@@ -6,10 +6,11 @@
 // waker.wait()——那条等待在长连接未就绪时会缩短成 pollSec。
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { Kernel } from "../kernel.mjs";
 import { formatStats } from "../kernel-util.mjs";
-import { resolveListenAddr } from "../config.mjs";
+import { readEnvFile, resolveListenAddr } from "../config.mjs";
 import { ApprovalService } from "./approval.mjs";
 import { PresentService } from "./present.mjs";
 import { StaleService } from "./stale.mjs";
@@ -74,8 +75,21 @@ export async function hubDoctor(configDir) {
       bad("listen 地址配置非法：" + e.message);
       problems++;
     }
-    if (!raw?.apiToken) {
-      info("未配置 apiToken：若要暴露到公网或不可信局域网，建议在 node.json 设置 apiToken");
+    let kv = {};
+    if (raw?.appEnv) {
+      try { kv = readEnvFile(String(raw.appEnv).replace(/^~/, os.homedir())); } catch {}
+    } else {
+      try { kv = readEnvFile(path.join(configDir, "app.env")); } catch {}
+    }
+    const hasApiToken = Boolean(
+      raw?.apiToken
+      || kv.HUB_API_TOKEN
+      || kv.LAH_API_TOKEN
+      || process.env.HUB_API_TOKEN
+      || process.env.LAH_API_TOKEN,
+    );
+    if (!hasApiToken) {
+      info("未配置 apiToken：若要暴露到公网或不可信局域网，建议在 node.json 或 app.env 设置 apiToken");
     } else {
       ok("apiToken 已配置（不显示明文）");
     }

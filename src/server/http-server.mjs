@@ -167,6 +167,7 @@ export async function startHubHttpServer({
           busType: cfg?.busType || "sqlite",
           seq: broker?.latestSeq ?? 0,
           authRequired: Boolean(apiToken),
+          hubPublicKey: cfg?.hubPublicKey || "",
         });
         return;
       }

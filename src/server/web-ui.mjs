@@ -307,6 +307,19 @@ export function renderWebConsoleHtml() {
 <div class="toast" id="toast"></div>
 
 <script>
+(() => {
+  try {
+    const params = new URLSearchParams(location.search);
+    const t = params.get("token");
+    if (t) {
+      localStorage.setItem("lobe_a2a_token", t.trim());
+      params.delete("token");
+      const next = location.pathname + (params.toString() ? "?" + params.toString() : "") + location.hash;
+      history.replaceState(null, "", next);
+    }
+  } catch {}
+})();
+
 const state = {
   view: "overview",
   data: null,
@@ -498,7 +511,7 @@ function renderOverview(d) {
 
   html += '<div class="section-title"><span>长轮询终端连接状态</span><span class="muted mono">HTTP Long-Polling · 零入站端口</span></div>';
   if (!nodes.length) {
-    html += '<div class="card muted">暂无远程长轮询终端接入。请在远程机器使用 <span class="mono">lah setup --hub-url http://&lt;mac-mini-ip&gt;:8787</span> 接入。</div>';
+    html += '<div class="card muted">暂无远程长轮询终端接入。请在远程机器执行 <span class="mono">lah join http://&lt;mac-mini-ip&gt;:8787</span> 接入。</div>';
   } else {
     html += '<div class="agent-grid">';
     for (const n of nodes) {

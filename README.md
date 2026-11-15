@@ -62,16 +62,51 @@ flowchart LR
 
 - **Node.js >= 24**（内置 `node:sqlite` 与原生 `fetch`，无需安装外部运行时依赖）。
 
+### 方式 A：一行命令全新安装并启动（推荐）
+
+**1) 在常驻主机（如 Mac mini / Linux）一行启动 Hub（自动生成密钥与 Token、开启 HTTP 服务并注册后台自启）：**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/backtomyfuture/lobe-a2a-hub/main/install.sh | sh -s -- --hub
+```
+
+安装完成后终端会直接输出：
+- 带免密参数的 Web 控制台地址：`http://<你的IP>:8787/?token=...`（首次打开自动写入浏览器本地存储并清洗地址栏）
+- 供其他机器复制即连的一行接入命令（含 Token，默认 0.0.0.0:8787 监听；加 `--no-service` 可仅在前台运行）。
+
+**2) 在其他机器接入远端执行节点（仅出站长轮询，不开放任何入站端口）：**
+
+```bash
+# macOS / Linux：
+curl -fsSL https://raw.githubusercontent.com/backtomyfuture/lobe-a2a-hub/main/install.sh | sh -s -- --join "http://<HUB_API_TOKEN>@<HUB_IP>:8787"
+
+# Windows PowerShell：
+$env:LAH_JOIN = "http://<HUB_API_TOKEN>@<HUB_IP>:8787"; irm https://raw.githubusercontent.com/backtomyfuture/lobe-a2a-hub/main/install.ps1 | iex
+```
+
+`--join` 会自动将 Token 写入 `0600` 权限的 `app.env`（不进入 `node.json`）、从 `GET /api/v1/health` 同步 `hubPublicKey`，并注册后台长轮询服务。
+
+### 方式 B：源码目录一键运行
+
+如果你已经克隆了仓库：
+
 ```bash
 git clone https://github.com/backtomyfuture/lobe-a2a-hub.git
 cd lobe-a2a-hub
 # 如需全局注册 `lah` / `lobe-hub` / `hub-node` 命令（可选）：
 npm link
+
+# 1) 在 Mac mini / 主机一行启动 Hub（加 --service 可顺便注册开机自启）：
+node bin/lah.mjs up
+
+# 2) 在其他机器一行接入节点（加 --service 注册开机自启）：
+node bin/lah.mjs join http://<HUB_API_TOKEN>@<HUB_IP>:8787
 ```
 
-### 1) 在常驻主机（如 Mac mini）启动独立中台 Hub
+<details>
+<summary>高级用法：手动分步 setup / 自定义参数 / 仅本地调试</summary>
 
-非交互快速初始化（SQLite 总线 + 生成 `approval_key.pem` ed25519 签名密钥；若对外暴露建议同时传入 `--api-token`）：
+1) 初始化独立中台 Hub：
 
 ```bash
 node bin/lah.mjs setup \
@@ -85,22 +120,12 @@ node bin/lah.mjs setup \
   --api-token "<YOUR_SECRET_TOKEN>" \
   --yes
 
-# 自检配置与数据库
 node bin/lah.mjs doctor --role hub
-
-# 启动中台（同时运行 Hub Kernel、HTTP 服务、LongPollBroker、LoopService 与 Web 控制台）
 node bin/lah.mjs daemon --role hub
-```
-
-启动后访问 **`http://127.0.0.1:8787`**（或你的内网/Tailscale IP `:8787`），如设置了 `--api-token`，在控制台填入对应 Token 即可管理节点、派发任务与审批（仅绑定 `127.0.0.1` 本地调试时也可省略 `--api-token`）。安装开机自启：
-
-```bash
 node bin/lah.mjs service --role hub
 ```
 
-### 2) 在其他机器接入远端节点（仅出站长轮询）
-
-把 Hub 的 `hubPublicKey` 与 `LAH_API_TOKEN` 配到远端节点（参考样例 [`config/node.remote.example.json`](config/node.remote.example.json) 与 [`config/commands.example.json`](config/commands.example.json)）：
+2) 手动接入远端 HTTP 长轮询节点（参考样例 [`config/node.remote.example.json`](config/node.remote.example.json) 与 [`config/commands.example.json`](config/commands.example.json)）：
 
 ```bash
 node bin/lah.mjs setup \
@@ -118,7 +143,7 @@ node bin/lah.mjs doctor
 node bin/lah.mjs daemon
 ```
 
-远端节点**不监听任何端口**，仅通过出站 HTTP 长轮询连接中台收单、续跑与回报结果。
+</details>
 
 ---
 
@@ -128,6 +153,8 @@ node bin/lah.mjs daemon
 
 | 分类 | 命令 | 用途 |
 |---|---|---|
+| **一键部署** | `lah up [--listen …] [--service] [--no-daemon]` | 一键初始化 SQLite Hub（自动生成 Token 与签名密钥）并启动 |
+| | `lah join <hub_url> [--node …] [--service] [--no-daemon]` | 一键抽离凭据、拉取 Hub 公钥并启动出站长轮询节点 |
 | **初始化与运维** | `lah setup [--role node\|hub] [--bus sqlite\|http\|feishu]` | 向导：初始化 SQLite 中台、远端 HTTP 节点或飞书多维表格节点 |
 | | `lah daemon [--role node\|hub]` | 启动节点或 Hub 全功能守护进程（含 HTTP 网关、Web 控制台、Loop 引擎） |
 | | `lah doctor [--role node\|hub]` | 只读自检：配置、`commands.json` 能力、总线/Hub 连通性、自启状态 |

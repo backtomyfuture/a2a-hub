@@ -183,7 +183,7 @@ export function capPrefixFromNodeJson(configDir) {
   }
 }
 
-function readEnvFile(p) {
+export function readEnvFile(p) {
   const kv = {};
   for (const line of fs.readFileSync(p, "utf8").split("\n")) {
     const i = line.indexOf("=");
@@ -241,7 +241,7 @@ export function loadConfig(configDir, opts = {}) {
   appSecret = appSecret || kv.APP_SECRET;
 
   const hubUrl = String(cfg.hubUrl ?? kv.HUB_URL ?? "").trim();
-  const apiToken = String(cfg.apiToken ?? kv.HUB_API_TOKEN ?? process.env.HUB_API_TOKEN ?? "").trim();
+  const apiToken = String(cfg.apiToken ?? kv.HUB_API_TOKEN ?? kv.LAH_API_TOKEN ?? process.env.HUB_API_TOKEN ?? process.env.LAH_API_TOKEN ?? "").trim();
   const hasFeishu = Boolean(appId && appSecret && cfg.baseToken && cfg.tables);
 
   let busType = String(cfg.busType ?? "").trim().toLowerCase();

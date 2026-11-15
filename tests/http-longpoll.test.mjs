@@ -16,10 +16,12 @@ import { f1 } from "../src/bus/feishu.mjs";
 import { HttpBus } from "../src/bus/http-bus.mjs";
 import { SqliteBus } from "../src/bus/sqlite-bus.mjs";
 import { DEFAULT_TABLES } from "../src/bus/tables.mjs";
+import { loadConfig, readEnvFile } from "../src/config.mjs";
 import { ApprovalService } from "../src/hub/approval.mjs";
 import { Kernel } from "../src/kernel.mjs";
 import { startHubHttpServer } from "../src/server/http-server.mjs";
 import { LongPollBroker } from "../src/server/longpoll-broker.mjs";
+import { runSetup } from "../src/setup.mjs";
 import { createLongPollWaker } from "../src/transport/longpoll.mjs";
 import { withTemp } from "./helpers.mjs";
 
@@ -231,6 +233,116 @@ test("端到端：HttpBus + 长轮询毫秒级唤醒 + Web ed25519 审批 + 问�
       broker.close();
       await httpHandle.close();
       sqliteBus.close();
+    }
+  });
+});
+
+test("一键部署：--hub 自动生成 Token、/api/v1/health 暴露公钥、--join 自动抽离凭据并同步 hubPublicKey", async () => {
+  await withTemp(async (rootDir) => {
+    const appDir = path.resolve(import.meta.dirname, "..");
+    const hubDir = path.join(rootDir, "hub");
+    const nodeDir = path.join(rootDir, "edge-node");
+    const prevExitCode = process.exitCode;
+    process.exitCode = 0;
+
+    let sqliteBus;
+    let broker;
+    let httpHandle;
+    try {
+      await runSetup(
+        hubDir,
+        ["--hub", "--listen", "127.0.0.1:18799", "--node", "test-hub", "--yes", "--skip-skill"],
+        appDir,
+      );
+      assert.strictEqual(process.exitCode || 0, 0);
+
+      const hubNodeJson = JSON.parse(fs.readFileSync(path.join(hubDir, "node.json"), "utf8"));
+      assert.strictEqual(hubNodeJson.busType, "sqlite");
+      assert.strictEqual(hubNodeJson.listen, "127.0.0.1:18799");
+      assert.strictEqual(hubNodeJson.role, "hub");
+
+      const keyPath = path.join(hubDir, "approval_key.pem");
+      assert.ok(fs.existsSync(keyPath));
+      assert.strictEqual(fs.statSync(keyPath).mode & 0o777, 0o600);
+
+      const hubEnvPath = path.join(hubDir, "app.env");
+      assert.ok(fs.existsSync(hubEnvPath));
+      assert.strictEqual(fs.statSync(hubEnvPath).mode & 0o777, 0o600);
+      const hubEnv = readEnvFile(hubEnvPath);
+      const apiToken = hubEnv.LAH_API_TOKEN || hubEnv.HUB_API_TOKEN || "";
+      assert.ok(apiToken.length >= 16, "auto-generated apiToken should be non-empty");
+      assert.strictEqual(hubEnv.HUB_API_TOKEN, apiToken);
+      assert.strictEqual(hubEnv.LAH_API_TOKEN, apiToken);
+
+      const key = loadOrCreateHubKey(hubDir);
+      broker = new LongPollBroker({ initialSeq: 0 });
+      sqliteBus = new SqliteBus({
+        dbPath: path.join(hubDir, "hub.db"),
+        tables: DEFAULT_TABLES,
+        broker,
+      });
+      const approval = new ApprovalService({
+        bus: sqliteBus,
+        ownerOpenId: "",
+        allowLocalOwner: true,
+        statePath: path.join(hubDir, "approval_state.json"),
+        signKey: key.privateKey,
+        log: () => {},
+      });
+
+      httpHandle = await startHubHttpServer({
+        cfg: {
+          node: "test-hub",
+          configDir: hubDir,
+          listen: "127.0.0.1:0",
+          apiToken,
+          hubPublicKey: key.publicKey,
+        },
+        bus: sqliteBus,
+        broker,
+        approval,
+        log: () => {},
+        onWake: () => {},
+      });
+
+      const healthResp = await fetch(`${httpHandle.localUrl}/api/v1/health`);
+      assert.strictEqual(healthResp.status, 200);
+      const health = await healthResp.json();
+      assert.strictEqual(health.ok, true);
+      assert.strictEqual(health.hubPublicKey, key.publicKey);
+
+      const port = new URL(httpHandle.localUrl).port;
+      const joinUrl = `http://${encodeURIComponent(apiToken)}@127.0.0.1:${port}`;
+      process.exitCode = 0;
+      await runSetup(
+        nodeDir,
+        ["--join", joinUrl, "--node", "edge-auto", "--yes", "--skip-skill"],
+        appDir,
+      );
+      assert.strictEqual(process.exitCode || 0, 0);
+
+      const edgeNodeJson = JSON.parse(fs.readFileSync(path.join(nodeDir, "node.json"), "utf8"));
+      assert.strictEqual(edgeNodeJson.busType, "http");
+      assert.strictEqual(edgeNodeJson.hubUrl, httpHandle.localUrl);
+      assert.ok(!String(edgeNodeJson.hubUrl).includes(apiToken), "node.json must not leak apiToken");
+      assert.strictEqual(edgeNodeJson.hubPublicKey, key.publicKey);
+
+      const edgeEnvPath = path.join(nodeDir, "app.env");
+      assert.ok(fs.existsSync(edgeEnvPath));
+      assert.strictEqual(fs.statSync(edgeEnvPath).mode & 0o777, 0o600);
+      const edgeEnv = readEnvFile(edgeEnvPath);
+      assert.strictEqual(edgeEnv.HUB_API_TOKEN, apiToken);
+      assert.strictEqual(edgeEnv.LAH_API_TOKEN, apiToken);
+
+      const loadedCfg = loadConfig(nodeDir);
+      assert.strictEqual(loadedCfg.apiToken, apiToken);
+      assert.strictEqual(loadedCfg.hubPublicKey, key.publicKey);
+      assert.strictEqual(loadedCfg.hubUrl, httpHandle.localUrl);
+    } finally {
+      process.exitCode = prevExitCode;
+      if (broker) broker.close();
+      if (httpHandle) await httpHandle.close();
+      if (sqliteBus) sqliteBus.close();
     }
   });
 });

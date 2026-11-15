@@ -16,7 +16,7 @@ import { FeishuBus, openHost } from "./bus/feishu.mjs";
 import { HttpBus } from "./bus/http-bus.mjs";
 import { SqliteBus } from "./bus/sqlite-bus.mjs";
 import { DEFAULT_TABLES, normalizeTables } from "./bus/tables.mjs";
-import { normalizeCommands, resolveListenAddr } from "./config.mjs";
+import { normalizeCommands, readEnvFile, resolveListenAddr } from "./config.mjs";
 import { isHubPublicKey, loadOrCreateHubKey } from "./approval-sign.mjs";
 import { doctor, checkAppEventSubscribed } from "./doctor.mjs";
 import { service } from "./service.mjs";
@@ -26,13 +26,29 @@ const TABLE_KEYS = { Tasks: "tasks", Messages: "messages", Parts: "parts", Runs:
 export const OFFICIAL_BASE_TEMPLATE_URL = "https://my.feishu.cn/wiki/OABiwbe3Si1FoCkelzYcYwTQ6de?base_hp_from=larktab&table=tblIvRscY5Mev3Do&view=vewzhNeMCe";
 
 export function parseFlags(argv) {
-  const f = { yes: false, force: false, service: false, role: "node", kind: "", skipSkill: false };
+  const f = { yes: false, force: false, service: false, role: "node", kind: "", skipSkill: false, autoToken: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--yes" || a === "-y") f.yes = true;
     else if (a === "--force") f.force = true;
     else if (a === "--service") f.service = true;
     else if (a === "--skip-skill") f.skipSkill = true;
+    else if (a === "--auto-token") f.autoToken = true;
+    else if (a === "--hub") {
+      f.role = "hub";
+      if (!f.bus) f.bus = "sqlite";
+      f.autoToken = true;
+    }
+    else if (a === "--join") {
+      f.role = "node";
+      f.bus = "http";
+      f.hubUrl = argv[++i];
+    }
+    else if (a.startsWith("--join=")) {
+      f.role = "node";
+      f.bus = "http";
+      f.hubUrl = a.slice("--join=".length);
+    }
     else if (a === "--help" || a === "-h") f.help = true;
     else if (a === "--wake") {
       f.wakeSeen = true;
@@ -798,12 +814,51 @@ function readLockedAppEnv(configDir) {
   let st;
   try { st = fs.lstatSync(p); } catch { return null; }
   if (!st.isFile() || st.isSymbolicLink() || (st.mode & 0o777) !== 0o600) return { insecure: true };
-  const kv = {};
-  for (const line of fs.readFileSync(p, "utf8").split("\n")) {
-    const i = line.indexOf("=");
-    if (i > 0) kv[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+  const kv = readEnvFile(p);
+  return {
+    appId: kv.APP_ID || "",
+    secret: kv.APP_SECRET || "",
+    apiToken: kv.HUB_API_TOKEN || kv.LAH_API_TOKEN || "",
+  };
+}
+
+function detectLanIp() {
+  try {
+    const nets = os.networkInterfaces();
+    for (const ifaces of Object.values(nets)) {
+      for (const iface of (ifaces || [])) {
+        if ((iface.family === "IPv4" || iface.family === 4) && !iface.internal && iface.address) {
+          return iface.address;
+        }
+      }
+    }
+  } catch { /* 获取网卡失败则退回 127.0.0.1 */ }
+  return "127.0.0.1";
+}
+
+function parseJoinHubUrl(rawUrl) {
+  let raw = String(rawUrl ?? "").trim();
+  if (!raw) throw new Error("缺少 Hub 访问地址");
+  if (!/^[a-z]+:\/\//i.test(raw)) raw = `http://${raw}`;
+  const parsed = new URL(raw);
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("--hub-url / --join 必须是 http:// 或 https:// 地址");
   }
-  return { appId: kv.APP_ID || "", secret: kv.APP_SECRET || "" };
+  let embeddedToken = "";
+  if (parsed.username) {
+    embeddedToken = decodeURIComponent(parsed.username);
+  } else if (parsed.password) {
+    embeddedToken = decodeURIComponent(parsed.password);
+  } else if (parsed.searchParams.has("token")) {
+    embeddedToken = String(parsed.searchParams.get("token") ?? "").trim();
+  }
+  parsed.username = "";
+  parsed.password = "";
+  parsed.searchParams.delete("token");
+  return {
+    hubUrl: parsed.toString().replace(/\/+$/, ""),
+    embeddedToken: String(embeddedToken ?? "").trim(),
+  };
 }
 
 // Node 26 的 promises readline 不再暴露 _writeToOutput，提问期间改写 stdout.write
@@ -834,13 +889,17 @@ async function askHidden(rl, prompt) {
 
 export function setupHelpText() {
   return `用法：
+  # 0. 一键启动独立中台 / 一键接入远端节点（推荐）
+  lah up   [--node mac-mini] [--listen 0.0.0.0:8787] [--service]
+  lah join http://[<token>@]<hub-ip>:8787 [--node worker-1] [--service]
+
   # 1. 独立自建主枢纽（Mac mini / SQLite + HTTP 长轮询 + Web 控制台，零飞书配额）
-  lah setup --role hub [--node mac-mini] [--listen 0.0.0.0:8787] [--api-token <token>]
+  lah setup --hub [--node mac-mini] [--listen 0.0.0.0:8787] [--api-token <token>]
             [--db-path <path>] [--public-url <url>] [--kind host|agent] [--yes]
 
-  # 2. 远程接入节点（通过 HTTP 长轮询接入主枢纽）
-  lah setup --hub-url http://<hub-ip>:8787 [--node worker-1] [--api-token <token>]
-            [--hub-key <hub 审批公钥>] [--kind host|agent] [--yes]
+  # 2. 远程接入节点（通过 HTTP 长轮询接入主枢纽，自动同步 hubPublicKey）
+  lah setup --join http://[<token>@]<hub-ip>:8787 [--node worker-1]
+            [--api-token <token>] [--hub-key <hub 审批公钥>] [--kind host|agent] [--yes]
 
   # 3. 飞书多维表格兼容模式
   lah setup --bus feishu [--yes] [--config <dir>] [--role node|hub] [--kind host|agent]
@@ -849,9 +908,12 @@ export function setupHelpText() {
             [--base <token>] [--app-id <id>] [--owner <open_id>]
             [--domain feishu|lark] [--hub-key <hub 审批公钥>]
 
-  --bus     显式指定总线模式：sqlite（独立 Hub）、http（远程长轮询节点）、feishu（飞书多维表格）
-  --wake    飞书模式下选择唤醒方式：event/ws、poll、sweep
-  --help    打印本帮助并退出，不进入向导，也不读取凭据`;
+  --bus         显式指定总线模式：sqlite（独立 Hub）、http（远程长轮询节点）、feishu（飞书多维表格）
+  --hub         快捷等价于 --role hub --bus sqlite --auto-token
+  --join        快捷接入地址（支持内嵌 token：http://<token>@<host>:8787），自动拉取公钥
+  --auto-token  若未传口令，自动生成高强度随机 API Token
+  --wake        飞书模式下选择唤醒方式：event/ws、poll、sweep
+  --help        打印本帮助并退出，不进入向导，也不读取凭据`;
 }
 
 export function normalizeWake(raw) {
@@ -1192,8 +1254,32 @@ export async function runSetup(configDir, argv, appDir) {
       }
       const prefix = flags.prefix || (node === "hub" ? "hub" : (node.split("-").filter(Boolean).pop() || node));
       const nodeDesc = flags.desc ?? (role === "hub" ? "独立主枢纽节点（调度＋Web控制台＋审批呈递）" : (kind === "agent" ? `${node} 独立 Agent` : ""));
-      const apiToken = String(flags.apiToken ?? process.env.HUB_API_TOKEN ?? existingRaw?.apiToken ?? "").trim()
-        || (interactive ? await ask("设置访问口令 HUB_API_TOKEN（可留空；暴露公网建议设置）", "") : "");
+
+      let resolvedHubUrl = "";
+      let embeddedToken = "";
+      if (setupBus === "http") {
+        const rawUrl = explicitHubUrl || envHubUrl || existingRaw?.hubUrl || await ask("输入独立 Hub 的访问地址（例如 http://192.168.1.10:8787 或 http://<token>@192.168.1.10:8787）");
+        const parsedJoin = parseJoinHubUrl(rawUrl);
+        resolvedHubUrl = parsedJoin.hubUrl;
+        embeddedToken = parsedJoin.embeddedToken;
+      }
+
+      const appEnvCreds = readLockedAppEnv(configDir);
+      let apiToken = (
+        String(flags.apiToken ?? "").trim()
+        || embeddedToken
+        || String(process.env.HUB_API_TOKEN ?? "").trim()
+        || String(process.env.LAH_API_TOKEN ?? "").trim()
+        || String(existingRaw?.apiToken ?? "").trim()
+        || String(appEnvCreds?.apiToken ?? "").trim()
+      );
+      if (!apiToken) {
+        if (setupBus === "sqlite" && flags.autoToken) {
+          apiToken = crypto.randomBytes(18).toString("base64url");
+        } else if (interactive) {
+          apiToken = (await ask("设置访问口令 HUB_API_TOKEN（留空不设口令；暴露局域网/公网建议设置）", "")).trim();
+        }
+      }
 
       const owRes = await confirmOverwriteNodeJson(configDir, flags, interactive, ask);
       if (!owRes.ok) return owRes.code;
@@ -1216,17 +1302,22 @@ export async function runSetup(configDir, argv, appDir) {
       };
 
       if (apiToken) {
-        const appEnvPath = writeLockedAppEnvVars(configDir, { HUB_API_TOKEN: apiToken });
+        const appEnvPath = writeLockedAppEnvVars(configDir, {
+          HUB_API_TOKEN: apiToken,
+          LAH_API_TOKEN: apiToken,
+        });
         nodeJson.appEnv = appEnvPath;
-        console.log("  ✓ 已保存 HUB_API_TOKEN 至 app.env（600）");
+        console.log("  ✓ 已保存访问口令至 app.env（600）");
       }
 
+      let listenAddr = null;
+      let publicUrl = "";
       if (setupBus === "sqlite") {
         const listenRaw = flags.listen || existingRaw?.listen || (interactive ? await ask("HTTP 监听地址", "0.0.0.0:8787") : "0.0.0.0:8787");
-        const addr = resolveListenAddr(listenRaw);
-        const listen = `${addr.host}:${addr.port}`;
+        listenAddr = resolveListenAddr(listenRaw);
+        const listen = `${listenAddr.host}:${listenAddr.port}`;
         const dbPath = flags.dbPath || existingRaw?.dbPath || path.join(configDir, "hub.db");
-        const publicUrl = String(flags.publicUrl ?? existingRaw?.publicUrl ?? "").trim();
+        publicUrl = String(flags.publicUrl ?? existingRaw?.publicUrl ?? "").trim();
         const ownerOpenId = String(flags.ownerOpenId ?? process.env.HUB_OWNER_OPEN_ID ?? existingRaw?.ownerOpenId ?? "").trim();
         if (ownerOpenId) nodeJson.ownerOpenId = ownerOpenId;
         nodeJson.listen = listen;
@@ -1234,18 +1325,17 @@ export async function runSetup(configDir, argv, appDir) {
         if (publicUrl) nodeJson.publicUrl = publicUrl;
         bus = new SqliteBus({ dbPath, tables });
       } else {
-        const rawUrl = explicitHubUrl || envHubUrl || existingRaw?.hubUrl || await ask("输入独立 Hub 的访问地址（例如 http://192.168.1.10:8787）");
-        const hubUrl = String(rawUrl ?? "").trim().replace(/\/+$/, "");
-        const parsed = new URL(hubUrl);
-        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-          throw new Error("--hub-url 必须是 http:// 或 https:// 地址");
-        }
-        nodeJson.hubUrl = hubUrl;
+        nodeJson.hubUrl = resolvedHubUrl;
         if (role !== "hub" && hubPublicKey) nodeJson.hubPublicKey = hubPublicKey;
-        bus = new HttpBus({ hubUrl, apiToken, node, tables });
+        bus = new HttpBus({ hubUrl: resolvedHubUrl, apiToken, node, tables });
         try {
           const health = await bus.api("GET", "/api/v1/health");
-          console.log(`  ✓ 远程 Hub 在线（${health?.node ?? hubUrl}，seq=${health?.seq ?? 0}）`);
+          console.log(`  ✓ 远程 Hub 在线（${health?.node ?? resolvedHubUrl}，seq=${health?.seq ?? 0}）`);
+          if (!hubPublicKey && health?.hubPublicKey && isHubPublicKey(health.hubPublicKey)) {
+            hubPublicKey = health.hubPublicKey;
+            if (role !== "hub") nodeJson.hubPublicKey = hubPublicKey;
+            console.log("  ✓ 已从远程 Hub 自动同步 ed25519 审批公钥");
+          }
         } catch (e) {
           console.log(`  · 暂未连上远程 Hub（${e.message}），将继续写入本地配置`);
         }
@@ -1254,9 +1344,20 @@ export async function runSetup(configDir, argv, appDir) {
       fs.writeFileSync(owRes.nodeJsonPath, JSON.stringify(nodeJson, null, 1) + "\n");
       if (role === "hub") {
         const key = loadOrCreateHubKey(configDir);
-        console.log(`  ✓ 审批签名密钥就绪（approval_key.pem，600）。远程节点可通过 --hub-key 绑定该公钥：\n    ${key.publicKey}`);
+        console.log(`  ✓ 审批签名密钥就绪（approval_key.pem，600），公钥：\n    ${key.publicKey}`);
+        if (listenAddr) {
+          const displayHost = (listenAddr.host === "0.0.0.0" || listenAddr.host === "::") ? detectLanIp() : listenAddr.host;
+          const baseDisplay = publicUrl ? publicUrl.replace(/\/+$/, "") : `http://${displayHost}:${listenAddr.port}`;
+          const joinHostUrl = new URL(baseDisplay);
+          if (apiToken) joinHostUrl.username = encodeURIComponent(apiToken);
+          const joinStr = joinHostUrl.toString().replace(/\/+$/, "");
+          const consoleUrl = apiToken ? `${baseDisplay}/?token=${encodeURIComponent(apiToken)}` : baseDisplay;
+          console.log(`  ✓ Web 控制台地址：${consoleUrl}`);
+          console.log(`  ✓ 其他机器一行接入命令（已安装 lah）：\n    lah join ${joinStr}`);
+          console.log(`  ✓ 全新机器一行安装并接入：\n    curl -fsSL https://raw.githubusercontent.com/backtomyfuture/lobe-a2a-hub/main/install.sh | sh -s -- --join ${joinStr}`);
+        }
       } else if (!hubPublicKey) {
-        console.log("  · 未配置 hubPublicKey：拿到 hub 公钥后可重跑 lah setup --hub-key <公钥> 开启端到端 ed25519 审批验签。");
+        console.log("  · 未配置 hubPublicKey：Hub 在线时执行 lah join 或 lah setup --hub-key <公钥> 可开启 ed25519 审批验签。");
       }
 
       return await finalizeSetup({ configDir, appDir, role, kind, node, prefix, bus, tables, flags, interactive, ask });

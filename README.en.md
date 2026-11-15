@@ -62,14 +62,49 @@ Tasks progress strictly across the eight A2A states: `submitted` → `working` �
 
 - **Node.js >= 24** (uses built-in `node:sqlite`, `node:http`, `node:crypto`, and global `fetch`; zero npm install needed).
 
+### Option A: True 1-Line Install & Start (Recommended)
+
+**1) Start the Standalone Hub (e.g., on a Mac mini / Linux host):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/backtomyfuture/lobe-a2a-hub/main/install.sh | sh -s -- --hub
+```
+
+This generates an ed25519 approval keypair + random `apiToken`, configures SQLite WAL, registers user-level autostart (add `--no-service` to run foreground-only), and prints:
+- A one-click Web Console URL `http://<LAN_IP>:8787/?token=...` (saved to `localStorage` and scrubbed from the address bar on load)
+- A copy-paste 1-line join command for worker machines.
+
+**2) Connect a Remote Edge Node (Outbound Long-Polling Only, Zero Open Ports):**
+
+```bash
+# macOS / Linux:
+curl -fsSL https://raw.githubusercontent.com/backtomyfuture/lobe-a2a-hub/main/install.sh | sh -s -- --join "http://<HUB_API_TOKEN>@<HUB_IP>:8787"
+
+# Windows PowerShell:
+$env:LAH_JOIN = "http://<HUB_API_TOKEN>@<HUB_IP>:8787"; irm https://raw.githubusercontent.com/backtomyfuture/lobe-a2a-hub/main/install.ps1 | iex
+```
+
+`--join` extracts the embedded token into mode-600 `app.env` (never written to `node.json`), fetches `hubPublicKey` from `GET /api/v1/health`, and starts the outbound long-polling daemon/service.
+
+### Option B: From a Cloned Checkout
+
 ```bash
 git clone https://github.com/backtomyfuture/lobe-a2a-hub.git
 cd lobe-a2a-hub
 # Optional: expose `lah` / `lobe-hub` / `hub-node` globally
 npm link
+
+# 1) Start the Hub in one line (add --service to register autostart):
+node bin/lah.mjs up
+
+# 2) Join from any worker machine (add --service for autostart):
+node bin/lah.mjs join http://<HUB_API_TOKEN>@<HUB_IP>:8787
 ```
 
-### 1) Start the Standalone Hub (e.g. on a Mac mini)
+<details>
+<summary>Advanced: Manual step-by-step setup / custom flags</summary>
+
+1) Standalone Hub:
 
 ```bash
 node bin/lah.mjs setup \
@@ -85,17 +120,10 @@ node bin/lah.mjs setup \
 
 node bin/lah.mjs doctor --role hub
 node bin/lah.mjs daemon --role hub
-```
-
-Open **`http://127.0.0.1:8787`** and authenticate using your configured `LAH_API_TOKEN` (from `app.env` / `--api-token`; `--api-token` can be omitted for local `127.0.0.1` testing). Install user-level autostart with:
-
-```bash
 node bin/lah.mjs service --role hub
 ```
 
-### 2) Connect a Remote Edge Node (Outbound Long-Polling Only)
-
-Use the Hub's public key and `LAH_API_TOKEN` (see [`config/node.remote.example.json`](config/node.remote.example.json) and [`config/commands.example.json`](config/commands.example.json)):
+2) Manual Remote Edge Node (see [`config/node.remote.example.json`](config/node.remote.example.json) and [`config/commands.example.json`](config/commands.example.json)):
 
 ```bash
 node bin/lah.mjs setup \
@@ -113,6 +141,8 @@ node bin/lah.mjs doctor
 node bin/lah.mjs daemon
 ```
 
+</details>
+
 ---
 
 ## Common Commands (`lah` / `lobe-hub` / `hub-node`)
@@ -121,6 +151,8 @@ Configuration defaults to `~/.hub-node` (override with `--config <dir>` or `HUB_
 
 | Area | Command | Purpose |
 |---|---|---|
+| **One-Line Setup** | `lah up [--listen …] [--service] [--no-daemon]` | Initialize SQLite Hub (auto token + ed25519 key) and start |
+| | `lah join <hub_url> [--node …] [--service] [--no-daemon]` | Extract credentials, sync `hubPublicKey`, and start long-poll node |
 | **Setup & Ops** | `lah setup [--role node\|hub] [--bus sqlite\|http\|feishu]` | Initialize a standalone Hub, remote HTTP node, or Feishu Bitable node |
 | | `lah daemon [--role node\|hub]` | Start the node or full Hub runtime (HTTP server, Web UI, Loops) |
 | | `lah doctor [--role node\|hub]` | Read-only checks for config, `commands.json`, bus connectivity, autostart |

@@ -1,7 +1,10 @@
-﻿# lark-a2a-hub Windows 安装，与 install.sh 对齐：
-#   irm https://raw.githubusercontent.com/backtomyfuture/lark-a2a-hub/main/install.ps1 | iex
+﻿# lobe-a2a-hub Windows 一行安装与部署：
+#   1) 仅安装命令行工具：
+#      irm https://raw.githubusercontent.com/backtomyfuture/lobe-a2a-hub/main/install.ps1 | iex
+#   2) 安装并一键接入已有 Hub：
+#      $env:LAH_JOIN="http://<token>@<hub-ip>:8787"; irm https://raw.githubusercontent.com/backtomyfuture/lobe-a2a-hub/main/install.ps1 | iex
 # 布局：%USERPROFILE%\.hub-node\ 是配置目录，其下 app\ 是程序本体，
-#       bin\lah.cmd 与 bin\hub-node.cmd 是命令入口（加入当前用户 PATH）。
+#       bin\lah.cmd、bin\lobe-hub.cmd 与 bin\hub-node.cmd 是命令入口（加入当前用户 PATH）。
 # Windows 不把无扩展名文件当命令，也不保证能建软链，所以入口是 cmd 包装，
 # 用 %~dp0 相对路径指向 app\bin\lah.mjs，用户名含非 ASCII 时也不靠代码页。
 # 不在这里写 node.json / commands.json。重跑本脚本 = 更新程序，已有配置不覆盖。
@@ -16,21 +19,41 @@
 
   $skipSkill = $false
   $showHelp = $false
+  $bootstrapMode = ""
+  $joinUrl = $env:LAH_JOIN
+  $useService = $true
+  if (-not [string]::IsNullOrWhiteSpace($joinUrl)) {
+    $bootstrapMode = "join"
+  }
   if ($env:LAH_SKIP_SKILL -eq "1" -or $env:LAH_SKIP_SKILL -eq "true") {
     $skipSkill = $true
   }
-  foreach ($arg in $args) {
+  for ($idx = 0; $idx -lt $args.Length; $idx++) {
+    $arg = [string]$args[$idx]
     switch -Regex ($arg) {
       "^(-h|--help|-Help)$" { $showHelp = $true }
       "^(--skip-skill|-SkipSkill)$" { $skipSkill = $true }
+      "^(--no-service|-NoService)$" { $useService = $false }
+      "^(--hub|-Hub)$" { $bootstrapMode = "hub" }
+      "^(--join|-Join)$" {
+        if ($idx + 1 -ge $args.Length) { throw "--join 需要 Hub URL 参数" }
+        $bootstrapMode = "join"
+        $joinUrl = [string]$args[++$idx]
+      }
+      "^--join=(.+)$" {
+        $bootstrapMode = "join"
+        $joinUrl = $Matches[1]
+      }
     }
   }
 
   if ($showHelp) {
-    Write-Host "用法: install.ps1 [-SkipSkill]"
-    Write-Host "      irm https://raw.githubusercontent.com/backtomyfuture/lark-a2a-hub/main/install.ps1 | iex"
+    Write-Host "用法: install.ps1 [-Hub | -Join <url>] [-NoService] [-SkipSkill]"
+    Write-Host "      irm https://raw.githubusercontent.com/backtomyfuture/lobe-a2a-hub/main/install.ps1 | iex"
+    Write-Host "  -Hub, --hub               安装后立即配置独立 SQLite Hub 并注册开机任务"
+    Write-Host "  -Join, --join <url>       安装后立即接入已有 Hub 并注册开机任务（也可用 `$env:LAH_JOIN）"
+    Write-Host "  -NoService, --no-service  仅配置与自检，不注册开机任务"
     Write-Host "  -SkipSkill, --skip-skill  跳过安装 %USERPROFILE%\.agents\skills\lah"
-    Write-Host "                            也可设置环境变量 LAH_SKIP_SKILL=1"
     return
   }
 
@@ -102,7 +125,7 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
 
   $nodeCmd = Get-Command node -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
   if (-not $nodeCmd) {
-    throw "需要先安装 Node.js >= 20：https://nodejs.org"
+    throw "需要先安装 Node.js >= 24：https://nodejs.org"
   }
   $nodeVer = (& $nodeCmd.Source -p "process.versions.node")
   if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($nodeVer)) {
@@ -110,8 +133,8 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
   }
   $nodeVer = $nodeVer.Trim()
   $nodeMajor = [int]($nodeVer.Split(".")[0])
-  if ($nodeMajor -lt 20) {
-    throw "Node.js 版本过低（当前 v$nodeVer），需要 >= 20"
+  if ($nodeMajor -lt 24) {
+    throw "Node.js 版本过低（当前 v$nodeVer），需要 >= 24"
   }
 
   $npmCmd = Get-Command npm.cmd -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -124,9 +147,6 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
     $npmBeside = Join-Path (Split-Path -Parent $nodeCmd.Source) "npm.cmd"
     if (Test-Path -LiteralPath $npmBeside) { $npmExe = $npmBeside }
   }
-  if (-not $npmExe) {
-    throw "找到了 Node.js，但没有 npm。请安装官方 Node.js >= 20（自带 npm）。"
-  }
 
   $profileHome = $env:USERPROFILE
   if ([string]::IsNullOrWhiteSpace($profileHome)) {
@@ -136,8 +156,8 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
     throw "无法确定用户目录（USERPROFILE 为空）"
   }
 
-  $repoGit = "https://github.com/backtomyfuture/lark-a2a-hub.git"
-  $repoTar = "https://codeload.github.com/backtomyfuture/lark-a2a-hub/tar.gz/refs/heads/main"
+  $repoGit = "https://github.com/backtomyfuture/lobe-a2a-hub.git"
+  $repoTar = "https://codeload.github.com/backtomyfuture/lobe-a2a-hub/tar.gz/refs/heads/main"
   $configHome = $env:HUB_NODE_HOME
   if ([string]::IsNullOrWhiteSpace($configHome)) {
     $configHome = Join-Path $profileHome ".hub-node"
@@ -167,9 +187,9 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
       $tarFile = Join-Path $tmp "src.tar.gz"
       Invoke-Native -File $curl.Source -ArgumentList @("-fsSL", $repoTar, "-o", $tarFile)
       Invoke-Native -File $tar.Source -ArgumentList @("-xzf", $tarFile, "-C", $tmp)
-      $extracted = Join-Path $tmp "lark-a2a-hub-main"
+      $extracted = Join-Path $tmp "lobe-a2a-hub-main"
       if (-not (Test-Path -LiteralPath $extracted)) {
-        throw "压缩包里没有 lark-a2a-hub-main"
+        throw "压缩包里没有 lobe-a2a-hub-main"
       }
       Move-Item -LiteralPath $extracted -Destination $app
     } finally {
@@ -181,19 +201,17 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
 
   Push-Location -LiteralPath $app
   try {
-    if (Test-Path -LiteralPath (Join-Path $app "package-lock.json")) {
+    if ((Test-Path -LiteralPath (Join-Path $app "package-lock.json")) -and $npmExe) {
       Invoke-Native -File $npmExe -ArgumentList @("ci", "--omit=dev", "--no-audit", "--no-fund")
-    } else {
-      Invoke-Native -File $npmExe -ArgumentList @("install", "--omit=dev", "--no-audit", "--no-fund")
     }
   } finally {
     Pop-Location
   }
 
-  # 两个名字都进 lah.mjs，与 install.sh 把 lah / hub-node 链到同一文件一致。
+  # 三个别名都进 lah.mjs。
   New-Item -ItemType Directory -Force -Path $binDir | Out-Null
   $shim = "@echo off`r`nnode `"%~dp0..\app\bin\lah.mjs`" %*`r`n"
-  foreach ($name in @("lah.cmd", "hub-node.cmd")) {
+  foreach ($name in @("lah.cmd", "lobe-hub.cmd", "hub-node.cmd")) {
     [System.IO.File]::WriteAllText((Join-Path $binDir $name), $shim, [System.Text.UTF8Encoding]::new($false))
   }
 
@@ -213,11 +231,28 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
     Write-Host "跳过安装 lah Skill（-SkipSkill）"
   }
 
+  $entryMjs = Join-Path $app "bin\lah.mjs"
+  if ($bootstrapMode -eq "hub") {
+    $setupArgs = @($entryMjs, "setup", "--role", "hub", "--bus", "sqlite", "--yes", "--auto-token")
+    if ($useService) { $setupArgs += "--service" }
+    if ($skipSkill) { $setupArgs += "--skip-skill" }
+    Invoke-Native -File $nodeCmd.Source -ArgumentList $setupArgs
+    return
+  }
+  if ($bootstrapMode -eq "join") {
+    if ([string]::IsNullOrWhiteSpace($joinUrl)) { throw "-Join 缺少 Hub URL" }
+    $setupArgs = @($entryMjs, "setup", "--role", "node", "--bus", "http", "--join", $joinUrl, "--yes", "--force")
+    if ($useService) { $setupArgs += "--service" }
+    if ($skipSkill) { $setupArgs += "--skip-skill" }
+    Invoke-Native -File $nodeCmd.Source -ArgumentList $setupArgs
+    return
+  }
+
   Write-Host ""
-  Write-Host "安装完成。接下来只需一条命令完成全部配置："
-  Write-Host "  作为普通节点：                                  lah setup"
-  Write-Host "  作为主枢纽节点（干活 + 审批发卡/结果推送）：lah setup --role hub"
-  Write-Host "（自动装/复用 lark-cli、发现 Base 表、扫描本地 Agent、写好配置并自检；细节见 README）"
+  Write-Host "安装完成（零外部依赖）。接下来只需一条命令："
+  Write-Host "  1) 本机启动独立中台 Hub：         lah up --service"
+  Write-Host "  2) 接入已有 Hub：                 lah join http://[<token>@]<hub-ip>:8787 --service"
+  Write-Host "  3) 飞书多维表格兼容模式 / 向导：  lah setup --bus feishu"
   Write-Host "命令入口：$binDir"
   if ($pathState -eq "added") {
     Write-Host "已加入用户 PATH。用 iex 跑的当前窗口可以直接试 lah；单独开的窗口请新开一个终端。"

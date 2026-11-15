@@ -141,9 +141,159 @@ process.on("unhandledRejection", (e) => {
   console.error(new Date().toISOString().slice(0, 19), "unhandledRejection:", e?.message ?? e);
 });
 
+async function runDaemonLoop(configDir, role) {
+  let release;
+  let kernel = null;
+  let hubRuntime = null;
+  let signalCode;
+  const onSignal = (signal) => {
+    const code = signal === "SIGINT" ? 130 : 143;
+    const ts = new Date().toISOString().slice(0, 19);
+    if (signalCode != null) {
+      console.error(`${ts} 再次收到 ${signal}，直接退出`);
+      process.exit(code);
+    }
+    signalCode = code;
+    if (kernel) {
+      console.error(`${ts} 收到 ${signal}，正在停止并标记 offline`);
+      kernel.requestStop();
+      return;
+    }
+    if (hubRuntime) {
+      console.error(`${ts} 收到 ${signal}，hub 关闭长连接并退出`);
+      try { hubRuntime.stop(); }
+      catch (e) { console.error(`${ts} hub 停止失败：` + (e?.message ?? e)); }
+      return;
+    }
+    // hub 路径在 lah 里不持有 Kernel；运行时还没建好时也要能退出。
+    console.error(`${ts} 收到 ${signal}，守护进程退出`);
+    process.exit(code);
+  };
+  try {
+    release = acquireDaemonLock(configDir);
+    process.once("exit", release);
+    process.on("SIGINT", onSignal);
+    process.on("SIGTERM", onSignal);
+    let cfg = null;
+    try {
+      cfg = loadConfig(configDir);
+    } catch (e) {
+      const backoffMs = configErrorBackoffMs();
+      const ts = new Date().toISOString().slice(0, 19);
+      console.error(`${ts} 配置加载失败：${readableConfigError(e, configDir)}`);
+      console.error(`守护进程将退避 ${backoffMs}ms 后以非零状态退出，避免 launchd KeepAlive 毫秒级重启刷屏。请修正配置后再启动。`);
+      await new Promise((resolve) => setTimeout(resolve, backoffMs));
+      process.exitCode = 1;
+      return;
+    }
+    if (cfg && role === "hub") {
+      const { runHub } = await import("../src/hub/index.mjs");
+      await runHub(cfg, undefined, { onRuntime(rt) { hubRuntime = rt; } });
+      if (signalCode != null) process.exitCode = signalCode;
+    } else if (cfg) {
+      kernel = new Kernel(cfg);
+      await kernel.run();
+      if (signalCode != null) process.exitCode = signalCode;
+    }
+  } catch (e) {
+    console.error("daemon 启动失败：" + e.message);
+    process.exitCode = 1;
+  } finally {
+    if (release) {
+      release();
+      process.removeListener("exit", release);
+      process.removeListener("SIGINT", onSignal);
+      process.removeListener("SIGTERM", onSignal);
+    }
+  }
+}
+
+function parseJoinCliArgs(rest) {
+  const valueFlags = new Set([
+    "--config", "--node", "--zone", "--prefix", "--desc", "--kind",
+    "--api-token", "--hub-key", "--hub-url", "--join",
+  ]);
+  let joinTarget = "";
+  const forwarded = [];
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a === "--no-daemon") continue;
+    if (a === "--hub-url" || a === "--join") {
+      joinTarget = rest[++i] ?? "";
+      continue;
+    }
+    if (a.startsWith("--hub-url=")) {
+      joinTarget = a.slice("--hub-url=".length);
+      continue;
+    }
+    if (a.startsWith("--join=")) {
+      joinTarget = a.slice("--join=".length);
+      continue;
+    }
+    if (valueFlags.has(a)) {
+      forwarded.push(a);
+      if (rest[i + 1] != null) forwarded.push(rest[++i]);
+      continue;
+    }
+    if (!a.startsWith("-") && !joinTarget) {
+      joinTarget = a;
+      continue;
+    }
+    forwarded.push(a);
+  }
+  return { joinTarget: String(joinTarget).trim(), forwarded };
+}
+
 const [cmd, ...rest] = process.argv.slice(2);
 
-if (cmd === "setup") {
+if (cmd === "up") {
+  const configDir = path.resolve(configDirFrom(rest));
+  const hasNodeJson = fs.existsSync(path.join(configDir, "node.json"));
+  const needSetup = !hasNodeJson || rest.includes("--force") || rest.includes("--setup");
+  let setupCode = 0;
+  if (needSetup) {
+    const { runSetup } = await import("../src/setup.mjs");
+    const setupArgs = [
+      "--role", "hub",
+      "--bus", "sqlite",
+      "--yes",
+      "--auto-token",
+      ...rest.filter((a) => a !== "--no-daemon" && a !== "--setup"),
+    ];
+    setupCode = await runSetup(configDir, setupArgs, APP_DIR);
+  } else if (rest.includes("--service")) {
+    const { service } = await import("../src/service.mjs");
+    setupCode = await service(configDir, { role: "hub" }, APP_DIR);
+  }
+  if (setupCode !== 0) {
+    process.exitCode = setupCode;
+  } else if (!rest.includes("--service") && !rest.includes("--no-daemon")) {
+    await runDaemonLoop(configDir, "hub");
+  }
+} else if (cmd === "join") {
+  const { joinTarget, forwarded } = parseJoinCliArgs(rest);
+  if (!joinTarget) {
+    console.error("用法：lah join http://[<token>@]<hub-ip>:8787 [--node <名>] [--service]");
+    process.exitCode = 1;
+  } else {
+    const configDir = path.resolve(configDirFrom(rest));
+    const { runSetup } = await import("../src/setup.mjs");
+    const setupArgs = [
+      "--role", "node",
+      "--bus", "http",
+      "--join", joinTarget,
+      "--yes",
+      "--force",
+      ...forwarded,
+    ];
+    const setupCode = await runSetup(configDir, setupArgs, APP_DIR);
+    if (setupCode !== 0) {
+      process.exitCode = setupCode;
+    } else if (!rest.includes("--service") && !rest.includes("--no-daemon")) {
+      await runDaemonLoop(configDir, "node");
+    }
+  }
+} else if (cmd === "setup") {
   const { runSetup } = await import("../src/setup.mjs");
   process.exitCode = await runSetup(configDirFrom(rest), rest, APP_DIR);
 } else if (cmd === "reconcile") {
@@ -180,69 +330,8 @@ if (cmd === "setup") {
     console.error(e.message);
     process.exitCode = 1;
   }
-  let release;
-  let kernel = null;
-  let hubRuntime = null;
-  let signalCode;
-  const onSignal = (signal) => {
-    const code = signal === "SIGINT" ? 130 : 143;
-    const ts = new Date().toISOString().slice(0, 19);
-    if (signalCode != null) {
-      console.error(`${ts} 再次收到 ${signal}，直接退出`);
-      process.exit(code);
-    }
-    signalCode = code;
-    if (kernel) {
-      console.error(`${ts} 收到 ${signal}，正在停止并标记 offline`);
-      kernel.requestStop();
-      return;
-    }
-    if (hubRuntime) {
-      console.error(`${ts} 收到 ${signal}，hub 关闭长连接并退出`);
-      try { hubRuntime.stop(); }
-      catch (e) { console.error(`${ts} hub 停止失败：` + (e?.message ?? e)); }
-      return;
-    }
-    // hub 路径在 lah 里不持有 Kernel；运行时还没建好时也要能退出。
-    console.error(`${ts} 收到 ${signal}，守护进程退出`);
-    process.exit(code);
-  };
-  if (role) try {
-    const configDir = path.resolve(configDirFrom(rest));
-    release = acquireDaemonLock(configDir);
-    process.once("exit", release);
-    process.on("SIGINT", onSignal);
-    process.on("SIGTERM", onSignal);
-    let cfg = null;
-    try {
-      cfg = loadConfig(configDir);
-    } catch (e) {
-      const backoffMs = configErrorBackoffMs();
-      const ts = new Date().toISOString().slice(0, 19);
-      console.error(`${ts} 配置加载失败：${readableConfigError(e, configDir)}`);
-      console.error(`守护进程将退避 ${backoffMs}ms 后以非零状态退出，避免 launchd KeepAlive 毫秒级重启刷屏。请修正配置后再启动。`);
-      await new Promise((resolve) => setTimeout(resolve, backoffMs));
-      process.exitCode = 1;
-    }
-    if (cfg && role === "hub") {
-      const { runHub } = await import("../src/hub/index.mjs");
-      await runHub(cfg, undefined, { onRuntime(rt) { hubRuntime = rt; } });
-      if (signalCode != null) process.exitCode = signalCode;
-    } else if (cfg) {
-      kernel = new Kernel(cfg);
-      await kernel.run();
-      if (signalCode != null) process.exitCode = signalCode;
-    }
-  } catch (e) {
-    console.error("daemon 启动失败：" + e.message);
-    process.exitCode = 1;
-  } finally {
-    if (release) {
-      release();
-      process.removeListener("exit", release);
-      process.removeListener("SIGINT", onSignal);
-      process.removeListener("SIGTERM", onSignal);
-    }
+  if (role) {
+    await runDaemonLoop(path.resolve(configDirFrom(rest)), role);
   }
 } else if (cmd === "doctor") {
   let role;
@@ -676,6 +765,8 @@ if (cmd === "setup") {
 } else {
   console.log(`lah ${DAEMON_VERSION}
 用法：
+  lah up      [--listen 0.0.0.0:8787] [--node mac-mini] [--service]  一行初始化并启动独立中台 Hub
+  lah join    http://[<token>@]<hub-ip>:8787 [--node worker-1] [--service]  一行接入远端 Hub 并启动长轮询
   lah setup   [--config <dir>] [--role node|hub] [--kind host|agent] [--wake poll|event|sweep] [--skip-skill]  一键配置向导（独立 SQLite Hub / 长轮询 Node / 传统飞书）
   lah daemon  [--config <dir>] [--role node|hub]  常驻守护进程（省略 --role 时读 node.json，缺省 node）
   lah reconcile [--config <dir>]  单次回表认领/对账后退出（不长驻；不停派、不改写命令表外的手工名片）
