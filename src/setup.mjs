@@ -1,29 +1,53 @@
-// setup —— 一键配置向导：把「装节点」的门槛压到一条命令。
-// 做完的事：确认 lark-cli 在位（不在则用 npm 装）；复用 lark-cli 已配置的
-// 飞书应用（凭据只在本机流转：配置文件 / macOS 钥匙串 / 环境变量 /
-// 已有 600 的 app.env -> 本机 app.env，绝不打印明文，也不接受命令行 Secret）；
-// 向 Base 自动发现六张表的 ID 并写入 node.json；host 节点按本机已装 CLI Agent 生成能力（不预置任何占位能力）；
-// 最后跑 doctor 自检，可选顺带注册开机自启。
-// 已有 lark-cli 配置是主路径；没有时给出确切的下一步（lark-cli config init）。
+// setup —— 一键配置向导：独立 Hub（SQLite + HTTP 网关 + Web 控制台）与远端节点（HTTP 长轮询）。
 
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline/promises";
-import { execFile, execFileSync, execSync } from "node:child_process";
-import { FeishuBus, openHost } from "./bus/feishu.mjs";
 import { HttpBus } from "./bus/http-bus.mjs";
 import { SqliteBus } from "./bus/sqlite-bus.mjs";
-import { DEFAULT_TABLES, normalizeTables } from "./bus/tables.mjs";
+import { normalizeTables } from "./bus/tables.mjs";
 import { normalizeCommands, readEnvFile, resolveListenAddr } from "./config.mjs";
 import { isHubPublicKey, loadOrCreateHubKey } from "./approval-sign.mjs";
-import { doctor, checkAppEventSubscribed } from "./doctor.mjs";
+import { doctor } from "./doctor.mjs";
 import { service } from "./service.mjs";
 
-const REQUIRED_TABLES = ["Tasks", "Messages", "Parts", "Runs", "Artifacts", "AgentCards"];
-const TABLE_KEYS = { Tasks: "tasks", Messages: "messages", Parts: "parts", Runs: "runs", Artifacts: "artifacts", AgentCards: "agentCards" };
-export const OFFICIAL_BASE_TEMPLATE_URL = "https://my.feishu.cn/wiki/OABiwbe3Si1FoCkelzYcYwTQ6de?base_hp_from=larktab&table=tblIvRscY5Mev3Do&view=vewzhNeMCe";
+// 按角色与宿主形态决定本机应安装的本地 CLI Skill，避免把打工接单指令混进普通 host 子进程全局目录。
+export function resolveSkillsForHost({ role = "node", kind = "host" } = {}) {
+  const isAgent = String(kind).trim().toLowerCase() === "agent";
+  const isHub = String(role).trim().toLowerCase() === "hub";
+  if (isAgent) {
+    return isHub ? ["ah", "ah-inbox"] : ["ah-inbox"];
+  }
+  return ["ah"];
+}
+
+export function installLocalSkills(appDir, {
+  role = "node",
+  kind = "host",
+  skipSkill = false,
+  skillsRoot = path.join(os.homedir(), ".agents", "skills"),
+  log = console.log,
+} = {}) {
+  if (skipSkill) {
+    log("  · 跳过安装本机 Skill（--skip-skill）");
+    return [];
+  }
+  const names = resolveSkillsForHost({ role, kind });
+  const installed = [];
+  for (const name of names) {
+    const skillSrc = path.join(appDir, "skills", name, "SKILL.md");
+    const skillDestDir = path.join(skillsRoot, name);
+    if (!fs.existsSync(skillSrc)) continue;
+    fs.mkdirSync(skillDestDir, { recursive: true });
+    const destPath = path.join(skillDestDir, "SKILL.md");
+    fs.copyFileSync(skillSrc, destPath);
+    log(`  ✓ 已自动安装 ${name} Skill 至 ${destPath}`);
+    installed.push({ name, path: destPath });
+  }
+  return installed;
+}
 
 export function parseFlags(argv) {
   const f = { yes: false, force: false, service: false, role: "node", kind: "", skipSkill: false, autoToken: false };
@@ -50,33 +74,16 @@ export function parseFlags(argv) {
       f.hubUrl = a.slice("--join=".length);
     }
     else if (a === "--help" || a === "-h") f.help = true;
-    else if (a === "--wake") {
-      f.wakeSeen = true;
-      const next = argv[i + 1];
-      if (next == null || next === "" || String(next).startsWith("--")) f.wakeMissing = true;
-      else { f.wake = next; i++; }
-    } else if (a.startsWith("--wake=")) {
-      f.wakeSeen = true;
-      f.wake = a.slice("--wake=".length);
-      if (!String(f.wake ?? "").trim()) f.wakeMissing = true;
-    }
     else if (a === "--role") f.role = argv[++i] || "node";
     else if (a.startsWith("--role=")) f.role = a.slice("--role=".length);
     else if (a === "--kind") f.kind = argv[++i] || "host";
     else if (a.startsWith("--kind=")) f.kind = a.slice("--kind=".length);
-    else if (a === "--owner" || a === "--owner-open-id") f.ownerOpenId = argv[++i];
-    else if (a.startsWith("--owner=")) f.ownerOpenId = a.slice("--owner=".length);
-    else if (a.startsWith("--owner-open-id=")) f.ownerOpenId = a.slice("--owner-open-id=".length);
-    else if (a === "--base") f.base = argv[++i];
-    else if (a === "--domain") f.domain = argv[++i];
     else if (a === "--hub-key") f.hubKey = argv[++i];
     else if (a.startsWith("--hub-key=")) f.hubKey = a.slice("--hub-key=".length);
-    else if (a.startsWith("--domain=")) f.domain = a.slice("--domain=".length);
     else if (a === "--node") f.node = argv[++i];
     else if (a === "--zone") f.zone = argv[++i];
     else if (a === "--prefix") f.prefix = argv[++i];
     else if (a === "--desc") f.desc = argv[++i];
-    else if (a === "--app-id") f.appId = argv[++i];
     else if (a === "--bus") f.bus = argv[++i];
     else if (a.startsWith("--bus=")) f.bus = a.slice("--bus=".length);
     else if (a === "--hub-url") f.hubUrl = argv[++i];
@@ -89,11 +96,6 @@ export function parseFlags(argv) {
     else if (a.startsWith("--db-path=")) f.dbPath = a.slice("--db-path=".length);
     else if (a === "--public-url") f.publicUrl = argv[++i];
     else if (a.startsWith("--public-url=")) f.publicUrl = a.slice("--public-url=".length);
-    // 明文参数会留在 ps 和 shell 历史里，只拒绝、不保存值。
-    else if (a === "--app-secret" || a.startsWith("--app-secret=")) {
-      f.rejectAppSecret = true;
-      if (a === "--app-secret") i++;
-    }
   }
   return f;
 }
@@ -129,472 +131,16 @@ function findExecutable(binName) {
   return null;
 }
 
-function findLarkCliBin() {
-  return findExecutable("lark-cli") || "lark-cli";
-}
-
-function run(cmd, args, opts = {}) {
-  const resolvedCmd = cmd === "lark-cli" ? findLarkCliBin() : cmd;
-  return execFileSync(resolvedCmd, args, { encoding: "utf8", env: { ...process.env, PATH: richPath() }, stdio: ["ignore", "pipe", "ignore"], ...opts });
-}
-
-export function openBrowser(url) {
-  try {
-    if (process.platform === "darwin") {
-      execFile("open", [url], () => {});
-      return true;
-    } else if (process.platform === "win32") {
-      execFile("cmd.exe", ["/c", "start", "", url], () => {});
-      return true;
-    } else {
-      execFile("xdg-open", [url], () => {});
-      return true;
-    }
-  } catch {
-    return false;
-  }
-}
-
-function checkDriveSubscription(baseToken, appId) {
-  try {
-    const args = [
-      "api", "GET", `/open-apis/drive/v1/files/${baseToken}/get_subscribe`,
-      "--params", JSON.stringify({ file_type: "bitable" }),
-      "--as", "user",
-      "--json",
-    ];
-    const out = run("lark-cli", args);
-    const parsed = JSON.parse(out);
-    if (parsed?.data?.is_subscribe === true) return { subscribed: true };
-    return { subscribed: false, error: parsed?.error?.message || parsed?.msg || (parsed?.data?.is_subscribe === false ? "未订阅" : out.trim()) };
-  } catch (e) {
-    return { subscribed: false, error: e.message };
-  }
-}
-
-// 尝试以当前用户身份向 Base 注册云文档事件订阅（ws 秒级门铃所需）
-function tryRegisterDriveSubscription(baseToken, appId) {
-  const before = checkDriveSubscription(baseToken, appId);
-  if (before.subscribed) return { success: true };
-
-  try {
-    const out = run("lark-cli", [
-      "api", "POST", `/open-apis/drive/v1/files/${baseToken}/subscribe`,
-      "--params", JSON.stringify({ file_type: "bitable" }),
-      "--as", "user",
-      "--json",
-    ]);
-    const parsed = JSON.parse(out);
-    const after = checkDriveSubscription(baseToken, appId);
-    if (after.subscribed) return { success: true };
-    return { success: false, error: parsed?.error?.message || parsed?.msg || after.error || out.trim() };
-  } catch (e) {
-    const after = checkDriveSubscription(baseToken, appId);
-    if (after.subscribed) return { success: true };
-    return { success: false, error: e.message };
-  }
-}
-
-function checkUserScopes(requiredScopes = ["docs:event:subscribe", "docs:permission.member:create"]) {
-  try {
-    const out = run("lark-cli", ["auth", "status", "--json"]);
-    const d = JSON.parse(out);
-    const user = d?.identities?.user;
-    if (!user || user.available !== true) {
-      return { ok: false, missing: requiredScopes };
-    }
-    const rawScope = user.scope || "";
-    const scopes = new Set(typeof rawScope === "string" ? rawScope.split(/\s+/).filter(Boolean) : (Array.isArray(rawScope) ? rawScope : []));
-    const missing = requiredScopes.filter((s) => !scopes.has(s));
-    return { ok: missing.length === 0, missing };
-  } catch (e) {
-    return { ok: false, missing: requiredScopes, error: e.message };
-  }
-}
-
-// 当机器人没有多维表格读写权限时，用当前已登录 User 身份自动把应用添加为该 Base 的协作者
-function tryAddBotCollaborator(baseToken, appId) {
-  if (!baseToken || !appId) return false;
-  try {
-    const out = run("lark-cli", [
-      "drive", "+member-add",
-      "--token", baseToken,
-      "--type", "bitable",
-      "--member-type", "appid",
-      "--member-id", appId,
-      "--perm", "full_access",
-      "--as", "user",
-      "--yes",
-      "--json",
-    ]);
-    const parsed = JSON.parse(out);
-    if (parsed && (parsed.code === 0 || parsed.member || parsed.data || parsed.member_id || !parsed.error)) {
-      return true;
-    }
-    return false;
-  } catch {
-    return false;
-  }
-}
-
-function larkVersion() {
-  try {
-    return run("lark-cli", ["--version"]).trim();
-  } catch {
-    return null;
-  }
-}
-
-function ensureLarkCli() {
-  const v = larkVersion();
-  if (v) {
-    console.log(`  ✓ lark-cli 已安装（${v}）`);
-    return true;
-  }
-  console.log("  · 未发现 lark-cli，正在通过 npm 安装 @larksuite/cli …");
-  try {
-    execSync("npm install -g @larksuite/cli", { stdio: "inherit", env: { ...process.env, PATH: richPath() } });
-  } catch {
-    console.error("  ✗ npm 安装 lark-cli 失败。请先确认 Node.js/npm 可用，再重跑 lah setup。");
-    return false;
-  }
-  const v2 = larkVersion();
-  if (!v2) {
-    console.error("  ✗ lark-cli 安装后仍不可用（可能不在 PATH 中）。新开一个终端再试。");
-    return false;
-  }
-  console.log(`  ✓ lark-cli 已安装（${v2}）`);
-  return true;
-}
-
-function readLarkConfig() {
-  const candidates = [
-    path.join(os.homedir(), ".lark-cli", "config.json"),
-    process.env.XDG_CONFIG_HOME ? path.join(process.env.XDG_CONFIG_HOME, "lark-cli", "config.json") : null,
-    path.join(os.homedir(), ".config", "lark-cli", "config.json"),
-    path.join(os.homedir(), "Library", "Application Support", "lark-cli", "config.json"),
-    process.env.XDG_DATA_HOME ? path.join(process.env.XDG_DATA_HOME, "lark-cli", "config.json") : null,
-    path.join(os.homedir(), ".local", "share", "lark-cli", "config.json"),
-  ].filter(Boolean);
-  for (const p of candidates) {
-    try {
-      const d = JSON.parse(fs.readFileSync(p, "utf8"));
-      if (Array.isArray(d.apps) && d.apps.length) return { path: p, apps: d.apps };
-    } catch { /* 下一个候选 */ }
-  }
-  return null;
-}
-
-function parseMasterKey(raw) {
-  if (!raw || typeof raw !== "string") return null;
-  let s = raw.trim();
-  if (s.startsWith("go-keyring-base64:")) {
-    try {
-      s = Buffer.from(s.slice("go-keyring-base64:".length), "base64").toString("utf8").trim();
-    } catch {
-      return null;
-    }
-  }
-  try {
-    const key = Buffer.from(s, "base64");
-    if (key.length === 32) return key;
-  } catch {
-    return null;
-  }
-  return null;
-}
-
-function loadMasterKey() {
-  const fileCandidates = [
-    path.join(os.homedir(), "Library", "Application Support", "lark-cli", "master.key.file"),
-    path.join(os.homedir(), "Library", "Application Support", "lark-cli", "master.key"),
-    process.env.XDG_DATA_HOME ? path.join(process.env.XDG_DATA_HOME, "lark-cli", "master.key.file") : null,
-    process.env.XDG_DATA_HOME ? path.join(process.env.XDG_DATA_HOME, "lark-cli", "master.key") : null,
-    path.join(os.homedir(), ".local", "share", "lark-cli", "master.key.file"),
-    path.join(os.homedir(), ".local", "share", "lark-cli", "master.key"),
-    process.env.XDG_CONFIG_HOME ? path.join(process.env.XDG_CONFIG_HOME, "lark-cli", "master.key.file") : null,
-    process.env.XDG_CONFIG_HOME ? path.join(process.env.XDG_CONFIG_HOME, "lark-cli", "master.key") : null,
-    path.join(os.homedir(), ".config", "lark-cli", "master.key.file"),
-    path.join(os.homedir(), ".config", "lark-cli", "master.key"),
-    path.join(os.homedir(), ".lark-cli", "master.key.file"),
-    path.join(os.homedir(), ".lark-cli", "master.key"),
-  ].filter(Boolean);
-  for (const fp of fileCandidates) {
-    try {
-      if (fs.existsSync(fp)) {
-        const content = fs.readFileSync(fp, "utf8").trim();
-        const key = parseMasterKey(content);
-        if (key) return key;
-      }
-    } catch { /* 下一个 */ }
-  }
-
-  if (process.platform === "darwin") {
-    try {
-      const out = run("security", ["find-generic-password", "-s", "lark-cli", "-a", "master.key", "-w"]).trim();
-      const key = parseMasterKey(out);
-      if (key) return key;
-    } catch { /* 忽略 */ }
-  }
-
-  if (process.platform === "linux") {
-    try {
-      const out = run("secret-tool", ["lookup", "service", "lark-cli", "username", "master.key"]).trim();
-      const key = parseMasterKey(out);
-      if (key) return key;
-    } catch { /* 忽略 */ }
-  }
-
-  return null;
-}
-
-function decryptLarkCliSecret(secretId) {
-  if (!secretId || typeof secretId !== "string") return null;
-  const key = loadMasterKey();
-  if (!key) return null;
-
-  const encFileName = secretId.replace(/[^a-zA-Z0-9._-]/g, "_") + ".enc";
-  const dirCandidates = [
-    path.join(os.homedir(), "Library", "Application Support", "lark-cli"),
-    process.env.XDG_DATA_HOME ? path.join(process.env.XDG_DATA_HOME, "lark-cli") : null,
-    path.join(os.homedir(), ".local", "share", "lark-cli"),
-    process.env.XDG_CONFIG_HOME ? path.join(process.env.XDG_CONFIG_HOME, "lark-cli") : null,
-    path.join(os.homedir(), ".config", "lark-cli"),
-    path.join(os.homedir(), ".lark-cli"),
-  ].filter(Boolean);
-
-  for (const dir of dirCandidates) {
-    const encPath = path.join(dir, encFileName);
-    try {
-      if (!fs.existsSync(encPath)) continue;
-      const buf = fs.readFileSync(encPath);
-      if (buf.length < 12 + 16) continue;
-      const iv = buf.subarray(0, 12);
-      const tag = buf.subarray(buf.length - 16);
-      const ciphertext = buf.subarray(12, buf.length - 16);
-
-      const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
-      decipher.setAuthTag(tag);
-      const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
-      if (decrypted) return decrypted;
-    } catch { /* 下一个目录或失败 */ }
-  }
-
-  return null;
-}
-
-// 从 lark-cli 的应用条目里解析出 secret 明文；只在本机内存里流转，绝不打印。
-// 形态：明文字符串 / 新版 lark-cli 安全存储（AES-256-GCM 文件） / 旧版 macOS 钥匙串引用。
-function resolveSecret(app) {
-  const s = app?.appSecret;
-  if (typeof s === "string" && s) return { value: s, source: "lark-cli 配置（明文）" };
-  if (s && typeof s === "object") {
-    // 优先尝试新版 lark-cli 安全存储解密（AES-256-GCM）
-    if (s.id) {
-      const dec = decryptLarkCliSecret(s.id);
-      if (dec) return { value: dec, source: "lark-cli 安全存储（自动解密）" };
-    }
-    // 旧版回退：直接通过 security 查明文
-    if (s.source === "keychain" && s.id && process.platform === "darwin") {
-      for (const args of [["find-generic-password", "-a", s.id, "-w"], ["find-generic-password", "-l", s.id, "-w"], ["find-generic-password", "-s", s.id, "-w"]]) {
-        try {
-          const out = run("security", args).replace(/\n$/, "");
-          if (out) return { value: out, source: "macOS 钥匙串（经 lark-cli 引用）" };
-        } catch { /* 换一种查法 */ }
-      }
-    }
-  }
-  return null;
-}
-
-function extractBaseToken(input) {
-  if (!input) return null;
-  const m = String(input).match(/\/base\/([A-Za-z0-9_-]+)/);
-  if (m) return m[1];
-  const t = String(input).trim();
-  return /^[A-Za-z0-9_-]{16,}$/.test(t) ? t : null;
-}
-
-// 自动探测和发现多维表格 Base（通过 lark-cli / tempBus 搜索及本机已有配置，并验证标准表）
-async function discoverCandidateBases(tempBus, appId) {
-  const candidates = [];
-  const seen = new Set();
-
-  const add = (token, name, source) => {
-    const t = extractBaseToken(token);
-    if (!t || seen.has(t)) return;
-    seen.add(t);
-    candidates.push({ token: t, name: name || t, source });
-  };
-
-  const addEntity = (o, source) => {
-    if (!o || typeof o !== "object") return;
-    if (o.docs_type && o.docs_type !== "bitable") return;
-    const tok = o.docs_token || o.token || o.file_token || o.doc_token;
-    const name = o.title || o.name;
-    add(tok, name, source);
-  };
-
-  // 1. 优先使用 tempBus 以 Bot 身份搜索（依次尝试关键词 ['Agent中台', 'Agent', '中台']，一旦找到候选即停）
-  if (tempBus && typeof tempBus.api === "function") {
-    for (const kw of ["Agent中台", "Agent", "中台"]) {
-      try {
-        const res = await tempBus.api("POST", "/suite/docs-api/search/object", {
-          search_key: kw,
-          count: 10,
-          docs_types: ["bitable"],
-        });
-        const objs = res?.docs_entities ?? res?.data?.docs_entities ?? [];
-        for (const o of objs) {
-          addEntity(o, `tempBus (bot) 搜索 "${kw}"`);
-        }
-        if (candidates.length > 0) break;
-      } catch { /* 忽略错误，继续下一个关键词或后续搜索方式 */ }
-    }
-  }
-
-  // 2. 若 tempBus 未搜出，尝试 lark-cli 以 bot 身份搜索
-  if (candidates.length === 0) {
-    for (const kw of ["Agent中台", "Agent", "中台"]) {
-      try {
-        const out = run("lark-cli", [
-          "api", "POST", "/open-apis/suite/docs-api/search/object",
-          "--data", JSON.stringify({ search_key: kw, count: 10, docs_types: ["bitable"] }),
-          "--as", "bot",
-          "--json",
-        ]);
-        const parsed = JSON.parse(out);
-        const objs = parsed?.data?.docs_entities ?? parsed?.docs_entities ?? [];
-        for (const o of objs) {
-          addEntity(o, `lark-cli bot 搜索 "${kw}"`);
-        }
-        if (candidates.length > 0) break;
-      } catch { /* 忽略错误 */ }
-    }
-  }
-
-  // 3. 尝试用 lark-cli 搜索 'Agent中台' 或 bitable 类型文件（user 身份）
-  if (candidates.length === 0) {
-    try {
-      const out = run("lark-cli", [
-        "drive", "+search",
-        "--doc-types", "bitable",
-        "--query", "Agent中台",
-        "--as", "user",
-        "--json",
-      ]);
-      const parsed = JSON.parse(out);
-      const docs = parsed?.docs ?? parsed?.data?.docs ?? parsed?.items ?? [];
-      for (const d of docs) {
-        addEntity(d, "lark-cli 搜索");
-      }
-    } catch { /* 忽略错误 */ }
-  }
-
-  if (candidates.length === 0) {
-    try {
-      const out = run("lark-cli", [
-        "drive", "+search",
-        "--doc-types", "bitable",
-        "--page-size", "10",
-        "--as", "user",
-        "--json",
-      ]);
-      const parsed = JSON.parse(out);
-      const docs = parsed?.docs ?? parsed?.data?.docs ?? parsed?.items ?? [];
-      for (const d of docs) {
-        addEntity(d, "lark-cli 搜索");
-      }
-    } catch { /* 忽略错误 */ }
-  }
-
-  if (candidates.length === 0) {
-    try {
-      const out = run("lark-cli", [
-        "api", "POST", "/open-apis/suite/docs-api/search/object",
-        "--data", JSON.stringify({ search_key: "Agent中台", count: 10, docs_types: ["bitable"] }),
-        "--as", "user",
-        "--json",
-      ]);
-      const parsed = JSON.parse(out);
-      const objs = parsed?.data?.docs_entities ?? parsed?.docs_entities ?? [];
-      for (const o of objs) {
-        addEntity(o, "docs-api 搜索");
-      }
-    } catch { /* 忽略错误 */ }
-  }
-
-  // 2. 检查本地已有配置
-  const knownConfigPaths = [
-    path.join(os.homedir(), ".hub-node", "node.json"),
-    path.join(os.homedir(), ".hub-node-hub", "node.json"),
-  ];
-  for (const p of knownConfigPaths) {
-    try {
-      if (fs.existsSync(p)) {
-        const d = JSON.parse(fs.readFileSync(p, "utf8"));
-        const token = d.baseToken;
-        if (token && !isPlaceholderToken(token)) {
-          add(token, "已有配置", p);
-        }
-      }
-    } catch { /* 忽略错误 */ }
-  }
-
-  // 3. 用 tempBus 校验哪些 Base 包含 6 张标准表，并补全名字
-  const verified = [];
-  for (const c of candidates) {
-    try {
-      let meta;
-      try {
-        meta = await tempBus.api("GET", `/bitable/v1/apps/${c.token}`);
-      } catch {
-        if (appId && tryAddBotCollaborator(c.token, appId)) {
-          try {
-            meta = await tempBus.api("GET", `/bitable/v1/apps/${c.token}`);
-          } catch { /* 仍然失败 */ }
-        }
-      }
-      if (meta?.app?.name) c.name = meta.app.name;
-      let tablesRes;
-      try {
-        tablesRes = await tempBus.api("GET", `/bitable/v1/apps/${c.token}/tables?page_size=100`);
-      } catch {
-        if (appId && tryAddBotCollaborator(c.token, appId)) {
-          try {
-            tablesRes = await tempBus.api("GET", `/bitable/v1/apps/${c.token}/tables?page_size=100`);
-          } catch { /* 仍然失败 */ }
-        }
-      }
-      const names = new Set((tablesRes?.items ?? []).map((t) => t.name));
-      const hasAll = REQUIRED_TABLES.every((n) => names.has(n));
-      c.hasStandardTables = hasAll;
-      if (hasAll) verified.push(c);
-    } catch {
-      // 无法访问该 Base（无权限或不存在），跳过
-    }
-  }
-
-  return verified.length > 0 ? verified : candidates;
-}
-
-// install.sh 曾经把 example 直接种成 node.json。这些值仍是占位符时，
-// 首装还没完成：--yes 应覆盖而不是退出 4，交互默认 Y。
-// app_token 是旧示例字段（正式配置用 baseToken），出现 REPLACE 或 bascn 即占位。
-// baseToken / 表 ID 认本仓库 example 的尖括号、<REPLACE>，以及 bascnxxxx 这种填充。
 function isPlaceholderToken(v) {
   if (typeof v !== "string") return false;
   const s = v.trim();
   if (!s) return false;
-  if (s.startsWith("<") || s.includes("REPLACE")) return true;
-  return s === "bascn" || /^bascn[xX._-]+$/.test(s);
+  return s.startsWith("<") || s.includes("REPLACE");
 }
 
 function isUnfinishedExample(raw) {
   if (!raw || typeof raw !== "object") return false;
-  const appToken = raw.app_token ?? raw.appToken;
-  if (typeof appToken === "string" && (appToken.includes("REPLACE") || appToken.includes("bascn"))) return true;
-  const fields = [raw.baseToken, raw.hubUrl, raw.node];
+  const fields = [raw.hubUrl, raw.node];
   if (raw.tables && typeof raw.tables === "object") fields.push(...Object.values(raw.tables));
   return fields.some(isPlaceholderToken);
 }
@@ -784,31 +330,6 @@ async function applyPaseoInteractive(selectedAgents, ask) {
   return out;
 }
 
-function envSecret() {
-  const candidates = [
-    { key: "HUB_APP_SECRET", val: process.env.HUB_APP_SECRET },
-    { key: "APP_SECRET", val: process.env.APP_SECRET },
-    { key: "FEISHU_APP_SECRET", val: process.env.FEISHU_APP_SECRET },
-    { key: "LARK_APP_SECRET", val: process.env.LARK_APP_SECRET },
-  ];
-  for (const c of candidates) {
-    const v = (c.val || "").trim();
-    if (v) return { value: v, source: `环境变量 ${c.key}` };
-  }
-  return null;
-}
-
-function envAppId() {
-  return (
-    process.env.HUB_APP_ID ||
-    process.env.APP_ID ||
-    process.env.FEISHU_APP_ID ||
-    process.env.LARK_APP_ID ||
-    ""
-  ).trim() || null;
-}
-
-// 只读权限刚好是 600 的普通文件。更松的权限或符号链接一律不读，避免把 Secret 从暴露的文件载入内存。
 function readLockedAppEnv(configDir) {
   const p = path.join(configDir, "app.env");
   let st;
@@ -816,8 +337,6 @@ function readLockedAppEnv(configDir) {
   if (!st.isFile() || st.isSymbolicLink() || (st.mode & 0o777) !== 0o600) return { insecure: true };
   const kv = readEnvFile(p);
   return {
-    appId: kv.APP_ID || "",
-    secret: kv.APP_SECRET || "",
     apiToken: kv.HUB_API_TOKEN || kv.LAH_API_TOKEN || "",
   };
 }
@@ -861,71 +380,25 @@ function parseJoinHubUrl(rawUrl) {
   };
 }
 
-// Node 26 的 promises readline 不再暴露 _writeToOutput，提问期间改写 stdout.write
-// 把按键回显丢掉，只放行换行；finally 恢复，避免 Secret 留在屏幕或后续输出上。
-async function askHidden(rl, prompt) {
-  process.stdout.write(prompt.endsWith(" ") ? prompt : prompt + " ");
-  const original = process.stdout.write;
-  process.stdout.write = function (chunk, encoding, cb) {
-    if (typeof encoding === "function") { cb = encoding; encoding = undefined; }
-    const s = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
-    if (/[\r\n]/.test(s)) return original.call(this, "\n", typeof cb === "function" ? cb : undefined);
-    if (typeof cb === "function") cb();
-    return true;
-  };
-  try {
-    const raw = await rl.question("");
-    const answer = String(raw || "").trim();
-    try {
-      if (Array.isArray(rl.history)) rl.history = rl.history.filter((h) => String(h).trim() !== answer);
-      if ("historyIndex" in rl) rl.historyIndex = -1;
-    } catch { /* 清不掉历史也不能把 Secret 打进日志 */ }
-    return answer;
-  } finally {
-    process.stdout.write = original;
-  }
-}
-
-
 export function setupHelpText() {
   return `用法：
   # 0. 一键启动独立中台 / 一键接入远端节点（推荐）
-  lah up   [--node mac-mini] [--listen 0.0.0.0:8787] [--service]
-  lah join http://[<token>@]<hub-ip>:8787 [--node worker-1] [--service]
+  ah up   [--node mac-mini] [--listen 0.0.0.0:8787] [--service]
+  ah join http://[<token>@]<hub-ip>:8787 [--node worker-1] [--service]
 
-  # 1. 独立自建主枢纽（Mac mini / SQLite + HTTP 长轮询 + Web 控制台，零飞书配额）
-  lah setup --hub [--node mac-mini] [--listen 0.0.0.0:8787] [--api-token <token>]
-            [--db-path <path>] [--public-url <url>] [--kind host|agent] [--yes]
+  # 1. 独立自建主枢纽（Mac mini / SQLite + HTTP 长轮询 + Web 控制台）
+  ah setup --hub [--node mac-mini] [--listen 0.0.0.0:8787] [--api-token <token>]
+           [--db-path <path>] [--public-url <url>] [--kind host|agent] [--yes]
 
   # 2. 远程接入节点（通过 HTTP 长轮询接入主枢纽，自动同步 hubPublicKey）
-  lah setup --join http://[<token>@]<hub-ip>:8787 [--node worker-1]
-            [--api-token <token>] [--hub-key <hub 审批公钥>] [--kind host|agent] [--yes]
+  ah setup --join http://[<token>@]<hub-ip>:8787 [--node worker-1]
+           [--api-token <token>] [--hub-key <hub 审批公钥>] [--kind host|agent] [--yes]
 
-  # 3. 飞书多维表格兼容模式
-  lah setup --bus feishu [--yes] [--config <dir>] [--role node|hub] [--kind host|agent]
-            [--wake poll|event|sweep] [--skip-skill] [--force]
-            [--node <名>] [--zone <区>] [--prefix <前缀>] [--desc <描述>]
-            [--base <token>] [--app-id <id>] [--owner <open_id>]
-            [--domain feishu|lark] [--hub-key <hub 审批公钥>]
-
-  --bus         显式指定总线模式：sqlite（独立 Hub）、http（远程长轮询节点）、feishu（飞书多维表格）
+  --bus         显式指定总线模式：sqlite（独立 Hub）或 http（远程长轮询节点）
   --hub         快捷等价于 --role hub --bus sqlite --auto-token
   --join        快捷接入地址（支持内嵌 token：http://<token>@<host>:8787），自动拉取公钥
   --auto-token  若未传口令，自动生成高强度随机 API Token
-  --wake        飞书模式下选择唤醒方式：event/ws、poll、sweep
-  --help        打印本帮助并退出，不进入向导，也不读取凭据`;
-}
-
-export function normalizeWake(raw) {
-  const s = String(raw ?? "").trim().toLowerCase();
-  if (!s) return "";
-  if (s === "1" || s === "ws" || s === "event") return "1";
-  if (s === "2" || s === "poll") return "2";
-  if (s === "3" || s === "sweep") return "3";
-  if (s === "automation") {
-    throw new Error("守护进程不能登记 automation。协议接入型节点的 Receive_Mode=automation 只能手工登记名片；--wake 请用 poll、event/ws 或 sweep");
-  }
-  throw new Error(`未知 --wake：${raw}（应为 poll、event/ws 或 sweep）`);
+  --help        打印本帮助并退出`;
 }
 
 function writeLockedAppEnvVars(configDir, vars) {
@@ -1031,7 +504,7 @@ async function finalizeSetup({ configDir, appDir, role, kind, node, prefix, bus,
         selectedAgents = indices.map((i) => discoveredAgents[i - 1]);
       }
     } else {
-      console.log("  · 未扫描到常见本机终端 Agent（本机暂无可接单能力，装好后重跑 lah setup 或手写 commands.json）");
+      console.log("  · 未扫描到常见本机终端 Agent（本机暂无可接单能力，装好后重跑 ah setup 或手写 commands.json）");
     }
 
     if (interactive) selectedAgents = await applyPaseoInteractive(selectedAgents, ask);
@@ -1048,7 +521,7 @@ async function finalizeSetup({ configDir, appDir, role, kind, node, prefix, bus,
   try {
     if (!fs.existsSync(presentStateFile) && bus) {
       try {
-        const { f1 } = await import("./bus/feishu.mjs");
+        const { f1 } = await import("./bus/tables.mjs");
         const existingTasks = await bus.listRecords(tables.tasks);
         const baseKeys = [];
         for (const t of existingTasks) {
@@ -1080,21 +553,11 @@ async function finalizeSetup({ configDir, appDir, role, kind, node, prefix, bus,
     try { bus?.close?.(); } catch {}
   }
 
-  // 自动为本机 Agent 安装 lah 技能（支持 --skip-skill 或 LAH_SKIP_SKILL=1 跳过）
-  const shouldSkipSkill = flags.skipSkill || ["1", "true"].includes(String(process.env.LAH_SKIP_SKILL || "").toLowerCase());
-  if (!shouldSkipSkill) {
-    try {
-      const skillSrc = path.join(appDir, "skills", "lah", "SKILL.md");
-      const skillDestDir = path.join(os.homedir(), ".agents", "skills", "lah");
-      if (fs.existsSync(skillSrc)) {
-        fs.mkdirSync(skillDestDir, { recursive: true });
-        fs.copyFileSync(skillSrc, path.join(skillDestDir, "SKILL.md"));
-        console.log(`  ✓ 已自动安装 lah Skill 至 ${path.join(skillDestDir, "SKILL.md")}`);
-      }
-    } catch {}
-  } else {
-    console.log("  · 跳过安装 lah Skill（--skip-skill）");
-  }
+  // 按本机角色/形态自动安装对应 CLI Skill（支持 --skip-skill 或 AH_SKIP_SKILL=1 / LAH_SKIP_SKILL=1 跳过）
+  const shouldSkipSkill = flags.skipSkill || ["1", "true"].includes(String(process.env.AH_SKIP_SKILL || process.env.LAH_SKIP_SKILL || "").toLowerCase());
+  try {
+    installLocalSkills(appDir, { role, kind, skipSkill: shouldSkipSkill });
+  } catch {}
 
   // 自检
   let dc = await doctor(configDir, appDir, { role });
@@ -1109,7 +572,7 @@ async function finalizeSetup({ configDir, appDir, role, kind, node, prefix, bus,
     }
   }
   if (dc !== 0) {
-    console.error(`  ✗ 自检未全过，按上面清单修完后运行 \`lah doctor${role === "hub" ? " --role hub" : ""}\` 复查。`);
+    console.error(`  ✗ 自检未全过，按上面清单修完后运行 \`ah doctor${role === "hub" ? " --role hub" : ""}\` 复查。`);
     return dc;
   }
 
@@ -1121,12 +584,12 @@ async function finalizeSetup({ configDir, appDir, role, kind, node, prefix, bus,
     if (sc !== 0) { console.error("  ✗ 自启注册失败，看上面输出。"); return sc; }
     console.log("  ✓ 自启已注册、守护已启动。");
   } else {
-    console.log(`  · 未注册自启；手动运行守护：lah daemon${role === "hub" ? " --role hub" : ""} --config ${configDir}`);
+    console.log(`  · 未注册自启；手动运行守护：ah daemon${role === "hub" ? " --role hub" : ""} --config ${configDir}`);
   }
   if (role === "hub") {
-    console.log(`setup 完成：主枢纽 ${node} 就绪（带 ${names.length} 项本地能力），可通过 lah daemon --role hub 常驻。`);
+    console.log(`setup 完成：主枢纽 ${node} 就绪（带 ${names.length} 项本地能力），可通过 ah daemon --role hub 常驻。`);
   } else {
-    console.log(`setup 完成：节点 ${node}（能力前缀 CAP-${prefix}-，带 ${names.length} 项本地能力），可通过 lah daemon 常驻。`);
+    console.log(`setup 完成：节点 ${node}（能力前缀 CAP-${prefix}-，带 ${names.length} 项本地能力），可通过 ah daemon 常驻。`);
   }
   return 0;
 }
@@ -1137,41 +600,13 @@ export async function runSetup(configDir, argv, appDir) {
     console.log(setupHelpText());
     return 0;
   }
-  if (flags.wakeMissing) {
-    console.error("  ✗ --wake 缺少值（应为 poll、event/ws 或 sweep）。协议节点的 automation 只能手工登记名片。");
-    return 2;
-  }
-  let wakeFlag = "";
-  try {
-    wakeFlag = flags.wake ? normalizeWake(flags.wake) : "";
-  } catch (e) {
-    console.error("  ✗ " + e.message);
-    return 2;
-  }
   const role = flags.role || "node";
   if (role !== "node" && role !== "hub") {
     console.error(`  ✗ --role 只能是 node 或 hub，收到：${role}`);
     return 2;
   }
-  if (flags.rejectAppSecret) {
-    console.error("  ✗ 已移除 --app-secret（会进入进程列表和 shell 历史）。请改用环境变量 APP_SECRET 或 HUB_APP_SECRET，或权限为 600 的 app.env。");
-    return 2;
-  }
   const interactive = !!process.stdin.isTTY && !flags.yes;
   let rl = interactive ? readline.createInterface({ input: process.stdin, output: process.stdout }) : null;
-  const runInteractive = (cmd) => {
-    if (rl) {
-      try { rl.close(); } catch {}
-      rl = null;
-    }
-    try {
-      execSync(cmd, { stdio: "inherit", env: { ...process.env, PATH: richPath() } });
-    } finally {
-      if (interactive) {
-        rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-      }
-    }
-  };
   const ask = async (q, def) => {
     if (!interactive) {
       if (def !== undefined) return def;
@@ -1185,23 +620,23 @@ export async function runSetup(configDir, argv, appDir) {
   };
 
   try {
-    console.log(`lah setup —— 一键配置${role === "hub" ? "主枢纽（hub，干活＋审批呈递）" : "节点（node）"}`);
+    console.log(`ah setup —— 一键配置${role === "hub" ? "主枢纽（hub，SQLite + HTTP 网关 + Web 控制台）" : "节点（node，HTTP 长轮询接入 Hub）"}`);
     console.log(`role: ${role}`);
     console.log(`config dir: ${configDir}`);
 
-    // hub 的审批签名公钥：节点靠它验 auth_decision。同样沿用已有值，带外拿到的公钥才可信，不从总线读。
+    // hub 的审批签名公钥：节点靠它验 auth_decision。
     let hubPublicKey = String(flags.hubKey ?? "").trim();
     if (!hubPublicKey) {
       try { hubPublicKey = String(JSON.parse(fs.readFileSync(path.join(configDir, "node.json"), "utf8")).hubPublicKey ?? "").trim(); }
       catch { /* 还没有 node.json */ }
     }
     if (hubPublicKey && !isHubPublicKey(hubPublicKey)) {
-      throw new Error("--hub-key 不是有效的 hub 审批公钥（应为 hub 上 lah doctor 打印的那串 base64）");
+      throw new Error("--hub-key 不是有效的 hub 审批公钥（应为 hub 上 ah doctor 打印的那串 base64）");
     }
 
     const busFlag = String(flags.bus ?? "").trim().toLowerCase();
-    if (busFlag && !["sqlite", "http", "feishu"].includes(busFlag)) {
-      console.error(`  ✗ --bus 只能是 sqlite、http 或 feishu，收到：${busFlag}`);
+    if (busFlag && !["sqlite", "http"].includes(busFlag)) {
+      console.error(`  ✗ --bus 只能是 sqlite 或 http，收到：${busFlag}`);
       return 2;
     }
     const envHubUrl = String(process.env.HUB_URL ?? "").trim();
@@ -1212,522 +647,137 @@ export async function runSetup(configDir, argv, appDir) {
     let setupBus = busFlag;
     if (!setupBus) {
       if (explicitHubUrl || envHubUrl) setupBus = "http";
-      else if (flags.base || flags.appId) setupBus = "feishu";
-      else if (flags.listen || flags.dbPath) setupBus = "sqlite";
-      else if (role === "hub") setupBus = "sqlite";
-      else if (existingRaw && !isUnfinishedExample(existingRaw)) {
-        if (existingRaw.busType === "sqlite" || existingRaw.busType === "http" || existingRaw.busType === "feishu") {
-          setupBus = existingRaw.busType;
-        } else if (existingRaw.hubUrl) {
-          setupBus = "http";
-        } else if (existingRaw.baseToken) {
-          setupBus = "feishu";
-        }
-      }
-      if (!setupBus) {
-        if (interactive) {
-          const m = await ask(
-            "选择总线模式：1=独立自建 Hub（HTTP 长轮询，零飞书配额，推荐），2=飞书多维表格共享总线",
-            "1"
-          );
-          setupBus = (m === "2" || /feishu|lark/i.test(m)) ? "feishu" : "http";
-        } else {
-          console.error("  ✗ 非交互节点 setup 缺少目标地址：请传 --hub-url http://<hub-ip>:8787（独立 Hub），或传 --bus feishu --base <token>（飞书兼容模式）。");
-          return 2;
-        }
-      }
-    }
-
-    if (setupBus === "sqlite" || setupBus === "http") {
-      console.log(`  ✓ 总线模式：${setupBus === "sqlite" ? "独立主枢纽（SQLite + HTTP 长轮询服务端 + Web 控制台）" : "远程节点（HTTP 长轮询接入独立 Hub）"}`);
-      const kind = await selectKind(flags, interactive, ask);
-      const hostDefault = os.hostname().split(".")[0].toLowerCase().replace(/[^a-z0-9-]/g, "-") || (role === "hub" ? "mac-mini" : "node");
-      const nodeDefault = role === "hub" ? (flags.node || hostDefault || "hub") : (flags.node || hostDefault);
-      const node = flags.node || (interactive ? await ask("给当前节点起个名字（中台按此名称派单）", nodeDefault) : nodeDefault);
-      let zone = flags.zone || "";
-      if (!zone) {
-        if (role === "hub" || !interactive) zone = role === "hub" ? "work" : "home";
-        else {
-          const z = await ask("这台机器主要在哪用？输 1=家里，2=公司", "1");
-          zone = (z === "2" || /work/i.test(z)) ? "work" : "home";
-        }
-      }
-      const prefix = flags.prefix || (node === "hub" ? "hub" : (node.split("-").filter(Boolean).pop() || node));
-      const nodeDesc = flags.desc ?? (role === "hub" ? "独立主枢纽节点（调度＋Web控制台＋审批呈递）" : (kind === "agent" ? `${node} 独立 Agent` : ""));
-
-      let resolvedHubUrl = "";
-      let embeddedToken = "";
-      if (setupBus === "http") {
-        const rawUrl = explicitHubUrl || envHubUrl || existingRaw?.hubUrl || await ask("输入独立 Hub 的访问地址（例如 http://192.168.1.10:8787 或 http://<token>@192.168.1.10:8787）");
-        const parsedJoin = parseJoinHubUrl(rawUrl);
-        resolvedHubUrl = parsedJoin.hubUrl;
-        embeddedToken = parsedJoin.embeddedToken;
-      }
-
-      const appEnvCreds = readLockedAppEnv(configDir);
-      let apiToken = (
-        String(flags.apiToken ?? "").trim()
-        || embeddedToken
-        || String(process.env.HUB_API_TOKEN ?? "").trim()
-        || String(process.env.LAH_API_TOKEN ?? "").trim()
-        || String(existingRaw?.apiToken ?? "").trim()
-        || String(appEnvCreds?.apiToken ?? "").trim()
-      );
-      if (!apiToken) {
-        if (setupBus === "sqlite" && flags.autoToken) {
-          apiToken = crypto.randomBytes(18).toString("base64url");
-        } else if (interactive) {
-          apiToken = (await ask("设置访问口令 HUB_API_TOKEN（留空不设口令；暴露局域网/公网建议设置）", "")).trim();
-        }
-      }
-
-      const owRes = await confirmOverwriteNodeJson(configDir, flags, interactive, ask);
-      if (!owRes.ok) return owRes.code;
-
-      const tables = normalizeTables(existingRaw?.tables);
-      let bus = null;
-      const nodeJson = {
-        node,
-        role,
-        kind,
-        busType: setupBus,
-        zone: zone || "work",
-        nodeDesc,
-        capPrefix: prefix,
-        pollSec: 45,
-        sweepSec: 900,
-        longPollSec: 25,
-        events: true,
-        tables,
-      };
-
-      if (apiToken) {
-        const appEnvPath = writeLockedAppEnvVars(configDir, {
-          HUB_API_TOKEN: apiToken,
-          LAH_API_TOKEN: apiToken,
-        });
-        nodeJson.appEnv = appEnvPath;
-        console.log("  ✓ 已保存访问口令至 app.env（600）");
-      }
-
-      let listenAddr = null;
-      let publicUrl = "";
-      if (setupBus === "sqlite") {
-        const listenRaw = flags.listen || existingRaw?.listen || (interactive ? await ask("HTTP 监听地址", "0.0.0.0:8787") : "0.0.0.0:8787");
-        listenAddr = resolveListenAddr(listenRaw);
-        const listen = `${listenAddr.host}:${listenAddr.port}`;
-        const dbPath = flags.dbPath || existingRaw?.dbPath || path.join(configDir, "hub.db");
-        publicUrl = String(flags.publicUrl ?? existingRaw?.publicUrl ?? "").trim();
-        const ownerOpenId = String(flags.ownerOpenId ?? process.env.HUB_OWNER_OPEN_ID ?? existingRaw?.ownerOpenId ?? "").trim();
-        if (ownerOpenId) nodeJson.ownerOpenId = ownerOpenId;
-        nodeJson.listen = listen;
-        nodeJson.dbPath = dbPath;
-        if (publicUrl) nodeJson.publicUrl = publicUrl;
-        bus = new SqliteBus({ dbPath, tables });
+      else if (flags.listen || flags.dbPath || role === "hub") setupBus = "sqlite";
+      else if (existingRaw && !isUnfinishedExample(existingRaw) && (existingRaw.busType === "sqlite" || existingRaw.busType === "http")) {
+        setupBus = existingRaw.busType;
+      } else if (existingRaw?.hubUrl) {
+        setupBus = "http";
+      } else if (interactive) {
+        setupBus = "http";
       } else {
-        nodeJson.hubUrl = resolvedHubUrl;
-        if (role !== "hub" && hubPublicKey) nodeJson.hubPublicKey = hubPublicKey;
-        bus = new HttpBus({ hubUrl: resolvedHubUrl, apiToken, node, tables });
-        try {
-          const health = await bus.api("GET", "/api/v1/health");
-          console.log(`  ✓ 远程 Hub 在线（${health?.node ?? resolvedHubUrl}，seq=${health?.seq ?? 0}）`);
-          if (!hubPublicKey && health?.hubPublicKey && isHubPublicKey(health.hubPublicKey)) {
-            hubPublicKey = health.hubPublicKey;
-            if (role !== "hub") nodeJson.hubPublicKey = hubPublicKey;
-            console.log("  ✓ 已从远程 Hub 自动同步 ed25519 审批公钥");
-          }
-        } catch (e) {
-          console.log(`  · 暂未连上远程 Hub（${e.message}），将继续写入本地配置`);
-        }
-      }
-
-      fs.writeFileSync(owRes.nodeJsonPath, JSON.stringify(nodeJson, null, 1) + "\n");
-      if (role === "hub") {
-        const key = loadOrCreateHubKey(configDir);
-        console.log(`  ✓ 审批签名密钥就绪（approval_key.pem，600），公钥：\n    ${key.publicKey}`);
-        if (listenAddr) {
-          const displayHost = (listenAddr.host === "0.0.0.0" || listenAddr.host === "::") ? detectLanIp() : listenAddr.host;
-          const baseDisplay = publicUrl ? publicUrl.replace(/\/+$/, "") : `http://${displayHost}:${listenAddr.port}`;
-          const joinHostUrl = new URL(baseDisplay);
-          if (apiToken) joinHostUrl.username = encodeURIComponent(apiToken);
-          const joinStr = joinHostUrl.toString().replace(/\/+$/, "");
-          const consoleUrl = apiToken ? `${baseDisplay}/?token=${encodeURIComponent(apiToken)}` : baseDisplay;
-          console.log(`  ✓ Web 控制台地址：${consoleUrl}`);
-          console.log(`  ✓ 其他机器一行接入命令（已安装 lah）：\n    lah join ${joinStr}`);
-          console.log(`  ✓ 全新机器一行安装并接入：\n    curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --join ${joinStr}`);
-        }
-      } else if (!hubPublicKey) {
-        console.log("  · 未配置 hubPublicKey：Hub 在线时执行 lah join 或 lah setup --hub-key <公钥> 可开启 ed25519 审批验签。");
-      }
-
-      return await finalizeSetup({ configDir, appDir, role, kind, node, prefix, bus, tables, flags, interactive, ask });
-    }
-
-    // 国内飞书还是国际版 Lark。没给 --domain 时沿用已有 node.json 的值，重跑向导不把 lark 冲回飞书。
-    let domain = String(flags.domain ?? "").trim();
-    if (!domain) {
-      try { domain = String(JSON.parse(fs.readFileSync(path.join(configDir, "node.json"), "utf8")).domain ?? "").trim(); }
-      catch { /* 还没有 node.json */ }
-    }
-    domain = domain || "feishu";
-    openHost(domain);
-    if (domain === "lark") {
-      console.log("  · 国际版 Lark（open.larksuite.com）。官方标准模板托管在飞书，Lark 租户不能直接克隆：请按 docs/base-schema.md 建好七张表后用 --base 指定。");
-    }
-
-    // 1. 优先检测本机是否安装了 lark-cli：若已安装则复用已配置的飞书应用；
-    //    未安装且无环境变量/app.env 凭据时，引导安装 lark-cli。
-    const lv = larkVersion();
-    let larkCfg = null;
-    if (lv) {
-      console.log(`  ✓ lark-cli 已安装（${lv}）`);
-      larkCfg = readLarkConfig();
-      if (larkCfg) console.log(`  ✓ 读到 lark-cli 配置：${larkCfg.path}（${larkCfg.apps.length} 个应用）`);
-    }
-
-    const fromEnv = envSecret();
-    const fileCreds = readLockedAppEnv(configDir);
-    let appId = flags.appId || envAppId() || null;
-    let secret = fromEnv?.value || null;
-    let secretSource = fromEnv?.source || null;
-    if (!secret && fileCreds?.secret) { secret = fileCreds.secret; secretSource = "本机 app.env（600）"; }
-    if (!appId && fileCreds?.appId) appId = fileCreds.appId;
-
-    if (!(appId && secret)) {
-      if (!lv) {
-        if (!ensureLarkCli()) return 2;
-        larkCfg = readLarkConfig();
-        if (larkCfg) console.log(`  ✓ 读到 lark-cli 配置：${larkCfg.path}（${larkCfg.apps.length} 个应用）`);
-      }
-      if (!larkCfg && !appId) {
-        if (interactive) {
-          console.log("  · lark-cli 尚未配置应用，正在启动 lark-cli config init 引导配置…");
-          try {
-            runInteractive("lark-cli config init");
-            larkCfg = readLarkConfig();
-            if (larkCfg) console.log(`  ✓ 读到 lark-cli 配置：${larkCfg.path}（${larkCfg.apps.length} 个应用）`);
-          } catch (e) {
-            console.error("  ✗ lark-cli 配置引导未完成：" + e.message);
-            return 2;
-          }
-        }
-        if (!larkCfg && !appId) {
-          console.error("  ✗ lark-cli 还没有配置任何飞书应用。");
-          console.error("    先运行 `lark-cli config init` 按它的引导完成应用配置，再重跑 `lah setup`。");
-          return 2;
-        }
-      }
-    }
-
-    // 2. 选定应用并解析凭据
-    let appEntry = null;
-    if (larkCfg) {
-      if (appId) appEntry = larkCfg.apps.find((a) => a.appId === appId) || null;
-      else if (larkCfg.apps.length === 1) appEntry = larkCfg.apps[0];
-      else {
-        larkCfg.apps.forEach((a, i) => console.log(`    ${i + 1}. ${a.appId}${a.users?.[0]?.userName ? `（${a.users[0].userName}）` : ""}`));
-        const pick = await ask(`选择用作${role === "hub" ? "枢纽" : "节点"}身份的应用序号`, "1");
-        appEntry = larkCfg.apps[Number(pick) - 1] || larkCfg.apps[0];
-      }
-      if (appEntry) appId = appEntry.appId;
-    }
-    if (!appId) throw new Error("未能确定应用：请用 --app-id 指定，或先完成 lark-cli 配置。");
-    if (!secret && appEntry) {
-      const r = resolveSecret(appEntry);
-      if (r) { secret = r.value; secretSource = r.source; }
-    }
-    if (!secret && fileCreds?.insecure && !interactive) {
-      console.error("  ✗ app.env 存在但权限不是 600（或是符号链接），已拒绝读取。请 chmod 600 后重跑，或改用环境变量 APP_SECRET / HUB_APP_SECRET。");
-      return 2;
-    }
-    if (!secret) {
-      if (!interactive) {
-        console.error("  ✗ 非交互模式需要环境变量 APP_SECRET 或 HUB_APP_SECRET，或权限为 600 的 app.env。");
+        console.error("  ✗ 非交互节点 setup 缺少 Hub 地址：请运行 `ah join http://<hub-ip>:8787` 或 `ah setup --hub`");
         return 2;
       }
-      if (!rl) {
-        rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-      }
-      secret = await askHidden(rl, `粘贴应用 ${appId} 的 App Secret（只写入本机 app.env，权限 600，输入不回显）`);
-      secretSource = "手工粘贴";
-      if (!secret) { console.error("  ✗ 没有 Secret 无法继续。"); return 2; }
-    }
-    console.log(`  ✓ 应用 ${appId}，凭据来源：${secretSource}`);
-
-    if (interactive && larkCfg) {
-      const userScopeCheck = checkUserScopes(["docs:event:subscribe", "docs:permission.member:create"]);
-      if (!userScopeCheck.ok) {
-        console.log("  · 正在通过 lark-cli 授权用户身份（用于自动搜索多维表格、自动添加机器人协作者权限及注册云文档事件订阅）…");
-        try {
-          runInteractive('lark-cli auth login --scope "docs:event:subscribe docs:permission.member:create"');
-        } catch (e) {
-          console.warn("  ! 用户身份授权未完成：" + e.message);
-        }
-      }
     }
 
-    // 3. Base 与表发现
-    let defaultBase = null;
-    let defaultBaseLabel = "";
-    const tempBus = new FeishuBus({ appId, appSecret: secret, baseToken: "", tables: {}, domain });
-    if (!flags.base) {
-      const candidates = await discoverCandidateBases(tempBus, appId);
-      if (candidates.length === 1) {
-        defaultBase = candidates[0].token;
-        defaultBaseLabel = candidates[0].name ? `${candidates[0].name}（${candidates[0].token}）` : candidates[0].token;
-        console.log(`  ✓ 自动发现多维表格 Base：${defaultBaseLabel}`);
-      } else if (candidates.length > 1) {
-        console.log("  · 发现多个候选多维表格 Base：");
-        console.log(`    0. [新建] 打开官方模板，一键克隆全新标准 Base`);
-        candidates.forEach((c, idx) => {
-          console.log(`    ${idx + 1}. ${c.name} (${c.token})${c.hasStandardTables ? " [含6张标准表]" : ""}`);
-        });
-        if (interactive) {
-          const pick = await ask("选择要使用的 Base 序号、输入 0 打开模板新建，或直接粘贴 Base 链接", "1");
-          if (pick === "0") {
-            console.log(`  · 正在打开官方标准多维表格模板页面…\n    👉 ${OFFICIAL_BASE_TEMPLATE_URL}`);
-            openBrowser(OFFICIAL_BASE_TEMPLATE_URL);
-          } else {
-            const num = Number(pick);
-            if (Number.isInteger(num) && num >= 1 && num <= candidates.length) {
-              defaultBase = candidates[num - 1].token;
-              defaultBaseLabel = candidates[num - 1].name ? `${candidates[num - 1].name}（${candidates[num - 1].token}）` : candidates[num - 1].token;
-            } else {
-              defaultBase = extractBaseToken(pick) || pick;
-            }
-          }
-        } else {
-          defaultBase = candidates[0].token;
-        }
-      } else {
-        console.log("  · 未搜索到现成的「Agent中台」多维表格 Base。");
-        console.log("  · 正在为你打开官方标准多维表格模板页面（含全部 7 张标准表，点击右上角「使用该模板」即可一键克隆）：");
-        console.log(`    👉 ${OFFICIAL_BASE_TEMPLATE_URL}`);
-        if (interactive) {
-          openBrowser(OFFICIAL_BASE_TEMPLATE_URL);
-        }
-      }
-    }
-
-    const basePrompt = defaultBaseLabel
-      ? "确认或修改多维表格 Base 链接/token"
-      : "请在打开的页面中点击右上角「使用该模板」创建，再把你的新 Base 网址粘贴进来（或直接给 token）";
-    const baseInput = flags.base || (await ask(basePrompt, defaultBase || undefined));
-    let baseToken = extractBaseToken(baseInput);
-    if (!baseToken) {
-      const wikiMatch = String(baseInput).match(/\/wiki\/([A-Za-z0-9_-]+)/);
-      if (wikiMatch) {
-        const wikiToken = wikiMatch[1];
-        try {
-          const nodeRes = await tempBus.api("GET", `/wiki/v2/spaces/get_node?token=${wikiToken}`);
-          if (nodeRes?.node?.obj_token) {
-            baseToken = nodeRes.node.obj_token;
-            console.log(`  ✓ 已从知识库节点自动解析出 Base token: ${baseToken}`);
-          }
-        } catch {
-          try {
-            const out = run("lark-cli", ["api", "GET", "/open-apis/wiki/v2/spaces/get_node", "--params", JSON.stringify({ token: wikiToken }), "--as", "bot", "--json"]);
-            const parsed = JSON.parse(out);
-            if (parsed?.data?.node?.obj_token) {
-              baseToken = parsed.data.node.obj_token;
-              console.log(`  ✓ 已从知识库节点自动解析出 Base token: ${baseToken}`);
-            }
-          } catch {}
-        }
-      }
-    }
-    if (!baseToken) { console.error("  ✗ 没能从输入里解析出 Base token。"); return 2; }
-    const bus = new FeishuBus({ appId, appSecret: secret, baseToken, tables: {}, domain });
-    let tableItems;
-    try {
-      const items = [];
-      let page = null;
-      for (;;) {
-        let d;
-        try {
-          d = await bus.api("GET", `/bitable/v1/apps/${baseToken}/tables?page_size=100` + (page ? `&page_token=${page}` : ""));
-        } catch (firstErr) {
-          if (!/tenant token failed/i.test(firstErr?.message || "") && tryAddBotCollaborator(baseToken, appId)) {
-            console.log(`  ✓ 已自动将应用 ${appId} 添加为该多维表格的「可管理」协作者`);
-            d = await bus.api("GET", `/bitable/v1/apps/${baseToken}/tables?page_size=100` + (page ? `&page_token=${page}` : ""));
-          } else {
-            throw firstErr;
-          }
-        }
-        items.push(...(d.items ?? []));
-        if (d.has_more) page = d.page_token; else break;
-      }
-      tableItems = items;
-    } catch (e) {
-      console.error(`  ✗ 读不到这个 Base 的表清单：${e.message}`);
-      if (/tenant token failed/i.test(e.message)) {
-        console.error("    凭据换不到 token：多半是 App Secret 不对，或应用未发布/未启用。核对开发者后台的应用凭据后重跑。");
-      } else {
-        console.error(`    若是无权限：请在该 Base 的分享设置里把应用 ${appId} 加为「可编辑」，再重跑 lah setup。`);
-      }
-      return 3;
-    }
-    const byName = new Map(tableItems.map((t) => [t.name, t.table_id]));
-    const missing = REQUIRED_TABLES.filter((n) => !byName.has(n));
-    if (missing.length) {
-      console.error(`  ✗ Base 缺少标准表：${missing.join(", ")}（现有表：${[...byName.keys()].join(", ") || "无"}）。中台标准 Base 需含 Tasks/Messages/Parts/Runs/Artifacts/AgentCards 六表。`);
-      console.error(`    提示：你可以直接一键克隆官方标准模板，免去手动建表：\n    👉 ${OFFICIAL_BASE_TEMPLATE_URL}\n    点击右上角「使用该模板」创建，再把新链接粘贴过来。`);
-      return 3;
-    }
-    const tables = {};
-    for (const n of REQUIRED_TABLES) tables[TABLE_KEYS[n]] = byName.get(n);
-    // Rules 不是建单/执行路径的必需表。Rules 现为各节点写入的计划观察镜像：
-    // Base 里有就一并登记映射。缺了这条映射时镜像会跳过，所以发现阶段就把它补上。
-    if (byName.has("Rules")) tables.rules = byName.get("Rules");
-    console.log(`  ✓ Base 表发现完成（${REQUIRED_TABLES.length} 张标准表齐全）`);
-
-    // 4. 身份与参数配置
+    console.log(`  ✓ 总线模式：${setupBus === "sqlite" ? "独立主枢纽（SQLite + HTTP 长轮询服务端 + Web 控制台）" : "远程节点（HTTP 长轮询接入独立 Hub）"}`);
     const kind = await selectKind(flags, interactive, ask);
+    const hostDefault = os.hostname().split(".")[0].toLowerCase().replace(/[^a-z0-9-]/g, "-") || (role === "hub" ? "mac-mini" : "node");
+    const nodeDefault = role === "hub" ? (flags.node || hostDefault || "hub") : (flags.node || hostDefault);
+    const node = flags.node || (interactive ? await ask("给当前节点起个名字（中台按此名称派单）", nodeDefault) : nodeDefault);
+    let zone = flags.zone || "";
+    if (!zone) {
+      if (role === "hub" || !interactive) zone = role === "hub" ? "work" : "home";
+      else {
+        const z = await ask("这台机器主要在哪用？输 1=家里，2=公司", "1");
+        zone = (z === "2" || /work/i.test(z)) ? "work" : "home";
+      }
+    }
+    const prefix = flags.prefix || (node === "hub" ? "hub" : (node.split("-").filter(Boolean).pop() || node));
+    const nodeDesc = flags.desc ?? (role === "hub" ? "独立主枢纽节点（调度＋Web控制台＋审批呈递）" : (kind === "agent" ? `${node} 独立 Agent` : ""));
 
-    let node, zone, prefix, nodeDesc, ownerOpenId;
-    if (role === "hub") {
-      node = flags.node || "hub";
-      ownerOpenId = flags.ownerOpenId || (process.env.HUB_OWNER_OPEN_ID || "").trim();
-      const defaultOwner = appEntry?.users?.[0]?.openId || "";
-      if (!ownerOpenId) {
-        if (interactive) {
-          ownerOpenId = await ask(
-            "输入机主 open_id（例如 ou_xxxx，审批卡只发给此人且回调只认此人）",
-            defaultOwner || undefined
-          );
-        } else if (defaultOwner) {
-          ownerOpenId = defaultOwner;
-        } else {
-          throw new Error("非交互模式配置 hub 角色缺少机主 open_id：请用 --owner 提供，或设置环境变量 HUB_OWNER_OPEN_ID");
-        }
-      }
-      if (!ownerOpenId) {
-        console.error("  ✗ hub 角色必须配置机主 open_id，未配置时审批回调一律拒绝。");
-        return 2;
-      }
-      zone = flags.zone || "work";
-      prefix = flags.prefix || (node === "hub" ? "hub" : (node.split("-").filter(Boolean).pop() || node));
-      nodeDesc = flags.desc ?? "主枢纽节点（干活＋审批呈递）";
-      if (interactive) {
-        console.log(`  · 即将配置：主枢纽 ${node}（${kind === "agent" ? "独立 Agent" : "电脑宿主"}，机主 ${ownerOpenId.slice(0, 8)}…），能力前缀 CAP-${prefix}-，应用 ${appId}，Base ${baseToken.slice(0, 8)}…`);
-        const go = await ask("开始配置？(Y/n)", "Y");
-        if (!/^y/i.test(go)) { console.error("  已取消，未写任何文件。"); return 5; }
-      }
-    } else {
-      const hostDefault = os.hostname().split(".")[0].toLowerCase().replace(/[^a-z0-9-]/g, "-") || "node";
-      node = flags.node || (await ask("给这台机器起个节点名（中台按这个名字派活）", hostDefault));
-      zone = flags.zone || null;
-      if (!zone) {
-        if (!interactive) zone = "home";
-        else {
-          const z = await ask("这台机器主要在哪用？输 1=家里，2=公司", "1");
-          zone = (z === "2" || /work/i.test(z)) ? "work" : "home";
-        }
-      }
-      prefix = flags.prefix || node.split("-").filter(Boolean).pop() || node;
-      nodeDesc = flags.desc ?? (kind === "agent" ? `${node} 独立 Agent` : "");
-      if (interactive) {
-        console.log(`  · 即将配置：节点 ${node}（${kind === "agent" ? "独立 Agent" : "电脑宿主"}，${zone === "work" ? "公司" : "家里"}），能力前缀 CAP-${prefix}-，应用 ${appId}，Base ${baseToken.slice(0, 8)}…`);
-        const go = await ask("开始配置？(Y/n)", "Y");
-        if (!/^y/i.test(go)) { console.error("  已取消，未写任何文件。"); return 5; }
+    let resolvedHubUrl = "";
+    let embeddedToken = "";
+    if (setupBus === "http") {
+      const rawUrl = explicitHubUrl || envHubUrl || existingRaw?.hubUrl || await ask("输入独立 Hub 的访问地址（例如 http://192.168.1.10:8787 或 http://<token>@192.168.1.10:8787）");
+      const parsedJoin = parseJoinHubUrl(rawUrl);
+      resolvedHubUrl = parsedJoin.hubUrl;
+      embeddedToken = parsedJoin.embeddedToken;
+    }
+
+    const appEnvCreds = readLockedAppEnv(configDir);
+    let apiToken = (
+      String(flags.apiToken ?? "").trim()
+      || embeddedToken
+      || String(process.env.AH_API_TOKEN ?? "").trim()
+      || String(process.env.HUB_API_TOKEN ?? "").trim()
+      || String(process.env.LAH_API_TOKEN ?? "").trim()
+      || String(existingRaw?.apiToken ?? "").trim()
+      || String(appEnvCreds?.apiToken ?? "").trim()
+    );
+    if (!apiToken) {
+      if (setupBus === "sqlite" && flags.autoToken) {
+        apiToken = crypto.randomBytes(18).toString("base64url");
+      } else if (interactive) {
+        apiToken = (await ask("设置访问口令 HUB_API_TOKEN（留空不设口令；暴露局域网/公网建议设置）", "")).trim();
       }
     }
 
-    // 5. 事件订阅检查与唤醒方式配置
-    console.log("  · 正在检查事件订阅就绪状态…");
-    const appEvRes = await checkAppEventSubscribed(bus, appId, "drive.file.bitable_record_changed_v1");
-    if (appEvRes.status === "subscribed") {
-      console.log(`  ✓ 应用已开启事件订阅：drive.file.bitable_record_changed_v1（线上版本 ${appEvRes.onlineVersionId}）`);
-    } else if (appEvRes.status === "unknown") {
-      console.log(`  · 跳过应用静态事件列表核对（${appEvRes.reason || "未开应用信息权限"}），以实际长连接状态为准`);
-    } else {
-      console.log(`  · 应用线上版本未订阅 drive.file.bitable_record_changed_v1 事件（${appEvRes.reason || "未包含该事件"}）`);
-      console.log(`    若需开启，请在飞书开放平台「事件与回调」添加「多维表格记录变更」并发布版本：https://${openHost(domain)}/app/${appId}/event`);
-    }
-
-    const subRes = tryRegisterDriveSubscription(baseToken, appId);
-    if (subRes.success) {
-      console.log("  ✓ 云文档事件订阅已生效（User 身份，is_subscribe=true）");
-    } else {
-      console.log(`  · 云文档事件订阅未生效（${subRes.error || "未订阅"}）`);
-      console.log("    若需开启，请在本机终端执行：");
-      console.log("    1. lark-cli auth login --scope docs:event:subscribe");
-      console.log(`    2. lark-cli api POST /open-apis/drive/v1/files/${baseToken}/subscribe --params '{"file_type":"bitable"}' --as user`);
-    }
-
-    const allEventsReady = (appEvRes.status === "subscribed" || appEvRes.status === "unknown") && subRes.success;
-
-    let events = false;
-    let pollSec = 45;
-    const sweepSec = 900;
-
-    if (role === "hub") {
-      events = true;
-      if (!allEventsReady) {
-        console.log("  · hub 角色强制使用长连接（用于审批卡回调）。未完成订阅时仍可通过长连接接收卡片回调与 15 分钟定时扫表。");
-      }
-    } else {
-      const defaultWake = allEventsReady ? "1" : "2";
-      let wakeChoice = defaultWake;
-      if (interactive) {
-        console.log("\n  选择节点的任务唤醒机制（标准 v3.1 §10.3）：");
-        console.log(`    1. ws${allEventsReady ? "（推荐）" : "（两层事件订阅未全就绪，需补齐后方可秒级唤醒）"}：长连接秒级事件唤醒 ＋ 15分钟对账兜底`);
-        console.log("    2. poll：45秒固定短轮询 ＋ 15分钟对账兜底（无需事件订阅）");
-        console.log("    3. sweep：轮询间隔不超过对账周期（900秒），名片登记 poll");
-        wakeChoice = await ask("选择唤醒方式序号", wakeFlag || defaultWake);
-      } else {
-        wakeChoice = wakeFlag || defaultWake;
-      }
-
-      if (wakeChoice === "1" || /ws/i.test(wakeChoice)) {
-        events = true;
-        pollSec = 45;
-        console.log("  ✓ 唤醒方式：长连接（ws）秒级事件 ＋ 15分钟对账兜底");
-      } else if (/automation/i.test(String(wakeChoice))) {
-        console.error("  ✗ automation 不能由守护进程登记。协议接入型节点的 Receive_Mode=automation 只能手工登记名片。");
-        return 2;
-      } else if (wakeChoice === "3" || /^sweep$/i.test(String(wakeChoice).trim())) {
-        events = false;
-        // 标准 §10.3：poll 的间隔不得长于对账周期（900 秒）。
-        pollSec = Math.min(sweepSec, 900);
-        console.log("  ✓ 唤醒方式：poll，间隔不超过对账周期 900 秒（sweep）");
-      } else {
-        events = false;
-        pollSec = 45;
-        console.log("  ✓ 唤醒方式：45秒短轮询（poll）＋ 15分钟对账兜底");
-      }
-    }
-
-    // 6. 写配置。真实 node.json 默认不覆盖；仍是示例占位符则视为首装未完成。
     const owRes = await confirmOverwriteNodeJson(configDir, flags, interactive, ask);
     if (!owRes.ok) return owRes.code;
-    const appEnvPath = writeLockedAppEnvVars(configDir, { APP_ID: appId, APP_SECRET: secret });
+
+    const tables = normalizeTables(existingRaw?.tables);
+    let bus = null;
     const nodeJson = {
       node,
       role,
       kind,
-      ...(role === "hub" ? { ownerOpenId } : {}),
+      busType: setupBus,
       zone: zone || "work",
-      nodeDesc: nodeDesc || "",
-      appEnv: appEnvPath,
-      baseToken,
-      pollSec, // sweep 也走这个变量：不超过对账周期，名片仍由 receiveModeOf 登记为 poll
-      sweepSec: 900,
-      events,
-      doorbellFile: null,
+      nodeDesc,
       capPrefix: prefix,
+      pollSec: 45,
+      sweepSec: 900,
+      longPollSec: 25,
+      events: true,
       tables,
-      // 只在国际版 Lark 时写出，飞书是缺省值。
-      ...(domain === "lark" ? { domain } : {}),
-      // hub 自己用本机私钥推出公钥，不必写；节点写带外拿到的那一把。
-      ...(role !== "hub" && hubPublicKey ? { hubPublicKey } : {}),
     };
+
+    if (apiToken) {
+      const appEnvPath = writeLockedAppEnvVars(configDir, {
+        HUB_API_TOKEN: apiToken,
+        LAH_API_TOKEN: apiToken,
+      });
+      nodeJson.appEnv = appEnvPath;
+      console.log("  ✓ 已保存访问口令至 app.env（600）");
+    }
+
+    let listenAddr = null;
+    let publicUrl = "";
+    if (setupBus === "sqlite") {
+      const listenRaw = flags.listen || existingRaw?.listen || (interactive ? await ask("HTTP 监听地址", "0.0.0.0:8787") : "0.0.0.0:8787");
+      listenAddr = resolveListenAddr(listenRaw);
+      const listen = `${listenAddr.host}:${listenAddr.port}`;
+      const dbPath = flags.dbPath || existingRaw?.dbPath || path.join(configDir, "hub.db");
+      publicUrl = String(flags.publicUrl ?? existingRaw?.publicUrl ?? "").trim();
+      nodeJson.listen = listen;
+      nodeJson.dbPath = dbPath;
+      if (publicUrl) nodeJson.publicUrl = publicUrl;
+      bus = new SqliteBus({ dbPath, tables });
+    } else {
+      nodeJson.hubUrl = resolvedHubUrl;
+      if (role !== "hub" && hubPublicKey) nodeJson.hubPublicKey = hubPublicKey;
+      bus = new HttpBus({ hubUrl: resolvedHubUrl, apiToken, node, tables });
+      try {
+        const health = await bus.api("GET", "/api/v1/health");
+        console.log(`  ✓ 远程 Hub 在线（${health?.node ?? resolvedHubUrl}，seq=${health?.seq ?? 0}）`);
+        if (!hubPublicKey && health?.hubPublicKey && isHubPublicKey(health.hubPublicKey)) {
+          hubPublicKey = health.hubPublicKey;
+          if (role !== "hub") nodeJson.hubPublicKey = hubPublicKey;
+          console.log("  ✓ 已从远程 Hub 自动同步 ed25519 审批公钥");
+        }
+      } catch (e) {
+        console.log(`  · 暂未连上远程 Hub（${e.message}），将继续写入本地配置`);
+      }
+    }
+
     fs.writeFileSync(owRes.nodeJsonPath, JSON.stringify(nodeJson, null, 1) + "\n");
     if (role === "hub") {
       const key = loadOrCreateHubKey(configDir);
-      console.log(`  ✓ 审批签名密钥就绪（approval_key.pem，600）。把下面这串公钥带到各节点：lah setup --hub-key <公钥>，或写进其 node.json 的 hubPublicKey\n    ${key.publicKey}`);
+      console.log(`  ✓ 审批签名密钥就绪（approval_key.pem，600），公钥：\n    ${key.publicKey}`);
+      if (listenAddr) {
+        const displayHost = (listenAddr.host === "0.0.0.0" || listenAddr.host === "::") ? detectLanIp() : listenAddr.host;
+        const baseDisplay = publicUrl ? publicUrl.replace(/\/+$/, "") : `http://${displayHost}:${listenAddr.port}`;
+        const joinHostUrl = new URL(baseDisplay);
+        if (apiToken) joinHostUrl.username = encodeURIComponent(apiToken);
+        const joinStr = joinHostUrl.toString().replace(/\/+$/, "");
+        const consoleUrl = apiToken ? `${baseDisplay}/?token=${encodeURIComponent(apiToken)}` : baseDisplay;
+        console.log(`  ✓ Web 控制台地址：${consoleUrl}`);
+        console.log(`  ✓ 其他机器一行接入命令（已安装 ah）：\n    ah join ${joinStr}`);
+        console.log(`  ✓ 全新机器一行安装并接入：\n    curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --join ${joinStr}`);
+      }
     } else if (!hubPublicKey) {
-      console.log("  · 未配置 hub 审批公钥：本节点暂时只按行上自报字段校验审批决定。拿到 hub 的公钥后重跑 lah setup --hub-key <公钥>。");
+      console.log("  · 未配置 hubPublicKey：Hub 在线时执行 ah join 或 ah setup --hub-key <公钥> 可开启 ed25519 审批验签。");
     }
 
     return await finalizeSetup({ configDir, appDir, role, kind, node, prefix, bus, tables, flags, interactive, ask });

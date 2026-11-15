@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { buildAcceptance, judgeChecks, parseCriteria } from "./acceptance.mjs";
-import { f1 } from "./bus/feishu.mjs";
+import { f1 } from "./bus/tables.mjs";
 import { createWaker } from "./transport/index.mjs";
 import { runDetachedCommand } from "./proc.mjs";
 import { createTask } from "./hub/create.mjs";
@@ -71,9 +71,9 @@ export const STALE_MIN = 20;
 // 扫表路径写 Heartbeat_At 的最小间隔。每次写 Tasks 都会触发记录变更事件，把全网叫醒再扫一轮；
 // inbox 保活和 direct 在途续心跳若每轮无条件写，就会变成「写 → 事件 → 扫表 → 再写」的自激。
 // 不等式：HEARTBEAT_MIN_SEC ＋ 对账周期 900 ＋ 扫表耗时，必须严格小于 20 分钟（1200 秒）。
-// 90 是本常量。900 是两次扫表的最长间隔：ws 的 waitWake 上限是 sweepSec，lah setup 固定写 900
-// （src/transport/ws.mjs、src/setup.mjs），poll 的 pollSec 同样被限制不超过 900，hub 固定用 sweepSec，
-// 外部 lah reconcile 也按 15 分钟。90＋900＝990，1200－990＝210 秒是留给扫表耗时的余量。
+// 90 是本常量。900 是两次扫表的最长间隔：事件唤醒的 wait 上限是 sweepSec，ah setup 固定写 900
+// （src/transport/longpoll.mjs、src/setup.mjs），poll 的 pollSec 同样被限制不超过 900，hub 固定用 sweepSec，
+// 外部 ah reconcile 也按 15 分钟。90＋900＝990，1200－990＝210 秒是留给扫表耗时的余量。
 // 扫表是串行的，中间可能夹着退避，耗时没有硬上界；210 秒只是余量，不是上界。
 // 一轮超过 210 秒时，最不利的时序仍可能让 hub 看到超过 20 分钟的心跳。
 // direct 与同步路径的定时心跳是 60 秒，必须 ≤ HEARTBEAT_MIN_SEC，否则命令还在跑时扫表路径也会写。
@@ -764,7 +764,7 @@ export class Kernel {
         await this.bus.updateRecord(this.T.agentCards, row.record_id, upd);
       }
     }
-    // lah reconcile 是一次性对账。协议节点的名片手工登记，命令表经常是空的。
+    // ah reconcile 是一次性对账。协议节点的名片手工登记，命令表经常是空的。
     // 这种模式不得写 Dispatchable=No，也不得改写命令表里没有的名片。
     // 常驻 daemon 仍把已从命令表删除的能力停派。
     if (!this._reconcileOnce) {
@@ -1090,7 +1090,7 @@ export class Kernel {
           claimed_at: Date.now(),
         });
         log(`inbox queued ${taskId} for agent本尊 (mode: inbox)`);
-        // 保持 working 状态，不起子进程，不结案，由 Agent 本尊通过 lah inbox 接收并回执
+        // 保持 working 状态，不起子进程，不结案，由 Agent 本尊通过 ah inbox 接收并回执
         return;
       }
 
@@ -1279,7 +1279,7 @@ export class Kernel {
       const carrierHint = entryCtx === "carrier"
         ? "carrier 语境已在本版本移除，请把该能力改为 direct 或删除。" : "";
       await this.writeMessage(task, "notice",
-        `${carrierHint}拒收：本机 commands.json 中能力 ${skill} 的 context/mode 取值非法（context=${String(entryCtx)}，mode=${String(entryMode)}）。为避免静默改走别的执行路径，任务不执行；请修正配置（lah doctor 可检查）后重派。`);
+        `${carrierHint}拒收：本机 commands.json 中能力 ${skill} 的 context/mode 取值非法（context=${String(entryCtx)}，mode=${String(entryMode)}）。为避免静默改走别的执行路径，任务不执行；请修正配置（ah doctor 可检查）后重派。`);
       if (!(await this.updateTaskState(task, { Status: "rejected" }, gate))) return false;
       this.clearRetry(taskId);
       log(`rejected (invalid commands.json context/mode) ${taskId}`);
@@ -1289,7 +1289,7 @@ export class Kernel {
     const hasVerify = typeof entryVerify === "string" ? entryVerify.trim().length > 0 : Boolean(entryVerify);
     if (entryMode === "inbox" && hasVerify) {
       await this.writeMessage(task, "notice",
-        `拒收：本机 commands.json 中能力 ${skill} 为 mode=inbox，不支持执行式验收（verify）。请移除 verify 或改用 direct 语境（lah doctor 可检查）后重派。`);
+        `拒收：本机 commands.json 中能力 ${skill} 为 mode=inbox，不支持执行式验收（verify）。请移除 verify 或改用 direct 语境（ah doctor 可检查）后重派。`);
       if (!(await this.updateTaskState(task, { Status: "rejected" }, gate))) return false;
       this.clearRetry(taskId);
       log(`rejected (inbox with verify) ${taskId}`);

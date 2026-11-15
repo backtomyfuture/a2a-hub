@@ -7,7 +7,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { parseCriteria } from "../acceptance.mjs";
 import { controlKeysIn } from "../config.mjs";
-import { f1 } from "../bus/feishu.mjs";
+import { f1 } from "../bus/tables.mjs";
 
 const APPROVALS = new Set(["auto", "notify", "approve"]);
 // 与 src/kernel.mjs 的 HOP_LIMIT 对齐。超过 8 的单节点会直接熔断，这里不落表。

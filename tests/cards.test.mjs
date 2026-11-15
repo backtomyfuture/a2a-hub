@@ -105,10 +105,10 @@ test("空参数不显示，有参数时脱敏并截断", () => {
   assert.equal(paramBody.endsWith("…"), true);
 });
 
-test("超长指令截断到 300，并指向 lah task why", () => {
+test("超长指令截断到 300，并指向 ah task why", () => {
   const text = "字".repeat(301);
   const body = bodyOf(cardOf({ title: "短标题", text }));
-  assert.equal(body.split("\n")[0], `${"字".repeat(300)}…（全文：lah task why ${TASK_ID}）`);
+  assert.equal(body.split("\n")[0], `${"字".repeat(300)}…（全文：ah task why ${TASK_ID}）`);
   assert.equal(body.includes("字".repeat(301)), false);
 });
 

@@ -1,4 +1,4 @@
-// hub 审批驳回写的 canceled 要回到发起方本机队列，否则 lah present --wait 等不到终态。
+// hub 审批驳回写的 canceled 要回到发起方本机队列，否则 ah present --wait 等不到终态。
 // 总线是内存 mock，队列只写临时目录。
 
 import assert from "node:assert/strict";

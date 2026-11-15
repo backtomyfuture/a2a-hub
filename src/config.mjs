@@ -2,7 +2,6 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { FeishuBus } from "./bus/feishu.mjs";
 import { SqliteBus } from "./bus/sqlite-bus.mjs";
 import { HttpBus } from "./bus/http-bus.mjs";
 import { normalizeTables } from "./bus/tables.mjs";
@@ -236,37 +235,30 @@ export function loadConfig(configDir, opts = {}) {
     }
   }
 
-  let { appId, appSecret } = cfg;
-  appId = appId || kv.APP_ID;
-  appSecret = appSecret || kv.APP_SECRET;
-
-  const hubUrl = String(cfg.hubUrl ?? kv.HUB_URL ?? "").trim();
-  const apiToken = String(cfg.apiToken ?? kv.HUB_API_TOKEN ?? kv.LAH_API_TOKEN ?? process.env.HUB_API_TOKEN ?? process.env.LAH_API_TOKEN ?? "").trim();
-  const hasFeishu = Boolean(appId && appSecret && cfg.baseToken && cfg.tables);
+  const hubUrl = String(cfg.hubUrl ?? kv.HUB_URL ?? process.env.HUB_URL ?? "").trim();
+  const apiToken = String(cfg.apiToken ?? kv.AH_API_TOKEN ?? kv.HUB_API_TOKEN ?? kv.LAH_API_TOKEN ?? process.env.AH_API_TOKEN ?? process.env.HUB_API_TOKEN ?? process.env.LAH_API_TOKEN ?? "").trim();
 
   let busType = String(cfg.busType ?? "").trim().toLowerCase();
   if (!busType) {
     if (hubUrl) busType = "http";
-    else if (cfg.dbPath || cfg.listen) busType = "sqlite";
-    else if (hasFeishu) busType = "feishu";
-    else if (cfg.role === "hub") busType = "sqlite";
-    else if (process.env.HUB_URL) busType = "http";
-    else busType = "feishu";
+    else if (cfg.dbPath || cfg.listen || cfg.role === "hub") busType = "sqlite";
+    else busType = "http";
   }
 
-  const tables = busType === "feishu" ? cfg.tables : normalizeTables(cfg.tables);
+  const tables = normalizeTables(cfg.tables);
   const dbPathRaw = cfg.dbPath ? String(cfg.dbPath).replace(/^~/, os.homedir()) : path.join(configDir, "hub.db");
   const resolvedDbPath = dbPathRaw === ":memory:" ? ":memory:" : path.resolve(configDir, dbPathRaw);
-  const effectiveHubUrl = hubUrl || String(process.env.HUB_URL ?? "").trim();
+  const effectiveHubUrl = hubUrl;
 
   let bus;
   if (busType === "http") {
-    if (!effectiveHubUrl) throw new Error("node.json missing 'hubUrl' for http bus");
+    if (!effectiveHubUrl) throw new Error("node.json 缺少 hubUrl：请运行 ah join http://<hub-ip>:8787 或配置 hubUrl");
     bus = new HttpBus({
       hubUrl: effectiveHubUrl,
       apiToken,
       node: cfg.node,
       tables,
+      longPollSec: cfg.longPollSec ?? 25,
     });
   } else if (busType === "sqlite") {
     // CLI 命令在 Hub 本机执行时，若守护进程在线则优先经 HTTP 写入，保证实时唤醒长轮询节点。
@@ -277,6 +269,7 @@ export function loadConfig(configDir, opts = {}) {
         apiToken,
         node: cfg.node,
         tables,
+        longPollSec: cfg.longPollSec ?? 25,
       });
     } else {
       bus = new SqliteBus({
@@ -284,12 +277,8 @@ export function loadConfig(configDir, opts = {}) {
         tables,
       });
     }
-  } else if (busType === "feishu") {
-    if (!appId || !appSecret) throw new Error("no app credentials: set appId/appSecret or appEnv in node.json");
-    if (!cfg.baseToken || !cfg.tables) throw new Error("node.json missing baseToken/tables");
-    bus = new FeishuBus({ appId, appSecret, baseToken: cfg.baseToken, tables: cfg.tables, domain: cfg.domain });
   } else {
-    throw new Error(`不支持的 busType: ${busType}（可选 sqlite / http / feishu）`);
+    throw new Error(`不支持的 busType: ${busType}（仅支持 sqlite / http）`);
   }
 
   const out = {

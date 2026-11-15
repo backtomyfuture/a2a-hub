@@ -5,7 +5,7 @@
 // 正文只取首条 instruction。auth_request 正文会把标题和指令再抄一遍，读它会让同一段话出现三次。
 // update_multi 是 schema 2.0 后续 PATCH 换卡的开关，缺了飞书会拒绝延时更新。
 
-import { f1 } from "../bus/feishu.mjs";
+import { f1 } from "../bus/tables.mjs";
 
 const INSTRUCTION_LIMIT = 300;
 const PARAM_LIMIT = 300;
@@ -141,7 +141,7 @@ function clipChars(text, limit) {
 function clipInstruction(text, taskId) {
   const value = String(text ?? "").trim();
   if (value.length <= INSTRUCTION_LIMIT) return value;
-  return value.slice(0, INSTRUCTION_LIMIT) + `…（全文：lah task why ${taskId}）`;
+  return value.slice(0, INSTRUCTION_LIMIT) + `…（全文：ah task why ${taskId}）`;
 }
 
 function clipParams(text) {

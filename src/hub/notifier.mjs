@@ -1,7 +1,7 @@
 // 可选外部通知器：在任务进入 auth-required、input-required 或终态/告警时，
 // 通过普通飞书群机器人 Webhook（免企业 API 配额）、Bark、Telegram 或通用 Webhook 推送提醒。
 
-import { f1 } from "../bus/feishu.mjs";
+import { f1 } from "../bus/tables.mjs";
 
 const DEFAULT_EVENTS = new Set(["auth-required", "input-required", "completed", "failed", "rejected"]);
 

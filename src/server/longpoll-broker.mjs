@@ -85,7 +85,7 @@ export class LongPollBroker {
     return () => this._localListeners.delete(fn);
   }
 
-  _touchNode(node, cursor, remoteAddr, deltaWaiter = 0) {
+  _touchNode(node, cursor, remoteAddr, deltaWaiter = 0, meta = null) {
     const key = String(node ?? "").trim();
     if (!key || key === "*" || key === "_web") return null;
     const prev = this._nodes.get(key) ?? {
@@ -96,6 +96,9 @@ export class LongPollBroker {
       cursor: 0,
       remoteAddr: "",
       activeWaiters: 0,
+      kind: "host",
+      mode: "longpoll",
+      role: "",
     };
     const next = {
       ...prev,
@@ -104,9 +107,17 @@ export class LongPollBroker {
       cursor: Number.isFinite(Number(cursor)) ? Number(cursor) : prev.cursor,
       remoteAddr: remoteAddr || prev.remoteAddr,
       activeWaiters: Math.max(0, (prev.activeWaiters || 0) + deltaWaiter),
+      kind: meta?.kind || prev.kind || "host",
+      mode: meta?.mode || prev.mode || "longpoll",
+      role: meta?.role !== undefined ? meta.role : (prev.role || ""),
     };
     this._nodes.set(key, next);
     return next;
+  }
+
+  // 记录外部 HTTP Agent 或客户端心跳/轮询活跃态，方便控制台统一展示连接节点与接入模式。
+  touchAgent(node, { remoteAddr = "", mode = "http-poll", kind = "agent", role = "", cursor = undefined } = {}) {
+    return this._touchNode(node, cursor, remoteAddr, 0, { mode, kind, role });
   }
 
   async wait({ node = "*", cursor = 0, timeoutMs = 25_000, signal = null, remoteAddr = "" } = {}) {
@@ -179,6 +190,9 @@ export class LongPollBroker {
         remoteAddr: info.remoteAddr,
         lastSeenAt: info.lastSeenAt,
         firstSeenAt: info.firstSeenAt,
+        kind: info.kind || "host",
+        mode: info.mode || "longpoll",
+        role: info.role || "",
       });
     }
     return out.sort((a, b) => a.node.localeCompare(b.node));

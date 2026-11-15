@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { f1 } from "../src/bus/feishu.mjs";
+import { f1 } from "../src/bus/tables.mjs";
 import { ScheduleMirror } from "../src/schedule-mirror.mjs";
 import { withTemp } from "./helpers.mjs";
 import { MockFeishuBus } from "./mocks/mock-bus.mjs";

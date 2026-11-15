@@ -9,7 +9,7 @@ import {
   verifyEvidenceTail,
   verifyVerdict,
 } from "./acceptance.mjs";
-import { f1 } from "./bus/feishu.mjs";
+import { f1 } from "./bus/tables.mjs";
 import { KILL_GRACE_MS } from "./proc.mjs";
 import {
   beginLaunchEntry,

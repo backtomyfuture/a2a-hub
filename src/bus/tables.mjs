@@ -1,5 +1,4 @@
-// 默认中台表名映射。独立中台（SQLite / HTTP）使用统一逻辑表名，
-// 飞书多维表格模式则使用用户配置的具体 table_id。
+// 默认中台表名映射与记录字段读取工具。独立中台（SQLite / HTTP）使用统一逻辑表名。
 
 export const DEFAULT_TABLES = Object.freeze({
   tasks: "tasks",
@@ -34,4 +33,11 @@ export function resolveTableName(tables, name) {
     if (v === raw) return v;
   }
   return "";
+}
+
+// 从记录 fields 读取标量字段（兼容数组包裹格式）。
+export function f1(rec, name) {
+  const v = rec?.fields?.[name];
+  if (Array.isArray(v)) return v[0] ?? "";
+  return v ?? "";
 }

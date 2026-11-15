@@ -3,8 +3,9 @@
   "version": "1.0.0",
   "description": "Self-hosted Multi-Agent Orchestration Hub (A2A Data Model + SQLite & HTTP Long-Polling + Web Console + LoopForge SOP Loops)",
   "bin": {
-    "a2a-hub": "bin/lah.mjs",
-    "ahub": "bin/lah.mjs",
+    "ah": "bin/ah.mjs",
+    "a2a-hub": "bin/ah.mjs",
+    "ahub": "bin/ah.mjs",
     "lah": "bin/lah.mjs",
     "hub-node": "bin/hub-node.mjs"
   },

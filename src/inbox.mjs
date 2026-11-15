@@ -1,5 +1,5 @@
 // src/inbox.mjs —— 独立 Agent 收件箱操作库。
-// 承载 agent_inbox.jsonl 的原子读写、心跳核验与 lah inbox (done|ask|fail|auth) 的总线状态流转。
+// 承载 agent_inbox.jsonl 的原子读写、心跳核验与 ah inbox (done|ask|fail|auth) 的总线状态流转。
 // 回执先落入本文件自己的 inbox-outbox（固定 Msg_ID / Part_ID / Artifact_ID / Run 更新），
 // 写表中途失败只补缺，不另开一条 result。这个目录不能并进内核的 outbox/：
 // 内核 flushOutbox 会把该目录下每个 json 当成自己的提交计划。
@@ -18,7 +18,7 @@ import {
   parseCheckFlag,
   parseCriteria,
 } from "./acceptance.mjs";
-import { f1 } from "./bus/feishu.mjs";
+import { f1 } from "./bus/tables.mjs";
 import { log, readTaskMeta } from "./kernel-util.mjs";
 
 export function inboxFilePath(configDir) {
@@ -617,6 +617,32 @@ async function commitInboxReceipt({ bus, configDir, node, taskId, text, artifact
   return receiptOf(plan);
 }
 
+// 供 Hub HTTP Agent 网关直接替纯 Agent 提交回执（不落本地 inbox-outbox 文件）。
+export async function submitAgentReceipt({ bus, node, taskId, text, artifact = "", op, checks = null, log: logFn = log }) {
+  const { reported, hasCheckFlags } = normalizeFlagChecks(checks);
+  const task = await loadTask(bus, taskId);
+  assertOwner(task, node);
+  const st = f1(task, "Status");
+  if (st !== "working") {
+    const err = new Error(`任务当前状态是 ${st}，不是 working`);
+    err.status = 409;
+    throw err;
+  }
+  const plan = await buildPlan({ bus, node, task, text, artifact, op, reportedChecks: reported, hasCheckFlags, logFn });
+  await ensureArtifact(bus, plan, node);
+  await ensureRun(bus, plan, node);
+  await ensureMessage(bus, plan, node);
+  const taskRecordId = await ensureTask(bus, plan, node);
+  if (plan.op === "done" && plan.acceptance) {
+    await ensureAcceptanceMeta(bus, plan, taskRecordId, logFn);
+  }
+  return {
+    ...receiptOf(plan),
+    status: plan.taskStatus,
+    runId: plan.runId || "",
+  };
+}
+
 export async function handleInboxDone({ bus, configDir, node, taskId, text, artifact, checks, log: logFn = log }) {
   const { reported, hasCheckFlags } = normalizeFlagChecks(checks);
   return commitInboxReceipt({
@@ -637,7 +663,7 @@ export async function handleInboxFail({ bus, configDir, node, taskId, text }) {
 export async function handleInboxAuth({ bus, configDir, node, taskId, text }) {
   const body = String(text ?? "").trim();
   if (!body) throw new Error("审批说明不能为空");
-  // 先标 waiting-auth，写总线期间 lah inbox --pop 不能再把这条 pending 取走。
+  // 先标 waiting-auth，写总线期间 ah inbox --pop 不能再把这条 pending 取走。
   if (!markInboxStatus(configDir, taskId, "waiting-auth")) {
     throw new Error(`收件箱没有任务 ${taskId}`);
   }

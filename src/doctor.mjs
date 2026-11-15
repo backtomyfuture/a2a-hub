@@ -9,11 +9,10 @@ import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { loadConfig, DAEMON_VERSION } from "./kernel.mjs";
 import { capIdOf, capIdsOf, normalizeCommands, resolveListenAddr } from "./config.mjs";
-import { openHost } from "./bus/feishu.mjs";
 import { isHubPublicKey, readHubPublicKey } from "./approval-sign.mjs";
 import { resolveScheduleTz } from "./hub/schedule.mjs";
 import { LocalScheduleService } from "./local-schedule.mjs";
-import { f1 } from "./bus/feishu.mjs";
+import { f1 } from "./bus/tables.mjs";
 
 const ok = (msg) => console.log("  ✓ " + msg);
 const bad = (msg) => console.log("  ✗ " + msg);
@@ -21,18 +20,9 @@ const info = (msg) => console.log("  · " + msg);
 const execFileAsync = promisify(execFile);
 
 function richPath() {
-  // 优先尊重外部传入的 PATH（允许测试通过 PATH 模拟缺少 lark-cli）；若未设置则兜底常用路径
   if (process.env.PATH != null) return process.env.PATH;
   const extra = ["/opt/homebrew/bin", "/usr/local/bin", path.join(os.homedir(), ".local/bin"), "/usr/bin", "/bin"];
   return extra.join(path.delimiter);
-}
-
-function getLarkVersion() {
-  try {
-    return execFileSync("lark-cli", ["--version"], { encoding: "utf8", env: { ...process.env, PATH: richPath() } }).trim();
-  } catch {
-    return null;
-  }
 }
 
 // 模板检查只认词法 token。子串会误伤：-p 是 --print 的子串。
@@ -272,166 +262,6 @@ async function auditAgentTemplates(cmds) {
   return problems;
 }
 
-export async function checkAppEventSubscribed(bus, appId, eventType = "drive.file.bitable_record_changed_v1") {
-  try {
-    const appRes = await bus.api("GET", `/application/v6/applications/${appId}?lang=zh_cn`);
-    const appData = appRes?.app ?? appRes?.data?.app;
-    const onlineVersionId = appData?.online_version_id;
-    if (!onlineVersionId) {
-      return { ok: false, status: "unknown", reason: "未获取到线上发布版本 ID" };
-    }
-    const verRes = await bus.api("GET", `/application/v6/applications/${appId}/app_versions/${onlineVersionId}?lang=zh_cn`);
-    const verData = verRes?.app_version ?? verRes?.data?.app_version;
-    const eventInfos = verData?.event_infos;
-    if (!Array.isArray(eventInfos)) {
-      return { ok: false, status: "unknown", onlineVersionId, reason: "应用版本数据不含事件订阅列表" };
-    }
-    const subscribed = eventInfos.some((e) => e.event_type === eventType);
-    if (subscribed) {
-      return {
-        ok: true,
-        status: "subscribed",
-        onlineVersionId,
-        subscribed: true,
-        eventInfos,
-      };
-    }
-    return {
-      ok: false,
-      status: "unsubscribed",
-      onlineVersionId,
-      subscribed: false,
-      eventInfos,
-      reason: "线上版本已发布但未订阅该事件",
-    };
-  } catch (e) {
-    const msg = e?.message || "";
-    return {
-      ok: false,
-      status: "unknown",
-      reason: `未开通应用版本查询权限或接口不可达（${msg.slice(0, 100)}）`,
-    };
-  }
-}
-
-// 总线契约检查：代码与标准写到的字段、选项值，必须在线上 Base 真实存在。
-// 2026-11-07 两次装机瘫痪都是「代码写了 Base 没有的列」（AgentCards.Metadata、
-// Runs.Status/Ended_At），运行时才爆 1254045；这里把这一类问题提前到自检阶段。
-// 期望侧来自随仓库发布的 schema/base-schema.json（由 generate_schema 生成），
-// 事实侧来自线上字段 API；标准声明的字段同样在 schema 里，一并覆盖。
-const CONTRACT_TABLES = {
-  tasks: "Tasks",
-  messages: "Messages",
-  parts: "Parts",
-  runs: "Runs",
-  artifacts: "Artifacts",
-  agentCards: "AgentCards",
-};
-// 代码实际会写入的单选值（取自各写点的字面量）；缺登记会报 OptionNotFound 或被迫污染选项集。
-const REQUIRED_OPTION_VALUES = {
-  Tasks: {
-    Status: ["submitted", "working", "input-required", "auth-required", "completed", "failed", "canceled", "rejected"],
-    Approval_Class: ["auto", "notify", "approve"],
-    // Presented 列 v3.5 已废弃、代码不再写，不再要求其选项；残留污染值仍在 DEPRECATED 里盯。
-  },
-  Messages: {
-    Kind: ["instruction", "question", "answer", "auth_request", "auth_decision", "progress", "result", "notice"],
-    Role: ["user", "agent"],
-  },
-  Parts: {
-    Kind: ["text", "file", "data"],
-    Parent_Type: ["message", "artifact"],
-  },
-  Runs: {
-    Outcome: ["succeeded", "failed", "paused"],
-  },
-  AgentCards: {
-    Availability: ["online", "offline"],
-    Dispatchable: ["Yes", "No"],
-    Receive_Mode: ["event", "poll", "automation"],
-  },
-};
-// 已废弃但可能残留在选项集里的值：出现只警告，不算失败。
-const DEPRECATED_OPTION_VALUES = {
-  AgentCards: { Receive_Mode: ["webhook"] },
-  Tasks: { Presented: ["no"] },
-};
-
-async function checkBusContract(bus, appDir, nodeName) {
-  let problems = 0;
-  let schema;
-  try {
-    schema = JSON.parse(fs.readFileSync(path.join(appDir, "schema", "base-schema.json"), "utf8"));
-  } catch (e) {
-    info(`契约检查跳过：读不到 schema/base-schema.json（${e.message}）`);
-    return 0;
-  }
-  const schemaTables = new Map((schema.tables || []).map((t) => [t.name, t]));
-  for (const [key, tableName] of Object.entries(CONTRACT_TABLES)) {
-    const tableId = bus.tables?.[key];
-    const schemaTable = schemaTables.get(tableName);
-    if (!tableId || !schemaTable) continue;
-    let liveFields;
-    try {
-      const res = await bus.api("GET", `/bitable/v1/apps/${bus.baseToken}/tables/${tableId}/fields?page_size=100`);
-      liveFields = res?.data?.items || res?.items || [];
-    } catch (e) {
-      info(`契约检查跳过 ${tableName}：字段列表读失败（${(e?.message || "").slice(0, 80)}）`);
-      continue;
-    }
-    const liveByName = new Map(liveFields.map((f) => [f.field_name, f]));
-    const schemaNames = new Set((schemaTable.fields || []).map((f) => f.name));
-    for (const name of schemaNames) {
-      if (!liveByName.has(name)) {
-        bad(`契约：${tableName}.${name} 在 schema 里有、线上 Base 没有（写它会报 1254045）`);
-        problems++;
-      }
-    }
-    for (const name of liveByName.keys()) {
-      if (!schemaNames.has(name)) {
-        info(`契约：${tableName}.${name} 线上有、schema 未登记（手工加列或 schema 过期，改表后请重跑 generate_schema）`);
-      }
-    }
-    const required = REQUIRED_OPTION_VALUES[tableName] || {};
-    for (const [field, values] of Object.entries(required)) {
-      const live = liveByName.get(field);
-      if (!live) continue; // 缺列已在上面报过
-      const opts = new Set((live.property?.options || []).map((o) => o.name));
-      if (!opts.size) continue; // 非单选或选项读不到，不下结论
-      for (const v of values) {
-        if (!opts.has(v)) {
-          bad(`契约：${tableName}.${field} 缺选项值 ${v}（代码会写，缺登记会报 OptionNotFound）`);
-          problems++;
-        }
-      }
-    }
-    // 本节点名必须在寻址类单选的选项里（历史上 Target_Node 选项缺现行节点名，靠自动新增污染选项集）
-    for (const field of tableName === "Tasks" ? ["Target_Node"] : tableName === "AgentCards" ? ["Node"] : []) {
-      const live = liveByName.get(field);
-      const opts = new Set((live?.property?.options || []).map((o) => o.name));
-      if (live && opts.size && nodeName && !opts.has(nodeName)) {
-        bad(`契约：${tableName}.${field} 选项里没有本节点名 ${nodeName}`);
-        problems++;
-      }
-    }
-    const deprecated = DEPRECATED_OPTION_VALUES[tableName] || {};
-    for (const [field, values] of Object.entries(deprecated)) {
-      const opts = new Set((liveByName.get(field)?.property?.options || []).map((o) => o.name));
-      for (const v of values) {
-        if (opts.has(v)) info(`契约：${tableName}.${field} 残留已废弃选项 ${v}（建议清洗）`);
-      }
-    }
-    for (const f of liveFields) {
-      const dv = f.property?.default_value;
-      if (dv !== null && dv !== undefined && dv !== "") {
-        info(`契约：${tableName}.${f.field_name} 设了字段默认值（项目口径为一律不设，请核对）`);
-      }
-    }
-  }
-  if (!problems) ok("总线契约检查通过（字段存在性与代码写入的选项值均已登记）");
-  return problems;
-}
-
 function capIdsFromCommands(configDir, capPrefix) {
   try {
     return capIdsOf(JSON.parse(fs.readFileSync(path.join(configDir, "commands.json"), "utf8")), capPrefix);
@@ -651,13 +481,11 @@ export async function doctor(configDir, appDir, opts = {}) {
   let busType = String(raw?.busType ?? "").trim().toLowerCase();
   if (!busType) {
     if (raw?.hubUrl || process.env.HUB_URL) busType = "http";
-    else if (raw?.dbPath || raw?.listen) busType = "sqlite";
-    else if (raw?.baseToken || raw?.appId) busType = "feishu";
-    else if (role === "hub") busType = "sqlite";
-    else busType = "feishu";
+    else if (raw?.dbPath || raw?.listen || role === "hub") busType = "sqlite";
+    else busType = "http";
   }
 
-  console.log(`lah doctor ${DAEMON_VERSION}`);
+  console.log(`ah doctor ${DAEMON_VERSION}`);
   console.log(`role: ${role}`);
   console.log(`kind: ${kind}`);
   console.log(`bus: ${busType}`);
@@ -673,12 +501,7 @@ export async function doctor(configDir, appDir, opts = {}) {
     ok("node.json 可解析");
     const placeholder = (v) => typeof v === "string" && v.startsWith("<");
     if (!raw.node || placeholder(raw.node)) { bad("node.json 的 node 未填"); problems++; }
-    if (busType === "feishu") {
-      if (!raw.baseToken || placeholder(raw.baseToken)) { bad("node.json 的 baseToken 未填（还是示例占位符）"); problems++; }
-      for (const k of ["tasks", "messages", "parts", "runs", "artifacts", "agentCards"]) {
-        if (!raw.tables?.[k] || placeholder(raw.tables[k])) { bad(`node.json 的 tables.${k} 未填`); problems++; }
-      }
-    } else if (busType === "sqlite") {
+    if (busType === "sqlite") {
       try {
         resolveListenAddr(raw.listen ?? "0.0.0.0:8787");
       } catch (e) {
@@ -705,7 +528,7 @@ export async function doctor(configDir, appDir, opts = {}) {
         }
       }
     } else {
-      bad(`node.json 的 busType 非法（${JSON.stringify(raw.busType)}，仅支持 sqlite / http / feishu）`);
+      bad(`node.json 的 busType 非法（${JSON.stringify(raw.busType)}，仅支持 sqlite / http）`);
       problems++;
     }
     // 只核取值，不回显其它字段：node.json 里可能直接写着 appSecret。
@@ -744,12 +567,12 @@ export async function doctor(configDir, appDir, opts = {}) {
   if (role === "hub") {
     const pub = readHubPublicKey(configDir);
     if (pub) info(`hub 审批公钥（各节点 node.json 的 hubPublicKey 填它）：${pub}`);
-    else info("审批签名密钥尚未生成：hub 守护进程首次启动或重跑 lah setup --role hub 时生成");
+    else info("审批签名密钥尚未生成：hub 守护进程首次启动或重跑 ah setup --role hub 时生成");
   } else if (raw?.hubPublicKey) {
     if (isHubPublicKey(raw.hubPublicKey)) ok("已配置 hub 审批公钥：只认签名对得上的 auth_decision");
     else { bad("node.json 的 hubPublicKey 不是有效的 ed25519 公钥：所有审批决定都会被当作无效"); problems++; }
   } else {
-    info("告警：未配置 hubPublicKey。审批决定只按行上自报字段校验，任何能写总线的身份都能冒写批准；向 hub 要公钥后 lah setup --hub-key <公钥>");
+    info("告警：未配置 hubPublicKey。审批决定只按行上自报字段校验，任何能写总线的身份都能冒写批准；向 hub 要公钥后 ah setup --hub-key <公钥>");
   }
 
   try {
@@ -793,27 +616,8 @@ export async function doctor(configDir, appDir, opts = {}) {
     problems++;
   }
 
-  // 3. 依赖（仅飞书总线模式需要飞书 SDK 与 CLI）
-  let larkVer = null;
-  if (busType === "sqlite" || busType === "http") {
-    ok("零外部依赖模式（Node 内置 sqlite / fetch，无需飞书 SDK 与 lark-cli）");
-  } else {
-    const sdkDir = path.join(appDir, "node_modules", "@larksuiteoapi", "node-sdk");
-    if (fs.existsSync(sdkDir)) ok("依赖已安装（@larksuiteoapi/node-sdk）");
-    else { bad("依赖未安装：在 app 目录跑 npm install"); problems++; }
-
-    larkVer = getLarkVersion();
-    // hub 角色强制长连接；node 角色仅在开启事件订阅（默认或显式 events: true）时才需要 lark-cli
-    // 做云文档事件订阅检查与注册；纯 REST / 轮询 / 协议节点（events: false）降级为 info 提示。
-    const needsLarkCli = role === "hub" || raw?.events !== false;
-    if (larkVer) ok(`lark-cli 已安装（${larkVer}）`);
-    else if (!needsLarkCli) {
-      info("未发现 lark-cli（当前为轮询/协议节点，无需此依赖；若需长连接 ws 门铃可运行 npm install -g @larksuite/cli 安装）");
-    } else {
-      bad("未发现 lark-cli：请运行 npm install -g @larksuite/cli 安装");
-      problems++;
-    }
-  }
+  // 3. 零外部依赖确认
+  ok("零外部依赖模式（Node 内置 sqlite / fetch）");
 
   // 4-6. 凭据与总线（loadConfig 成功 = 配置/凭据齐备；再实测连通与读表）
   let cfg = null;
@@ -822,10 +626,8 @@ export async function doctor(configDir, appDir, opts = {}) {
     cfg.role = role;
     if (cfg.busType === "sqlite") {
       ok(`独立 SQLite 总线可读（${cfg.dbPath}，监听 ${cfg.listen}）`);
-    } else if (cfg.busType === "http") {
-      ok(`远程 Hub 连接已配置（节点 ${cfg.node} -> ${cfg.hubUrl}）`);
     } else {
-      ok(`凭据可读（${role === "hub" ? "枢纽" : "节点"} ${cfg.node}，app_id 已配置）`);
+      ok(`远程 Hub 连接已配置（节点 ${cfg.node} -> ${cfg.hubUrl}）`);
     }
   } catch (e) {
     bad(`凭据/总线配置不可用：${e.message}`);
@@ -859,142 +661,6 @@ export async function doctor(configDir, appDir, opts = {}) {
       problems++;
     }
     info(`唤醒方式：HTTP 长轮询（longpoll，超时 ${cfg.longPollSec}s）＋ ${cfg.sweepSec}s 对账扫表`);
-  } else if (cfg) {
-    const baseToken = cfg.bus.baseToken;
-    try {
-      await cfg.bus.tenantToken();
-      ok("飞书 tenant token 获取成功");
-    } catch (e) {
-      bad(`tenant token 失败：${e.message}`);
-      problems++;
-    }
-    try {
-      const appMeta = await cfg.bus.api("GET", `/bitable/v1/apps/${baseToken}`);
-      const baseName = appMeta?.app?.name || baseToken;
-      ok(`Base 元数据可访问：${baseName}`);
-    } catch (e) {
-      const msg = e?.message || "";
-      if (/403|91403|1254302|forbidden|permission/i.test(msg)) {
-        bad("多维表格读写权限不足：请打开该 Base 文档右上角「分享/协作」，将应用机器人添加为「可编辑」协作者");
-      } else {
-        bad(`Base 元数据访问失败：${msg}`);
-      }
-      problems++;
-    }
-    try {
-      const cards = await cfg.bus.listRecords(cfg.bus.tables.agentCards);
-      const mine = cards.filter((r) => f1(r, "Node") === cfg.node);
-      if (role === "hub") {
-        ok(`AgentCards 可读：本节点已登记 ${mine.length} 项能力，总线共 ${cards.length} 项在册`);
-      } else {
-        ok(`AgentCards 可读：本节点已登记 ${mine.length} 项能力`);
-      }
-      const tasks = await cfg.bus.listRecords(cfg.bus.tables.tasks);
-      ok(`Tasks 可读：共 ${tasks.length} 条`);
-      problems += await checkBusContract(cfg.bus, appDir, cfg.node);
-    } catch (e) {
-      const msg = e?.message || "";
-      if (/403|91403|1254302|forbidden|permission/i.test(msg)) {
-        bad("多维表格读写权限不足：请打开该 Base 文档右上角「分享/协作」，将应用机器人添加为「可编辑」协作者");
-      } else {
-        bad(`读表失败：${e.message}`);
-      }
-      problems++;
-    }
-    if (role === "hub" || cfg.events === true) {
-      const appEvCheck = await checkAppEventSubscribed(cfg.bus, cfg.bus.appId, "drive.file.bitable_record_changed_v1");
-      if (appEvCheck.status === "subscribed") {
-        ok(`应用已开启事件订阅：drive.file.bitable_record_changed_v1（线上版本 ${appEvCheck.onlineVersionId}）`);
-      } else if (appEvCheck.status === "unknown") {
-        info(`跳过应用静态事件列表核对（${appEvCheck.reason || "未开应用信息权限"}），以实际长连接状态为准`);
-      } else {
-        bad(`应用线上已发布版本未订阅事件 drive.file.bitable_record_changed_v1（${appEvCheck.reason || "未包含该事件"}）`);
-        info(`请打开 https://${openHost(cfg.bus.domain)}/app/${cfg.bus.appId}/event 添加「多维表格记录变更」并发布版本，或降级为 45s 轮询模式。`);
-        problems++;
-      }
-
-      let isSubscribed = false;
-      let checkErr = null;
-      if (!larkVer) {
-        checkErr = "未发现 lark-cli";
-      } else {
-        try {
-          const out = execFileSync("lark-cli", [
-            "api", "GET", `/open-apis/drive/v1/files/${baseToken}/get_subscribe`,
-            "--params", JSON.stringify({ file_type: "bitable" }),
-            "--as", "user",
-            "--json",
-          ], { encoding: "utf8", env: { ...process.env, PATH: richPath() } });
-          const parsed = JSON.parse(out);
-          if (parsed?.data?.is_subscribe === true) {
-            isSubscribed = true;
-          } else {
-            checkErr = parsed?.error?.message || parsed?.msg || (parsed?.data?.is_subscribe === false ? "is_subscribe=false" : out.trim());
-          }
-        } catch (e) {
-          checkErr = e.message;
-        }
-      }
-
-      if (isSubscribed) {
-        ok("云文档事件订阅已生效（User 身份，is_subscribe=true）");
-      } else {
-        bad(`云文档事件订阅未生效${checkErr ? `（${checkErr}）` : ""}`);
-        info(`修复命令：lark-cli api POST /open-apis/drive/v1/files/${baseToken}/subscribe --params '{"file_type":"bitable"}' --as user`);
-        problems++;
-      }
-    } else {
-      const appEvCheck = await checkAppEventSubscribed(cfg.bus, cfg.bus.appId, "drive.file.bitable_record_changed_v1");
-      if (appEvCheck.status === "subscribed") {
-        ok(`应用已开启事件订阅：drive.file.bitable_record_changed_v1（线上版本 ${appEvCheck.onlineVersionId}）`);
-      } else if (appEvCheck.status === "unknown") {
-        info(`跳过应用静态事件列表核对（${appEvCheck.reason || "未开应用信息权限"}）`);
-      } else {
-        info(`应用线上版本未订阅 drive.file.bitable_record_changed_v1（当前为轮询模式已忽略）`);
-      }
-    }
-    const busSockPath = cfg.bus?.appId
-      ? path.join(os.homedir(), ".lark-cli", "events", cfg.bus.appId, "bus.sock")
-      : null;
-    if (busSockPath && fs.existsSync(busSockPath)) {
-      let busAlive = false;
-      try {
-        const { createConnection } = await import("node:net");
-        await new Promise((resolve) => {
-          const s = createConnection(busSockPath, () => {
-            busAlive = true;
-            s.end();
-            resolve();
-          });
-          s.setTimeout(1500, () => { s.destroy(); resolve(); });
-          s.on("error", () => resolve());
-        });
-      } catch { /* 忽略探测异常 */ }
-
-      if (busAlive) {
-        if (role === "hub") {
-          // hub 自己拉 WSClient 应答卡片回调。socket 还在，说明同一个 appId 另有长连接。
-          // 飞书只随机投递一条。没注册卡片处理函数的那条会把这句当响应体回回去，飞书报 200672。
-          bad("hub 的 appId 不应同时被 lark-cli event consume 或其他进程占用长连接。hub 的卡片回调始终走自己的 WSClient。另一条没注册 card.action.trigger 的连接抢到点击时，SDK 会把 \"no card.action.trigger event handle\" 当响应回给飞书，飞书报 200672（没有接口）。");
-          problems++;
-        } else {
-          ok(`发现本机 lark-cli Local Event Bus 在线（${busSockPath}，表变更门铃复用该 Bus）`);
-        }
-      } else {
-        info(`本机 lark-cli Local Event Bus socket 存在但无法连接（${busSockPath}，事件将直连飞书 WSClient）`);
-      }
-    } else {
-      info(`未发现本机 lark-cli Local Event Bus（${busSockPath || "~/.lark-cli/events/<appId>/bus.sock"}，事件将通过 WSClient 直连飞书）`);
-    }
-    if (role === "hub") {
-      info(`唤醒方式：长连接（ws，表变更门铃 + card.action.trigger）＋ ${cfg.sweepSec}s 对账扫表（hub 角色强制长连接）`);
-    } else if (cfg.events) {
-      info(`唤醒方式：事件订阅（长连接 ws）＋ ${cfg.sweepSec}s 对账兜底`);
-    } else if (cfg.pollSec >= cfg.sweepSec) {
-      info(`唤醒方式：仅对账间隔 ${cfg.sweepSec}s（事件订阅已关）`);
-    } else {
-      info(`唤醒方式：轮询（poll）${cfg.pollSec}s（事件订阅已关）`);
-    }
   }
 
   // 7. 自启状态（只报告，不动手）
@@ -1003,13 +669,13 @@ export async function doctor(configDir, appDir, opts = {}) {
       const out = execFileSync("launchctl", ["list"], { encoding: "utf8" });
       const mine = out.split("\n").filter((l) => l.includes("hub-node") || l.includes("agenthub"));
       if (mine.length) ok(`launchd 自启在册：${mine.map((l) => l.trim().split(/\s+/).pop()).join(", ")}`);
-      else info("未发现 launchd 自启（可用 lah service 安装）");
+      else info("未发现 launchd 自启（可用 ah service 安装）");
     } else if (process.platform === "linux") {
       const units = fs.existsSync(path.join(os.homedir(), ".config/systemd/user"))
         ? fs.readdirSync(path.join(os.homedir(), ".config/systemd/user")).filter((f) => f.startsWith("hub-node"))
         : [];
       if (units.length) ok(`systemd 用户单元在册：${units.join(", ")}`);
-      else info("未发现 systemd 用户单元（可用 lah service 安装）");
+      else info("未发现 systemd 用户单元（可用 ah service 安装）");
     } else if (process.platform === "win32") {
       try {
         const out = execFileSync("schtasks", ["/Query", "/TN", "\\lah\\", "/FO", "LIST"], { encoding: "utf8" });
@@ -1018,9 +684,9 @@ export async function doctor(configDir, appDir, opts = {}) {
           return at >= 0 ? line.slice(at).trim() : "";
         }).filter(Boolean))];
         if (mine.length) ok(`任务计划程序自启在册：${mine.join(", ")}`);
-        else info("未发现任务计划程序自启（可用 lah service 安装）");
+        else info("未发现任务计划程序自启（可用 ah service 安装）");
       } catch {
-        info("未发现任务计划程序自启（可用 lah service 安装）");
+        info("未发现任务计划程序自启（可用 ah service 安装）");
       }
     }
   } catch { /* 自启状态查不到不算失败 */ }

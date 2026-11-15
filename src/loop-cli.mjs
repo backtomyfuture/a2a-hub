@@ -1,7 +1,7 @@
-// lah loop CLI 实现：创建、查看、取消多阶段 SOP 闭环与列出内置模板。
+// ah loop CLI 实现：创建、查看、取消多阶段 SOP 闭环与列出内置模板。
 
 import fs from "node:fs";
-import { f1 } from "./bus/feishu.mjs";
+import { f1 } from "./bus/tables.mjs";
 import { loadConfig } from "./config.mjs";
 import { BUILTIN_LOOP_TEMPLATES, cancelLoop, createLoop } from "./hub/loop.mjs";
 
@@ -125,7 +125,7 @@ export async function runLoopCli(argv, defaultConfigDir) {
       else if (rest[i] === "--loop") { loopId = take(i, "--loop"); i++; }
       else if (!rest[i].startsWith("--") && !loopId) loopId = rest[i];
     }
-    if (!loopId) throw new Error("用法：lah loop show <Loop_ID>");
+    if (!loopId) throw new Error("用法：ah loop show <Loop_ID>");
     const cfg = loadConfig(configDir, { forCli: true });
     const rows = await cfg.bus.listRecords(cfg.bus.tables.loops);
     const row = rows.find((r) => f1(r, "Loop_ID") === loopId);
@@ -159,12 +159,12 @@ export async function runLoopCli(argv, defaultConfigDir) {
       else if (rest[i] === "--text") { text = take(i, "--text"); i++; }
       else if (!rest[i].startsWith("--") && !loopId) loopId = rest[i];
     }
-    if (!loopId) throw new Error("用法：lah loop cancel <Loop_ID> [--text <说明>]");
+    if (!loopId) throw new Error("用法：ah loop cancel <Loop_ID> [--text <说明>]");
     const cfg = loadConfig(configDir, { forCli: true });
     const res = await cancelLoop({ bus: cfg.bus, loopId, reason: text || "操作者取消了 SOP 闭环" });
     console.log(`已取消 Loop ${res.loopId}` + (res.canceledTaskId ? `（并取消在途任务 ${res.canceledTaskId}）` : ""));
     return 0;
   }
 
-  throw new Error("用法：lah loop <create|ls|show|cancel|templates>");
+  throw new Error("用法：ah loop <create|ls|show|cancel|templates>");
 }

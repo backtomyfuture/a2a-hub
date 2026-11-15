@@ -1,4 +1,4 @@
-// lah present 的等待、按任务过滤，以及队列锁。状态只写临时目录。
+// ah present 的等待、按任务过滤，以及队列锁。状态只写临时目录。
 // 等待用注入的时钟，不睡真实的秒；并发用例只看结果对不对。
 
 import assert from "node:assert/strict";
@@ -16,7 +16,7 @@ import {
 import { withTemp } from "./helpers.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const lahBin = path.join(root, "bin", "lah.mjs");
+const ahBin = path.join(root, "bin", "ah.mjs");
 
 function queueFile(dir) {
   return path.join(dir, "present_queue.jsonl");
@@ -433,14 +433,14 @@ test("新鲜锁会等，超时失败且队列不变，过期锁可以被清掉�
 test("真实 CLI：--wait 0 退出码 2，无文件的 --pop 退出码 0", async () => {
   await withTemp(async (dir) => {
     const waited = spawnSync(process.execPath, [
-      lahBin, "present", "--config", dir, "--wait", "0", "--task", "NOPE",
+      ahBin, "present", "--config", dir, "--wait", "0", "--task", "NOPE",
     ], { encoding: "utf8" });
     assert.equal(waited.status, 2);
     assert.equal(waited.stdout, "");
     assert.match(waited.stderr, /未收到/);
 
     const popped = spawnSync(process.execPath, [
-      lahBin, "present", "--config", dir, "--pop",
+      ahBin, "present", "--config", dir, "--pop",
     ], { encoding: "utf8" });
     assert.equal(popped.status, 0);
     assert.equal(popped.stdout, "");

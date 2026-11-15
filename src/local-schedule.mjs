@@ -3,7 +3,7 @@
 // 基线还没有（新建、改了 cron、状态文件缺失或损坏）时只锚水位，不补历史期次。
 import fs from "node:fs";
 import path from "node:path";
-import { f1 } from "./bus/feishu.mjs";
+import { f1 } from "./bus/tables.mjs";
 import { controlKeysIn } from "./config.mjs";
 import { formatOccurrenceKey, latestOccurrence, parseCron, resolveScheduleTz } from "./schedule-cron.mjs";
 import { ScheduleMirror } from "./schedule-mirror.mjs";

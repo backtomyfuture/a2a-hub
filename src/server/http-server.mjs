@@ -4,13 +4,14 @@ import { randomUUID, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
-import { f1 } from "../bus/feishu.mjs";
+import { f1 } from "../bus/tables.mjs";
 import { resolveTableName } from "../bus/tables.mjs";
 import { resolveListenAddr } from "../config.mjs";
 import { cancelTask } from "../hub/cancel.mjs";
 import { createTask } from "../hub/create.mjs";
 import { BUILTIN_LOOP_TEMPLATES, cancelLoop, createLoop } from "../hub/loop.mjs";
 import { getTaskWhy } from "../why.mjs";
+import { handleAgentGatewayRequest } from "./agent-gateway.mjs";
 import { renderWebConsoleHtml } from "./web-ui.mjs";
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -172,12 +173,26 @@ export async function startHubHttpServer({
         return;
       }
 
+      // A2A 协议探索名片免鉴权，便于外部 Agent 先发现接入端点
+      if (await handleAgentGatewayRequest({
+        req, res, reqUrl, pathname, method, bus, broker, approval, cfg, onWake, readJsonBody, sendJson, discoverOnly: true,
+      })) {
+        return;
+      }
+
       if (apiToken && pathname.startsWith("/api/")) {
         const provided = extractToken(req, reqUrl);
         if (!safeTokenEqual(provided, apiToken)) {
           sendJson(res, 401, { error: "Unauthorized: invalid or missing API token" });
           return;
         }
+      }
+
+      // 外部 HTTP Agent（Muse / Grok Bot 等）统一网关，优先于通用 /api/v1/tasks/:id 详情路由匹配
+      if (await handleAgentGatewayRequest({
+        req, res, reqUrl, pathname, method, bus, broker, approval, cfg, onWake, readJsonBody, sendJson,
+      })) {
+        return;
       }
 
       // 1) HTTP 长轮询唤醒端点
@@ -402,7 +417,7 @@ export async function startHubHttpServer({
         const taskId = await createTask({
           bus,
           from: body.from || cfg?.node || "hub",
-          source: body.source || "web",
+          source: body.source || body.from || "web",
           to: body.to || "",
           worker: body.worker || "",
           cap: body.cap || "",
@@ -463,9 +478,9 @@ export async function startHubHttpServer({
           Msg_ID: msgId,
           Task_ID: taskId,
           Context_ID: f1(task, "Context_ID"),
-          From_Node: cfg?.node || "hub",
+          From_Node: String(body.from ?? body.node ?? "").trim() || cfg?.node || "hub",
           To_Node: f1(task, "Target_Node"),
-          Role: "user",
+          Role: String(body.role ?? "").trim() || "user",
           Kind: "answer",
           In_Reply_To: String(f1(task, "Status_Msg") ?? "").trim(),
           Created_At: nowMinute,
@@ -480,10 +495,12 @@ export async function startHubHttpServer({
       if (method === "POST" && cancelMatch) {
         const taskId = decodeURIComponent(cancelMatch[1]);
         const body = await readJsonBody(req);
+        const actor = String(body.from ?? body.node ?? "").trim();
+        const hubNode = cfg?.node || "hub";
         const result = await cancelTask({
           bus,
-          node: cfg?.node || "hub",
-          role: "hub",
+          node: actor || hubNode,
+          role: actor && actor !== hubNode ? "node" : "hub",
           taskId,
           text: body.text || "",
         });

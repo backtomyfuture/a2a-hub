@@ -1,6 +1,6 @@
 // Tasks.Metadata 上的 usage / later / acceptance 合并写。写失败只记日志，不影响已经落下的回执。
 import { acceptanceIndex } from "./acceptance.mjs";
-import { f1 } from "./bus/feishu.mjs";
+import { f1 } from "./bus/tables.mjs";
 import { log, readTaskMeta } from "./kernel-util.mjs";
 import { addUsage } from "./receipt.mjs";
 

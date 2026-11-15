@@ -7,13 +7,13 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { f1 } from "../src/bus/feishu.mjs";
+import { f1 } from "../src/bus/tables.mjs";
 import { createTask, parseCreateArgv, parseCriteriaInput } from "../src/hub/create.mjs";
 import { enqueueOrUpdateInbox, handleInboxDone, readInbox } from "../src/inbox.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";
 import { MockFeishuBus } from "./mocks/mock-bus.mjs";
 
-const LAH_BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../bin/lah.mjs");
+const AH_BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../bin/ah.mjs");
 
 function writes(mock) {
   return mock.journal.filter((item) => item.op === "create" || item.op === "update");
@@ -324,7 +324,7 @@ test("inbox done --check：非法格式与无清单时拒绝且不写任何表",
     // CLI 入口在读配置或写总线之前就应拒绝非法 --check 与非法 --criteria。
     const badCheckCli = spawnSync(
       process.execPath,
-      [LAH_BIN, "inbox", "done", "--config", dir, "--task", "TASK-NO-CRITERIA-1", "--text", "ok", "--check", "c1=nope"],
+      [AH_BIN, "inbox", "done", "--config", dir, "--task", "TASK-NO-CRITERIA-1", "--text", "ok", "--check", "c1=nope"],
       { encoding: "utf8" },
     );
     assert.notEqual(badCheckCli.status, 0);
@@ -332,7 +332,7 @@ test("inbox done --check：非法格式与无清单时拒绝且不写任何表",
 
     const badCriteriaCli = spawnSync(
       process.execPath,
-      [LAH_BIN, "task", "create", "--config", dir, "--to", "node-a", "--text", "ok", "--criteria", "[]"],
+      [AH_BIN, "task", "create", "--config", dir, "--to", "node-a", "--text", "ok", "--criteria", "[]"],
       { encoding: "utf8" },
     );
     assert.notEqual(badCriteriaCli.status, 0);

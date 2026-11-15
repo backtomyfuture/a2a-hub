@@ -6,7 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { f1 } from "../src/bus/feishu.mjs";
+import { f1 } from "../src/bus/tables.mjs";
 import { Kernel } from "../src/kernel.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";
 import { MockFeishuBus } from "./mocks/mock-bus.mjs";

@@ -1,4 +1,4 @@
-// lah update —— 自更新程序本体。
+// ah update —— 自更新程序本体。
 // 等价于重跑 install.sh / install.ps1 的「更新已有安装」分支：git pull + 依赖重装 +
 // 入口补齐 + Skill 重拷，但不碰配置目录里的任何文件。
 // 只支持 git 检出（安装脚本装出来的就是）：tarball 装的没有 .git，
@@ -7,6 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { resolveSkillsForHost } from "./setup.mjs";
 
 // git / npm 输出直接透传：npm ci 可能要几分钟，静默会像卡死。
 function run(cmd, args, cwd) {
@@ -27,7 +28,7 @@ function readAppVersion(appDir) {
 
 // 软链只在缺失时补建、指向别处时警告：install.sh 的软链指向 $APP/bin/，
 // git pull 后路径不变，本来就不用刷新；指向别处说明用户自管入口，不抢。
-// Windows 入口是 install.ps1 写的 lah.cmd（相对路径指向 app\bin\lah.mjs），
+// Windows 入口是 install.ps1 写的 ah.cmd（相对路径指向 app\bin\ah.mjs），
 // 不在这里建 Unix 软链：未开开发者模式时会抛错，把已经完成的更新报成失败。
 function ensureSymlink(target, link) {
   const name = path.basename(link);
@@ -48,8 +49,8 @@ function ensureEntrySymlinks(appDir) {
     return;
   }
   const binDir = path.join(os.homedir(), ".local", "bin");
-  const entry = path.join(appDir, "bin", "lah.mjs");
-  for (const name of ["lah", "a2a-hub", "ahub", "hub-node"]) {
+  const entry = path.join(appDir, "bin", "ah.mjs");
+  for (const name of ["ah", "a2a-hub", "ahub", "lah", "hub-node"]) {
     const link = path.join(binDir, name);
     const state = ensureSymlink(entry, link);
     if (state === "missing") {
@@ -62,20 +63,56 @@ function ensureEntrySymlinks(appDir) {
   }
 }
 
-function refreshSkill(appDir, skip) {
+export function refreshSkill(
+  appDir,
+  skip,
+  configDir = "",
+  skillsRoot = path.join(os.homedir(), ".agents", "skills"),
+) {
   if (skip) {
-    console.log("  · 跳过 lah Skill 更新（--skip-skill）");
-    return;
+    console.log("  · 跳过 ah Skill 更新（--skip-skill）");
+    return [];
   }
   try {
-    const src = path.join(appDir, "skills", "lah", "SKILL.md");
-    if (!fs.existsSync(src)) return;
-    const destDir = path.join(os.homedir(), ".agents", "skills", "lah");
-    fs.mkdirSync(destDir, { recursive: true });
-    fs.copyFileSync(src, path.join(destDir, "SKILL.md"));
-    console.log(`  ✓ 已更新 lah Skill 至 ${path.join(destDir, "SKILL.md")}`);
+    const wanted = new Set();
+    const cfgFile = configDir ? path.join(configDir, "node.json") : "";
+    if (cfgFile && fs.existsSync(cfgFile)) {
+      const cfg = JSON.parse(fs.readFileSync(cfgFile, "utf8"));
+      for (const name of resolveSkillsForHost({ role: cfg.role, kind: cfg.kind })) {
+        wanted.add(name);
+      }
+    }
+    // 兼容未传 configDir 与旧版名称：同步刷新本机已装过的 CLI Skill（含从 lah 迁移至 ah）；若均未安装则默认补全主控 ah
+    for (const [installedName, targetName] of [
+      ["ah", "ah"],
+      ["lah", "ah"],
+      ["ah-inbox", "ah-inbox"],
+      ["lah-inbox", "ah-inbox"],
+    ]) {
+      if (fs.existsSync(path.join(skillsRoot, installedName, "SKILL.md"))) {
+        wanted.add(targetName);
+      }
+    }
+    if (wanted.size === 0) {
+      for (const name of resolveSkillsForHost({ role: "node", kind: "host" })) {
+        wanted.add(name);
+      }
+    }
+    const updated = [];
+    for (const name of wanted) {
+      const src = path.join(appDir, "skills", name, "SKILL.md");
+      if (!fs.existsSync(src)) continue;
+      const destDir = path.join(skillsRoot, name);
+      fs.mkdirSync(destDir, { recursive: true });
+      const dest = path.join(destDir, "SKILL.md");
+      fs.copyFileSync(src, dest);
+      updated.push(name);
+      console.log(`  ✓ 已更新 ${name} Skill 至 ${dest}`);
+    }
+    return updated;
   } catch (e) {
-    console.log(`  · lah Skill 更新跳过：${e.message}`);
+    console.log(`  · ah Skill 更新跳过：${e.message}`);
+    return [];
   }
 }
 
@@ -128,7 +165,7 @@ export async function update(appDir, { check = false, skipSkill = false, configD
 
   if (check) {
     console.log(behind > 0
-      ? `当前 v${before}，远端 ${branch} 有 ${behind} 个新提交。运行 lah update 升级。`
+      ? `当前 v${before}，远端 ${branch} 有 ${behind} 个新提交。运行 ah update 升级。`
       : `已是最新（v${before}，分支 ${branch}）。`);
     return 0;
   }
@@ -159,14 +196,14 @@ export async function update(appDir, { check = false, skipSkill = false, configD
   }
 
   try {
-    for (const bin of ["lah.mjs", "hub-node.mjs"]) fs.chmodSync(path.join(appDir, "bin", bin), 0o755);
+    for (const bin of ["ah.mjs", "lah.mjs", "hub-node.mjs"]) fs.chmodSync(path.join(appDir, "bin", bin), 0o755);
   } catch (e) {
     console.log("  · bin 可执行位跳过：" + e.message);
   }
 
   ensureEntrySymlinks(appDir);
-  refreshSkill(appDir, skipSkill);
+  refreshSkill(appDir, skipSkill, configDir);
   if (configDir) daemonHint(configDir);
-  console.log(`更新完成：v${before} → v${after}。重启 lah daemon / lah host 后生效。`);
+  console.log(`更新完成：v${before} → v${after}。重启 ah daemon 后生效。`);
   return 0;
 }

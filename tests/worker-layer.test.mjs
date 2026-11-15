@@ -7,7 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { f1 } from "../src/bus/feishu.mjs";
+import { f1 } from "../src/bus/tables.mjs";
 import { capIdOf, capIdsOf, controlKeysIn, normalizeCommands, resolveCapKey } from "../src/config.mjs";
 import { createTask, parseCreateArgv } from "../src/hub/create.mjs";
 import { Kernel } from "../src/kernel.mjs";
