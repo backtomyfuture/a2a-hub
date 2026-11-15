@@ -2,7 +2,7 @@
 // 只发起出站 HTTP 请求（REST 读写 + 长轮询唤醒），节点本身不开任何监听端口。
 
 import { randomUUID } from "node:crypto";
-import { f1 } from "./feishu.mjs";
+import { f1 } from "./tables.mjs";
 import { normalizeTables } from "./tables.mjs";
 import { log as defaultLog } from "../kernel-util.mjs";
 

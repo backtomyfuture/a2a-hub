@@ -335,13 +335,15 @@ export function classifyEntry(entry) {
   const target = entry.state === "verifying" ? entry.verify : entry;
   if (!target || typeof target !== "object") return { kind: "fail" };
   if (target.disposition === "fail") return { kind: "fail" };
-  if (target.exit_path && fs.existsSync(target.exit_path)) return { kind: "exited" };
+  const hasExit = () => Boolean(target.exit_path && fs.existsSync(target.exit_path));
+  if (hasExit()) return { kind: "exited" };
   const ident = identityOf(target);
   if (ident === "nopid" || ident === "mismatch") {
     const found = findWrapProcess(target.wrap_path);
     if (found.status === "unknown") return { kind: "uncertain" };
     if (found.status === "found") return rebound(found);
-    return { kind: "dead" };
+    // 再查一次退出码文件：防止 ps 探测耗时期间包装脚本刚落盘退出码并正常退出（TOCTOU）
+    return hasExit() ? { kind: "exited" } : { kind: "dead" };
   }
   const group = groupAlive(target.pgid || target.pid);
   if (group === true && ident === "match") return { kind: "alive" };
@@ -350,7 +352,7 @@ export function classifyEntry(entry) {
     const found = findWrapProcess(target.wrap_path);
     if (found.status === "found") return rebound(found);
     if (found.status === "unknown") return { kind: "uncertain" };
-    return { kind: "dead" };
+    return hasExit() ? { kind: "exited" } : { kind: "dead" };
   }
   return { kind: "uncertain" };
 }

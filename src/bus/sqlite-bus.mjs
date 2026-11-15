@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { f1 } from "./feishu.mjs";
+import { f1 } from "./tables.mjs";
 import { normalizeTables } from "./tables.mjs";
 
 function scalar(fields, key) {

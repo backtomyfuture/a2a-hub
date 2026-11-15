@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
-import { f1 } from "../src/bus/feishu.mjs";
+import { f1 } from "../src/bus/tables.mjs";
 import { createTask, parseCreateArgv, parseParams } from "../src/hub/create.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";
 import { MockFeishuBus } from "./mocks/mock-bus.mjs";

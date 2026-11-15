@@ -1,9 +1,6 @@
-// hub 角色主循环：node 能力的超集（单进程承载能力登记与执行、审批发卡、结果呈递、陈旧告警）。
-// 长连接走 src/transport/index.mjs 的 createWaker。调用前把 cfg.role 设为 hub，
-// 工厂才会强制 ws（events:false 也不改发 poll）。本角色不接受纯轮询退路。
-// SDK 只在放弃重连时才让 onStatus(false) 上来；那时停掉当前这条，退避后
-// 再 connect 一次。同一时刻只留一条连接。对账间隔固定 sweepSec，不用
-// waker.wait()——那条等待在长连接未就绪时会缩短成 pollSec。
+// hub 角色主循环：node 能力的超集（单进程承载能力登记与执行、SQLite + HTTP 长轮询网关、
+// Web 控制台、ed25519 审批发卡、结果呈递、陈旧告警、later 与 Loop 编排）。
+// 唤醒通道走 src/transport/index.mjs 的 createWaker（longpoll，hub 进程内直连 Broker）。
 
 import fs from "node:fs";
 import os from "node:os";
@@ -59,7 +56,6 @@ export async function hubDoctor(configDir) {
     bad("hub 读 node.json 失败：" + e.message);
     problems++;
   }
-  const isStandalone = raw?.busType === "sqlite" || (!raw?.appId && !raw?.baseToken && !raw?.hubUrl);
   let owner = "";
   try {
     owner = readOwnerFromConfigDir(configDir);
@@ -67,62 +63,51 @@ export async function hubDoctor(configDir) {
     bad("hub 读取机主配置失败：" + e.message);
     problems++;
   }
-  if (isStandalone) {
-    try {
-      const addr = resolveListenAddr(raw?.listen ?? "0.0.0.0:8787");
-      ok(`独立中台模式（SQLite + HTTP 长轮询 + Web 控制台），监听 ${addr.host}:${addr.port}`);
-    } catch (e) {
-      bad("listen 地址配置非法：" + e.message);
-      problems++;
-    }
-    let kv = {};
-    if (raw?.appEnv) {
-      try { kv = readEnvFile(String(raw.appEnv).replace(/^~/, os.homedir())); } catch {}
-    } else {
-      try { kv = readEnvFile(path.join(configDir, "app.env")); } catch {}
-    }
-    const hasApiToken = Boolean(
-      raw?.apiToken
-      || kv.HUB_API_TOKEN
-      || kv.LAH_API_TOKEN
-      || process.env.HUB_API_TOKEN
-      || process.env.LAH_API_TOKEN,
-    );
-    if (!hasApiToken) {
-      info("未配置 apiToken：若要暴露到公网或不可信局域网，建议在 node.json 或 app.env 设置 apiToken");
-    } else {
-      ok("apiToken 已配置（不显示明文）");
-    }
-    if (!owner) {
-      info("未配置飞书机主 open_id：独立模式下将使用内置 Web 控制台执行 ed25519 签名审批");
-    } else {
-      ok("机主 open_id 已配置（不显示明文）");
-    }
+  try {
+    const addr = resolveListenAddr(raw?.listen ?? "0.0.0.0:8787");
+    ok(`独立中台模式（SQLite + HTTP 长轮询 + Web 控制台），监听 ${addr.host}:${addr.port}`);
+  } catch (e) {
+    bad("listen 地址配置非法：" + e.message);
+    problems++;
+  }
+  let kv = {};
+  if (raw?.appEnv) {
+    try { kv = readEnvFile(String(raw.appEnv).replace(/^~/, os.homedir())); } catch {}
   } else {
-    if (!owner) {
-      bad("未配置机主 open_id（node.json 的 ownerOpenId，或环境变量 HUB_OWNER_OPEN_ID）。未配置时不发卡，审批回调一律拒绝。");
-      problems++;
-    } else {
-      ok("机主 open_id 已配置（不显示明文）");
-    }
-    if (raw?.events === false) {
-      bad("node.json 写了 events=false。hub 角色忽略该项：审批卡回调只能经长连接送达，不会改为纯轮询。");
-      problems++;
-    }
+    try { kv = readEnvFile(path.join(configDir, "app.env")); } catch {}
+  }
+  const hasApiToken = Boolean(
+    raw?.apiToken
+    || kv.HUB_API_TOKEN
+    // 兼容 AH_API_TOKEN / HUB_API_TOKEN / LAH_API_TOKEN
+    || kv.AH_API_TOKEN
+    || kv.LAH_API_TOKEN
+    || process.env.AH_API_TOKEN
+    || process.env.LAH_API_TOKEN,
+  );
+  if (!hasApiToken) {
+    info("未配置 apiToken：若要暴露到公网或不可信局域网，建议在 node.json 或 app.env 设置 apiToken");
+  } else {
+    ok("apiToken 已配置（不显示明文）");
+  }
+  if (!owner) {
+    info("使用内置 Web 控制台执行 ed25519 签名审批");
+  } else {
+    ok("机主标识已配置（不显示明文）");
   }
   const sweep = Number(raw?.sweepSec);
   const sweepSec = Number.isFinite(sweep) && sweep > 0 ? sweep : 900;
-  info(`唤醒：长连接（表变更门铃 + card.action.trigger）＋ ${sweepSec}s 对账扫表。poll 不是 hub 的退路。`);
+  info(`唤醒：进程内事件代理（LongPollBroker）＋ HTTP 长轮询网关 ＋ ${sweepSec}s 对账扫表。`);
   try {
     const mod = await importWakerModule();
     if (typeof mod.createWaker !== "function") {
-      bad("src/transport/index.mjs 未导出 createWaker。hub 收不到审批卡回调，且不会退化为纯轮询。");
+      bad("src/transport/index.mjs 未导出 createWaker。");
       problems++;
     } else {
-      ok("长连接模块 createWaker 可加载。首启失败或 SDK 放弃重连时会退避重试，同一时刻只保持一条连接");
+      ok("事件唤醒模块 createWaker 可加载");
     }
   } catch (e) {
-    bad("长连接模块不可用（" + e.message + "）。hub 角色不会退化为纯轮询。");
+    bad("事件唤醒模块不可用（" + e.message + "）。");
     problems++;
   }
   try {
@@ -133,7 +118,7 @@ export async function hubDoctor(configDir) {
       bad("结果呈递模块不可用");
       problems++;
     } else {
-      ok("结果呈递：归属于本节点或主节点的任务回执（completed / failed / rejected / input-required）写入 present_queue.jsonl，由本机 Agent 经 lah present（可 --wait）取走，去重键记在 present_state.json 与线上 Metadata");
+      ok("结果呈递：归属于本节点或主节点的任务回执（completed / failed / rejected / input-required）写入 present_queue.jsonl，由本机 Agent 经 ah present（可 --wait）取走，去重键记在 present_state.json 与线上 Metadata");
     }
     if (typeof stale.StaleService !== "function") {
       bad("陈旧告警模块不可用");
@@ -161,7 +146,7 @@ export async function hubDoctor(configDir) {
     bad("配置目录不可写，呈递去重和陈旧告警无法记住已发送项");
     problems++;
   }
-  info("建单：lah task create --to <node> --cap <cap_id>。先写 instruction 与 Parts，最后写 Tasks 行。doctor 不写表。");
+  info("建单：ah task create --to <node> --cap <cap_id>。先写 instruction 与 Parts，最后写 Tasks 行。doctor 不写表。");
   return problems;
 }
 
@@ -175,11 +160,8 @@ export async function runHub(cfg, log = logLine, hooks = {}) {
     log("读取机主配置失败（进程不退出）：" + (e?.message ?? e));
   }
   const isStandalone = cfg.busType === "sqlite" || typeof cfg.bus?.attachBroker === "function";
-  if (!ownerOpenId && !isStandalone) {
-    log("hub 未配置机主 open_id。不发卡；审批回调一律拒绝。不会因此退出。");
-  }
   if (cfg.events === false) {
-    log("hub 角色忽略 events=false：保持实时事件通道，禁止退化为纯轮询。");
+    log("hub 角色忽略 events=false：保持实时事件唤醒通道，不退化为纯轮询。");
   }
   // 审批签名密钥：没有就生成。hub 自己认领任务时也按这把公钥验签，不认没签名的决定。
   let signKey = null;
@@ -386,9 +368,6 @@ export class HubRuntime {
     let mine = null;
     const waker = await factory(this.cfg, {
       onWake: () => this.wakeNow(),
-      extraHandlers: {
-        "card.action.trigger": (data) => this.approval.handleCardAction(data),
-      },
       onStatus: (up) => {
         if (this._stopped || !mine || this._waker !== mine) return;
         this._wsUp = !!up;
@@ -398,7 +377,7 @@ export class HubRuntime {
           this.log("hub 实时事件通道已就绪");
           return;
         }
-        this.log("hub 实时事件通道未就绪（首次未连上或 SDK 不再重连）。将退避后重建连接，不会改为纯轮询。");
+        this.log("hub 实时事件通道未就绪，将退避后重连。");
         this.closeConnection();
         this.scheduleRetry();
       },
@@ -408,9 +387,9 @@ export class HubRuntime {
       try { waker?.stop?.(); } catch { /* 退出时拆掉刚建的实例 */ }
       return;
     }
-    if ((waker?.mode !== "ws" && waker?.mode !== "longpoll") || typeof waker.start !== "function") {
+    if (waker?.mode !== "longpoll" || typeof waker.start !== "function") {
       try { waker?.stop?.(); } catch { /* 退路实例不要留着 */ }
-      throw new Error(`hub 角色需要 ws 或 longpoll 唤醒器，实际是 ${waker?.mode ?? "未知"}。拒绝改用轮询。`);
+      throw new Error(`hub 角色需要 longpoll 唤醒器，实际是 ${waker?.mode ?? "未知"}。`);
     }
     mine = waker;
     this._waker = waker;
@@ -421,11 +400,7 @@ export class HubRuntime {
       throw e;
     }
     if (this._waker === waker) {
-      if (waker.mode === "longpoll") {
-        this.log(`hub 本地事件代理已挂载。对账间隔 ${this.sweepSec()}s。`);
-      } else {
-        this.log(`hub 长连接已发起，card.action.trigger 已注册。对账间隔 ${this.sweepSec()}s。SDK 若放弃重连，将退避后只重建一条，不使用 pollSec。`);
-      }
+      this.log(`hub 事件唤醒器已挂载（longpoll）。对账间隔 ${this.sweepSec()}s。`);
     }
   }
 
@@ -486,7 +461,7 @@ export class HubRuntime {
   }
 
   async run() {
-    this.log(`hub daemon starting on ${this.cfg.node}（对账 ${this.sweepSec()}s，长连接必需，不使用 poll 退路；含能力登记与接单、审批、呈递、陈旧告警、later 复查；本机计划由内核本地调度）`);
+    this.log(`hub daemon starting on ${this.cfg.node}（对账 ${this.sweepSec()}s，SQLite + HTTP 长轮询事件驱动；含能力登记与接单、审批、呈递、陈旧告警、later 复查；本机计划由内核本地调度）`);
     // hub 不走 Kernel.run。分钟定时器仍要起：到点经 kernel._notifyWake 抬这里的 _wakeFlag。
     this.kernel?.startMinuteTimer();
     try {
@@ -500,7 +475,7 @@ export class HubRuntime {
       this._wakeFlag = false;
       this.refreshOwner();
       if (!this._wsUp) {
-        this.log("hub 长连接未就绪：本轮只做对账。正在按退避重建一条长连接，不会改为纯轮询，也不会同时保持两条。");
+        this.log("hub 事件唤醒器尚未就绪：本轮先执行对账扫表，同时继续等待/重连事件通道。");
       }
       try {
         await this.kernel.sweepOnce();

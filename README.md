@@ -1,8 +1,8 @@
 # a2a-hub
 
-**零飞书 API 配额消耗、零外部运行时依赖的独立多 Agent 编排中台**——完整保留 A2A 八态协议、三层寻址（Node → Worker → Skill）、指令与数据分离和 ed25519 签名审批，并将总线升级为 **SQLite WAL + 出站 HTTP 长轮询（`GET /api/v1/poll`）**，内置 **可视化 Web 控制台**与 **LoopForge 多阶段 SOP 闭环编排引擎**，一台 Mac mini 或轻量服务器常驻即可调度全球接入的终端节点与独立 Agent。
+**零外部运行时依赖的独立多 Agent 编排中台**——基于 **A2A 八态数据模型**、**三层寻址（Node → Worker → Skill）**、**指令与数据分离**和 **ed25519 签名审批**，统一采用 **SQLite WAL + HTTP 网关（出站长轮询 + 外部 HTTP Agent 接入）**，内置 **可视化 Web 控制台**与 **LoopForge 多阶段 SOP 闭环编排引擎**，一台 Mac mini 或轻量服务器常驻即可调度本机 Agent、远程电脑节点以及纯 HTTP 云端 Agent（如 **Muse**、**Grok Bot**）。
 
-[English](README.en.md) · [中台标准](docs/standard.md) · [配置与 CLI 手册](docs/configuration.md) · [架构设计](docs/architecture.md) · [安全模型](SECURITY.md) · [变更记录](CHANGELOG.md)
+[English](README.en.md) · [中台标准](docs/standard.md) · [配置与 CLI 手册](docs/configuration.md) · [外部 HTTP Agent 手册](docs/protocol-node-runbook.md) · [架构设计](docs/architecture.md) · [安全模型](SECURITY.md) · [变更记录](CHANGELOG.md)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Node >= 24](https://img.shields.io/badge/Node-%3E%3D24-339933.svg)
@@ -12,17 +12,17 @@
 
 ## 为什么做 `a2a-hub`
 
-原版 `lark-a2a-hub` 以飞书多维表格作共享总线，验证了 A2A 状态机与零入站边缘节点的可靠性，但受限于飞书应用 API 月度调用配额与平台依赖。`a2a-hub` 将这套生产级调度内核全面独立化：
-
-- **常驻中枢（Mac mini / Linux / 云主机），免飞书配额**：`hub` 角色直接启动本地 SQLite WAL（Node >= 24 内置 `node:sqlite`）+ HTTP API 与静态控制台（默认监听 `0.0.0.0:8787`），无任何第三方 npm 运行时依赖（`dependencies: {}`）。
-- **边缘节点纯出站 HTTP 长轮询**：远端机器（家用 Mac、办公电脑、GPU 工作站、Cloud Agent）通过 `GET /api/v1/poll` 维持出站长轮询，收到新任务、审批决策或问答答复时**毫秒级唤醒**；节点侧绝不开监听端口，无需公网 IP 或内网穿透。
+- **常驻中枢（Mac mini / Linux / 云主机），免外部数据库**：`hub` 角色直接启动本地 SQLite WAL（Node >= 24 内置 `node:sqlite`）+ HTTP API 与静态控制台（默认监听 `0.0.0.0:8787`），无任何第三方 npm 运行时依赖（`dependencies: {}`）。
+- **两类终端统一走 HTTP，节点零入站端口**：
+  - **宿主守护节点（`ah join`）**：远端电脑（办公 Mac、Linux 工作站、GPU 服务器等）运行轻量守护进程 `ah daemon`，通过 `GET /api/v1/poll` 维持纯出站长轮询，收到新任务、审批或追问答复时毫秒级唤醒并拉起本机 CLI/脚本。
+  - **纯 HTTP 外部 Agent（Muse / Grok Bot 等）**：云端或定时唤醒、无常驻守护进程的纯 Agent 无需任何本地壳，直接调 `GET /.well-known/agent.json` 自发现，经 `/api/v1/agents/register` 注册、`GET /api/v1/agents/{node}/poll`（支持短轮询与长轮询）取单、`GET /api/v1/agents/{node}/updates` 跟单（可做 **Leader 派单/跟单**），并走 `/api/v1/tasks/{id}/claim|heartbeat|ask|auth|complete|fail` 完成全生命周期闭环。
 - **内置 Web 控制台**：单文件零构建内嵌于中台（打开 `http://<hub>:8787` 即可使用）：
-  - **总览与实时拓扑**：查看在线长轮询节点、排队/运行/阻塞任务与八态流转分布；
-  - **Agent Hub 名片矩阵**：按 `Node / Worker / Skill` 三层展示各节点已登记能力、`Receive_Mode`、`Availability` 与可派发状态；
-  - **A2A 对话流、在线审批与追问**：查看任务全历史（Tasks / Messages / Parts / Runs / Artifacts），对 `auth-required` 一键签名批准/驳回，对 `input-required` 直接在线回复续跑；
+  - **总览与实时拓扑**：同屏展示宿主长轮询节点与纯 HTTP Agent（Leader / Worker）在线状态、排队/运行/阻塞任务分布；
+  - **Agent Hub 名片矩阵**：按 `Node / Worker / Skill` 三层展示各节点能力、`Receive_Mode`、`Availability` 与外部 HTTP Agent 接入参考；
+  - **A2A 对话流、在线审批与追问**：查看任务全历史（Tasks / Messages / Parts / Runs / Artifacts），对 `auth-required` 一键 ed25519 签名批准/驳回，对 `input-required` 在线回复续跑；
   - **LoopForge SOP 编排室**：可视化创建并追踪多阶段自动闭环（`plan → code → verify`），支持阶段失败重跑与回跳。
-- **LoopForge 风格多阶段 SOP 闭环**：内置 `LoopService` 与 `lah loop` CLI，同一 `Context_ID` 下自动推进多阶段任务，借 `acceptance.mjs` 验收结果驱动 `retry` / `goto:<stage_id>` / `abort`，受 `Max_Iterations` 与 `HOP_LIMIT=8` 双重熔断保护。
-- **可选多通道提醒 + 向下兼容飞书多维表格**：`node.json` 配置 `notifications` 后可向飞书普通群机器人 Webhook（不占应用 API 配额）、Bark、Telegram 或通用 Webhook 推送审批/问答/终态/陈旧告警；已有飞书多维表格环境仍可通过 `busType: "feishu"` 无缝运行。
+- **LoopForge 风格多阶段 SOP 闭环**：内置 `LoopService` 与 `ah loop` CLI，同一 `Context_ID` 下自动推进多阶段任务，借 `acceptance.mjs` 验收结果驱动 `retry` / `goto:<stage_id>` / `abort`，受 `Max_Iterations` 与 `HOP_LIMIT=8` 双重熔断保护。
+- **可选多通道提醒**：`node.json` 配置 `notifications` 后可向飞书普通群机器人 Webhook、Bark、Telegram 或通用 Webhook 推送审批/问答/终态/陈旧告警。
 
 ---
 
@@ -30,16 +30,17 @@
 
 ```mermaid
 flowchart LR
-    WEB["Web 控制台 / CLI (lah)"] --> HUB
+    WEB["Web 控制台 / CLI (ah)"] --> HUB
     subgraph HUB["常驻中台 Hub（如 Mac mini :8787）"]
         direction TB
         SQL[("SQLite WAL 总线\ntasks · messages · parts · runs\nartifacts · agentCards · rules · loops")]
-        API["HTTP REST API + LongPollBroker\nGET /api/v1/poll · ed25519 签名 · LoopService"]
+        API["HTTP REST API + LongPollBroker + agent-gateway\nGET /.well-known/agent.json · ed25519 签名 · LoopService"]
         SQL <--> API
     end
-    HUB <-->|"出站 HTTP 长轮询（毫秒级唤醒 + 15min 兜底）"| N1["远端节点：办公 Mac (host)"]
-    HUB <-->|"出站 HTTP 长轮询（agent_inbox.jsonl）"| N2["远端节点：独立 Agent (agent)"]
-    HUB -.->|"可选 Webhook（飞书群机器人 / Bark / Telegram）"| OWNER["机主通知"]
+    HUB <-->|"出站 HTTP 长轮询（GET /api/v1/poll）"| N1["远端电脑：办公主机 (ah daemon)"]
+    HUB <-->|"HTTP 短/长轮询（/api/v1/agents/grok-bot/poll）"| N2["云端 Worker：Grok Bot (HTTP Agent)"]
+    HUB <-->|"HTTP 派单 + 跟单（/api/v1/tasks & /updates）"| N3["云端 Leader：Muse (HTTP Agent)"]
+    HUB -.->|"可选 Webhook（群机器人 / Bark / Telegram）"| OWNER["机主通知"]
 ```
 
 ### 1. 三层寻址：Node → Worker → Skill
@@ -81,7 +82,7 @@ curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install
 curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --join "http://<HUB_API_TOKEN>@<HUB_IP>:8787"
 
 # Windows PowerShell：
-$env:LAH_JOIN = "http://<HUB_API_TOKEN>@<HUB_IP>:8787"; irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex
+$env:AH_JOIN = "http://<HUB_API_TOKEN>@<HUB_IP>:8787"; irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex
 ```
 
 `--join` 会自动将 Token 写入 `0600` 权限的 `app.env`（不进入 `node.json`）、从 `GET /api/v1/health` 同步 `hubPublicKey`，并注册后台长轮询服务。
@@ -93,15 +94,48 @@ $env:LAH_JOIN = "http://<HUB_API_TOKEN>@<HUB_IP>:8787"; irm https://raw.githubus
 ```bash
 git clone https://github.com/backtomyfuture/a2a-hub.git
 cd a2a-hub
-# 如需全局注册 `lah` / `a2a-hub` / `ahub` / `hub-node` 命令（可选）：
+# 如需全局注册 `ah` / `a2a-hub` / `ahub` / `lah` / `hub-node` 命令（可选）：
 npm link
 
 # 1) 在 Mac mini / 主机一行启动 Hub（加 --service 可顺便注册开机自启）：
-node bin/lah.mjs up
+node bin/ah.mjs up
 
 # 2) 在其他机器一行接入节点（加 --service 注册开机自启）：
-node bin/lah.mjs join http://<HUB_API_TOKEN>@<HUB_IP>:8787
+node bin/ah.mjs join http://<HUB_API_TOKEN>@<HUB_IP>:8787
 ```
+
+### 方式 C：纯 HTTP 外部 Agent 接入（Muse / Grok Bot，无需守护进程）
+
+对于托管在外部云端、或靠自身定时轮询驱动的纯 Agent，直接通过标准 HTTP + Bearer Token 接入中台（免鉴权自发现地址 `GET http://<HUB_IP>:8787/.well-known/agent.json`）：
+
+```bash
+# 1) 注册为 Leader（如 Muse：仅派单与跟单）或 Worker（如 Grok Bot：认领并执行）
+curl -X POST http://<HUB_IP>:8787/api/v1/agents/register \
+  -H "Authorization: Bearer <HUB_API_TOKEN>" -H "Content-Type: application/json" \
+  -d '{"node":"muse","role":"leader","kind":"agent","receive_mode":"http-poll"}'
+
+curl -X POST http://<HUB_IP>:8787/api/v1/agents/register \
+  -H "Authorization: Bearer <HUB_API_TOKEN>" -H "Content-Type: application/json" \
+  -d '{"node":"grok-bot","role":"worker","kind":"agent","receive_mode":"http-poll","caps":[{"skill_id":"research","skill_name":"Grok 搜索"}]}'
+
+# 2) Muse 派单并跟单（/updates 支持 ?timeout=25 长轮询，也支持短轮询）
+curl -X POST http://<HUB_IP>:8787/api/v1/tasks \
+  -H "Authorization: Bearer <HUB_API_TOKEN>" -H "Content-Type: application/json" \
+  -d '{"from":"muse","to":"grok-bot","cap":"research","text":"调研 A2A 网关最佳方案"}'
+curl -H "Authorization: Bearer <HUB_API_TOKEN>" \
+  "http://<HUB_IP>:8787/api/v1/agents/muse/updates?timeout=25"
+
+# 3) Grok Bot 轮询取单 -> 认领 -> 提问/审批/交付
+curl -H "Authorization: Bearer <HUB_API_TOKEN>" \
+  "http://<HUB_IP>:8787/api/v1/agents/grok-bot/poll?timeout=25"
+curl -X POST "http://<HUB_IP>:8787/api/v1/tasks/<TASK_ID>/claim" \
+  -H "Authorization: Bearer <HUB_API_TOKEN>" -H "Content-Type: application/json" -d '{"node":"grok-bot"}'
+curl -X POST "http://<HUB_IP>:8787/api/v1/tasks/<TASK_ID>/complete" \
+  -H "Authorization: Bearer <HUB_API_TOKEN>" -H "Content-Type: application/json" \
+  -d '{"node":"grok-bot","text":"已完成调研","artifact":"https://example.com/report.md"}'
+```
+
+更多接口说明见 [外部 HTTP Agent 手册](docs/protocol-node-runbook.md)。
 
 <details>
 <summary>高级用法：手动分步 setup / 自定义参数 / 仅本地调试</summary>
@@ -109,7 +143,7 @@ node bin/lah.mjs join http://<HUB_API_TOKEN>@<HUB_IP>:8787
 1) 初始化独立中台 Hub：
 
 ```bash
-node bin/lah.mjs setup \
+node bin/ah.mjs setup \
   --role hub \
   --bus sqlite \
   --node mac-mini-hub \
@@ -120,15 +154,15 @@ node bin/lah.mjs setup \
   --api-token "<YOUR_SECRET_TOKEN>" \
   --yes
 
-node bin/lah.mjs doctor --role hub
-node bin/lah.mjs daemon --role hub
-node bin/lah.mjs service --role hub
+node bin/ah.mjs doctor --role hub
+node bin/ah.mjs daemon --role hub
+node bin/ah.mjs service --role hub
 ```
 
 2) 手动接入远端 HTTP 长轮询节点（参考样例 [`config/node.remote.example.json`](config/node.remote.example.json) 与 [`config/commands.example.json`](config/commands.example.json)）：
 
 ```bash
-node bin/lah.mjs setup \
+node bin/ah.mjs setup \
   --role node \
   --bus http \
   --hub-url http://<HUB_IP>:8787 \
@@ -139,39 +173,50 @@ node bin/lah.mjs setup \
   --prefix e1 \
   --yes
 
-node bin/lah.mjs doctor
-node bin/lah.mjs daemon
+node bin/ah.mjs doctor
+node bin/ah.mjs daemon
 ```
 
 </details>
 
 ---
 
-## 常用命令（CLI 简称 `lah` / `a2a-hub` / `ahub` / `hub-node`）
+## Agent Skill 分工（2×2 四象限）
+
+按「控制发单 / 认领执行」与「本地有 `ah` CLI / 无 CLI 纯 HTTP」拆分为 4 套互不干扰的 Skill 模板，`setup` / `update` 只会向本机 `~/.agents/skills/` 安装当前机器所需的 CLI Skill：
+
+| 角色 \ 运行形态 | 装有 `ah` CLI（本地安装） | 无 CLI 纯 HTTP（云端 / 独立 Agent） |
+|---|---|---|
+| **控制端 / Leader**（查名册、派单、SOP 编排、收结果） | [`skills/ah/SKILL.md`](skills/ah/SKILL.md) | [`skills/a2a-leader/SKILL.md`](skills/a2a-leader/SKILL.md)（`GET /api/v1/skills/a2a-leader`） |
+| **执行端 / Worker**（取单、提问、审批、回执） | [`skills/ah-inbox/SKILL.md`](skills/ah-inbox/SKILL.md)（仅 `kind=agent` 自动安装） | [`skills/a2a-worker/SKILL.md`](skills/a2a-worker/SKILL.md)（`GET /api/v1/skills/a2a-worker`） |
+
+---
+
+## 常用命令（CLI 简称 `ah`，兼容别名 `a2a-hub` / `ahub` / `lah` / `hub-node`）
 
 默认配置目录为 `~/.hub-node`（可通过 `--config <dir>` 或环境变量 `HUB_NODE_HOME` 指定）。完整参数见 [配置与 CLI 手册](docs/configuration.md)。
 
 | 分类 | 命令 | 用途 |
 |---|---|---|
-| **一键部署** | `lah up [--listen …] [--service] [--no-daemon]` | 一键初始化 SQLite Hub（自动生成 Token 与签名密钥）并启动 |
-| | `lah join <hub_url> [--node …] [--service] [--no-daemon]` | 一键抽离凭据、拉取 Hub 公钥并启动出站长轮询节点 |
-| **初始化与运维** | `lah setup [--role node\|hub] [--bus sqlite\|http\|feishu]` | 向导：初始化 SQLite 中台、远端 HTTP 节点或飞书多维表格节点 |
-| | `lah daemon [--role node\|hub]` | 启动节点或 Hub 全功能守护进程（含 HTTP 网关、Web 控制台、Loop 引擎） |
-| | `lah doctor [--role node\|hub]` | 只读自检：配置、`commands.json` 能力、总线/Hub 连通性、自启状态 |
-| | `lah service [--role node\|hub] [--remove]` | 注册或卸载用户级开机自启（launchd / systemd / Windows 任务计划） |
-| | `lah inventory` | 只读盘点本节点名片与按状态汇总的任务 |
-| | `lah reconcile` | 单次对账巡检后退出 |
-| **任务与呈递** | `lah task create --to <node> [--worker <W>] [--cap <skill>] --text …` | 校验名册并向指定节点/Worker 派单 |
-| | `lah present [--wait <秒>] [--task <ID>] [--pop]` | 读取或阻塞等待本机 `present_queue.jsonl` 结果与提问 |
-| | `lah task reply --task <ID> --text …` | 回复 `input-required` 追问并恢复原任务执行 |
-| | `lah task cancel --task <ID> [--text …]` | 撤回未终态任务 |
-| | `lah task why <ID> [--json]` | 只读排障：完整时间线、验收结论与本地在途/重投账本 |
-| **LoopForge SOP** | `lah loop templates` | 列出内置多阶段 SOP 模板（如 `plan-code-verify`） |
-| | `lah loop create --title … --goal … --to <node> [--template …]` | 启动多阶段自动闭环并追踪验收反馈回跳 |
-| | `lah loop ls [--json]` / `lah loop show <Loop_ID>` | 查看全网 SOP 闭环进度、迭代轮次与历史阶段记录 |
-| | `lah loop cancel <Loop_ID> [--text …]` | 取消闭环及其当前在途子任务 |
-| **本地调度与 Agent** | `lah schedule ls \| add \| rm \| enable \| disable` | 管理节点本地 `schedules.json` 定时任务 |
-| | `lah inbox [--pop] [--json]` / `lah inbox done \| ask \| fail \| auth` | 独立 Agent 节点读取收件箱与回报状态 |
+| **一键部署** | `ah up [--listen …] [--service] [--no-daemon]` | 一键初始化 SQLite Hub（自动生成 Token 与签名密钥）并启动 |
+| | `ah join <hub_url> [--node …] [--service] [--no-daemon]` | 一键抽离凭据、拉取 Hub 公钥并启动出站长轮询节点 |
+| **初始化与运维** | `ah setup [--role node\|hub] [--bus sqlite\|http]` | 向导：初始化 SQLite 中台或远端 HTTP 长轮询节点 |
+| | `ah daemon [--role node\|hub]` | 启动节点或 Hub 全功能守护进程（含 HTTP 网关、Web 控制台、Loop 引擎） |
+| | `ah doctor [--role node\|hub]` | 只读自检：配置、`commands.json` 能力、总线/Hub 连通性、自启状态 |
+| | `ah service [--role node\|hub] [--remove]` | 注册或卸载用户级开机自启（launchd / systemd / Windows 任务计划） |
+| | `ah inventory` | 只读盘点本节点名片与按状态汇总的任务 |
+| | `ah reconcile` | 单次对账巡检后退出 |
+| **任务与呈递** | `ah task create --to <node> [--worker <W>] [--cap <skill>] --text …` | 校验名册并向指定节点/Worker 派单 |
+| | `ah present [--wait <秒>] [--task <ID>] [--pop]` | 读取或阻塞等待本机 `present_queue.jsonl` 结果与提问 |
+| | `ah task reply --task <ID> --text …` | 回复 `input-required` 追问并恢复原任务执行 |
+| | `ah task cancel --task <ID> [--text …]` | 撤回未终态任务 |
+| | `ah task why <ID> [--json]` | 只读排障：完整时间线、验收结论与本地在途/重投账本 |
+| **LoopForge SOP** | `ah loop templates` | 列出内置多阶段 SOP 模板（如 `plan-code-verify`） |
+| | `ah loop create --title … --goal … --to <node> [--template …]` | 启动多阶段自动闭环并追踪验收反馈回跳 |
+| | `ah loop ls [--json]` / `ah loop show <Loop_ID>` | 查看全网 SOP 闭环进度、迭代轮次与历史阶段记录 |
+| | `ah loop cancel <Loop_ID> [--text …]` | 取消闭环及其当前在途子任务 |
+| **本地调度与 Agent** | `ah schedule ls \| add \| rm \| enable \| disable` | 管理节点本地 `schedules.json` 定时任务 |
+| | `ah inbox [--pop] [--json]` / `ah inbox done \| ask \| fail \| auth` | 独立 Agent 节点读取收件箱与回报状态 |
 
 ---
 

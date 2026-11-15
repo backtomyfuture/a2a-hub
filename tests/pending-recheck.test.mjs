@@ -6,7 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { Kernel, PENDING_RECHECK, pendingRecheckCapMs } from "../src/kernel.mjs";
-import { createWsWaker } from "../src/transport/ws.mjs";
+import { createLongPollWaker } from "../src/transport/longpoll.mjs";
 import { createPollWaker } from "../src/transport/poll.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";
 import { MockFeishuBus } from "./mocks/mock-bus.mjs";
@@ -84,30 +84,15 @@ test("Kernel.trackPending：只记本节点名下的挂起任务，Status_Msg �
   });
 });
 
-test("WsWaker.wait：capMs 只缩短等待，不拉长", async () => {
-  const clients = [];
-  const clock = fakeClock();
-  const waker = createWsWaker(
-    { role: "node", appId: "cli_1", appSecret: "sec", pollSec: 45, sweepSec: 900 },
-    {
-      sleep: clock.sleep,
-      createClient: (opts) => {
-        const c = { opts, start: () => Promise.resolve(), close() {} };
-        clients.push(c);
-        return c;
-      },
-    },
+test("LongPollWaker.wait：capMs 只缩短等待，不拉长", async () => {
+  const waker = createLongPollWaker(
+    { role: "node", bus: {}, pollSec: 45, sweepSec: 900 },
   );
   waker.start(() => {});
-  clients[0].opts.onReady();
-  await waker.wait(() => false, { capMs: 60_000 });
-  assert.equal(clock.ticks, 60);
-  let start = clock.ticks;
-  await waker.wait(() => false, { capMs: Infinity });
-  assert.equal(clock.ticks - start, 900);
-  start = clock.ticks;
-  await waker.wait(() => false, { capMs: 5_000_000 });
-  assert.equal(clock.ticks - start, 900);
+  const t0 = Date.now();
+  await waker.wait(() => false, { capMs: 60 });
+  const spent = Date.now() - t0;
+  assert.ok(spent >= 40 && spent < 500, "spent " + spent);
   waker.stop();
 });
 

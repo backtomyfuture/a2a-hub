@@ -509,17 +509,24 @@ function renderOverview(d) {
     html += '</div>';
   }
 
-  html += '<div class="section-title"><span>长轮询终端连接状态</span><span class="muted mono">HTTP Long-Polling · 零入站端口</span></div>';
+  html += '<div class="section-title"><span>在线节点与外部 Agent 连接</span><span class="muted mono">HTTP Poll / Long-Poll · 零入站端口</span></div>';
   if (!nodes.length) {
-    html += '<div class="card muted">暂无远程长轮询终端接入。请在远程机器执行 <span class="mono">lah join http://&lt;mac-mini-ip&gt;:8787</span> 接入。</div>';
+    html += '<div class="card muted">暂无远程节点或外部 Agent 接入。远程电脑可执行 <span class="mono">ah join http://&lt;hub-ip&gt;:8787</span>，云端 Agent（如 Muse / Grok Bot）可调用 <span class="mono">POST /api/v1/agents/register</span> 接入。</div>';
   } else {
     html += '<div class="agent-grid">';
     for (const n of nodes) {
       const ago = Math.max(0, Math.round((Date.now() - n.lastSeenAt) / 1000));
-      html += '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;">'
+      const isAgent = n.kind === 'agent';
+      const statusText = n.polling ? '长轮询挂起中' : (n.online ? (n.mode === 'http-poll' ? 'HTTP 轮询在线' : '在线') : '离线');
+      const roleLabel = n.role === 'leader' ? 'Leader' : (n.role === 'hybrid' ? 'Leader+Worker' : (n.role === 'worker' ? 'Worker' : ''));
+      html += '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">'
         + '<div style="display:flex;align-items:center;gap:8px;font-weight:650;"><span class="dot ' + (n.online ? 'on' : 'err') + '"></span>' + esc(n.node) + '</div>'
-        + '<span class="badge ' + (n.online ? 'green' : 'red') + '">' + (n.polling ? '长轮询挂起中' : (n.online ? '在线' : '离线')) + '</span>'
-        + '</div><div class="muted mono" style="margin-top:8px;">addr: ' + esc(n.remoteAddr || '-') + ' · cursor: ' + esc(n.cursor) + ' · ' + ago + 's 前</div></div>';
+        + '<div style="display:flex;gap:6px;flex-wrap:wrap;">'
+        + '<span class="badge ' + (isAgent ? 'indigo' : '') + '">' + (isAgent ? 'HTTP Agent' : '宿主节点') + '</span>'
+        + (roleLabel ? '<span class="badge">' + esc(roleLabel) + '</span>' : '')
+        + '<span class="badge ' + (n.online ? 'green' : 'red') + '">' + statusText + '</span>'
+        + '</div>'
+        + '</div><div class="muted mono" style="margin-top:8px;">mode: ' + esc(n.mode || 'longpoll') + ' · addr: ' + esc(n.remoteAddr || '-') + ' · cursor: ' + esc(n.cursor) + ' · ' + ago + 's 前</div></div>';
     }
     html += '</div>';
   }
@@ -535,45 +542,89 @@ function renderOverview(d) {
 
 function renderAgents(d) {
   const cards = d.agentCards || [];
-  if (!cards.length) {
-    return '<div class="card muted">尚未登记任何 Agent 名片。启动 Hub 或接入节点后将自动同步 AgentCards。</div>';
-  }
-  const byNode = new Map();
-  for (const c of cards) {
-    const n = c.node || "unknown";
-    if (!byNode.has(n)) byNode.set(n, []);
-    byNode.get(n).push(c);
-  }
-  let html = "";
-  for (const [node, list] of byNode.entries()) {
-    const nodeDesc = list.find((x) => x.node_desc)?.node_desc || "";
-    const ver = list.find((x) => x.daemon_version)?.daemon_version || "";
-    html += '<div class="section-title"><span>节点：' + esc(node) + ' <span class="muted" style="font-weight:400;margin-left:8px;">' + esc(nodeDesc) + '</span></span>'
-      + '<span class="mono muted">' + esc(ver) + ' · ' + list.length + ' 项能力</span></div>';
+  const nodes = d.connectedNodes || [];
+  const connByNode = new Map(nodes.map((n) => [n.node, n]));
+  const cardNodes = new Set(cards.map((c) => c.node || 'unknown'));
+  const leaderOrUnlisted = nodes.filter((n) => !cardNodes.has(n.node));
+
+  let html = '';
+  if (leaderOrUnlisted.length) {
+    html += '<div class="section-title"><span>纯协调者 / 外部 HTTP Agent（无本地技能名片）</span><span class="muted mono">' + leaderOrUnlisted.length + ' 个连接</span></div>';
     html += '<div class="agent-grid">';
-    for (const c of list) {
-      const online = String(c.availability || "").toLowerCase() !== "offline";
-      const dispatchable = c.dispatchable === "Yes";
+    for (const n of leaderOrUnlisted) {
+      const ago = Math.max(0, Math.round((Date.now() - n.lastSeenAt) / 1000));
+      const roleLabel = n.role === 'leader' ? 'Leader（只派单/跟单）' : (n.role || 'HTTP Agent');
       html += '<div class="agent-card">'
         + '<div class="agent-head">'
-        + '<div><div class="agent-name">' + esc(c.skill_name || c.skill_id) + '</div><div class="mono muted">' + esc(c.cap_id) + '</div></div>'
-        + '<span class="badge ' + (online ? 'green' : 'red') + '">' + esc(c.availability || 'unknown') + '</span>'
+        + '<div><div class="agent-name">' + esc(n.node) + '</div><div class="mono muted">' + esc(roleLabel) + '</div></div>'
+        + '<span class="badge ' + (n.online ? 'green' : 'red') + '">' + (n.online ? (n.mode === 'http-poll' ? 'HTTP 在线' : '在线') : '离线') + '</span>'
         + '</div>'
-        + '<div class="muted" style="min-height:34px;">' + esc(c.description || "无说明") + '</div>'
+        + '<div class="muted">通过 HTTP 接入中台，可调用 <span class="mono">/api/v1/tasks</span> 派单并监听 <span class="mono">/api/v1/agents/' + esc(n.node) + '/updates</span>。</div>'
         + '<div style="display:flex;flex-wrap:wrap;gap:6px;">'
-        + (c.worker ? '<span class="badge indigo">Worker: ' + esc(c.worker) + '</span>' : '<span class="badge">节点本尊</span>')
-        + '<span class="badge">Skill: ' + esc(c.skill_id) + '</span>'
-        + '<span class="badge">SideEffect: ' + esc(c.side_effect || "-") + '</span>'
-        + '<span class="badge">' + esc(c.receive_mode || "event") + '</span>'
-        + '</div>'
-        + '<div style="display:flex;justify-content:flex-end;margin-top:auto;">'
-        + (dispatchable
-          ? '<button class="btn sm primary" onclick="openDispatchFor(\\'' + esc(c.node) + '\\',\\'' + esc(c.worker) + '\\',\\'' + esc(c.skill_id) + '\\')">向此能力派单</button>'
-          : '<span class="muted" style="font-size:12px;">已停派 (Dispatchable=No)</span>')
+        + '<span class="badge indigo">' + (n.kind === 'agent' ? 'HTTP Agent' : '宿主节点') + '</span>'
+        + '<span class="badge">' + esc(n.mode || 'http-poll') + '</span>'
+        + '<span class="badge">' + ago + 's 前活跃</span>'
         + '</div></div>';
     }
     html += '</div>';
   }
+
+  if (!cards.length && !leaderOrUnlisted.length) {
+    html += '<div class="card muted">尚未登记任何 Agent 名片或外部 Agent。启动 Hub、执行 <span class="mono">ah join</span>，或让外部 Agent 调用 <span class="mono">POST /api/v1/agents/register</span> 即可上线。</div>';
+  } else if (cards.length) {
+    const byNode = new Map();
+    for (const c of cards) {
+      const n = c.node || 'unknown';
+      if (!byNode.has(n)) byNode.set(n, []);
+      byNode.get(n).push(c);
+    }
+    for (const [node, list] of byNode.entries()) {
+      const nodeDesc = list.find((x) => x.node_desc)?.node_desc || '';
+      const ver = list.find((x) => x.daemon_version)?.daemon_version || '';
+      const conn = connByNode.get(node);
+      const connBadge = conn
+        ? ' <span class="badge ' + (conn.online ? 'green' : 'red') + '">' + (conn.polling ? '长轮询' : (conn.online ? (conn.mode || '在线') : '离线')) + '</span>'
+        : '';
+      html += '<div class="section-title"><span>节点：' + esc(node) + connBadge + ' <span class="muted" style="font-weight:400;margin-left:8px;">' + esc(nodeDesc) + '</span></span>'
+        + '<span class="mono muted">' + esc(ver) + ' · ' + list.length + ' 项能力</span></div>';
+      html += '<div class="agent-grid">';
+      for (const c of list) {
+        const online = String(c.availability || '').toLowerCase() !== 'offline';
+        const dispatchable = c.dispatchable === 'Yes';
+        html += '<div class="agent-card">'
+          + '<div class="agent-head">'
+          + '<div><div class="agent-name">' + esc(c.skill_name || c.skill_id) + '</div><div class="mono muted">' + esc(c.cap_id) + '</div></div>'
+          + '<span class="badge ' + (online ? 'green' : 'red') + '">' + esc(c.availability || 'unknown') + '</span>'
+          + '</div>'
+          + '<div class="muted" style="min-height:34px;">' + esc(c.description || '无说明') + '</div>'
+          + '<div style="display:flex;flex-wrap:wrap;gap:6px;">'
+          + (c.worker ? '<span class="badge indigo">Worker: ' + esc(c.worker) + '</span>' : '<span class="badge">节点本尊</span>')
+          + '<span class="badge">Skill: ' + esc(c.skill_id) + '</span>'
+          + '<span class="badge">SideEffect: ' + esc(c.side_effect || '-') + '</span>'
+          + '<span class="badge">' + esc(c.receive_mode || 'http-poll') + '</span>'
+          + '</div>'
+          + '<div style="display:flex;justify-content:flex-end;margin-top:auto;">'
+          + (dispatchable
+            ? '<button class="btn sm primary" onclick="openDispatchFor(\\'' + esc(c.node) + '\\',\\'' + esc(c.worker) + '\\',\\'' + esc(c.skill_id) + '\\')">向此能力派单</button>'
+            : '<span class="muted" style="font-size:12px;">已停派 (Dispatchable=No)</span>')
+          + '</div></div>';
+      }
+      html += '</div>';
+    }
+  }
+
+  html += '<div class="section-title"><span>统一接入参考（宿主守护进程 &amp; 云端 Agent &amp; 4 类 Skill）</span><span class="mono muted">GET /.well-known/agent.json</span></div>';
+  html += '<div class="card"><div class="muted" style="line-height:1.7;">'
+    + '<div><strong>1. 固定电脑 / 本地 Agent 宿主：</strong><span class="mono">ah join http://&lt;hub-ip&gt;:8787</span>（长轮询常驻，零入站端口）。</div>'
+    + '<div><strong>2. 云端 / 定时 Agent（如 Muse、Grok Bot）：</strong></div>'
+    + '<div class="mono" style="margin-top:4px;">POST /api/v1/agents/register · GET /api/v1/agents/{node}/poll · GET /api/v1/agents/{node}/updates</div>'
+    + '<div class="mono">POST /api/v1/tasks · POST /api/v1/tasks/{id}/claim|heartbeat|ask|auth|complete|fail</div>'
+    + '<div style="margin-top:8px;"><strong>3. 2×2 四类 Agent Skill 分工</strong>（可通过 <span class="mono">GET /api/v1/skills</span> 或 <span class="mono">GET /api/v1/skills/{name}</span> 拉取）：</div>'
+    + '<div class="mono" style="margin-top:4px;">· ah（控制端 + CLI）：Hub / 工作机主控终端派单与闭环编排</div>'
+    + '<div class="mono">· ah-inbox（执行端 + CLI）：本机独立 Agent 消费 inbox（kind=agent）</div>'
+    + '<div class="mono">· a2a-leader（控制端 + 纯 HTTP）：云端 Muse Leader 派单与验收</div>'
+    + '<div class="mono">· a2a-worker（执行端 + 纯 HTTP）：云端 Grok Bot 轮询认领与回执</div>'
+    + '</div></div>';
   return html;
 }
 

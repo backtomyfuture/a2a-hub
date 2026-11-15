@@ -1,4 +1,4 @@
-// why.mjs —— lah task why 单任务全链来龙去脉与时间线拼装。
+// why.mjs —— ah task why 单任务全链来龙去脉与时间线拼装。
 // 职责：
 // 1. 完全只读：复用 FeishuBus 现有 listRecords 接口，不写任何表，不新增依赖，不开端口；
 // 2. 状态与溯源：汇总 Tasks 当前状态、认领节点、重试次数、待批/提问消息与跳数；
@@ -14,7 +14,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { acceptanceForTask, acceptanceLine } from "./acceptance.mjs";
 import { pickSignedDecision } from "./approval-sign.mjs";
-import { f1 } from "./bus/feishu.mjs";
+import { f1 } from "./bus/tables.mjs";
 import { readInbox } from "./inbox.mjs";
 
 // 解析时间戳为毫秒数。兼容 ISO 8601、空格分隔格式与数字。

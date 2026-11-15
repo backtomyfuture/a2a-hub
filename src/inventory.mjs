@@ -1,7 +1,7 @@
 // inventory —— 只读盘点本节点名片与任务。不创建、不更新、不删除任何行。
 
 import { loadConfig, receiveModeOf } from "./kernel.mjs";
-import { f1 } from "./bus/feishu.mjs";
+import { f1 } from "./bus/tables.mjs";
 
 const ok = (msg) => console.log("  ✓ " + msg);
 const warn = (msg) => console.log("  ! " + msg);

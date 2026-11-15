@@ -1,10 +1,10 @@
-// CLI 调度子命令实现：lah schedule (ls|add|rm|enable|disable|register) 与 lah task begin。
+// CLI 调度子命令实现：ah schedule (ls|add|rm|enable|disable|register) 与 ah task begin。
 // 调度计划保存在本机 schedules.json，由 LocalScheduleService 读取触发；
 // register 与 begin 供 Agent 类自带时钟终端使用，通过 Rules 镜像和总线收件箱协作。
 
 import fs from "node:fs";
 import path from "node:path";
-import { f1 } from "./bus/feishu.mjs";
+import { f1 } from "./bus/tables.mjs";
 import { capIdsOf, capPrefixFromNodeJson, controlKeysIn, loadConfig } from "./config.mjs";
 import { createTask } from "./hub/create.mjs";
 import { formatOccurrenceKey, latestOccurrence, parseCron, resolveScheduleTz, wallClock, DEFAULT_SCHEDULE_TZ } from "./schedule-cron.mjs";
@@ -113,7 +113,7 @@ export async function refreshMirror({ configDir, bus, now = () => Date.now(), lo
   await mirror.sync({ plans, state, tz: cfg.tz, statePath });
 }
 
-// lah schedule ls [--config <dir>] [--json]
+// ah schedule ls [--config <dir>] [--json]
 export async function scheduleLs({ configDir, json = false, now = () => Date.now(), stdout = (s) => process.stdout.write(s) } = {}) {
   const schedules = readSchedules(configDir);
   const state = readLocalState(configDir);
@@ -167,7 +167,7 @@ export async function scheduleLs({ configDir, json = false, now = () => Date.now
   return items;
 }
 
-// lah schedule add --id <id> --cron "<五段>" --cap <cap_id> --text <指令> [--approval auto|notify|approve] [--disabled]
+// ah schedule add --id <id> --cron "<五段>" --cap <cap_id> --text <指令> [--approval auto|notify|approve] [--disabled]
 export async function scheduleAdd({
   configDir, id, cron, cap, text, approval, disabled = false, rawExtra = {},
   bus, now = () => Date.now(), stdout = (s) => process.stdout.write(s), log = () => {},
@@ -242,12 +242,12 @@ export async function scheduleAdd({
   }
 }
 
-// lah schedule rm <id>
+// ah schedule rm <id>
 export async function scheduleRm({
   configDir, id, bus, now = () => Date.now(), stdout = (s) => process.stdout.write(s), log = () => {},
 } = {}) {
   const normId = String(id ?? "").trim();
-  if (!normId) throw new Error("lah schedule rm 需要指定 <id>");
+  if (!normId) throw new Error("ah schedule rm 需要指定 <id>");
 
   const schedules = readSchedules(configDir);
   const idx = schedules.findIndex((p) => p.id === normId);
@@ -264,12 +264,12 @@ export async function scheduleRm({
   }
 }
 
-// lah schedule enable <id>
+// ah schedule enable <id>
 export async function scheduleEnable({
   configDir, id, bus, now = () => Date.now(), stdout = (s) => process.stdout.write(s), log = () => {},
 } = {}) {
   const normId = String(id ?? "").trim();
-  if (!normId) throw new Error("lah schedule enable 需要指定 <id>");
+  if (!normId) throw new Error("ah schedule enable 需要指定 <id>");
 
   const schedules = readSchedules(configDir);
   const plan = schedules.find((p) => p.id === normId);
@@ -286,12 +286,12 @@ export async function scheduleEnable({
   }
 }
 
-// lah schedule disable <id>
+// ah schedule disable <id>
 export async function scheduleDisable({
   configDir, id, bus, now = () => Date.now(), stdout = (s) => process.stdout.write(s), log = () => {},
 } = {}) {
   const normId = String(id ?? "").trim();
-  if (!normId) throw new Error("lah schedule disable 需要指定 <id>");
+  if (!normId) throw new Error("ah schedule disable 需要指定 <id>");
 
   const schedules = readSchedules(configDir);
   const plan = schedules.find((p) => p.id === normId);
@@ -308,7 +308,7 @@ export async function scheduleDisable({
   }
 }
 
-// lah schedule register --id <id> --cron "<五段>" --cap <cap_id> [--text <指令>]
+// ah schedule register --id <id> --cron "<五段>" --cap <cap_id> [--text <指令>]
 export async function scheduleRegister({
   configDir, id, cron, cap, text = "", bus, now = () => Date.now(), stdout = (s) => process.stdout.write(s),
 } = {}) {
@@ -369,13 +369,13 @@ export async function scheduleRegister({
   }
 }
 
-// lah task begin --schedule <id> [--period <期次键>] [--cap <cap_id>] [--text <指令>] [--config <dir>]
+// ah task begin --schedule <id> [--period <期次键>] [--cap <cap_id>] [--text <指令>] [--config <dir>]
 export async function taskBegin({
   configDir, schedule, period, cap = "agent", text, bus, now = () => Date.now(), stdout = (s) => process.stdout.write(s),
 } = {}) {
   const schedId = String(schedule ?? "").trim();
   if (!schedId) {
-    throw new Error("lah task begin 需要 --schedule <id>");
+    throw new Error("ah task begin 需要 --schedule <id>");
   }
 
   let cfg;
@@ -455,7 +455,7 @@ export async function taskBegin({
   return { taskId, exists: false, exitCode: 0 };
 }
 
-// lah schedule CLI 入口分发
+// ah schedule CLI 入口分发
 export async function handleScheduleCli(argv, options = {}) {
   const sub = argv[0];
   const rest = argv.slice(1);
@@ -566,7 +566,7 @@ export async function handleScheduleCli(argv, options = {}) {
       return 0;
     }
 
-    stderr("用法：lah schedule ls|add|rm|enable|disable|register\n");
+    stderr("用法：ah schedule ls|add|rm|enable|disable|register\n");
     return 1;
   } catch (e) {
     stderr((e?.message ?? String(e)) + "\n");
@@ -574,7 +574,7 @@ export async function handleScheduleCli(argv, options = {}) {
   }
 }
 
-// lah task begin CLI 入口分发
+// ah task begin CLI 入口分发
 export async function handleTaskBegin(argv, options = {}) {
   const stdout = options.stdout || ((s) => process.stdout.write(s));
   const stderr = options.stderr || ((s) => process.stderr.write(s));

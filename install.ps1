@@ -2,13 +2,13 @@
 #   1) 仅安装命令行工具：
 #      irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex
 #   2) 安装并一键接入已有 Hub：
-#      $env:LAH_JOIN="http://<token>@<hub-ip>:8787"; irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex
+#      $env:AH_JOIN="http://<token>@<hub-ip>:8787"; irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex
 # 布局：%USERPROFILE%\.hub-node\ 是配置目录，其下 app\ 是程序本体，
-#       bin\lah.cmd、bin\a2a-hub.cmd、bin\ahub.cmd 与 bin\hub-node.cmd 是命令入口（加入当前用户 PATH）。
+#       bin\ah.cmd、bin\a2a-hub.cmd、bin\ahub.cmd、bin\lah.cmd 与 bin\hub-node.cmd 是命令入口（加入当前用户 PATH）。
 # Windows 不把无扩展名文件当命令，也不保证能建软链，所以入口是 cmd 包装，
-# 用 %~dp0 相对路径指向 app\bin\lah.mjs，用户名含非 ASCII 时也不靠代码页。
+# 用 %~dp0 相对路径指向 app\bin\ah.mjs，用户名含非 ASCII 时也不靠代码页。
 # 不在这里写 node.json / commands.json。重跑本脚本 = 更新程序，已有配置不覆盖。
-# 跳过 Skill：-SkipSkill / --skip-skill，或事先 $env:LAH_SKIP_SKILL=1。
+# 跳过 Skill：-SkipSkill / --skip-skill，或事先 $env:AH_SKIP_SKILL=1。
 # 本文件不用 param()：irm | iex 会把顶层 param 当成命令，参数因此从 $args 读。
 & {
   $ErrorActionPreference = "Stop"
@@ -20,12 +20,12 @@
   $skipSkill = $false
   $showHelp = $false
   $bootstrapMode = ""
-  $joinUrl = $env:LAH_JOIN
+  $joinUrl = if (-not [string]::IsNullOrWhiteSpace($env:AH_JOIN)) { $env:AH_JOIN } else { $env:LAH_JOIN }
   $useService = $true
   if (-not [string]::IsNullOrWhiteSpace($joinUrl)) {
     $bootstrapMode = "join"
   }
-  if ($env:LAH_SKIP_SKILL -eq "1" -or $env:LAH_SKIP_SKILL -eq "true") {
+  if ($env:AH_SKIP_SKILL -eq "1" -or $env:AH_SKIP_SKILL -eq "true" -or $env:LAH_SKIP_SKILL -eq "1" -or $env:LAH_SKIP_SKILL -eq "true") {
     $skipSkill = $true
   }
   for ($idx = 0; $idx -lt $args.Length; $idx++) {
@@ -51,9 +51,9 @@
     Write-Host "用法: install.ps1 [-Hub | -Join <url>] [-NoService] [-SkipSkill]"
     Write-Host "      irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex"
     Write-Host "  -Hub, --hub               安装后立即配置独立 SQLite Hub 并注册开机任务"
-    Write-Host "  -Join, --join <url>       安装后立即接入已有 Hub 并注册开机任务（也可用 `$env:LAH_JOIN）"
+    Write-Host "  -Join, --join <url>       安装后立即接入已有 Hub 并注册开机任务（也可用 `$env:AH_JOIN）"
     Write-Host "  -NoService, --no-service  仅配置与自检，不注册开机任务"
-    Write-Host "  -SkipSkill, --skip-skill  跳过安装 %USERPROFILE%\.agents\skills\lah"
+    Write-Host "  -SkipSkill, --skip-skill  跳过安装 %USERPROFILE%\.agents\skills\ah"
     return
   }
 
@@ -81,7 +81,7 @@
     return $false
   }
 
-  # 返回 added / present / manual。当前进程的 PATH 能补就补，让本次窗口立刻能跑 lah。
+  # 返回 added / present / manual。当前进程的 PATH 能补就补，让本次窗口立刻能跑 ah。
   function Add-UserPathEntry {
     param([string]$Dir)
     $userRaw = [Environment]::GetEnvironmentVariable("Path", "User")
@@ -119,7 +119,7 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
       $broadcastResult = [UIntPtr]::Zero
       [LahWin32.Native]::SendMessageTimeout([IntPtr]0xffff, 0x001A, [UIntPtr]::Zero, "Environment", 2, 5000, [ref]$broadcastResult) | Out-Null
     } catch {
-      Write-Host "未能通知其它窗口刷新 PATH。新开一个终端后再运行 lah。"
+      Write-Host "未能通知其它窗口刷新 PATH。新开一个终端后再运行 ah。"
     }
   }
 
@@ -208,10 +208,10 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
     Pop-Location
   }
 
-  # 四个别名都进 lah.mjs。
+  # 五个入口都进 ah.mjs（保留 lah.cmd / hub-node.cmd 向下兼容）。
   New-Item -ItemType Directory -Force -Path $binDir | Out-Null
-  $shim = "@echo off`r`nnode `"%~dp0..\app\bin\lah.mjs`" %*`r`n"
-  foreach ($name in @("lah.cmd", "a2a-hub.cmd", "ahub.cmd", "hub-node.cmd")) {
+  $shim = "@echo off`r`nnode `"%~dp0..\app\bin\ah.mjs`" %*`r`n"
+  foreach ($name in @("ah.cmd", "a2a-hub.cmd", "ahub.cmd", "lah.cmd", "hub-node.cmd")) {
     [System.IO.File]::WriteAllText((Join-Path $binDir $name), $shim, [System.Text.UTF8Encoding]::new($false))
   }
 
@@ -221,17 +221,20 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
   }
 
   if (-not $skipSkill) {
-    $skillDir = Join-Path $profileHome ".agents\skills\lah"
-    $skillSrc = Join-Path $app "skills\lah\SKILL.md"
-    if (Test-Path -LiteralPath $skillSrc) {
-      New-Item -ItemType Directory -Force -Path $skillDir | Out-Null
-      Copy-Item -LiteralPath $skillSrc -Destination (Join-Path $skillDir "SKILL.md") -Force
+    # 仅纯安装 CLI 时预装控制端 ah Skill；带 -Hub/-Join 时由随后的 ah setup 按角色与形态安装对应 Skill
+    if ([string]::IsNullOrEmpty($bootstrapMode)) {
+      $skillDir = Join-Path $profileHome ".agents\skills\ah"
+      $skillSrc = Join-Path $app "skills\ah\SKILL.md"
+      if (Test-Path -LiteralPath $skillSrc) {
+        New-Item -ItemType Directory -Force -Path $skillDir | Out-Null
+        Copy-Item -LiteralPath $skillSrc -Destination (Join-Path $skillDir "SKILL.md") -Force
+      }
     }
   } else {
-    Write-Host "跳过安装 lah Skill（-SkipSkill）"
+    Write-Host "跳过安装 Skill（-SkipSkill）"
   }
 
-  $entryMjs = Join-Path $app "bin\lah.mjs"
+  $entryMjs = Join-Path $app "bin\ah.mjs"
   if ($bootstrapMode -eq "hub") {
     $setupArgs = @($entryMjs, "setup", "--role", "hub", "--bus", "sqlite", "--yes", "--auto-token")
     if ($useService) { $setupArgs += "--service" }
@@ -250,14 +253,14 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
 
   Write-Host ""
   Write-Host "安装完成（零外部依赖）。接下来只需一条命令："
-  Write-Host "  1) 本机启动独立中台 Hub：         lah up --service"
-  Write-Host "  2) 接入已有 Hub：                 lah join http://[<token>@]<hub-ip>:8787 --service"
-  Write-Host "  3) 飞书多维表格兼容模式 / 向导：  lah setup --bus feishu"
+  Write-Host "  1) 本机启动独立中台 Hub：         ah up --service"
+  Write-Host "  2) 接入已有 Hub：                 ah join http://[<token>@]<hub-ip>:8787 --service"
+  Write-Host "  3) 自定义交互配置向导：           ah setup"
   Write-Host "命令入口：$binDir"
   if ($pathState -eq "added") {
-    Write-Host "已加入用户 PATH。用 iex 跑的当前窗口可以直接试 lah；单独开的窗口请新开一个终端。"
+    Write-Host "已加入用户 PATH。用 iex 跑的当前窗口可以直接试 ah；单独开的窗口请新开一个终端。"
   } elseif ($pathState -eq "manual") {
-    Write-Host "请把上面的目录加入 PATH 后再运行 lah。"
+    Write-Host "请把上面的目录加入 PATH 后再运行 ah。"
   }
   Write-Host "向导问到开机自启时直接回车即可：会注册当前用户的任务计划程序任务，登录时启动，无需管理员。"
 } @args

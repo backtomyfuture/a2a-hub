@@ -10,7 +10,7 @@
 import { pickSignedDecision, publicKeyOf, signDecision } from "../approval-sign.mjs";
 import fs from "node:fs";
 import path from "node:path";
-import { f1 } from "../bus/feishu.mjs";
+import { f1 } from "../bus/tables.mjs";
 import { buildCard, buildStatusCard } from "./cards.mjs";
 
 // 同步回读的上限。飞书 3 秒预算里只留这一次读，读挂住不能把回调拖过超时。

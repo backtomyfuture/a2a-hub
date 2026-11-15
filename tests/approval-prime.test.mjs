@@ -7,7 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { f1 } from "../src/bus/feishu.mjs";
+import { f1 } from "../src/bus/tables.mjs";
 import { ApprovalService } from "../src/hub/approval.mjs";
 import { Kernel } from "../src/kernel.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";

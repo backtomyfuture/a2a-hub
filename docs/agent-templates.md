@@ -1,6 +1,6 @@
 # 能力模板库
 
-`lah setup` 扫到本机 CLI 后，按这里的定版命令把它登记为该节点 `commands.json` 里 `workers` 下的一个 Worker（Worker 名即下面的小节名，如 `claude`、`agy`；每个 Worker 在名册里有一张 Worker 名片（`Skill_ID=agent`，代表它的通用执行），见[配置参考](configuration.md#4-commandsjson能力表)）。命令里的可执行文件会落成绝对路径，下面为了可读只写命令名。
+`ah setup` 扫到本机 CLI 后，按这里的定版命令把它登记为该节点 `commands.json` 里 `workers` 下的一个 Worker（Worker 名即下面的小节名，如 `claude`、`agy`；每个 Worker 在名册里有一张 Worker 名片（`Skill_ID=agent`，代表它的通用执行），见[配置参考](configuration.md#4-commandsjson能力表)）。命令里的可执行文件会落成绝对路径，下面为了可读只写命令名。
 
 规范性要求在 [标准 §9](standard.md)：编排型 CLI 必须显式带默认执行主体；agent 型无头 CLI 必须显式处理权限。模型 slug 只钉在节点本地，不进总线。
 
@@ -17,7 +17,7 @@
 - 编排型的 provider 必须写进模板。Paseo 不带 `--provider` 时没有执行主体，运行必失败。
 - 模型 slug 按需钉在节点本地 `commands.json`（`--provider <provider>/<model>`）。不写模型就只用 provider 的默认模型。
 - 能用别名就用别名，例如 claude 的 `sonnet`，少钉死一串会过期的版本号。
-- 钉了 slug 之后靠 `lah doctor` 对照 `paseo provider models <provider>` 的在册 ID 校验活性。slug 失效应在自检时报出，而不是跑任务时才发现。
+- 钉了 slug 之后靠 `ah doctor` 对照 `paseo provider models <provider>` 的在册 ID 校验活性。slug 失效应在自检时报出，而不是跑任务时才发现。
 
 ## 定版命令
 
@@ -105,7 +105,7 @@
 
 同一任务从 input-required 收到 answer 再执行时，如果本机 `runs/<Task_ID>/session.json` 里已有执行者上次自报的 session id，并且该能力写了 `resume_command`，节点用它替换 `command`。第一次执行、失败重试、心跳回收后的重跑仍走原来的 `command`。session id 不进总线。
 
-`{session}` 会换成单引号包裹的 id，只替换一次。agent 模式同时保留 `{prompt}`，数据仍在全量 `input.json`。json 模式只需要 `{session}`，任务信封仍走标准输入。`lah doctor` 发现写了 `resume_command` 却没有 `{session}` 会报问题。
+`{session}` 会换成单引号包裹的 id，只替换一次。agent 模式同时保留 `{prompt}`，数据仍在全量 `input.json`。json 模式只需要 `{session}`，任务信封仍走标准输入。`ah doctor` 发现写了 `resume_command` 却没有 `{session}` 会报问题。
 
 下面的旗标按本机帮助文本的位置来写，没有另造开关。换了版本先看 `--help`。
 

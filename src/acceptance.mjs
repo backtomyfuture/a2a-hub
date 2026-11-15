@@ -1,6 +1,6 @@
 // 验收层（标准 §11）的纯函数：清单校验、自检归一、逐条判定、overall 与摘要文案。
 // 内核、inbox、建单、why 与呈递共用这一份，避免几处各写一套口径。不读写总线，不碰文件。
-import { f1 } from "./bus/feishu.mjs";
+import { f1 } from "./bus/tables.mjs";
 import { log } from "./kernel-util.mjs";
 
 export const CRITERION_ID = /^[A-Za-z0-9._-]{1,32}$/;
@@ -88,7 +88,7 @@ export function normalizeJsonChecks(raw, logFn = log) {
   return out;
 }
 
-// lah inbox done 的 --check <id>=<verdict>[:<证据>]。不合法直接抛错，让 CLI 当场报出来。
+// ah inbox done 的 --check <id>=<verdict>[:<证据>]。不合法直接抛错，让 CLI 当场报出来。
 export function parseCheckFlag(raw) {
   const s = String(raw ?? "");
   const eq = s.indexOf("=");

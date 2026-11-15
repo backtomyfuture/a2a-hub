@@ -7,7 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { f1 } from "../src/bus/feishu.mjs";
+import { f1 } from "../src/bus/tables.mjs";
 import { capIdOf, capIdsOf, capKey, loadConfig, normalizeCommands, resolveCapKey } from "../src/config.mjs";
 import { createTask } from "../src/hub/create.mjs";
 import { ScheduleService } from "../src/hub/schedule.mjs";
@@ -99,9 +99,8 @@ test("R1：loadConfig 不接纳 node.json 里的 workerName", async () => {
     fs.writeFileSync(path.join(dir, "node.json"), JSON.stringify({
       node: "node-a",
       kind: "agent",
-      appId: "cli_placeholder",
-      appSecret: "secret_placeholder",
-      baseToken: "bascn_placeholder",
+      busType: "sqlite",
+      dbPath: ":memory:",
       tables: TABLES,
       workerName: "grok",
     }), { mode: 0o600 });

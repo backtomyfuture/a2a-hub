@@ -17,10 +17,12 @@ import {
 } from "../src/service.mjs";
 import { withTemp } from "./helpers.mjs";
 
-test("结束残留守护进程时只认 lah daemon 的命令行", () => {
+test("结束残留守护进程时认 ah daemon 与兼容 lah daemon 的命令行", () => {
+  assert.equal(isLahDaemonCommandLine("node.exe C:\\app\\bin\\ah.mjs daemon --config C:\\cfg --role hub"), true);
   assert.equal(isLahDaemonCommandLine("node.exe C:\\app\\bin\\lah.mjs daemon --config C:\\cfg --role hub"), true);
-  assert.equal(isLahDaemonCommandLine("node.exe C:\\app\\bin\\lah.mjs doctor"), false);
-  assert.equal(isLahDaemonCommandLine("node.exe C:\\daemon\\lah.mjs doctor"), false);
+  assert.equal(isLahDaemonCommandLine("node.exe C:\\app\\bin\\blah.mjs daemon --config C:\\cfg --role hub"), false);
+  assert.equal(isLahDaemonCommandLine("node.exe C:\\app\\bin\\ah.mjs doctor"), false);
+  assert.equal(isLahDaemonCommandLine("node.exe C:\\daemon\\ah.mjs doctor"), false);
   assert.equal(isLahDaemonCommandLine("notepad.exe"), false);
 });
 
@@ -74,7 +76,7 @@ test("Windows 启动器隐藏控制台，守护启动器把日志送进 daemon.l
 
   const source = renderWindowsLauncher({
     node: "C:\\Program Files\\nodejs\\node.exe",
-    appBin: "C:\\Users\\张三\\.hub-node\\app\\bin\\lah.mjs",
+    appBin: "C:\\Users\\张三\\.hub-node\\app\\bin\\ah.mjs",
     configDir: "C:\\Users\\张三\\.hub-node",
     role: "hub",
     logPath: "C:\\Users\\张三\\.hub-node\\daemon.log",

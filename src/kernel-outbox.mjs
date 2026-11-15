@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { acceptanceLine } from "./acceptance.mjs";
-import { f1 } from "./bus/feishu.mjs";
+import { f1 } from "./bus/tables.mjs";
 import { TERMINAL_STATUSES, annotateElapsed, log, nowStr } from "./kernel-util.mjs";
 
 function verifyFailedNoticeText(box) {

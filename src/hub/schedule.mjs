@@ -4,7 +4,7 @@
 // 与 create.mjs / kernel.mjs 的 HOP_LIMIT 对齐。再加一跳超过 8 就只写标记，不再每轮重试。
 const HOP_LIMIT = 8;
 
-import { f1 } from "../bus/feishu.mjs";
+import { f1 } from "../bus/tables.mjs";
 import { parseLaterInstant } from "../kernel.mjs";
 import { createTask } from "./create.mjs";
 

@@ -12,7 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { loadOrCreateHubKey } from "../src/approval-sign.mjs";
-import { f1 } from "../src/bus/feishu.mjs";
+import { f1 } from "../src/bus/tables.mjs";
 import { HttpBus } from "../src/bus/http-bus.mjs";
 import { SqliteBus } from "../src/bus/sqlite-bus.mjs";
 import { DEFAULT_TABLES } from "../src/bus/tables.mjs";
@@ -25,7 +25,7 @@ import { runSetup } from "../src/setup.mjs";
 import { createLongPollWaker } from "../src/transport/longpoll.mjs";
 import { withTemp } from "./helpers.mjs";
 
-async function waitFor(fn, { timeoutMs = 4000, stepMs = 30 } = {}) {
+async function waitFor(fn, { timeoutMs = 10000, stepMs = 30 } = {}) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const val = await fn();

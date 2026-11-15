@@ -1,8 +1,8 @@
 # a2a-hub
 
-**A self-hosted, zero-external-dependency multi-agent orchestration hub with zero Feishu API quota limits** — preserving the A2A eight-state model, three-layer addressing (`Node` → `Worker` → `Skill`), instruction/data separation, and ed25519-signed approvals, while moving the shared bus to **SQLite WAL + outbound HTTP Long-Polling (`GET /api/v1/poll`)** with a built-in **Web Console** and **LoopForge multi-stage SOP orchestration engine**.
+**A self-hosted, zero-external-dependency multi-agent orchestration hub** — combining the **A2A eight-state model**, **three-layer addressing (`Node` → `Worker` → `Skill`)**, **instruction/data separation**, and **ed25519-signed approvals** over one unified **SQLite WAL + HTTP Gateway** architecture (outbound HTTP Long-Polling for host daemons + REST Agent Gateway for pure cloud/cron Agents), with a built-in **Web Console** and **LoopForge multi-stage SOP orchestration engine**.
 
-[中文说明](README.md) · [Standard (Chinese)](docs/standard.md) · [Configuration & CLI](docs/configuration.md) · [Architecture](docs/architecture.md) · [Security Model](SECURITY.md) · [Changelog](CHANGELOG.md)
+[中文说明](README.md) · [Standard (Chinese)](docs/standard.md) · [Configuration & CLI](docs/configuration.md) · [HTTP Agent Runbook](docs/protocol-node-runbook.md) · [Architecture](docs/architecture.md) · [Security Model](SECURITY.md) · [Changelog](CHANGELOG.md)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Node >= 24](https://img.shields.io/badge/Node-%3E%3D24-339933.svg)
@@ -12,17 +12,17 @@
 
 ## Why `a2a-hub`
 
-Originally migrated from `lark-a2a-hub`, `a2a-hub` removes the mandatory Feishu/Lark Bitable API quota bottleneck while retaining every battle-tested reliability and security guarantee:
-
-- **Self-Hosted Standalone Hub (`busType: "sqlite"`)**: Run `lah daemon --role hub` on a persistent server (such as a Mac mini or Linux VPS) backed by Node >= 24's built-in `node:sqlite` (WAL mode) and zero third-party npm dependencies (`dependencies: {}`).
-- **Outbound HTTP Long-Polling Edge Nodes (`busType: "http"`)**: Remote machines, workstations, and standalone agents connect outbound via `GET /api/v1/poll` for sub-second wakeups when tasks, approvals, or answers arrive. Edge nodes never open inbound listening ports.
+- **Self-Hosted Standalone Hub (`busType: "sqlite"`)**: Run `ah daemon --role hub` on a persistent server (such as a Mac mini or Linux VPS) backed by Node >= 24's built-in `node:sqlite` (WAL mode) and zero third-party npm dependencies (`dependencies: {}`).
+- **Two Connection Modes Over Pure HTTP, Zero Open Node Ports**:
+  - **Host Daemon Nodes (`ah join`)**: Workstations, office Macs, or GPU hosts run a thin outbound daemon (`GET /api/v1/poll`) that wakes within milliseconds to execute local CLIs/scripts safely via `commands.json`.
+  - **Pure HTTP External Agents (Muse, Grok Bot, etc.)**: Cloud or cron-driven Agents with no daemon discover endpoints via `GET /.well-known/agent.json`, register via `POST /api/v1/agents/register`, pull work via `GET /api/v1/agents/{node}/poll` (short-poll or long-poll `?timeout=25`), watch delegated tasks via `GET /api/v1/agents/{node}/updates` (enabling **Leader orchestration**), and drive execution via `POST /api/v1/tasks/{id}/{claim,heartbeat,ask,auth,complete,fail}`.
 - **Built-in Web Console** (`http://<hub>:8787`):
-  - **Topology & Overview**: Live connected long-polling nodes, task state counters, and event health.
-  - **Agent Hub Roster**: Three-layer (`Node` / `Worker` / `Skill`) capability matrix with `Receive_Mode` and `Dispatchable` status.
+  - **Topology & Overview**: Live connected host daemons and external HTTP Agents (`Leader` / `Worker`), task state counters, and event health.
+  - **Agent Hub Roster**: Three-layer (`Node` / `Worker` / `Skill`) capability matrix alongside connected pure-Leader/HTTP Agents.
   - **A2A Conversation Stream**: Full `Messages` / `Parts` / `Runs` / `Artifacts` timeline, one-click ed25519-signed `Approve` / `Reject` actions for `auth-required`, and inline replies for `input-required`.
   - **LoopForge SOP Studio**: Launch, monitor, and cancel multi-stage closed-loop workflows directly from the UI.
 - **LoopForge-style SOP Orchestration Engine (`LoopService`)**: Automate multi-stage pipelines (e.g. `plan → code → verify`) under a shared `Context_ID` with `Ref_Task_IDs`. Verify failures feed structured diagnostics (`retry` / `goto:<stage_id>` / `abort`) back to earlier stages, bounded by `Max_Iterations` and `HOP_LIMIT = 8`.
-- **Optional Webhook Notifications & Feishu Compatibility**: Configure `notifications` in `node.json` to push alerts via Feishu custom group bots (no enterprise API quota), Bark, Telegram, or generic webhooks; existing Feishu Bitable setups still work via `busType: "feishu"`.
+- **Optional Webhook Notifications**: Configure `notifications` in `node.json` to push alerts via group bot webhooks, Bark, Telegram, or generic webhooks.
 
 ---
 
@@ -30,16 +30,17 @@ Originally migrated from `lark-a2a-hub`, `a2a-hub` removes the mandatory Feishu/
 
 ```mermaid
 flowchart LR
-    WEB["Web Console / CLI (lah)"] --> HUB
+    WEB["Web Console / CLI (ah)"] --> HUB
     subgraph HUB["Persistent Hub Server (e.g., Mac mini :8787)"]
         direction TB
         SQL[("SQLite WAL Bus\ntasks · messages · parts · runs\nartifacts · agentCards · rules · loops")]
-        API["HTTP REST API + LongPollBroker\nGET /api/v1/poll · ed25519 Signer · LoopService"]
+        API["HTTP REST API + LongPollBroker + agent-gateway\nGET /.well-known/agent.json · ed25519 Signer · LoopService"]
         SQL <--> API
     end
-    HUB <-->|"Outbound HTTP Long-Polling (instant wakeup + 15m sweep)"| N1["Edge Node: Workstation (host)"]
-    HUB <-->|"Outbound HTTP Long-Polling (agent_inbox.jsonl)"| N2["Edge Node: Standalone Agent (agent)"]
-    HUB -.->|"Optional Webhooks (Feishu Bot / Bark / Telegram)"| OWNER["Owner Alerts"]
+    HUB <-->|"Outbound HTTP Long-Polling (GET /api/v1/poll)"| N1["Workstation Daemon (ah join)"]
+    HUB <-->|"HTTP Short/Long-Poll (/api/v1/agents/grok-bot/poll)"| N2["Cloud Worker: Grok Bot (HTTP Agent)"]
+    HUB <-->|"HTTP Dispatch + Updates (/api/v1/tasks & /updates)"| N3["Cloud Leader: Muse (HTTP Agent)"]
+    HUB -.->|"Optional Webhooks (Bot / Bark / Telegram)"| OWNER["Owner Alerts"]
 ```
 
 ### 1. Three-Level Addressing: `Node → Worker → Skill`
@@ -81,7 +82,7 @@ This generates an ed25519 approval keypair + random `apiToken`, configures SQLit
 curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --join "http://<HUB_API_TOKEN>@<HUB_IP>:8787"
 
 # Windows PowerShell:
-$env:LAH_JOIN = "http://<HUB_API_TOKEN>@<HUB_IP>:8787"; irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex
+$env:AH_JOIN = "http://<HUB_API_TOKEN>@<HUB_IP>:8787"; irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex
 ```
 
 `--join` extracts the embedded token into mode-600 `app.env` (never written to `node.json`), fetches `hubPublicKey` from `GET /api/v1/health`, and starts the outbound long-polling daemon/service.
@@ -91,15 +92,48 @@ $env:LAH_JOIN = "http://<HUB_API_TOKEN>@<HUB_IP>:8787"; irm https://raw.githubus
 ```bash
 git clone https://github.com/backtomyfuture/a2a-hub.git
 cd a2a-hub
-# Optional: expose `lah` / `a2a-hub` / `ahub` / `hub-node` globally
+# Optional: expose `ah` / `a2a-hub` / `ahub` / `lah` / `hub-node` globally
 npm link
 
 # 1) Start the Hub in one line (add --service to register autostart):
-node bin/lah.mjs up
+node bin/ah.mjs up
 
 # 2) Join from any worker machine (add --service for autostart):
-node bin/lah.mjs join http://<HUB_API_TOKEN>@<HUB_IP>:8787
+node bin/ah.mjs join http://<HUB_API_TOKEN>@<HUB_IP>:8787
 ```
+
+### Option C: Connect Pure HTTP External Agents (Muse / Grok Bot, No Daemon)
+
+Cloud or cron-driven Agents connect directly with standard HTTP + Bearer Token (unauthenticated discovery at `GET http://<HUB_IP>:8787/.well-known/agent.json`):
+
+```bash
+# 1) Register a Leader (e.g. Muse) or Worker (e.g. Grok Bot)
+curl -X POST http://<HUB_IP>:8787/api/v1/agents/register \
+  -H "Authorization: Bearer <HUB_API_TOKEN>" -H "Content-Type: application/json" \
+  -d '{"node":"muse","role":"leader","kind":"agent","receive_mode":"http-poll"}'
+
+curl -X POST http://<HUB_IP>:8787/api/v1/agents/register \
+  -H "Authorization: Bearer <HUB_API_TOKEN>" -H "Content-Type: application/json" \
+  -d '{"node":"grok-bot","role":"worker","kind":"agent","receive_mode":"http-poll","caps":[{"skill_id":"research","skill_name":"Grok Research"}]}'
+
+# 2) Muse dispatches a task and polls /updates (supports short-poll or ?timeout=25 long-poll)
+curl -X POST http://<HUB_IP>:8787/api/v1/tasks \
+  -H "Authorization: Bearer <HUB_API_TOKEN>" -H "Content-Type: application/json" \
+  -d '{"from":"muse","to":"grok-bot","cap":"research","text":"Compare HTTP poll vs long-poll"}'
+curl -H "Authorization: Bearer <HUB_API_TOKEN>" \
+  "http://<HUB_IP>:8787/api/v1/agents/muse/updates?timeout=25"
+
+# 3) Grok Bot polls -> claims -> reports ask / auth / complete / fail
+curl -H "Authorization: Bearer <HUB_API_TOKEN>" \
+  "http://<HUB_IP>:8787/api/v1/agents/grok-bot/poll?timeout=25"
+curl -X POST "http://<HUB_IP>:8787/api/v1/tasks/<TASK_ID>/claim" \
+  -H "Authorization: Bearer <HUB_API_TOKEN>" -H "Content-Type: application/json" -d '{"node":"grok-bot"}'
+curl -X POST "http://<HUB_IP>:8787/api/v1/tasks/<TASK_ID>/complete" \
+  -H "Authorization: Bearer <HUB_API_TOKEN>" -H "Content-Type: application/json" \
+  -d '{"node":"grok-bot","text":"Comparison report ready","artifact":"https://example.com/report.md"}'
+```
+
+See [HTTP Agent Runbook](docs/protocol-node-runbook.md) for the full lifecycle API.
 
 <details>
 <summary>Advanced: Manual step-by-step setup / custom flags</summary>
@@ -107,7 +141,7 @@ node bin/lah.mjs join http://<HUB_API_TOKEN>@<HUB_IP>:8787
 1) Standalone Hub:
 
 ```bash
-node bin/lah.mjs setup \
+node bin/ah.mjs setup \
   --role hub \
   --bus sqlite \
   --node mac-mini-hub \
@@ -118,15 +152,15 @@ node bin/lah.mjs setup \
   --api-token "<YOUR_SECRET_TOKEN>" \
   --yes
 
-node bin/lah.mjs doctor --role hub
-node bin/lah.mjs daemon --role hub
-node bin/lah.mjs service --role hub
+node bin/ah.mjs doctor --role hub
+node bin/ah.mjs daemon --role hub
+node bin/ah.mjs service --role hub
 ```
 
 2) Manual Remote Edge Node (see [`config/node.remote.example.json`](config/node.remote.example.json) and [`config/commands.example.json`](config/commands.example.json)):
 
 ```bash
-node bin/lah.mjs setup \
+node bin/ah.mjs setup \
   --role node \
   --bus http \
   --hub-url http://<HUB_IP>:8787 \
@@ -137,39 +171,50 @@ node bin/lah.mjs setup \
   --prefix e1 \
   --yes
 
-node bin/lah.mjs doctor
-node bin/lah.mjs daemon
+node bin/ah.mjs doctor
+node bin/ah.mjs daemon
 ```
 
 </details>
 
 ---
 
-## Common Commands (`lah` / `a2a-hub` / `ahub` / `hub-node`)
+## Agent Skills (2x2 Matrix)
+
+Skills are separated along **Leader vs. Worker** and **CLI (`ah`) vs. Pure HTTP** so local sub-agents and cloud bots never receive conflicting instructions:
+
+| Role \ Runtime | Local with `ah` CLI | Pure HTTP (Cloud / Cron Agent, no CLI) |
+|---|---|---|
+| **Controller / Leader** (inspect, dispatch, loops, collect updates) | [`skills/ah/SKILL.md`](skills/ah/SKILL.md) | [`skills/a2a-leader/SKILL.md`](skills/a2a-leader/SKILL.md) (`GET /api/v1/skills/a2a-leader`) |
+| **Executor / Worker** (poll, claim, ask, auth, complete/fail) | [`skills/ah-inbox/SKILL.md`](skills/ah-inbox/SKILL.md) (auto-installed for `kind=agent`) | [`skills/a2a-worker/SKILL.md`](skills/a2a-worker/SKILL.md) (`GET /api/v1/skills/a2a-worker`) |
+
+---
+
+## Common Commands (`ah`, aliases: `a2a-hub` / `ahub` / `lah` / `hub-node`)
 
 Configuration defaults to `~/.hub-node` (override with `--config <dir>` or `HUB_NODE_HOME`). See [Configuration & CLI](docs/configuration.md) for the complete reference.
 
 | Area | Command | Purpose |
 |---|---|---|
-| **One-Line Setup** | `lah up [--listen …] [--service] [--no-daemon]` | Initialize SQLite Hub (auto token + ed25519 key) and start |
-| | `lah join <hub_url> [--node …] [--service] [--no-daemon]` | Extract credentials, sync `hubPublicKey`, and start long-poll node |
-| **Setup & Ops** | `lah setup [--role node\|hub] [--bus sqlite\|http\|feishu]` | Initialize a standalone Hub, remote HTTP node, or Feishu Bitable node |
-| | `lah daemon [--role node\|hub]` | Start the node or full Hub runtime (HTTP server, Web UI, Loops) |
-| | `lah doctor [--role node\|hub]` | Read-only checks for config, `commands.json`, bus connectivity, autostart |
-| | `lah service [--role node\|hub] [--remove]` | Install or remove user-level autostart (launchd / systemd / Windows) |
-| | `lah inventory` | Inspect this node's AgentCards and task counts |
-| | `lah reconcile` | Run a single sweep/reconciliation pass and exit |
-| **Tasks & Debug** | `lah task create --to <node> [--worker <W>] [--cap <skill>] --text …` | Validate roster and create a task |
-| | `lah present [--wait <sec>] [--task <ID>] [--pop]` | Read or wait for receipts in `present_queue.jsonl` |
-| | `lah task reply --task <ID> --text …` | Reply to an `input-required` question and resume the task |
-| | `lah task cancel --task <ID> [--text …]` | Cancel a non-terminal task |
-| | `lah task why <ID> [--json]` | Reconstruct full timeline, acceptance summary, and local flight/outbox state |
-| **LoopForge SOP** | `lah loop templates` | List built-in multi-stage SOP templates (e.g., `plan-code-verify`) |
-| | `lah loop create --title … --goal … --to <node> [--template …]` | Launch an automated multi-stage closed loop |
-| | `lah loop ls [--json]` / `lah loop show <Loop_ID>` | Inspect active and completed loops and stage history |
-| | `lah loop cancel <Loop_ID> [--text …]` | Cancel a loop and its active task |
-| **Local Scheduling & Inbox** | `lah schedule ls \| add \| rm \| enable \| disable` | Manage local `schedules.json` cron jobs |
-| | `lah inbox [--pop] [--json]` / `lah inbox done \| ask \| fail \| auth` | Consume `agent_inbox.jsonl` and report results from standalone agents |
+| **One-Line Setup** | `ah up [--listen …] [--service] [--no-daemon]` | Initialize SQLite Hub (auto token + ed25519 key) and start |
+| | `ah join <hub_url> [--node …] [--service] [--no-daemon]` | Extract credentials, sync `hubPublicKey`, and start long-poll node |
+| **Setup & Ops** | `ah setup [--role node\|hub] [--bus sqlite\|http]` | Initialize a standalone SQLite Hub or remote HTTP node |
+| | `ah daemon [--role node\|hub]` | Start the node or full Hub runtime (HTTP server, Web UI, Loops) |
+| | `ah doctor [--role node\|hub]` | Read-only checks for config, `commands.json`, bus connectivity, autostart |
+| | `ah service [--role node\|hub] [--remove]` | Install or remove user-level autostart (launchd / systemd / Windows) |
+| | `ah inventory` | Inspect this node's AgentCards and task counts |
+| | `ah reconcile` | Run a single sweep/reconciliation pass and exit |
+| **Tasks & Debug** | `ah task create --to <node> [--worker <W>] [--cap <skill>] --text …` | Validate roster and create a task |
+| | `ah present [--wait <sec>] [--task <ID>] [--pop]` | Read or wait for receipts in `present_queue.jsonl` |
+| | `ah task reply --task <ID> --text …` | Reply to an `input-required` question and resume the task |
+| | `ah task cancel --task <ID> [--text …]` | Cancel a non-terminal task |
+| | `ah task why <ID> [--json]` | Reconstruct full timeline, acceptance summary, and local flight/outbox state |
+| **LoopForge SOP** | `ah loop templates` | List built-in multi-stage SOP templates (e.g., `plan-code-verify`) |
+| | `ah loop create --title … --goal … --to <node> [--template …]` | Launch an automated multi-stage closed loop |
+| | `ah loop ls [--json]` / `ah loop show <Loop_ID>` | Inspect active and completed loops and stage history |
+| | `ah loop cancel <Loop_ID> [--text …]` | Cancel a loop and its active task |
+| **Local Scheduling & Inbox** | `ah schedule ls \| add \| rm \| enable \| disable` | Manage local `schedules.json` cron jobs |
+| | `ah inbox [--pop] [--json]` / `ah inbox done \| ask \| fail \| auth` | Consume `agent_inbox.jsonl` and report results from standalone agents |
 
 ---
 

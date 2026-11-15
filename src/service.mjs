@@ -178,7 +178,7 @@ export function windowsLegacyTaskName(node) {
 }
 
 // 登记当时的 PATH 写进启动器。登录后的计划任务拿不到「当时这个终端」的 PATH，
-// 不写进去，node 和 lah 这类用户目录里的命令会找不到。
+// 不写进去，node 和 ah 这类用户目录里的命令会找不到。
 export function windowsServicePath(configDir, currentPath, execPath) {
   // 用 win32 规则切路径：这个函数的入参是 Windows 路径，测试和 CI 跑在 macOS / Linux 上。
   const extra = [path.win32.dirname(execPath), path.win32.join(configDir, "bin")];
@@ -204,7 +204,7 @@ export function renderWindowsStarter({ nodeExe, launcher }) {
 // 启动器停在前台：自己负责环境变量和 daemon.log。计划任务结束时，作业对象会连带结束子进程。
 export function renderWindowsLauncher(spec) {
   const payload = JSON.stringify(spec);
-  return `// 由 lah service 生成。任务计划程序经 vbs 拉起本文件，本文件再拉起守护进程。
+  return `// 由 ah service 生成。任务计划程序经 vbs 拉起本文件，本文件再拉起守护进程。
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 const spec = ${payload};
@@ -296,11 +296,11 @@ function nodeBinary() {
 
 // 只认本仓库守护进程的命令行，避免锁文件里的 pid 被系统复用后误杀别的进程。
 export function isLahDaemonCommandLine(text) {
-  // 子命令必须紧跟 lah.mjs。路径里碰巧有 daemon 字样不能算。
-  return /lah\.mjs["']?\s+daemon\b/.test(String(text ?? ""));
+  // 子命令必须紧跟 ah.mjs（或兼容入口 lah.mjs）。路径里碰巧有 daemon 字样不能算。
+  return /(?:^|[\\/"'\s])l?ah\.mjs["']?\s+daemon\b/.test(String(text ?? ""));
 }
 
-// 计划任务结束时，子进程有时不会跟着退出。锁里若仍是本次 lah daemon，就结束它，
+// 计划任务结束时，子进程有时不会跟着退出。锁里若仍是本次 ah/lah daemon，就结束它，
 // 否则重新注册会因为「daemon 已在运行」起不来。
 function stopLockedDaemon(configDir) {
   let pid;
@@ -384,7 +384,7 @@ async function registerWindowsService({ configDir, role, node, appBin, logPath, 
     userId: windowsUserId(),
     wscript,
   });
-  const xmlPath = path.join(os.tmpdir(), `lah-task-${process.pid}-${role}-${node}.xml`);
+  const xmlPath = path.join(os.tmpdir(), `ah-task-${process.pid}-${role}-${node}.xml`);
   try {
     fs.writeFileSync(xmlPath, windowsTaskXmlBuffer(xml));
     run("schtasks", ["/Create", "/F", "/TN", taskName, "/XML", xmlPath]);
@@ -396,14 +396,14 @@ async function registerWindowsService({ configDir, role, node, appBin, logPath, 
   console.log(`  任务：任务计划程序库 ${taskName}`);
   console.log(`  启动器：${launcher}`);
   console.log(`  日志：${logPath}`);
-  console.log(`  卸载：lah service --remove --role ${role} --config ${configDir}`);
+  console.log(`  卸载：ah service --remove --role ${role} --config ${configDir}`);
   return 0;
 }
 
 export async function service(configDir, { remove = false, role: explicitRole } = {}, appDir) {
   const role = roleOf(configDir, { role: explicitRole });
   const node = nodeNameOf(configDir);
-  const appBin = path.join(appDir, "bin", "lah.mjs");
+  const appBin = path.join(appDir, "bin", "ah.mjs");
   const logPath = path.join(configDir, "daemon.log");
 
   if (process.platform === "darwin") {
@@ -430,7 +430,7 @@ export async function service(configDir, { remove = false, role: explicitRole } 
     console.log(`自启已安装并启动：${label}（role: ${role}）`);
     console.log(`  plist：${plistPath}`);
     console.log(`  日志：${logPath}`);
-    console.log(`  卸载：lah service --remove --role ${role} --config ${configDir}`);
+    console.log(`  卸载：ah service --remove --role ${role} --config ${configDir}`);
     return 0;
   }
 
@@ -506,7 +506,7 @@ export async function service(configDir, { remove = false, role: explicitRole } 
           console.log(`自启已安装并启动：${unit}（role: ${role}）`);
           console.log(`  单元：${unitPath}`);
           console.log(`  日志：journalctl --user -u ${unit}`);
-          console.log(`  卸载：lah service --remove --role ${role} --config ${configDir}`);
+          console.log(`  卸载：ah service --remove --role ${role} --config ${configDir}`);
           return 0;
         }
       } catch (e) {

@@ -1,5 +1,5 @@
 // 本机结果队列的追加、取走与等待。只碰队列文件和它旁边的锁，不访问总线。
-// 追加方（守护进程）与 lah present --pop 必须共用这把锁：只做 rename 快照仍会丢，
+// 追加方（守护进程）与 ah present --pop 必须共用这把锁：只做 rename 快照仍会丢，
 // 因为追加方可能已经打开旧文件，rename 之后才写入被摘走的 inode。
 
 import { randomBytes } from "node:crypto";
@@ -12,7 +12,7 @@ const DEFAULT_STALE_MS = 10_000;
 const DEFAULT_POLL_MS = 500;
 const WAIT_MAX_SEC = 86400;
 
-const USAGE = "用法：lah present [--pop] [--task <Task_ID>] [--wait <秒>]  读取本机结果呈递队列；--wait 阻塞到出现匹配回执（超时退出码 2）；--pop 只移除本次输出的条目";
+const USAGE = "用法：ah present [--pop] [--task <Task_ID>] [--wait <秒>]  读取本机结果呈递队列；--wait 阻塞到出现匹配回执（超时退出码 2）；--pop 只移除本次输出的条目";
 
 function defaultSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -292,13 +292,13 @@ function timeoutMessage(waitSec, taskId, configDir, alive) {
   const who = taskId == null ? "任何回执" : `任务 ${taskId} 的回执`;
   let text = `未收到${who}（已等待 ${waitSec} 秒）。\n`;
   if (!alive) {
-    text += `未检测到守护进程在运行（${path.join(configDir, "daemon.lock")}）。可用 lah doctor 排查。\n`;
+    text += `未检测到守护进程在运行（${path.join(configDir, "daemon.lock")}）。可用 ah doctor 排查。\n`;
   }
   return text;
 }
 
 function waitingHint(configDir) {
-  return `未检测到守护进程在运行（${path.join(configDir, "daemon.lock")}）。回执要等守护进程写入队列；可用 lah doctor 排查。继续等待。\n`;
+  return `未检测到守护进程在运行（${path.join(configDir, "daemon.lock")}）。回执要等守护进程写入队列；可用 ah doctor 排查。继续等待。\n`;
 }
 
 export async function handlePresentCli(args, {

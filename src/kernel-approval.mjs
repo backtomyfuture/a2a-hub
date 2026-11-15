@@ -1,7 +1,7 @@
 // 审批请求与机主决定。方法挂到 Kernel.prototype，this 仍是内核实例。
 import { createHash } from "node:crypto";
 import { pickSignedDecision, verifyDecision } from "./approval-sign.mjs";
-import { f1 } from "./bus/feishu.mjs";
+import { f1 } from "./bus/tables.mjs";
 import { approvalRank, clipText, log, redactValue } from "./kernel-util.mjs";
 
 export const approvalMethods = {

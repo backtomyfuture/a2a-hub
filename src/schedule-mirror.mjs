@@ -3,7 +3,7 @@
 // 也不改别人的行：触发只认本机 schedules.json。
 import fs from "node:fs";
 import path from "node:path";
-import { f1 } from "./bus/feishu.mjs";
+import { f1 } from "./bus/tables.mjs";
 import { formatOccurrenceKey } from "./schedule-cron.mjs";
 
 const REFRESH_MS = 15 * 60 * 1000;

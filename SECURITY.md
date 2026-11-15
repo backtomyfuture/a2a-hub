@@ -4,7 +4,7 @@ lark-a2a-hub 会在你的机器上按任务拉起命令和 Agent。这份文档�
 
 ## 报告漏洞
 
-请不要在公开 issue 里贴可利用的细节。用 GitHub 的私密漏洞报告：仓库页 **Security → Report a vulnerability**。报告里请写清受影响的版本（`lah --version`）、复现步骤和你认为的影响。
+请不要在公开 issue 里贴可利用的细节。用 GitHub 的私密漏洞报告：仓库页 **Security → Report a vulnerability**。报告里请写清受影响的版本（`ah --version`）、复现步骤和你认为的影响。
 
 目前只维护最新版本，修复不回补旧版本。
 
@@ -29,7 +29,7 @@ lark-a2a-hub 会在你的机器上按任务拉起命令和 Agent。这份文档�
 
 ## 不防什么
 
-- **节点没配 `hubPublicKey` 时，审批决定只按自报字段校验。** 这时任何能写总线的身份都能冒写批准。`lah doctor` 会提示。配置方法：在 hub 上跑 `lah doctor` 拿到公钥，在节点上 `lah setup --hub-key <公钥>`。公钥必须带外传递，不要从总线读。
+- **节点没配 `hubPublicKey` 时，审批决定只按自报字段校验。** 这时任何能写总线的身份都能冒写批准。`ah doctor` 会提示。配置方法：在 hub 上跑 `ah doctor` 拿到公钥，在节点上 `ah setup --hub-key <公钥>`。公钥必须带外传递，不要从总线读。
 - **任务行的 `Approval_Class` 能被改松。** 它在总线上，是发起方的请求，不是安全边界。改不动的边界是执行节点本机 `commands.json` 里的 `approval_class` 下限（Worker 与 Skill 取严）。高风险的 Worker 和技能要在本机声明 `approve`。
 - **hub 那台机器上的 Agent 读得到签名私钥。** hub 也是执行节点，它拉起的 Agent 与它同一个系统用户。要隔离，就让 hub 不登记有工具权限的 Worker，或者把 hub 放在专用机器或专用系统用户下。
 - **能写总线就能派单。** 拿到任一节点凭据的人可以给任意节点建任务。任务能做的事仍受目标节点本机 `commands.json` 和审批下限约束，但 `approval_class` 为 `auto` 的能力会直接执行。
@@ -42,5 +42,5 @@ lark-a2a-hub 会在你的机器上按任务拉起命令和 Agent。这份文档�
 1. hub 一个应用，每台节点各一个应用，不共用凭据（标准 §10.2）。
 2. 每个节点都配 `hubPublicKey`。
 3. 有写权限的 Worker 在本机声明 `approval_class: approve`。
-4. 安装后跑 `lah doctor`，处理它报出的每一条告警。
+4. 安装后跑 `ah doctor`，处理它报出的每一条告警。
 5. 安装脚本从仓库拉取代码并在本机执行，运行前先看一眼脚本内容。

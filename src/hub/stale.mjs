@@ -8,7 +8,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { f1 } from "../bus/feishu.mjs";
+import { f1 } from "../bus/tables.mjs";
 
 export const STALE_MIN = 20;
 export const STALE_GRACE_MIN = 30;

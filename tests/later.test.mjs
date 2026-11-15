@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
-import { f1 } from "../src/bus/feishu.mjs";
+import { f1 } from "../src/bus/tables.mjs";
 import { ScheduleService } from "../src/hub/schedule.mjs";
 import { Kernel, parseAgentReceipt, parseJsonReceipt, parseLaterInstant } from "../src/kernel.mjs";
 import { formatWhyText, getTaskWhy } from "../src/why.mjs";

@@ -1,7 +1,7 @@
 // 内存版飞书总线，给 Kernel 与 hub 的测试用。不读环境变量，不访问网络，不碰 ~/.hub-node。
 //
 // 用法：
-//   import { f1 } from "../../src/bus/feishu.mjs";
+//   import { f1 } from "../../src/bus/tables.mjs";
 //   const bus = new MockFeishuBus({
 //     tables: { tasks: "tbl_tasks", messages: "tbl_messages", parts: "tbl_parts",
 //               runs: "tbl_runs", artifacts: "tbl_artifacts", agentCards: "tbl_cards" },

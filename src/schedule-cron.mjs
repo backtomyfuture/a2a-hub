@@ -1,6 +1,6 @@
 // cron 解析与期次计算的纯函数，从 src/hub/schedule.mjs 原样搬出（零行为变化）。
 // 它们只依赖 Intl 与 Date，不碰总线与文件系统；抽出来是为了让节点本地调度
-// （方案 §3.2）与 lah schedule / task begin 共用同一套表达式语义与期次键写法。
+// （方案 §3.2）与 ah schedule / task begin 共用同一套表达式语义与期次键写法。
 // 期次按配置时区（缺省 Asia/Shanghai）的墙钟计算，不用宿主机时区：
 // hub 常驻在 UTC 的机器上，表达式却按北京时间书写。
 

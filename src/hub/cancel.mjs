@@ -6,7 +6,7 @@
 // 取消要按回执原路把 notice 给发起方，语义不同；这里只按同一口径重写序号、
 // In_Reply_To=当前 Status_Msg、任务行只改 Status 不改 Status_Msg。
 
-import { f1 } from "../bus/feishu.mjs";
+import { f1 } from "../bus/tables.mjs";
 import { initiatorOf } from "../inbox.mjs";
 
 const TERMINAL = new Set(["completed", "failed", "canceled", "rejected"]);
@@ -53,7 +53,7 @@ function assertCancellable(status) {
 
 export async function cancelTask({ bus, node, role, taskId, text }) {
   const id = String(taskId ?? "").trim();
-  if (!id) throw new Error("用法：lah task cancel --task <Task_ID> [--text <说明>]");
+  if (!id) throw new Error("用法：ah task cancel --task <Task_ID> [--text <说明>]");
   const tasks = await bus.listRecords(bus.tables.tasks);
   const listed = tasks.find((t) => f1(t, "Task_ID") === id);
   if (!listed) throw new Error(`任务不存在：${id}`);

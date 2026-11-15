@@ -4,7 +4,7 @@
 // 受 Max_Iterations 与 A2A HOP_LIMIT (8) 双重熔断约束。
 
 import { randomBytes } from "node:crypto";
-import { f1 } from "../bus/feishu.mjs";
+import { f1 } from "../bus/tables.mjs";
 import { acceptanceForTask, parseCriteria } from "../acceptance.mjs";
 import { createTask, formatCreatedAt } from "./create.mjs";
 import { messageText } from "./cards.mjs";

@@ -1,4 +1,4 @@
-// CLI lah schedule 与 lah task begin 测试。
+// CLI ah schedule 与 ah task begin 测试。
 // 守住参数校验、控制键拒收、权限 600、幂等键格式、Rules 镜像保护与不重复建单。
 // 内存 mock 总线，使用临时目录，不连真实 Base，不污染真实环境变量。
 
@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
-import { f1 } from "../src/bus/feishu.mjs";
+import { f1 } from "../src/bus/tables.mjs";
 import {
   handleScheduleCli,
   handleTaskBegin,
@@ -37,9 +37,8 @@ function setupDir(dir, { tz = "Asia/Shanghai", withRules = true, caps = { echo: 
   const tables = withRules ? TABLES_WITH_RULES : { ...TABLES };
   fs.writeFileSync(path.join(dir, "node.json"), JSON.stringify({
     node: "node-a",
-    appId: "mock_id",
-    appSecret: "mock_secret",
-    baseToken: "mock_base",
+    busType: "sqlite",
+    dbPath: ":memory:",
     tz,
     tables,
   }, null, 2), { mode: 0o600 });

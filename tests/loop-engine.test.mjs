@@ -7,7 +7,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { f1 } from "../src/bus/feishu.mjs";
+import { f1 } from "../src/bus/tables.mjs";
 import { SqliteBus } from "../src/bus/sqlite-bus.mjs";
 import { DEFAULT_TABLES } from "../src/bus/tables.mjs";
 import { LoopService, cancelLoop, createLoop } from "../src/hub/loop.mjs";
