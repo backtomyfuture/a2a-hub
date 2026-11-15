@@ -1,0 +1,31 @@
+{
+ "node": "mac-mini-hub",
+ "role": "hub",
+ "kind": "host",
+ "zone": "home",
+ "capPrefix": "mm",
+ "busType": "sqlite",
+ "dbPath": "./hub.db",
+ "listen": "0.0.0.0:8787",
+ "publicUrl": "http://127.0.0.1:8787",
+ "longPollSec": 25,
+ "sweepSec": 60,
+ "pollSec": 45,
+ "events": true,
+ "nodeDesc": "Mac mini 常驻中台中枢：SQLite 总线 + 长轮询网关 + LobeHub Web 控制台 + LoopForge SOP 编排",
+ "notifications": {
+  "feishuWebhookUrl": "",
+  "barkUrl": "",
+  "telegramBotToken": "",
+  "telegramChatId": "",
+  "webhookUrl": "",
+  "events": [
+   "auth-required",
+   "input-required",
+   "completed",
+   "failed",
+   "rejected",
+   "stale"
+  ]
+ }
+}

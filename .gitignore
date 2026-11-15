@@ -1,0 +1,27 @@
+node_modules/
+*.log
+.DS_Store
+*.local.json
+__pycache__/
+
+# 运行时与凭据（只存本机，绝不进仓库）
+.hub-node/
+app.env
+hub.db
+hub.db-wal
+hub.db-shm
+hub_runtime.json
+*.db
+*.db-wal
+*.db-shm
+approval_state.json
+present_state.json
+present_queue.jsonl
+present_queue.jsonl.lock
+stale_state.json
+schedule_state.json
+schedule_local_state.json
+schedules.json
+retry_state.json
+approval_key.pem
+runs/
