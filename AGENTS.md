@@ -1,7 +1,7 @@
-# AGENTS.md — lobe-a2a-hub
+# AGENTS.md — a2a-hub
 
-lobe-a2a-hub：自托管独立多 Agent 编排中台（基于 A2A 八态数据模型，从 `lark-a2a-hub` 演进迁移而来，默认采用 SQLite WAL + 出站 HTTP 长轮询总线，内置 LobeHub 风格 Web 控制台与 LoopForge 多阶段 SOP 闭环引擎，并保留对飞书多维表格总线的向下兼容）。
-本仓库只有 Node >= 24 ESM 实现且**零外部 npm 运行时依赖**（`dependencies: {}`）：`lah`（主入口）、`lobe-hub` 与 `hub-node`（兼容别名）同时承载 `node` 与 `hub` 两个逻辑角色。
+a2a-hub：自托管独立多 Agent 编排中台（基于 A2A 八态数据模型，从 `lark-a2a-hub` 演进迁移而来，默认采用 SQLite WAL + 出站 HTTP 长轮询总线，内置 Web 控制台与 LoopForge 多阶段 SOP 闭环引擎，并保留对飞书多维表格总线的向下兼容）。
+本仓库只有 Node >= 24 ESM 实现且**零外部 npm 运行时依赖**（`dependencies: {}`）：`lah`（主入口）、`a2a-hub`、`ahub` 与 `hub-node`（兼容别名）同时承载 `node` 与 `hub` 两个逻辑角色。
 方向（标准 §10）：`hub` 角色是 `node` 角色的单进程超集；由 `lah daemon --role node|hub` 承载。省略 `--role` 时读配置目录 `node.json` 的 `role`，缺省 `node`。独立中台模式下，`role=hub` 单进程同时运行本地工作内核（按 `commands.json` 接单）、`SqliteBus`（`node:sqlite`）、`startHubHttpServer`（REST API + `LongPollBroker` + Web 控制台）、`ApprovalService`（ed25519 签名）、`PresentService`、`StaleService`、`ScheduleService`、`LoopService` 与 `ExternalNotifier`。
 
 ## 目录与职责
@@ -13,7 +13,7 @@ lobe-a2a-hub：自托管独立多 Agent 编排中台（基于 A2A 八态数据�
 - `src/bus/feishu.mjs` / `src/bus/feishu-events.mjs`：`FeishuBus` 与飞书长连接订阅（当 `busType: "feishu"` 时保留向下兼容，不引入第三方 SDK 时通过全局 `fetch` 调用）。
 - `src/server/longpoll-broker.mjs`：`LongPollBroker`，维护全网单调递增 `seq` 与挂起 HTTP 长轮询连接（`GET /api/v1/poll`），写操作发生后毫秒级唤醒目标节点。
 - `src/server/http-server.mjs`：`startHubHttpServer`，暴露独立 Hub HTTP 网关：`/`（Web 控制台）、`/api/v1/health`（免鉴权健康探针）、`/api/v1/state`、`/api/v1/poll`、`/api/v1/tables/*`、`/api/v1/tasks*`、`/api/v1/approvals/:taskId/decide`、`/api/v1/loops*`；监听地址由 `cfg.listen`（默认 `0.0.0.0:8787`）控制并支持 Bearer Token 鉴权（`LAH_API_TOKEN` / `cfg.apiToken`）。
-- `src/server/web-ui.mjs`：`renderWebConsoleHtml()`，零构建依赖内嵌 LobeHub + LoopForge 风格 Web 控制台（总览拓扑、Agent Hub 名片、A2A 任务详情与在线签名审批/答复、SOP Loop 编排室）。
+- `src/server/web-ui.mjs`：`renderWebConsoleHtml()`，零构建依赖内嵌 Web 控制台（总览拓扑、Agent Hub 名片、A2A 任务详情与在线签名审批/答复、SOP Loop 编排室）。
 - `src/hub/loop.mjs`：`LoopService`、`BUILTIN_LOOP_TEMPLATES`（含 `plan-code-verify`）、`createLoop`、`cancelLoop`；LoopForge 风格多阶段闭环状态机，在同一个 `Context_ID` 下推进阶段任务并结合 `acceptance.mjs` 验收结论触发 `retry` / `goto:<stage_id>` / `abort`，受 `Max_Iterations` 与 `HOP_LIMIT=8` 限制。
 - `src/loop-cli.mjs`：`lah loop (create|ls|show|cancel|templates)` CLI 实现。
 - `src/hub/notifier.mjs`：`ExternalNotifier`，可选外部通知器（飞书普通群机器人 Webhook / Bark / Telegram / 通用 Webhook），按事件去重并附带控制台深链。

@@ -1,10 +1,11 @@
 {
-  "name": "lobe-a2a-hub",
+  "name": "a2a-hub",
   "version": "1.0.0",
-  "description": "Self-hosted Multi-Agent Orchestration Hub (A2A Data Model + SQLite & Long-Polling + LobeHub Portal + LoopForge SOP Loops)",
+  "description": "Self-hosted Multi-Agent Orchestration Hub (A2A Data Model + SQLite & HTTP Long-Polling + Web Console + LoopForge SOP Loops)",
   "bin": {
+    "a2a-hub": "bin/lah.mjs",
+    "ahub": "bin/lah.mjs",
     "lah": "bin/lah.mjs",
-    "lobe-hub": "bin/lah.mjs",
     "hub-node": "bin/hub-node.mjs"
   },
   "type": "module",

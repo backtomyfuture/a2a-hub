@@ -1,4 +1,4 @@
-// LobeHub + LoopForge 风格内置 Web 控制台（零外部构建依赖、无外网 CDN 依赖，局域网/离线可用）。
+// 内置 Web 控制台（零外部构建依赖、无外网 CDN 依赖，局域网/离线可用）。
 
 export function renderWebConsoleHtml() {
   return `<!DOCTYPE html>
@@ -6,7 +6,7 @@ export function renderWebConsoleHtml() {
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Lobe-A2A-Hub · 独立多 Agent 编排中台</title>
+<title>A2A-Hub · 独立多 Agent 编排中台</title>
 <style>
   :root {
     --bg: #0b0d14;
@@ -140,9 +140,9 @@ export function renderWebConsoleHtml() {
 <div class="app">
   <aside class="sidebar">
     <div class="brand">
-      <div class="brand-logo">LA</div>
+      <div class="brand-logo">AH</div>
       <div>
-        <div class="brand-title">Lobe-A2A-Hub</div>
+        <div class="brand-title">A2A-Hub</div>
         <div class="brand-sub" id="hubNodeLabel">Independent Control Plane</div>
       </div>
     </div>
@@ -312,7 +312,7 @@ export function renderWebConsoleHtml() {
     const params = new URLSearchParams(location.search);
     const t = params.get("token");
     if (t) {
-      localStorage.setItem("lobe_a2a_token", t.trim());
+      localStorage.setItem("a2a_hub_token", t.trim());
       params.delete("token");
       const next = location.pathname + (params.toString() ? "?" + params.toString() : "") + location.hash;
       history.replaceState(null, "", next);
@@ -328,7 +328,7 @@ const state = {
   statusFilter: "ALL",
   search: "",
   cursor: 0,
-  token: localStorage.getItem("lobe_a2a_token") || "",
+  token: localStorage.getItem("a2a_hub_token") || localStorage.getItem("lobe_a2a_token") || "",
   templates: [],
 };
 
@@ -747,7 +747,7 @@ function render() {
 function syncNav() {
   const titles = {
     overview: "总览与终端拓扑",
-    agents: "Agent 名片墙 (LobeHub Style)",
+    agents: "Agent 名片墙",
     tasks: "任务与 A2A 对话流",
     loops: "LoopForge SOP 闭环工坊",
   };
@@ -812,7 +812,7 @@ document.getElementById("btnToken").addEventListener("click", () => {
 });
 document.getElementById("saveTokenBtn").addEventListener("click", () => {
   state.token = document.getElementById("tokenInput").value.trim();
-  localStorage.setItem("lobe_a2a_token", state.token);
+  localStorage.setItem("a2a_hub_token", state.token);
   closeModal("tokenModal");
   refreshState();
 });

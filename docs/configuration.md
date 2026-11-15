@@ -383,7 +383,7 @@ grep -cE 'api code 99991403|api retry exhausted|poll error|scan failed' "$LOG"
 
 ## 7. 独立中台、长轮询与 LoopForge SOP 配置
 
-`lobe-a2a-hub` 默认以独立中台（`sqlite` + `http` 长轮询）运行，无需飞书多维表格配额；同时保留 `feishu` 模式向下兼容。配置样例见 [`config/hub.standalone.example.json`](../config/hub.standalone.example.json) 与 [`config/node.remote.example.json`](../config/node.remote.example.json)。
+`a2a-hub` 默认以独立中台（`sqlite` + `http` 长轮询）运行，无需飞书多维表格配额；同时保留 `feishu` 模式向下兼容。配置样例见 [`config/hub.standalone.example.json`](../config/hub.standalone.example.json) 与 [`config/node.remote.example.json`](../config/node.remote.example.json)。
 
 ### 7.1 `node.json` 独立中台与长轮询字段
 

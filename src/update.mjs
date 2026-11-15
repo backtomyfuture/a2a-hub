@@ -49,7 +49,7 @@ function ensureEntrySymlinks(appDir) {
   }
   const binDir = path.join(os.homedir(), ".local", "bin");
   const entry = path.join(appDir, "bin", "lah.mjs");
-  for (const name of ["lah", "hub-node"]) {
+  for (const name of ["lah", "a2a-hub", "ahub", "hub-node"]) {
     const link = path.join(binDir, name);
     const state = ensureSymlink(entry, link);
     if (state === "missing") {

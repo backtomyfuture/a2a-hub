@@ -3,13 +3,13 @@
 本项目的主要变更记录如下。节点适配器版本号见 `package.json` /
 `lah --version`；中台标准版本独立编号（现行 v3.9）。
 
-## [1.0.0] - 2026-11-15（`lobe-a2a-hub` 独立中台首发：SQLite WAL、HTTP 长轮询、Web 控制台与 LoopForge SOP 闭环）
+## [1.0.0] - 2026-11-15（`a2a-hub` 独立中台首发：SQLite WAL、HTTP 长轮询、Web 控制台与 LoopForge SOP 闭环）
 
 `DAEMON_VERSION` 升级至 `node-1.0.0`，正式从飞书多维表格单一总线演进为零外部依赖的独立自托管多 Agent 编排中台（保留 `busType: "feishu"` 向下兼容）：
 
 - **零依赖 SQLite WAL 总线（`SqliteBus`）**：基于 Node >= 24 内置 `node:sqlite`（`DatabaseSync` WAL 模式）存储 `tasks` / `messages` / `parts` / `runs` / `artifacts` / `agentCards` / `rules` / `loops`，移除 `@larksuiteoapi/node-sdk` 外部依赖（`dependencies: {}`），彻底摆脱飞书应用 API 配额限制。
 - **出站 HTTP 长轮询网关（`startHubHttpServer` + `LongPollBroker` + `HttpBus`）**：中台常驻主机暴露统一 REST API 与 `GET /api/v1/poll` 长轮询端点，支持 Bearer Token 鉴权与 `hub_runtime.json`；远端执行节点仍保持零监听端口、纯出站连接，实现毫秒级唤醒与 `PENDING_RECHECK` 短复查。
-- **LobeHub 风格内置 Web 控制台（`src/server/web-ui.mjs`）**：零构建依赖内嵌可视化中台界面，支持全网拓扑与长轮询在线节点监控、AgentCards 三层能力矩阵、A2A 任务全时间线展示、基于 Hub ed25519 私钥的在线签名审批、在线 `input-required` 回复与任务撤回。
+- **内置 Web 控制台（`src/server/web-ui.mjs`）**：零构建依赖内嵌可视化中台界面，支持全网拓扑与长轮询在线节点监控、AgentCards 三层能力矩阵、A2A 任务全时间线展示、基于 Hub ed25519 私钥的在线签名审批、在线 `input-required` 回复与任务撤回。
 - **LoopForge 多阶段 SOP 闭环编排引擎（`LoopService` + `lah loop`）**：新增 `Loops` 表、内置 `plan-code-verify` 等 SOP 模板、`lah loop (create|ls|show|cancel|templates)` CLI 与 Web SOP 编排室；支持同一 `Context_ID` 下阶段推进、结合 `acceptanceForTask` 验收结论触发 `retry` / `goto:<stage_id>` / `abort` 自动回跳反馈，受 `Max_Iterations` 与 `HOP_LIMIT=8` 熔断保护。
 - **可选多通道外部提醒（`ExternalNotifier`）**：支持配置飞书群自定义机器人 Webhook（免企业配额）、Bark、Telegram 与通用 Webhook 推送待审批、提问、终态与陈旧任务告警。
 - **CLI 与自检向导扩展**：`lah setup` 新增 `--bus sqlite|http|feishu`、`--listen`、`--db-path`、`--public-url`、`--hub-url`、`--api-token`；`lah doctor` 针对独立中台与远端 HTTP 节点提供专属数据库与健康探针诊断。

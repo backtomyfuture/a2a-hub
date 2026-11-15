@@ -1,6 +1,6 @@
-# lobe-a2a-hub
+# a2a-hub
 
-**A self-hosted, zero-external-dependency multi-agent orchestration hub with zero Feishu API quota limits** — preserving the A2A eight-state model, three-layer addressing (`Node` → `Worker` → `Skill`), instruction/data separation, and ed25519-signed approvals, while moving the shared bus to **SQLite WAL + outbound HTTP Long-Polling (`GET /api/v1/poll`)** with a built-in **LobeHub-style Web Console** and **LoopForge multi-stage SOP orchestration engine**.
+**A self-hosted, zero-external-dependency multi-agent orchestration hub with zero Feishu API quota limits** — preserving the A2A eight-state model, three-layer addressing (`Node` → `Worker` → `Skill`), instruction/data separation, and ed25519-signed approvals, while moving the shared bus to **SQLite WAL + outbound HTTP Long-Polling (`GET /api/v1/poll`)** with a built-in **Web Console** and **LoopForge multi-stage SOP orchestration engine**.
 
 [中文说明](README.md) · [Standard (Chinese)](docs/standard.md) · [Configuration & CLI](docs/configuration.md) · [Architecture](docs/architecture.md) · [Security Model](SECURITY.md) · [Changelog](CHANGELOG.md)
 
@@ -10,13 +10,13 @@
 
 ---
 
-## Why `lobe-a2a-hub`
+## Why `a2a-hub`
 
-Originally migrated from `lark-a2a-hub`, `lobe-a2a-hub` removes the mandatory Feishu/Lark Bitable API quota bottleneck while retaining every battle-tested reliability and security guarantee:
+Originally migrated from `lark-a2a-hub`, `a2a-hub` removes the mandatory Feishu/Lark Bitable API quota bottleneck while retaining every battle-tested reliability and security guarantee:
 
 - **Self-Hosted Standalone Hub (`busType: "sqlite"`)**: Run `lah daemon --role hub` on a persistent server (such as a Mac mini or Linux VPS) backed by Node >= 24's built-in `node:sqlite` (WAL mode) and zero third-party npm dependencies (`dependencies: {}`).
 - **Outbound HTTP Long-Polling Edge Nodes (`busType: "http"`)**: Remote machines, workstations, and standalone agents connect outbound via `GET /api/v1/poll` for sub-second wakeups when tasks, approvals, or answers arrive. Edge nodes never open inbound listening ports.
-- **Built-in LobeHub-style Web Console** (`http://<hub>:8787`):
+- **Built-in Web Console** (`http://<hub>:8787`):
   - **Topology & Overview**: Live connected long-polling nodes, task state counters, and event health.
   - **Agent Hub Roster**: Three-layer (`Node` / `Worker` / `Skill`) capability matrix with `Receive_Mode` and `Dispatchable` status.
   - **A2A Conversation Stream**: Full `Messages` / `Parts` / `Runs` / `Artifacts` timeline, one-click ed25519-signed `Approve` / `Reject` actions for `auth-required`, and inline replies for `input-required`.
@@ -30,7 +30,7 @@ Originally migrated from `lark-a2a-hub`, `lobe-a2a-hub` removes the mandatory Fe
 
 ```mermaid
 flowchart LR
-    WEB["LobeHub Web Console / CLI (lah)"] --> HUB
+    WEB["Web Console / CLI (lah)"] --> HUB
     subgraph HUB["Persistent Hub Server (e.g., Mac mini :8787)"]
         direction TB
         SQL[("SQLite WAL Bus\ntasks · messages · parts · runs\nartifacts · agentCards · rules · loops")]
@@ -67,7 +67,7 @@ Tasks progress strictly across the eight A2A states: `submitted` → `working` �
 **1) Start the Standalone Hub (e.g., on a Mac mini / Linux host):**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/backtomyfuture/lobe-a2a-hub/main/install.sh | sh -s -- --hub
+curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --hub
 ```
 
 This generates an ed25519 approval keypair + random `apiToken`, configures SQLite WAL, registers user-level autostart (add `--no-service` to run foreground-only), and prints:
@@ -78,10 +78,10 @@ This generates an ed25519 approval keypair + random `apiToken`, configures SQLit
 
 ```bash
 # macOS / Linux:
-curl -fsSL https://raw.githubusercontent.com/backtomyfuture/lobe-a2a-hub/main/install.sh | sh -s -- --join "http://<HUB_API_TOKEN>@<HUB_IP>:8787"
+curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --join "http://<HUB_API_TOKEN>@<HUB_IP>:8787"
 
 # Windows PowerShell:
-$env:LAH_JOIN = "http://<HUB_API_TOKEN>@<HUB_IP>:8787"; irm https://raw.githubusercontent.com/backtomyfuture/lobe-a2a-hub/main/install.ps1 | iex
+$env:LAH_JOIN = "http://<HUB_API_TOKEN>@<HUB_IP>:8787"; irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex
 ```
 
 `--join` extracts the embedded token into mode-600 `app.env` (never written to `node.json`), fetches `hubPublicKey` from `GET /api/v1/health`, and starts the outbound long-polling daemon/service.
@@ -89,9 +89,9 @@ $env:LAH_JOIN = "http://<HUB_API_TOKEN>@<HUB_IP>:8787"; irm https://raw.githubus
 ### Option B: From a Cloned Checkout
 
 ```bash
-git clone https://github.com/backtomyfuture/lobe-a2a-hub.git
-cd lobe-a2a-hub
-# Optional: expose `lah` / `lobe-hub` / `hub-node` globally
+git clone https://github.com/backtomyfuture/a2a-hub.git
+cd a2a-hub
+# Optional: expose `lah` / `a2a-hub` / `ahub` / `hub-node` globally
 npm link
 
 # 1) Start the Hub in one line (add --service to register autostart):
@@ -145,7 +145,7 @@ node bin/lah.mjs daemon
 
 ---
 
-## Common Commands (`lah` / `lobe-hub` / `hub-node`)
+## Common Commands (`lah` / `a2a-hub` / `ahub` / `hub-node`)
 
 Configuration defaults to `~/.hub-node` (override with `--config <dir>` or `HUB_NODE_HOME`). See [Configuration & CLI](docs/configuration.md) for the complete reference.
 

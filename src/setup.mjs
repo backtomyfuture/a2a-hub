@@ -1354,7 +1354,7 @@ export async function runSetup(configDir, argv, appDir) {
           const consoleUrl = apiToken ? `${baseDisplay}/?token=${encodeURIComponent(apiToken)}` : baseDisplay;
           console.log(`  ✓ Web 控制台地址：${consoleUrl}`);
           console.log(`  ✓ 其他机器一行接入命令（已安装 lah）：\n    lah join ${joinStr}`);
-          console.log(`  ✓ 全新机器一行安装并接入：\n    curl -fsSL https://raw.githubusercontent.com/backtomyfuture/lobe-a2a-hub/main/install.sh | sh -s -- --join ${joinStr}`);
+          console.log(`  ✓ 全新机器一行安装并接入：\n    curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --join ${joinStr}`);
         }
       } else if (!hubPublicKey) {
         console.log("  · 未配置 hubPublicKey：Hub 在线时执行 lah join 或 lah setup --hub-key <公钥> 可开启 ed25519 审批验签。");

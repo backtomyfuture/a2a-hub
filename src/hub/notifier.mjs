@@ -104,7 +104,7 @@ export class ExternalNotifier {
       jobs.push(this._postJson(base, {
         title,
         body,
-        group: "lobe-a2a-hub",
+        group: "a2a-hub",
         url: this.publicUrl ? `${this.publicUrl}/#task=${encodeURIComponent(taskId)}` : undefined,
       }));
     }

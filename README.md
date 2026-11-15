@@ -1,6 +1,6 @@
-# lobe-a2a-hub
+# a2a-hub
 
-**零飞书 API 配额消耗、零外部运行时依赖的独立多 Agent 编排中台**——完整保留 A2A 八态协议、三层寻址（Node → Worker → Skill）、指令与数据分离和 ed25519 签名审批，并将总线升级为 **SQLite WAL + 出站 HTTP 长轮询（`GET /api/v1/poll`）**，内置 **LobeHub 风格可视化 Web 控制台**与 **LoopForge 多阶段 SOP 闭环编排引擎**，一台 Mac mini 或轻量服务器常驻即可调度全球接入的终端节点与独立 Agent。
+**零飞书 API 配额消耗、零外部运行时依赖的独立多 Agent 编排中台**——完整保留 A2A 八态协议、三层寻址（Node → Worker → Skill）、指令与数据分离和 ed25519 签名审批，并将总线升级为 **SQLite WAL + 出站 HTTP 长轮询（`GET /api/v1/poll`）**，内置 **可视化 Web 控制台**与 **LoopForge 多阶段 SOP 闭环编排引擎**，一台 Mac mini 或轻量服务器常驻即可调度全球接入的终端节点与独立 Agent。
 
 [English](README.en.md) · [中台标准](docs/standard.md) · [配置与 CLI 手册](docs/configuration.md) · [架构设计](docs/architecture.md) · [安全模型](SECURITY.md) · [变更记录](CHANGELOG.md)
 
@@ -10,13 +10,13 @@
 
 ---
 
-## 为什么做 `lobe-a2a-hub`
+## 为什么做 `a2a-hub`
 
-原版 `lark-a2a-hub` 以飞书多维表格作共享总线，验证了 A2A 状态机与零入站边缘节点的可靠性，但受限于飞书应用 API 月度调用配额与平台依赖。`lobe-a2a-hub` 将这套生产级调度内核全面独立化：
+原版 `lark-a2a-hub` 以飞书多维表格作共享总线，验证了 A2A 状态机与零入站边缘节点的可靠性，但受限于飞书应用 API 月度调用配额与平台依赖。`a2a-hub` 将这套生产级调度内核全面独立化：
 
 - **常驻中枢（Mac mini / Linux / 云主机），免飞书配额**：`hub` 角色直接启动本地 SQLite WAL（Node >= 24 内置 `node:sqlite`）+ HTTP API 与静态控制台（默认监听 `0.0.0.0:8787`），无任何第三方 npm 运行时依赖（`dependencies: {}`）。
 - **边缘节点纯出站 HTTP 长轮询**：远端机器（家用 Mac、办公电脑、GPU 工作站、Cloud Agent）通过 `GET /api/v1/poll` 维持出站长轮询，收到新任务、审批决策或问答答复时**毫秒级唤醒**；节点侧绝不开监听端口，无需公网 IP 或内网穿透。
-- **LobeHub 风格内置 Web 控制台**：单文件零构建内嵌于中台（打开 `http://<hub>:8787` 即可使用）：
+- **内置 Web 控制台**：单文件零构建内嵌于中台（打开 `http://<hub>:8787` 即可使用）：
   - **总览与实时拓扑**：查看在线长轮询节点、排队/运行/阻塞任务与八态流转分布；
   - **Agent Hub 名片矩阵**：按 `Node / Worker / Skill` 三层展示各节点已登记能力、`Receive_Mode`、`Availability` 与可派发状态；
   - **A2A 对话流、在线审批与追问**：查看任务全历史（Tasks / Messages / Parts / Runs / Artifacts），对 `auth-required` 一键签名批准/驳回，对 `input-required` 直接在线回复续跑；
@@ -30,7 +30,7 @@
 
 ```mermaid
 flowchart LR
-    WEB["LobeHub Web 控制台 / CLI (lah)"] --> HUB
+    WEB["Web 控制台 / CLI (lah)"] --> HUB
     subgraph HUB["常驻中台 Hub（如 Mac mini :8787）"]
         direction TB
         SQL[("SQLite WAL 总线\ntasks · messages · parts · runs\nartifacts · agentCards · rules · loops")]
@@ -67,7 +67,7 @@ flowchart LR
 **1) 在常驻主机（如 Mac mini / Linux）一行启动 Hub（自动生成密钥与 Token、开启 HTTP 服务并注册后台自启）：**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/backtomyfuture/lobe-a2a-hub/main/install.sh | sh -s -- --hub
+curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --hub
 ```
 
 安装完成后终端会直接输出：
@@ -78,10 +78,10 @@ curl -fsSL https://raw.githubusercontent.com/backtomyfuture/lobe-a2a-hub/main/in
 
 ```bash
 # macOS / Linux：
-curl -fsSL https://raw.githubusercontent.com/backtomyfuture/lobe-a2a-hub/main/install.sh | sh -s -- --join "http://<HUB_API_TOKEN>@<HUB_IP>:8787"
+curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --join "http://<HUB_API_TOKEN>@<HUB_IP>:8787"
 
 # Windows PowerShell：
-$env:LAH_JOIN = "http://<HUB_API_TOKEN>@<HUB_IP>:8787"; irm https://raw.githubusercontent.com/backtomyfuture/lobe-a2a-hub/main/install.ps1 | iex
+$env:LAH_JOIN = "http://<HUB_API_TOKEN>@<HUB_IP>:8787"; irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex
 ```
 
 `--join` 会自动将 Token 写入 `0600` 权限的 `app.env`（不进入 `node.json`）、从 `GET /api/v1/health` 同步 `hubPublicKey`，并注册后台长轮询服务。
@@ -91,9 +91,9 @@ $env:LAH_JOIN = "http://<HUB_API_TOKEN>@<HUB_IP>:8787"; irm https://raw.githubus
 如果你已经克隆了仓库：
 
 ```bash
-git clone https://github.com/backtomyfuture/lobe-a2a-hub.git
-cd lobe-a2a-hub
-# 如需全局注册 `lah` / `lobe-hub` / `hub-node` 命令（可选）：
+git clone https://github.com/backtomyfuture/a2a-hub.git
+cd a2a-hub
+# 如需全局注册 `lah` / `a2a-hub` / `ahub` / `hub-node` 命令（可选）：
 npm link
 
 # 1) 在 Mac mini / 主机一行启动 Hub（加 --service 可顺便注册开机自启）：
@@ -147,7 +147,7 @@ node bin/lah.mjs daemon
 
 ---
 
-## 常用命令（CLI 简称 `lah` / `lobe-hub` / `hub-node`）
+## 常用命令（CLI 简称 `lah` / `a2a-hub` / `ahub` / `hub-node`）
 
 默认配置目录为 `~/.hub-node`（可通过 `--config <dir>` 或环境变量 `HUB_NODE_HOME` 指定）。完整参数见 [配置与 CLI 手册](docs/configuration.md)。
 

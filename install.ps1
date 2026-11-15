@@ -1,10 +1,10 @@
-﻿# lobe-a2a-hub Windows 一行安装与部署：
+﻿# a2a-hub Windows 一行安装与部署：
 #   1) 仅安装命令行工具：
-#      irm https://raw.githubusercontent.com/backtomyfuture/lobe-a2a-hub/main/install.ps1 | iex
+#      irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex
 #   2) 安装并一键接入已有 Hub：
-#      $env:LAH_JOIN="http://<token>@<hub-ip>:8787"; irm https://raw.githubusercontent.com/backtomyfuture/lobe-a2a-hub/main/install.ps1 | iex
+#      $env:LAH_JOIN="http://<token>@<hub-ip>:8787"; irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex
 # 布局：%USERPROFILE%\.hub-node\ 是配置目录，其下 app\ 是程序本体，
-#       bin\lah.cmd、bin\lobe-hub.cmd 与 bin\hub-node.cmd 是命令入口（加入当前用户 PATH）。
+#       bin\lah.cmd、bin\a2a-hub.cmd、bin\ahub.cmd 与 bin\hub-node.cmd 是命令入口（加入当前用户 PATH）。
 # Windows 不把无扩展名文件当命令，也不保证能建软链，所以入口是 cmd 包装，
 # 用 %~dp0 相对路径指向 app\bin\lah.mjs，用户名含非 ASCII 时也不靠代码页。
 # 不在这里写 node.json / commands.json。重跑本脚本 = 更新程序，已有配置不覆盖。
@@ -49,7 +49,7 @@
 
   if ($showHelp) {
     Write-Host "用法: install.ps1 [-Hub | -Join <url>] [-NoService] [-SkipSkill]"
-    Write-Host "      irm https://raw.githubusercontent.com/backtomyfuture/lobe-a2a-hub/main/install.ps1 | iex"
+    Write-Host "      irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex"
     Write-Host "  -Hub, --hub               安装后立即配置独立 SQLite Hub 并注册开机任务"
     Write-Host "  -Join, --join <url>       安装后立即接入已有 Hub 并注册开机任务（也可用 `$env:LAH_JOIN）"
     Write-Host "  -NoService, --no-service  仅配置与自检，不注册开机任务"
@@ -156,8 +156,8 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
     throw "无法确定用户目录（USERPROFILE 为空）"
   }
 
-  $repoGit = "https://github.com/backtomyfuture/lobe-a2a-hub.git"
-  $repoTar = "https://codeload.github.com/backtomyfuture/lobe-a2a-hub/tar.gz/refs/heads/main"
+  $repoGit = "https://github.com/backtomyfuture/a2a-hub.git"
+  $repoTar = "https://codeload.github.com/backtomyfuture/a2a-hub/tar.gz/refs/heads/main"
   $configHome = $env:HUB_NODE_HOME
   if ([string]::IsNullOrWhiteSpace($configHome)) {
     $configHome = Join-Path $profileHome ".hub-node"
@@ -187,9 +187,9 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
       $tarFile = Join-Path $tmp "src.tar.gz"
       Invoke-Native -File $curl.Source -ArgumentList @("-fsSL", $repoTar, "-o", $tarFile)
       Invoke-Native -File $tar.Source -ArgumentList @("-xzf", $tarFile, "-C", $tmp)
-      $extracted = Join-Path $tmp "lobe-a2a-hub-main"
+      $extracted = Join-Path $tmp "a2a-hub-main"
       if (-not (Test-Path -LiteralPath $extracted)) {
-        throw "压缩包里没有 lobe-a2a-hub-main"
+        throw "压缩包里没有 a2a-hub-main"
       }
       Move-Item -LiteralPath $extracted -Destination $app
     } finally {
@@ -208,10 +208,10 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
     Pop-Location
   }
 
-  # 三个别名都进 lah.mjs。
+  # 四个别名都进 lah.mjs。
   New-Item -ItemType Directory -Force -Path $binDir | Out-Null
   $shim = "@echo off`r`nnode `"%~dp0..\app\bin\lah.mjs`" %*`r`n"
-  foreach ($name in @("lah.cmd", "lobe-hub.cmd", "hub-node.cmd")) {
+  foreach ($name in @("lah.cmd", "a2a-hub.cmd", "ahub.cmd", "hub-node.cmd")) {
     [System.IO.File]::WriteAllText((Join-Path $binDir $name), $shim, [System.Text.UTF8Encoding]::new($false))
   }
 

@@ -88,11 +88,11 @@ flowchart TB
 ## 角色与传输（标准 §10）
 
 - **hub 是逻辑角色，且为 node 的单进程超集。** 中台只有 node 与 hub 两个角色；
-  hub 角色是 node 角色的单进程超集，由 `lah daemon --role node|hub`（CLI 简称 `lah`，亦支持 `lobe-hub` 与 `hub-node` 别名）承载。
+  hub 角色是 node 角色的单进程超集，由 `lah daemon --role node|hub`（CLI 简称 `lah`，亦支持 `a2a-hub`、`ahub` 与 `hub-node` 别名）承载。
   省略 `--role` 时读该配置目录 `node.json` 的 `role`，缺省 node。单进程单配置目录即可搞定，无需拆两个进程。
   `role=hub` 既像普通节点一样读取 `commands.json` 登记能力接单干活，又负责建单（入口 `lah task create` 与 Web 控制台）、审批签名、结果呈递、陈旧任务告警与 LoopForge 多阶段 SOP 闭环推进（`LoopService`）。
   node 角色从不写 `auth_decision` 与 `canceled`，hub 角色是唯一写方。
-  在**独立中台模式**（`busType: "sqlite"`）下，hub 进程还会启动本地 HTTP 网关（`src/server/http-server.mjs`，默认 `0.0.0.0:8787`），集中托管 `SqliteBus`（`src/bus/sqlite-bus.mjs`）、`LongPollBroker`（`src/server/longpoll-broker.mjs`）、内置 LobeHub 风格 Web 控制台（`src/server/web-ui.mjs`）与可选外部通知器（`src/hub/notifier.mjs`）。
+  在**独立中台模式**（`busType: "sqlite"`）下，hub 进程还会启动本地 HTTP 网关（`src/server/http-server.mjs`，默认 `0.0.0.0:8787`），集中托管 `SqliteBus`（`src/bus/sqlite-bus.mjs`）、`LongPollBroker`（`src/server/longpoll-broker.mjs`）、内置 Web 控制台（`src/server/web-ui.mjs`）与可选外部通知器（`src/hub/notifier.mjs`）。
   hub 逻辑代码主要在 `src/hub/` 与 `src/server/`。
 - **应用与连接身份。** 独立模式下不再强依赖飞书应用，通过 `LAH_API_TOKEN`（Bearer Token）保护 Hub HTTP API，通过 `approval_key.pem` / `hubPublicKey`（ed25519 签名）校验审批真实性；远端节点配置 `busType: "http"` 仅出站拉取总线并接受长轮询唤醒，同样具备身份与审计边界。若使用飞书多维表格模式（`busType: "feishu"`），保留原有的节点独立应用与 ws 长连接语义（标准 §10.2）。
 - **传输与门铃方式**，事件本身仍只是门铃，任务与消息内容回总线拉取：

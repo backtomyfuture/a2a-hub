@@ -1,13 +1,13 @@
 #!/bin/sh
-# lobe-a2a-hub 一行安装与部署：
+# a2a-hub 一行安装与部署：
 #   1) 全新 Mac mini / 服务器一键安装并启动独立 Hub：
-#      curl -fsSL https://raw.githubusercontent.com/backtomyfuture/lobe-a2a-hub/main/install.sh | sh -s -- --hub
+#      curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --hub
 #   2) 全新机器一键安装并接入已有 Hub（自动同步公钥与 Token）：
-#      curl -fsSL https://raw.githubusercontent.com/backtomyfuture/lobe-a2a-hub/main/install.sh | sh -s -- --join http://<token>@<hub-ip>:8787
+#      curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --join http://<token>@<hub-ip>:8787
 #   3) 仅安装命令行工具（不立即配置）：
-#      curl -fsSL https://raw.githubusercontent.com/backtomyfuture/lobe-a2a-hub/main/install.sh | sh
+#      curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh
 # 布局：~/.hub-node/ 是配置目录，~/.hub-node/app/ 是程序本体，
-#       ~/.local/bin/lah 是主命令入口（同时提供 lobe-hub / hub-node 别名）。
+#       ~/.local/bin/lah 是主命令入口（同时提供 a2a-hub / ahub / hub-node 别名）。
 set -eu
 
 SKIP_SKILL="${LAH_SKIP_SKILL:-0}"
@@ -55,8 +55,8 @@ while [ "$n" -gt 0 ]; do
   esac
 done
 
-REPO_GIT="https://github.com/backtomyfuture/lobe-a2a-hub.git"
-REPO_TAR="https://codeload.github.com/backtomyfuture/lobe-a2a-hub/tar.gz/refs/heads/main"
+REPO_GIT="https://github.com/backtomyfuture/a2a-hub.git"
+REPO_TAR="https://codeload.github.com/backtomyfuture/a2a-hub/tar.gz/refs/heads/main"
 HOME_DIR="${HUB_NODE_HOME:-$HOME/.hub-node}"
 APP="$HOME_DIR/app"
 
@@ -78,7 +78,7 @@ else
   echo "未找到 git，改用压缩包安装…"
   TMP="$(mktemp -d)"
   curl -fsSL "$REPO_TAR" | tar xz -C "$TMP"
-  mv "$TMP"/lobe-a2a-hub-main "$APP"
+  mv "$TMP"/a2a-hub-main "$APP"
   rm -rf "$TMP"
 fi
 
@@ -90,7 +90,8 @@ fi
 chmod +x "$APP/bin/lah.mjs" "$APP/bin/hub-node.mjs"
 mkdir -p "$HOME/.local/bin"
 ln -sf "$APP/bin/lah.mjs" "$HOME/.local/bin/lah"
-ln -sf "$APP/bin/lah.mjs" "$HOME/.local/bin/lobe-hub"
+ln -sf "$APP/bin/lah.mjs" "$HOME/.local/bin/a2a-hub"
+ln -sf "$APP/bin/lah.mjs" "$HOME/.local/bin/ahub"
 ln -sf "$APP/bin/lah.mjs" "$HOME/.local/bin/hub-node"
 
 # 自动安装 lah Skill 给终端 Agent 使用（可通过 --skip-skill 或 LAH_SKIP_SKILL=1 跳过）
