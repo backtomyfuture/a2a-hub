@@ -15,12 +15,13 @@
 - **Self-Hosted Standalone Hub (`busType: "sqlite"`)**: Run `ah daemon --role hub` on a persistent server (such as a Mac mini or Linux VPS) backed by Node >= 24's built-in `node:sqlite` (WAL mode) and zero third-party npm dependencies (`dependencies: {}`).
 - **Two Connection Modes Over Pure HTTP, Zero Open Node Ports**:
   - **Host Daemon Nodes (`ah join`)**: Workstations, office Macs, or GPU hosts run a thin outbound daemon (`GET /api/v1/poll`) that wakes within milliseconds to execute local CLIs/scripts safely via `commands.json`.
-  - **Pure HTTP External Agents (Muse, Grok Bot, etc.)**: Cloud or cron-driven Agents with no daemon discover endpoints via `GET /.well-known/agent.json`, register via `POST /api/v1/agents/register`, pull work via `GET /api/v1/agents/{node}/poll` (short-poll or long-poll `?timeout=25`), watch delegated tasks via `GET /api/v1/agents/{node}/updates` (enabling **Leader orchestration**), and drive execution via `POST /api/v1/tasks/{id}/{claim,heartbeat,ask,auth,complete,fail}`.
-- **Built-in Web Console** (`http://<hub>:8787`):
-  - **Topology & Overview**: Live connected host daemons and external HTTP Agents (`Leader` / `Worker`), task state counters, and event health.
-  - **Agent Hub Roster**: Three-layer (`Node` / `Worker` / `Skill`) capability matrix alongside connected pure-Leader/HTTP Agents.
-  - **A2A Conversation Stream**: Full `Messages` / `Parts` / `Runs` / `Artifacts` timeline, one-click ed25519-signed `Approve` / `Reject` actions for `auth-required`, and inline replies for `input-required`.
-  - **LoopForge SOP Studio**: Launch, monitor, and cancel multi-stage closed-loop workflows directly from the UI.
+  - **Pure HTTP External Agents (Muse, Grok Bot, etc.)**: No daemon. The owner issues a per-agent token in the console (not the owner `AH_API_TOKEN`). `GET /.well-known/agent.json` is public; `/api/v1/skills*` and every other API call need that token. A worker wakes every 10 minutes (`poll?timeout=0`) and finishes claimed work in the same run. A leader wakes every 15 minutes (`updates?new=1`). Each run starts with no prior context.
+- **Built-in Web Console** (`http://<hub>:8787`, owner token):
+  - **Needs you**: Home list of approvals, questions, and tasks worth a look.
+  - **Agents**: Grouped by node, with admission, display names, and token rotate/revoke.
+  - **Dispatch**: Plain-language form.
+  - **Add Agent**: Three steps (access type, name and role, token plus onboarding). HTTP agents get a one-time token.
+  - **Tasks and SOP**: Task detail with ed25519 approve/reject, replies, and the LoopForge studio.
 - **LoopForge-style SOP Orchestration Engine (`LoopService`)**: Automate multi-stage pipelines (e.g. `plan → code → verify`) under a shared `Context_ID` with `Ref_Task_IDs`. Verify failures feed structured diagnostics (`retry` / `goto:<stage_id>` / `abort`) back to earlier stages, bounded by `Max_Iterations` and `HOP_LIMIT = 8`.
 - **Optional Webhook Notifications**: Configure `notifications` in `node.json` to push alerts via group bot webhooks, Bark, Telegram, or generic webhooks.
 
@@ -104,32 +105,32 @@ node bin/ah.mjs join http://<AH_API_TOKEN>@<HUB_IP>:8787
 
 ### Option C: Connect Pure HTTP External Agents (Muse / Grok Bot, No Daemon)
 
-Cloud or cron-driven Agents connect directly with standard HTTP + Bearer Token (unauthenticated discovery at `GET http://<HUB_IP>:8787/.well-known/agent.json`):
+Cloud or cron-driven Agents do not install a daemon. Add the agent in the Web Console and copy its per-agent token (shown once). Discovery at `GET http://<HUB_IP>:8787/.well-known/agent.json` is unauthenticated. Skill fetch (`GET /api/v1/skills/a2a-leader` or `a2a-worker`) and every other call need that token. `<AGENT_TOKEN>` below is not the owner `AH_API_TOKEN`.
 
 ```bash
-# 1) Register a Leader (e.g. Muse) or Worker (e.g. Grok Bot)
+# 1) Register a Leader (Muse, every 15 minutes) or Worker (Grok Bot, every 10 minutes)
 curl -X POST http://<HUB_IP>:8787/api/v1/agents/register \
-  -H "Authorization: Bearer <AH_API_TOKEN>" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <AGENT_TOKEN>" -H "Content-Type: application/json" \
   -d '{"node":"muse","role":"leader","kind":"agent","receive_mode":"http-poll"}'
 
 curl -X POST http://<HUB_IP>:8787/api/v1/agents/register \
-  -H "Authorization: Bearer <AH_API_TOKEN>" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <AGENT_TOKEN>" -H "Content-Type: application/json" \
   -d '{"node":"grok-bot","role":"worker","kind":"agent","receive_mode":"http-poll","caps":[{"skill_id":"research","skill_name":"Grok Research"}]}'
 
-# 2) Muse dispatches a task and polls /updates (supports short-poll or ?timeout=25 long-poll)
+# 2) Muse dispatches, then reads only new changes (new terminals + still-open questions/approvals)
 curl -X POST http://<HUB_IP>:8787/api/v1/tasks \
-  -H "Authorization: Bearer <AH_API_TOKEN>" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <AGENT_TOKEN>" -H "Content-Type: application/json" \
   -d '{"from":"muse","to":"grok-bot","cap":"research","text":"Compare HTTP poll vs long-poll"}'
-curl -H "Authorization: Bearer <AH_API_TOKEN>" \
-  "http://<HUB_IP>:8787/api/v1/agents/muse/updates?timeout=25"
+curl -H "Authorization: Bearer <AGENT_TOKEN>" \
+  "http://<HUB_IP>:8787/api/v1/agents/muse/updates?new=1"
 
-# 3) Grok Bot polls -> claims -> reports ask / auth / complete / fail
-curl -H "Authorization: Bearer <AH_API_TOKEN>" \
-  "http://<HUB_IP>:8787/api/v1/agents/grok-bot/poll?timeout=25"
+# 3) Grok Bot short-polls, then claims and finishes in the same run
+curl -H "Authorization: Bearer <AGENT_TOKEN>" \
+  "http://<HUB_IP>:8787/api/v1/agents/grok-bot/poll?timeout=0"
 curl -X POST "http://<HUB_IP>:8787/api/v1/tasks/<TASK_ID>/claim" \
-  -H "Authorization: Bearer <AH_API_TOKEN>" -H "Content-Type: application/json" -d '{"node":"grok-bot"}'
+  -H "Authorization: Bearer <AGENT_TOKEN>" -H "Content-Type: application/json" -d '{"node":"grok-bot"}'
 curl -X POST "http://<HUB_IP>:8787/api/v1/tasks/<TASK_ID>/complete" \
-  -H "Authorization: Bearer <AH_API_TOKEN>" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <AGENT_TOKEN>" -H "Content-Type: application/json" \
   -d '{"node":"grok-bot","text":"Comparison report ready","artifact":"https://example.com/report.md"}'
 ```
 
@@ -185,8 +186,8 @@ Skills are separated along **Leader vs. Worker** and **CLI (`ah`) vs. Pure HTTP*
 
 | Role \ Runtime | Local with `ah` CLI | Pure HTTP (Cloud / Cron Agent, no CLI) |
 |---|---|---|
-| **Controller / Leader** (inspect, dispatch, loops, collect updates) | [`skills/ah/SKILL.md`](skills/ah/SKILL.md) | [`skills/a2a-leader/SKILL.md`](skills/a2a-leader/SKILL.md) (`GET /api/v1/skills/a2a-leader`) |
-| **Executor / Worker** (poll, claim, ask, auth, complete/fail) | [`skills/ah-inbox/SKILL.md`](skills/ah-inbox/SKILL.md) (auto-installed for `kind=agent`) | [`skills/a2a-worker/SKILL.md`](skills/a2a-worker/SKILL.md) (`GET /api/v1/skills/a2a-worker`) |
+| **Controller / Leader** (inspect, dispatch, loops, collect updates) | [`skills/ah/SKILL.md`](skills/ah/SKILL.md) | [`skills/a2a-leader/SKILL.md`](skills/a2a-leader/SKILL.md) (`GET /api/v1/skills/a2a-leader`, authenticated) |
+| **Executor / Worker** (poll, claim, ask, auth, complete/fail) | [`skills/ah-inbox/SKILL.md`](skills/ah-inbox/SKILL.md) (auto-installed for `kind=agent`) | [`skills/a2a-worker/SKILL.md`](skills/a2a-worker/SKILL.md) (`GET /api/v1/skills/a2a-worker`, authenticated) |
 
 ---
 

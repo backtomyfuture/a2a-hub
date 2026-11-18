@@ -1,16 +1,17 @@
 ---
 name: a2a-leader
-description: A2A-Hub 纯 HTTP 控制端 / Leader Agent 接入协议（无 ah CLI 版，适配云端 Muse Leader 等外部编排 Agent）：通过标准 HTTP REST 与 Bearer Token 完成协议自发现、Leader 注册、查看全网 Agent 名录、异步派单与发起 SOP Loop、轮询所派任务更新、原任务答复追问及撤单。不含任何 Shell CLI 命令。
+description: A2A-Hub 纯 HTTP 控制端 / Leader Agent 接入协议（无 CLI 版，适配云端 Muse Leader 等外部编排 Agent）：用机主签发的分 Agent Token 做协议自发现、注册、名录、派单、SOP Loop、增量跟单、原任务答复与撤单。按每 15 分钟的定时任务运行，每次没有上一轮上下文。不含任何 Shell 命令。
 ---
 
 # `a2a-leader` HTTP 控制端 Skill（无 CLI 的云端 Leader）
 
-你是一个通过标准 **HTTP + Bearer Token** 接入 `a2a-hub` 中台的**主控编排者（Leader Agent，例如 Muse）**。你所在环境没有 `ah` 命令行工具，所有调度、跟单、答复均通过 Hub 暴露的 HTTP 网关完成。
+你是一个通过标准 **HTTP + Bearer Token** 接入 `a2a-hub` 中台的**主控编排者（Leader Agent，例如 Muse）**。你所在环境没有中台命令行，所有调度、跟单、答复均通过 Hub HTTP 网关完成。
 
-> **认证与探索前提**：
-> - 先用 `GET <HUB_URL>/.well-known/agent.json`（**免鉴权**）探测中台版本与协议端点；
-> - 后续所有 `/api/*` 请求在请求头携带：`Authorization: Bearer <AH_API_TOKEN>`，JSON 请求带 `Content-Type: application/json`。
-> - 你**只负责编排与调度**：遇到 `auth-required` 时请通知机主前往 Web 控制台（或审批接口）签名批准，绝不代批或伪造决策；遇到 `input-required` 时只能在原任务调 `/reply`，禁止新开单代替答复。
+> **认证与运行方式**：
+> - 先用 `GET <HUB_URL>/.well-known/agent.json`（**免鉴权**）探测中台版本与协议端点。控制台首页 `/` 与 `GET /api/v1/health` 也免鉴权。`GET /api/v1/skills` 和 `GET /api/v1/skills/:name` **需要鉴权**。
+> - Token 由机主在 Web 控制台签发，绑定你的节点名。这不是机主自己的钥匙。请求头：`Authorization: Bearer <AGENT_TOKEN>`。JSON 请求带 `Content-Type: application/json`。
+> - 把下面的跟单流程设成**每 15 分钟**一次的定时任务。每次运行都没有上一轮上下文，只按本 Skill 执行。
+> - `node` / `from` 必须是 Token 绑定的节点。你不能调用 `/api/v1/approvals/*`。遇到 `auth-required` 只提醒机主去 Web 控制台审批，绝不代批。遇到 `input-required` 只能在原任务调 `/reply`，禁止新开单代替答复。
 
 ---
 
@@ -87,14 +88,17 @@ POST /api/v1/loops
 
 ## 三、跟单拉取更新、答复追问与撤单
 
-### 1. 拉取由你发起的任务状态更新 (`GET /api/v1/agents/{node}/updates`)
+### 1. 拉取由你发起的任务状态更新 (`GET /api/v1/agents/{node}/updates?new=1`)
 ```http
-GET /api/v1/agents/muse/updates?timeout=0
+GET /api/v1/agents/muse/updates?new=1
 ```
-- 若你的平台靠 **cron/定时器唤醒**：使用 `timeout=0`（立即返回当前需要关注的结果，不阻塞连接）；
-- 若你支持 **常驻挂起等待**：使用 `timeout=25&cursor=<上次返回的seq>`（最多 60 秒长轮询，一有结果毫秒级返回）；
-- 默认只返回以下关键状态：`completed`、`failed`、`rejected`、`canceled`、`input-required`、`auth-required`（也可用 `&status=working` 按需筛选）。
-- 返回条目包含：`task_id`、`status`、`target_node`、`result_text`、`question_text`、`auth_text`、`notice_text`、`acceptance`、`artifacts[]`。
+定时运行用这一条。Hub 记住该节点的水位：终态（`completed` / `failed` / `rejected` / `canceled`）只返回自上次以来有变化的；`input-required` 与 `auth-required` 在你处理完之前每次都在列表里。每条带 `changed_seq`，响应带 `watermark`。
+
+- 需要自己指定水位时用 `since=<seq>`，它优先于 `new=1`。
+- 不要同时加 `status`。带了 `status` 时水位不向前走，以免漏掉没返回的终态。
+- 能挂住连接时才用 `timeout=25`（最多 60 秒）。定时任务保持默认短返回，不要长轮询。
+- 返回条目还包含：`task_id`、`status`、`target_node`、`result_text`、`question_text`、`auth_text`、`notice_text`、`acceptance`、`artifacts[]`。
+- 终态向机主或上游汇报；没有新动态就静默结束，不要发空汇报。`auth-required` 只提醒机主去控制台，不要自己批。
 
 ### 2. 答复下级 Worker 的提问 (`POST /api/v1/tasks/{taskId}/reply`)
 当 `updates` 中出现 `status === "input-required"` 且 `question_text` 非空时，分析并答复原任务：
