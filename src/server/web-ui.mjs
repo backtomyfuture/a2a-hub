@@ -1807,9 +1807,11 @@ function renderCapTechnicalDetails(c) {
     + '</div></details>';
 }
 
-function renderTokenManageBox(node) {
+function renderTokenManageBox(node, kind) {
   if (!state.tokensApiAvailable) return "";
   const info = state.tokensByNode.get(node);
+  // 宿主节点（含 Hub 本机）走机主 Token 的 ah daemon，专属密钥对它没有意义，只会误导机主去生成。
+  if (!info && kind === "host") return "";
   if (info) {
     const usedText = info.last_used_at ? formatRelativeTime(info.last_used_at) : "尚未使用";
     return '<div class="token-box">'
@@ -1922,7 +1924,7 @@ function renderAgents(d) {
           html += '<div class="hint">已接纳 <strong>' + g.admittedCards.length + '</strong> 项能力</div>';
         }
 
-        html += renderTokenManageBox(g.node);
+        html += renderTokenManageBox(g.node, g.kind);
 
         html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:auto;">';
         if (dispatchable) {
