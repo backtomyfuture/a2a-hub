@@ -16,7 +16,7 @@ import {
 } from "../src/kernel.mjs";
 import { formatWhyText, getTaskWhy } from "../src/why.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";
-import { MockFeishuBus } from "./mocks/mock-bus.mjs";
+import { MockBus } from "./mocks/mock-bus.mjs";
 
 function shellSingleQuote(text) {
   return `'${String(text).replaceAll("'", "'\\''")}'`;
@@ -76,7 +76,7 @@ function reap(dir, kernels) {
 
 async function setup(dir, commandEntry) {
   fs.writeFileSync(path.join(dir, "commands.json"), JSON.stringify({ echo: commandEntry }), { mode: 0o600 });
-  const mock = new MockFeishuBus({ tables: TABLES });
+  const mock = new MockBus({ tables: TABLES });
   const kernel = new Kernel({
     node: "node-a",
     role: "node",
@@ -391,7 +391,7 @@ test("buildPrompt 说明可选 USAGE，不把指令拼进提示", async () => {
 
 test("task why 显示 usage 汇总与未上报轮数", async () => {
   await withTemp(async (dir) => {
-    const bus = new MockFeishuBus({ tables: TABLES });
+    const bus = new MockBus({ tables: TABLES });
     await bus.createRecord(TABLES.tasks, {
       Task_ID: "TASK-WHY-USE",
       Title: "用量",

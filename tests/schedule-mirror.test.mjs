@@ -6,14 +6,14 @@ import test from "node:test";
 import { f1 } from "../src/bus/tables.mjs";
 import { ScheduleMirror } from "../src/schedule-mirror.mjs";
 import { withTemp } from "./helpers.mjs";
-import { MockFeishuBus } from "./mocks/mock-bus.mjs";
+import { MockBus } from "./mocks/mock-bus.mjs";
 
 const RULES = "tbl_rules";
 const KEY = "2026-01-15T09:00:00+0800";
 const NOW = Date.parse("2026-01-15T01:30:00.000Z");
 
 function bus() {
-  return new MockFeishuBus({ tables: { rules: RULES } });
+  return new MockBus({ tables: { rules: RULES } });
 }
 
 function plan(extra = {}) {
@@ -199,7 +199,7 @@ test("停用计划镜像成 No，已下线行只写一次", async () => {
 });
 
 test("缺少 tables.rules 时跳过并只记一次日志", async () => {
-  const mock = new MockFeishuBus({ tables: { tasks: "tbl_tasks" } });
+  const mock = new MockBus({ tables: { tasks: "tbl_tasks" } });
   const logs = [];
   const svc = new ScheduleMirror({ bus: mock, node: "node-a", log: (line) => logs.push(String(line)) });
   await assert.doesNotReject(() => svc.sync({ plans: [plan()], tz: "Asia/Shanghai" }));

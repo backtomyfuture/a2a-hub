@@ -9,7 +9,7 @@ import { Kernel, PENDING_RECHECK, pendingRecheckCapMs } from "../src/kernel.mjs"
 import { createLongPollWaker } from "../src/transport/longpoll.mjs";
 import { createPollWaker } from "../src/transport/poll.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";
-import { MockFeishuBus } from "./mocks/mock-bus.mjs";
+import { MockBus } from "./mocks/mock-bus.mjs";
 
 function fakeClock() {
   let ticks = 0;
@@ -32,7 +32,7 @@ function makeKernel(dir) {
     capPrefix: "test",
     events: false,
     configDir: dir,
-    bus: new MockFeishuBus({ tables: TABLES }),
+    bus: new MockBus({ tables: TABLES }),
   });
 }
 

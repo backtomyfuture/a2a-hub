@@ -10,7 +10,7 @@ import { f1 } from "../src/bus/tables.mjs";
 import { Kernel, HEARTBEAT_MIN_SEC, STALE_MIN } from "../src/kernel.mjs";
 import { STALE_MIN as HUB_STALE_MIN, isStaleWorking } from "../src/hub/stale.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";
-import { MockFeishuBus } from "./mocks/mock-bus.mjs";
+import { MockBus } from "./mocks/mock-bus.mjs";
 
 function shellSingleQuote(text) {
   return `'${String(text).replaceAll("'", "'\\''")}'`;
@@ -165,7 +165,7 @@ test.describe("心跳降频", { concurrency: false }, () => {
           name: "agent",
         },
       });
-      const mock = new MockFeishuBus({ tables: TABLES });
+      const mock = new MockBus({ tables: TABLES });
       const kernel = new Kernel(kernelCfg(dir, mock));
       await seedTask(mock, {
         Task_ID: "TASK-INBOX-HB",
@@ -196,7 +196,7 @@ test.describe("心跳降频", { concurrency: false }, () => {
           name: "agent",
         },
       });
-      const mock = new MockFeishuBus({ tables: TABLES });
+      const mock = new MockBus({ tables: TABLES });
       const kernel = new Kernel(kernelCfg(dir, mock));
       const created = await seedTask(mock, {
         Task_ID: "TASK-INBOX-EDGE",
@@ -239,7 +239,7 @@ test.describe("心跳降频", { concurrency: false }, () => {
           name: "agent",
         },
       });
-      const mock = new MockFeishuBus({ tables: TABLES });
+      const mock = new MockBus({ tables: TABLES });
       const kernel = new Kernel(kernelCfg(dir, mock));
       const created = await seedTask(mock, {
         Task_ID: "TASK-INBOX-BAD",
@@ -272,7 +272,7 @@ test.describe("心跳降频", { concurrency: false }, () => {
             name: "echo",
           },
         });
-        const mock = new MockFeishuBus({ tables: TABLES });
+        const mock = new MockBus({ tables: TABLES });
         const kernel = new Kernel(kernelCfg(dir, mock));
         kernels.push(kernel);
         await seedTask(mock, { Task_ID: "TASK-DIRECT-HB", Context_ID: "CTX-DIRECT-HB" });
@@ -297,7 +297,7 @@ test.describe("心跳降频", { concurrency: false }, () => {
   test("touchHeartbeat 新鲜不写、过期才写、写失败只记日志", async () => {
     await withTemp(async (dir) => {
       writeCommands(dir, {});
-      const mock = new MockFeishuBus({ tables: TABLES });
+      const mock = new MockBus({ tables: TABLES });
       const kernel = new Kernel(kernelCfg(dir, mock));
       const created = await mock.createRecord(TABLES.tasks, {
         Task_ID: "TASK-TOUCH",
@@ -361,7 +361,7 @@ test.describe("心跳降频", { concurrency: false }, () => {
           name: "agent",
         },
       });
-      const mock = new MockFeishuBus({ tables: TABLES });
+      const mock = new MockBus({ tables: TABLES });
       const kernel = new Kernel(kernelCfg(dir, mock));
       await seedTask(mock, {
         Task_ID: "TASK-WORST-HB",

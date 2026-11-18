@@ -78,12 +78,8 @@ export async function hubDoctor(configDir) {
   }
   const hasApiToken = Boolean(
     raw?.apiToken
-    || kv.HUB_API_TOKEN
-    // 兼容 AH_API_TOKEN / HUB_API_TOKEN / LAH_API_TOKEN
     || kv.AH_API_TOKEN
-    || kv.LAH_API_TOKEN
-    || process.env.AH_API_TOKEN
-    || process.env.LAH_API_TOKEN,
+    || process.env.AH_API_TOKEN,
   );
   if (!hasApiToken) {
     info("未配置 apiToken：若要暴露到公网或不可信局域网，建议在 node.json 或 app.env 设置 apiToken");
@@ -153,9 +149,9 @@ export async function hubDoctor(configDir) {
 export async function runHub(cfg, log = logLine, hooks = {}) {
   // 工厂只在 role===hub 时强制实时事件通道。loadConfig 不带这个字段。
   cfg.role = "hub";
-  let ownerOpenId = "";
+  let ownerId = "";
   try {
-    ownerOpenId = readOwnerFromConfigDir(cfg.configDir);
+    ownerId = readOwnerFromConfigDir(cfg.configDir);
   } catch (e) {
     log("读取机主配置失败（进程不退出）：" + (e?.message ?? e));
   }
@@ -191,7 +187,7 @@ export async function runHub(cfg, log = logLine, hooks = {}) {
 
   const approval = new ApprovalService({
     bus: cfg.bus,
-    ownerOpenId,
+    ownerId,
     allowLocalOwner: isStandalone,
     statePath: path.join(cfg.configDir, "approval_state.json"),
     log,
@@ -199,7 +195,7 @@ export async function runHub(cfg, log = logLine, hooks = {}) {
   });
   const present = new PresentService({
     bus: cfg.bus,
-    ownerOpenId,
+    ownerId,
     nodeName: cfg.node,
     role: "hub",
     statePath: path.join(cfg.configDir, "present_state.json"),
@@ -208,7 +204,7 @@ export async function runHub(cfg, log = logLine, hooks = {}) {
   });
   const stale = new StaleService({
     bus: cfg.bus,
-    ownerOpenId,
+    ownerId,
     allowLocalAlert: isStandalone,
     notifier,
     statePath: path.join(cfg.configDir, "stale_state.json"),
@@ -295,9 +291,9 @@ export class HubRuntime {
     } catch (e) {
       this.log("读取机主配置失败：" + (e?.message ?? e));
     }
-    if (this.approval) this.approval.ownerOpenId = owner;
-    if (this.present) this.present.ownerOpenId = owner;
-    if (this.stale) this.stale.ownerOpenId = owner;
+    if (this.approval) this.approval.ownerId = owner;
+    if (this.present) this.present.ownerId = owner;
+    if (this.stale) this.stale.ownerId = owner;
   }
 
   startWsLoop() {

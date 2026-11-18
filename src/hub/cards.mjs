@@ -3,7 +3,7 @@
 // card.action.trigger 才能收到点击。按钮 value 多带 status_msg，回调用它判断卡是否过期，
 // 并带上标题、目标节点和技能，结果卡不用再读表。
 // 正文只取首条 instruction。auth_request 正文会把标题和指令再抄一遍，读它会让同一段话出现三次。
-// update_multi 是 schema 2.0 后续 PATCH 换卡的开关，缺了飞书会拒绝延时更新。
+// update_multi 是 schema 2.0 后续 PATCH 换卡的开关，缺了就不能延时更新同一张卡。
 
 import { f1 } from "../bus/tables.mjs";
 
@@ -34,7 +34,7 @@ export function redact(obj) {
 }
 
 function textValue(value) {
-  // 多维表格文本偶发成 {text: ...}；取不到正文就当空，走回退，别把结构体印上卡片。
+  // 文本偶发成 {text: ...}；取不到正文就当空，走回退，别把结构体印上卡片。
   if (value && typeof value === "object") return String(value.text ?? "").trim();
   return String(value ?? "").trim();
 }
@@ -296,7 +296,7 @@ export function buildStatusCard(info, { state, at = "", note = "" } = {}) {
   if (title) lines.push(title);
   const where = [target, skill].filter(Boolean).join("/");
   if (where) lines.push(where);
-  // 卡只发给机主本人，操作者必然是他，不必把 open_id 打在卡上。
+  // 卡只发给机主本人，操作者必然是他，不必把机主标识打在卡上。
   if (state === "approved" && when) lines.push(when);
   if ((state === "expired" || state === "failed") && extra) lines.push(extra);
   if (!lines.length) lines.push(taskId || "-");

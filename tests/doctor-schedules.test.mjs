@@ -1,5 +1,5 @@
 // schedules.json 的自检只告警。坏计划、坏时区都不能让 doctor 改退出码。
-// 状态只写临时目录，不读 ~/.hub-node。
+// 状态只写临时目录，不读 ~/.a2a-hub。
 
 import assert from "node:assert/strict";
 import fs from "node:fs";

@@ -9,7 +9,7 @@ description: A2A-Hub 纯 HTTP 控制端 / Leader Agent 接入协议（无 ah CLI
 
 > **认证与探索前提**：
 > - 先用 `GET <HUB_URL>/.well-known/agent.json`（**免鉴权**）探测中台版本与协议端点；
-> - 后续所有 `/api/*` 请求在请求头携带：`Authorization: Bearer <LAH_API_TOKEN>`，JSON 请求带 `Content-Type: application/json`。
+> - 后续所有 `/api/*` 请求在请求头携带：`Authorization: Bearer <AH_API_TOKEN>`，JSON 请求带 `Content-Type: application/json`。
 > - 你**只负责编排与调度**：遇到 `auth-required` 时请通知机主前往 Web 控制台（或审批接口）签名批准，绝不代批或伪造决策；遇到 `input-required` 时只能在原任务调 `/reply`，禁止新开单代替答复。
 
 ---

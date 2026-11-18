@@ -1,5 +1,5 @@
 // 自托管 SQLite 总线后端（基于 Node >= 24 内置 node:sqlite DatabaseSync）。
-// 零外部依赖，实现与 FeishuBus / MockFeishuBus 完全一致的数据面契约，
+// 零外部依赖，与内存 MockBus 同一数据面契约，
 // 并支持 WAL 并发读写、client_token 幂等建行、单调 seq 游标与长轮询事件发布。
 
 import { randomUUID } from "node:crypto";
@@ -288,7 +288,7 @@ export class SqliteBus {
     return { record: structuredClone(updated) };
   }
 
-  async sendMessage(receiveId, msgType, content, receiveIdType = "open_id") {
+  async sendMessage(receiveId, msgType, content, receiveIdType = "owner") {
     this._stats.other += 1;
     const messageId = `om_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
     const now = new Date().toISOString();
@@ -301,7 +301,7 @@ export class SqliteBus {
       this._stmts.insertCard.run(
         messageId,
         String(receiveId ?? ""),
-        String(receiveIdType ?? "open_id"),
+        String(receiveIdType ?? "owner"),
         String(msgType ?? "interactive"),
         contentJson,
         now,
@@ -323,8 +323,8 @@ export class SqliteBus {
     return { message_id: messageId };
   }
 
-  sendCard(openId, card) {
-    return this.sendMessage(openId, "interactive", card, "open_id");
+  sendCard(receiveId, card) {
+    return this.sendMessage(receiveId, "interactive", card, "owner");
   }
 
   async patchInteractiveCard(messageId, card) {
@@ -339,7 +339,7 @@ export class SqliteBus {
       const existing = this._stmts.getCard.get(id);
       if (!existing) {
         seq = this._bumpSeq();
-        this._stmts.insertCard.run(id, "owner", "open_id", "interactive", contentJson, now, now);
+        this._stmts.insertCard.run(id, "owner", "owner", "interactive", contentJson, now, now);
       } else {
         seq = this._bumpSeq();
         this._stmts.updateCard.run(contentJson, now, id);

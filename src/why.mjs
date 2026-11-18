@@ -1,6 +1,6 @@
 // why.mjs —— ah task why 单任务全链来龙去脉与时间线拼装。
 // 职责：
-// 1. 完全只读：复用 FeishuBus 现有 listRecords 接口，不写任何表，不新增依赖，不开端口；
+// 1. 完全只读：复用总线现有 listRecords 接口，不写任何表，不新增依赖，不开端口；
 // 2. 状态与溯源：汇总 Tasks 当前状态、认领节点、重试次数、待批/提问消息与跳数；
 // 3. 消息与 Parts：按时间重排 Messages（instruction/question/answer/auth_request/auth_decision/result/notice 等），
 //    标注 From_Node→To_Node 走向；文本正文截断至 200 字符；DataPart 仅显示键名、绝不显示值（凭据与参数值不泄露）；

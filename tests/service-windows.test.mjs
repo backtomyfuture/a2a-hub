@@ -6,41 +6,38 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import test from "node:test";
 import {
-  isLahDaemonCommandLine,
+  isAhDaemonCommandLine,
   renderWindowsLauncher,
   renderWindowsStarter,
   renderWindowsTaskXml,
-  windowsLegacyTaskName,
   windowsServicePath,
   windowsTaskName,
   windowsTaskXmlBuffer,
 } from "../src/service.mjs";
 import { withTemp } from "./helpers.mjs";
 
-test("结束残留守护进程时认 ah daemon 与兼容 lah daemon 的命令行", () => {
-  assert.equal(isLahDaemonCommandLine("node.exe C:\\app\\bin\\ah.mjs daemon --config C:\\cfg --role hub"), true);
-  assert.equal(isLahDaemonCommandLine("node.exe C:\\app\\bin\\lah.mjs daemon --config C:\\cfg --role hub"), true);
-  assert.equal(isLahDaemonCommandLine("node.exe C:\\app\\bin\\blah.mjs daemon --config C:\\cfg --role hub"), false);
-  assert.equal(isLahDaemonCommandLine("node.exe C:\\app\\bin\\ah.mjs doctor"), false);
-  assert.equal(isLahDaemonCommandLine("node.exe C:\\daemon\\ah.mjs doctor"), false);
-  assert.equal(isLahDaemonCommandLine("notepad.exe"), false);
+test("结束残留守护进程时只认 ah.mjs daemon 的命令行", () => {
+  assert.equal(isAhDaemonCommandLine("node.exe C:\\app\\bin\\ah.mjs daemon --config C:\\cfg --role hub"), true);
+  assert.equal(isAhDaemonCommandLine("node.exe C:\\app\\bin\\ah.mjs doctor"), false);
+  assert.equal(isAhDaemonCommandLine("node.exe C:\\app\\bin\\xah.mjs daemon --config C:\\cfg --role hub"), false);
+  assert.equal(isAhDaemonCommandLine("node.exe C:\\daemon\\ah.mjs doctor"), false);
+  assert.equal(isAhDaemonCommandLine("notepad.exe"), false);
 });
 
-test("Windows 任务名按角色分开，并保留旧名字供卸载", () => {
-  assert.equal(windowsTaskName("hub", "desk"), "\\lah\\hub-node-hub.desk");
-  assert.equal(windowsTaskName("node", "desk"), "\\lah\\hub-node-node.desk");
-  assert.equal(windowsLegacyTaskName("desk"), "\\lah\\hub-node.desk");
+test("Windows 任务名按角色分开，默认目录不带摘要", () => {
+  assert.equal(windowsTaskName("hub", "desk"), "ah-hub-desk");
+  assert.equal(windowsTaskName("node", "desk"), "ah-node-desk");
 });
 
 test("Windows PATH 把 node 与配置目录 bin 放在前面且去重", () => {
-  const got = windowsServicePath("C:\\Users\\a\\.hub-node", "C:\\Windows;C:\\node", "C:\\node\\node.exe");
-  assert.equal(got, "C:\\node;C:\\Users\\a\\.hub-node\\bin;C:\\Windows");
+  const got = windowsServicePath("C:\\Users\\a\\.a2a-hub", "C:\\Windows;C:\\node", "C:\\node\\node.exe");
+  assert.equal(got, "C:\\node;C:\\Users\\a\\.a2a-hub\\bin;C:\\Windows");
 });
 
 test("Windows 任务 XML 是当前用户登录触发，不存密码，不因电池或 72 小时被杀掉", () => {
   const xml = renderWindowsTaskXml({
-    starter: "C:\\Users\\a & b\\.hub-node\\service\\hub-node-node.desk.vbs",
-    configDir: "C:\\Users\\a & b\\.hub-node",
+    starter: "C:\\Users\\a & b\\.a2a-hub\\service\\ah-node.desk.vbs",
+    configDir: "C:\\Users\\a & b\\.a2a-hub",
     role: "node",
     node: "desk",
     userId: "DESKTOP\\a<b>",
@@ -68,7 +65,7 @@ test("Windows 任务 XML 是当前用户登录触发，不存密码，不因电�
 test("Windows 启动器隐藏控制台，守护启动器把日志送进 daemon.log 且能被 node 解析", async () => {
   const starter = renderWindowsStarter({
     nodeExe: "C:\\Program Files\\nodejs\\node.exe",
-    launcher: "C:\\Users\\张三\\.hub-node\\service\\hub-node-hub.desk.mjs",
+    launcher: "C:\\Users\\张三\\.a2a-hub\\service\\ah-hub.desk.mjs",
   });
   assert.match(starter, /WScript\.Quit sh\.Run\(/);
   assert.match(starter, /, 0, True\)/);
@@ -76,11 +73,11 @@ test("Windows 启动器隐藏控制台，守护启动器把日志送进 daemon.l
 
   const source = renderWindowsLauncher({
     node: "C:\\Program Files\\nodejs\\node.exe",
-    appBin: "C:\\Users\\张三\\.hub-node\\app\\bin\\ah.mjs",
-    configDir: "C:\\Users\\张三\\.hub-node",
+    appBin: "C:\\Users\\张三\\.a2a-hub\\app\\bin\\ah.mjs",
+    configDir: "C:\\Users\\张三\\.a2a-hub",
     role: "hub",
-    logPath: "C:\\Users\\张三\\.hub-node\\daemon.log",
-    env: { PATH: "C:\\node;C:\\Users\\张三\\.hub-node\\bin", HTTPS_PROXY: "http://127.0.0.1:7890" },
+    logPath: "C:\\Users\\张三\\.a2a-hub\\daemon.log",
+    env: { PATH: "C:\\node;C:\\Users\\张三\\.a2a-hub\\bin", HTTPS_PROXY: "http://127.0.0.1:7890" },
   });
   assert.match(source, /windowsHide: true/);
   assert.match(source, /daemon", "--config"/);

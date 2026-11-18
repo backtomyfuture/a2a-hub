@@ -13,7 +13,7 @@ import {
   summarizeText,
 } from "../src/why.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";
-import { MockFeishuBus } from "./mocks/mock-bus.mjs";
+import { MockBus } from "./mocks/mock-bus.mjs";
 
 const SECRET = "s3cret-value-should-not-leak";
 
@@ -51,7 +51,7 @@ test("checkLocalOutbox 拒绝非法任务号，损坏文件只报读失败", asy
 // 红线：DataPart 在时间线里只显示键名。文本照常摘要，但不把数据值拼进去。
 test("formatWhyText 不包含 DataPart 的值", async () => {
   await withTemp(async (dir) => {
-    const bus = new MockFeishuBus({ tables: TABLES });
+    const bus = new MockBus({ tables: TABLES });
     await bus.createRecord(TABLES.tasks, {
       Task_ID: "TASK-WHY-1",
       Title: "诊断",
@@ -105,7 +105,7 @@ test("formatWhyText 不包含 DataPart 的值", async () => {
 
 test("formatWhyText 显示幂等键，sched 键标出定时计划", async () => {
   await withTemp(async (dir) => {
-    const bus = new MockFeishuBus({ tables: TABLES });
+    const bus = new MockBus({ tables: TABLES });
     await bus.createRecord(TABLES.tasks, {
       Task_ID: "TASK-WHY-SCHED",
       Title: "早报",

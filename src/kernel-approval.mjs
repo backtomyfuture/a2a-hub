@@ -28,10 +28,10 @@ export const approvalMethods = {
     return this.listMessages(taskId);
   },
 
-  // 飞书 client_token 要像 UUID。scope 为空时哈希输入必须与旧静态门逐字节相同，
+  // client_token 要像 UUID。scope 为空时哈希输入必须与静态门逐字节相同，
   // 否则已发出的静态请求在重试时会对不上、再写一条。动态门把本次 runId 接在第二个 NUL 后面。
   authRequestToken(taskId, scope = "") {
-    let input = "lah-auth-request\0" + String(taskId);
+    let input = "ah-auth-request\0" + String(taskId);
     if (scope) input += "\0" + String(scope);
     const hex = createHash("sha256").update(input).digest("hex");
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;

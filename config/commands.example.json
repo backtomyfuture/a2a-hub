@@ -16,7 +16,7 @@
   "mode": "json",
   "name": "每日早报",
   "side_effect": "read",
-  "verify": "test -n \"$LAH_TASK_ID\""
+  "verify": "test -n \"$AH_TASK_ID\""
  },
  "ops-check": {
   "workers": [

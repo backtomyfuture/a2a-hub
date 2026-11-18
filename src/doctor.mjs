@@ -667,23 +667,21 @@ export async function doctor(configDir, appDir, opts = {}) {
   try {
     if (process.platform === "darwin") {
       const out = execFileSync("launchctl", ["list"], { encoding: "utf8" });
-      const mine = out.split("\n").filter((l) => l.includes("hub-node") || l.includes("agenthub") || /(?:^|\s)ah-(?:hub|node)\./.test(l));
+      const mine = out.split("\n").filter((l) => /(?:^|\s)ah-(?:hub|node)\./.test(l));
       if (mine.length) ok(`launchd 自启在册：${mine.map((l) => l.trim().split(/\s+/).pop()).join(", ")}`);
       else info("未发现 launchd 自启（可用 ah service 安装）");
     } else if (process.platform === "linux") {
       const units = fs.existsSync(path.join(os.homedir(), ".config/systemd/user"))
-        ? fs.readdirSync(path.join(os.homedir(), ".config/systemd/user")).filter((f) => f.startsWith("hub-node") || f.startsWith("ah-hub-") || f.startsWith("ah-node-"))
+        ? fs.readdirSync(path.join(os.homedir(), ".config/systemd/user")).filter((f) => f.startsWith("ah-hub-") || f.startsWith("ah-node-"))
         : [];
       if (units.length) ok(`systemd 用户单元在册：${units.join(", ")}`);
       else info("未发现 systemd 用户单元（可用 ah service 安装）");
     } else if (process.platform === "win32") {
       try {
-        const out = execFileSync("schtasks", ["/Query", "/TN", "\\lah\\", "/FO", "LIST"], { encoding: "utf8" });
+        const out = execFileSync("schtasks", ["/Query", "/FO", "LIST"], { encoding: "utf8" });
         const mine = [...new Set(out.split(/\r?\n/).map((line) => {
-          const atHub = line.indexOf("\\lah\\hub-node");
-          const atAh = line.indexOf("\\lah\\ah-");
-          const at = atHub >= 0 ? atHub : atAh;
-          return at >= 0 ? line.slice(at).trim() : "";
+          const matched = line.match(/ah-(?:hub|node)-[A-Za-z0-9_.-]+/);
+          return matched ? matched[0] : "";
         }).filter(Boolean))];
         if (mine.length) ok(`任务计划程序自启在册：${mine.join(", ")}`);
         else info("未发现任务计划程序自启（可用 ah service 安装）");

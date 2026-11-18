@@ -11,7 +11,7 @@ import { controlKeysIn, normalizeCommands } from "../src/config.mjs";
 import { describeCommands, doctor } from "../src/doctor.mjs";
 import { Kernel } from "../src/kernel.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";
-import { MockFeishuBus } from "./mocks/mock-bus.mjs";
+import { MockBus } from "./mocks/mock-bus.mjs";
 
 function shellSingleQuote(text) {
   return `'${String(text).replaceAll("'", "'\\''")}'`;
@@ -81,7 +81,7 @@ async function alive(pid) {
 
 function setup(dir, commands) {
   fs.writeFileSync(path.join(dir, "commands.json"), JSON.stringify(commands), { mode: 0o600 });
-  const mock = new MockFeishuBus({ tables: TABLES });
+  const mock = new MockBus({ tables: TABLES });
   const kernel = new Kernel({
     node: "node-a",
     role: "node",
@@ -179,15 +179,15 @@ test("verify 退出 0 → completed 且 result 带 Seq 2 DataPart、Metadata.acc
       const verify = nodeCommand(`
         const fs = require("node:fs");
         const stdin = fs.readFileSync(0, "utf8");
-        const mainStdout = fs.readFileSync(process.env.LAH_MAIN_STDOUT, "utf8");
+        const mainStdout = fs.readFileSync(process.env.AH_MAIN_STDOUT, "utf8");
         fs.writeFileSync(${JSON.stringify(probePath)}, JSON.stringify({
           stdin: JSON.parse(stdin),
           cwd: fs.realpathSync(process.cwd()),
           env: {
-            LAH_TASK_ID: process.env.LAH_TASK_ID,
-            LAH_ARTIFACT: process.env.LAH_ARTIFACT,
-            LAH_RUN_DIR: process.env.LAH_RUN_DIR,
-            LAH_MAIN_STDOUT: process.env.LAH_MAIN_STDOUT,
+            AH_TASK_ID: process.env.AH_TASK_ID,
+            AH_ARTIFACT: process.env.AH_ARTIFACT,
+            AH_RUN_DIR: process.env.AH_RUN_DIR,
+            AH_MAIN_STDOUT: process.env.AH_MAIN_STDOUT,
           },
           mainStdout,
         }));
@@ -215,10 +215,10 @@ test("verify 退出 0 → completed 且 result 带 Seq 2 DataPart、Metadata.acc
         artifact_name: "report.txt",
         checks: {},
       });
-      assert.equal(probe.env.LAH_TASK_ID, "TASK-V-PASS");
-      assert.equal(probe.env.LAH_ARTIFACT, artPath);
-      assert.equal(probe.env.LAH_RUN_DIR, path.join(dir, "runs", "TASK-V-PASS"));
-      assert.equal(probe.env.LAH_MAIN_STDOUT, path.join(dir, "runs", "TASK-V-PASS", "stdout.txt"));
+      assert.equal(probe.env.AH_TASK_ID, "TASK-V-PASS");
+      assert.equal(probe.env.AH_ARTIFACT, artPath);
+      assert.equal(probe.env.AH_RUN_DIR, path.join(dir, "runs", "TASK-V-PASS"));
+      assert.equal(probe.env.AH_MAIN_STDOUT, path.join(dir, "runs", "TASK-V-PASS", "stdout.txt"));
       assert.match(probe.mainStdout, /work done/);
 
       const resultMsg = (await mock.findRecords(TABLES.messages, "Task_ID", "TASK-V-PASS"))

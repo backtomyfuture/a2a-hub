@@ -1,6 +1,6 @@
 // 守住三层寻址（标准 v3.7）：Node / Worker / Skill。
 // Worker 只是本机 commands.json 白名单里的选择键；写了就是硬约束，留空由节点取默认并在认领时回填。
-// 总线是 tests/mocks/mock-bus.mjs。不读 ~/.hub-node，不取凭据。
+// 总线是 tests/mocks/mock-bus.mjs。不读 ~/.a2a-hub，不取凭据。
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -13,7 +13,7 @@ import { createTask, parseCreateArgv } from "../src/hub/create.mjs";
 import { Kernel } from "../src/kernel.mjs";
 import { buildAgentCommands } from "../src/setup.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";
-import { MockFeishuBus } from "./mocks/mock-bus.mjs";
+import { MockBus } from "./mocks/mock-bus.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ECHO = `${JSON.stringify(process.execPath)} ${JSON.stringify(path.join(ROOT, "src", "executors", "echo.mjs"))}`;
@@ -32,7 +32,7 @@ function layered() {
 
 function setup(dir, commands) {
   fs.writeFileSync(path.join(dir, "commands.json"), JSON.stringify(commands), { mode: 0o600 });
-  const mock = new MockFeishuBus({ tables: TABLES });
+  const mock = new MockBus({ tables: TABLES });
   const kernel = new Kernel({
     node: "node-a", role: "node", kind: "host", zone: "test", capPrefix: "test",
     events: false, configDir: dir, bus: mock,
@@ -214,7 +214,7 @@ async function card(mock, fields) {
 }
 
 async function roster() {
-  const mock = new MockFeishuBus({ tables: TABLES });
+  const mock = new MockBus({ tables: TABLES });
   await card(mock, { Cap_ID: "CAP-a-alpha-agent", Worker: "alpha", Skill_ID: "agent" });
   await card(mock, { Cap_ID: "CAP-a-beta-agent", Worker: "beta", Skill_ID: "agent" });
   await card(mock, { Cap_ID: "CAP-a-beta-review", Worker: "beta", Skill_ID: "review" });

@@ -11,7 +11,7 @@ export const HUB_KEY_FILE = "approval_key.pem";
 
 // 把决定绑在「哪个任务、哪条审批请求」上：换一个任务或换一条请求，签名就失效，抄来的决定用不了。
 function payload({ taskId, requestId, decision }) {
-  return Buffer.from(["lah-auth-decision-v1", String(taskId ?? ""), String(requestId ?? ""), String(decision ?? "")].join("\n"));
+  return Buffer.from(["ah-auth-decision-v1", String(taskId ?? ""), String(requestId ?? ""), String(decision ?? "")].join("\n"));
 }
 
 export function publicKeyOf(privateKey) {

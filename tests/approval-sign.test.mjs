@@ -12,7 +12,7 @@ import { f1 } from "../src/bus/tables.mjs";
 import { ApprovalService } from "../src/hub/approval.mjs";
 import { Kernel } from "../src/kernel.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";
-import { MockFeishuBus } from "./mocks/mock-bus.mjs";
+import { MockBus } from "./mocks/mock-bus.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ECHO = `${JSON.stringify(process.execPath)} ${JSON.stringify(path.join(ROOT, "src", "executors", "echo.mjs"))}`;
@@ -66,11 +66,11 @@ async function pendingApproval(dir, { pinned = true } = {}) {
   fs.mkdirSync(hubDir);
   fs.writeFileSync(path.join(hubDir, "commands.json"), "{}");
   const key = loadOrCreateHubKey(hubDir);
-  const mock = new MockFeishuBus({ tables: TABLES });
+  const mock = new MockBus({ tables: TABLES });
   const node = kernelFor(dir, mock, "node-a", "node", pinned ? { hubPublicKey: key.publicKey } : {});
   const hub = kernelFor(hubDir, mock, "hub", "hub", { hubPublicKey: key.publicKey });
   const approval = new ApprovalService({
-    bus: mock, ownerOpenId: OWNER, statePath: path.join(hubDir, "approval_state.json"),
+    bus: mock, ownerId: OWNER, statePath: path.join(hubDir, "approval_state.json"),
     kernel: hub, log: () => {}, signKey: key.privateKey,
   });
   await seedApproveTask(mock, "TASK-SIG-1");
@@ -112,7 +112,7 @@ test("hub 签名的批准通过验签，任务执行完成", async () => {
   await withTemp(async (dir) => {
     const { mock, node, approval, task } = await pendingApproval(dir);
     await approval.handleCardAction({
-      operator: { open_id: OWNER },
+      operator: { id: OWNER },
       action: { value: { record_id: task.record_id, task_id: "TASK-SIG-1", status_msg: f1(task, "Status_Msg"), decision: "approve" } },
     });
     await approval.whenIdle();
@@ -149,7 +149,7 @@ test("更晚的冒写驳回不影响已签名的批准", async () => {
   await withTemp(async (dir) => {
     const { mock, node, approval, task } = await pendingApproval(dir);
     await approval.handleCardAction({
-      operator: { open_id: OWNER },
+      operator: { id: OWNER },
       action: { value: { record_id: task.record_id, task_id: "TASK-SIG-1", status_msg: f1(task, "Status_Msg"), decision: "approve" } },
     });
     await approval.whenIdle();

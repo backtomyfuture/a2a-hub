@@ -138,23 +138,6 @@ function isPlaceholderToken(v) {
   return s.startsWith("<") || s.includes("REPLACE");
 }
 
-// 旧版 lark-a2a-hub 的 node.json 没有 busType，或写着 feishu，并带 baseToken 等飞书字段。
-// 新配置只使用 sqlite / http。notifications.feishuWebhookUrl 是提醒地址，不算飞书总线。
-const LEGACY_FEISHU_KEYS = ["baseToken", "appId", "appSecret", "verificationToken", "encryptKey", "appToken"];
-
-export function isLegacyFeishuNodeConfig(raw) {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
-  const bus = String(raw.busType ?? "").trim().toLowerCase();
-  if (bus === "feishu") return true;
-  // 缺 busType 时 config.mjs 会按 hubUrl / dbPath / listen 推断为 http 或 sqlite；这类手写的新配置不能误判为旧版。
-  if (!bus && !raw.hubUrl && !raw.dbPath && !raw.listen) return true;
-  return LEGACY_FEISHU_KEYS.some((key) => {
-    if (!Object.hasOwn(raw, key)) return false;
-    const value = raw[key];
-    return value != null && String(value).trim() !== "";
-  });
-}
-
 function isUnfinishedExample(raw) {
   if (!raw || typeof raw !== "object") return false;
   const fields = [raw.hubUrl, raw.node];
@@ -354,7 +337,7 @@ function readLockedAppEnv(configDir) {
   if (!st.isFile() || st.isSymbolicLink() || (st.mode & 0o777) !== 0o600) return { insecure: true };
   const kv = readEnvFile(p);
   return {
-    apiToken: kv.HUB_API_TOKEN || kv.LAH_API_TOKEN || "",
+    apiToken: kv.AH_API_TOKEN || "",
   };
 }
 
@@ -415,7 +398,7 @@ export function setupHelpText() {
   --hub         快捷等价于 --role hub --bus sqlite --auto-token
   --join        快捷接入地址（支持内嵌 token：http://<token>@<host>:8787），自动拉取公钥
   --auto-token  若未传口令，自动生成高强度随机 API Token
-  --force       覆盖已有 node.json。旧版飞书总线配置默认拒绝覆盖，只有显式加上本参数才会改
+  --force       覆盖已有 node.json。未加时，已完成的配置会保留，不会静默改写
   --help        打印本帮助并退出`;
 }
 
@@ -448,17 +431,6 @@ async function confirmOverwriteNodeJson(configDir, flags, interactive, ask) {
       existingRaw = JSON.parse(fs.readFileSync(nodeJsonPath, "utf8"));
       parsed = true;
     } catch { /* 解析不了就按已有配置保护 */ }
-  }
-  // 先于「示例占位符可覆盖」判断。飞书生产配置里的表 ID 偶尔含占位形状，不能当成未完成示例静默换掉。
-  if (nodeExisted && parsed && isLegacyFeishuNodeConfig(existingRaw)) {
-    if (!flags.force) {
-      console.error("  ✗ 检测到旧版飞书总线配置，已拒绝覆盖，未改动任何文件。");
-      console.error("    这份配置多半属于仍在运行的 lark-a2a-hub。请换一个独立配置目录，例如：");
-      console.error('    HUB_NODE_HOME="$HOME/.a2a-hub" ah up --service');
-      console.error("    只有确认可以废弃这份飞书配置时才加 --force。未打印配置内容。");
-      return { ok: false, code: 4 };
-    }
-    console.error("  ! 已指定 --force，将覆盖旧版飞书总线配置。未打印配置内容。");
   }
   const placeholder = parsed && isUnfinishedExample(existingRaw);
   if (nodeExisted && !flags.force) {
@@ -586,8 +558,8 @@ async function finalizeSetup({ configDir, appDir, role, kind, node, prefix, bus,
     try { bus?.close?.(); } catch {}
   }
 
-  // 按本机角色/形态自动安装对应 CLI Skill（支持 --skip-skill 或 AH_SKIP_SKILL=1 / LAH_SKIP_SKILL=1 跳过）
-  const shouldSkipSkill = flags.skipSkill || ["1", "true"].includes(String(process.env.AH_SKIP_SKILL || process.env.LAH_SKIP_SKILL || "").toLowerCase());
+  // 按本机角色/形态自动安装对应 CLI Skill（支持 --skip-skill 或 AH_SKIP_SKILL=1 跳过）
+  const shouldSkipSkill = flags.skipSkill || ["1", "true"].includes(String(process.env.AH_SKIP_SKILL || "").toLowerCase());
   try {
     installLocalSkills(appDir, { role, kind, skipSkill: shouldSkipSkill });
   } catch {}
@@ -723,8 +695,6 @@ export async function runSetup(configDir, argv, appDir) {
       String(flags.apiToken ?? "").trim()
       || embeddedToken
       || String(process.env.AH_API_TOKEN ?? "").trim()
-      || String(process.env.HUB_API_TOKEN ?? "").trim()
-      || String(process.env.LAH_API_TOKEN ?? "").trim()
       || String(existingRaw?.apiToken ?? "").trim()
       || String(appEnvCreds?.apiToken ?? "").trim()
     );
@@ -732,7 +702,7 @@ export async function runSetup(configDir, argv, appDir) {
       if (setupBus === "sqlite" && flags.autoToken) {
         apiToken = crypto.randomBytes(18).toString("base64url");
       } else if (interactive) {
-        apiToken = (await ask("设置访问口令 HUB_API_TOKEN（留空不设口令；暴露局域网/公网建议设置）", "")).trim();
+        apiToken = (await ask("设置访问口令 AH_API_TOKEN（留空不设口令；暴露局域网/公网建议设置）", "")).trim();
       }
     }
 
@@ -758,8 +728,7 @@ export async function runSetup(configDir, argv, appDir) {
 
     if (apiToken) {
       const appEnvPath = writeLockedAppEnvVars(configDir, {
-        HUB_API_TOKEN: apiToken,
-        LAH_API_TOKEN: apiToken,
+        AH_API_TOKEN: apiToken,
       });
       nodeJson.appEnv = appEnvPath;
       console.log("  ✓ 已保存访问口令至 app.env（600）");

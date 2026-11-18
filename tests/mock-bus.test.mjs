@@ -4,10 +4,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { f1 } from "../src/bus/tables.mjs";
 import { TABLES } from "./helpers.mjs";
-import { MockFeishuBus } from "./mocks/mock-bus.mjs";
+import { MockBus } from "./mocks/mock-bus.mjs";
 
 function bus() {
-  return new MockFeishuBus({ tables: TABLES });
+  return new MockBus({ tables: TABLES });
 }
 
 // 红线：线上字段是单元素数组。测试若存成裸字符串，f1 的调用方会和真实总线分叉。

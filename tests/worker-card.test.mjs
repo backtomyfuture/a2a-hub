@@ -1,6 +1,6 @@
 // 守住 Worker 名片（标准 v3.8 要写明的口径，行为与现在的 v3.7 一致）。
 // 这些用例钉的是当前正确行为：名片由 kernel.run 登记产生，不手造名册。
-// 总线是 tests/mocks/mock-bus.mjs。不读 ~/.hub-node，不取凭据。
+// 总线是 tests/mocks/mock-bus.mjs。不读 ~/.a2a-hub，不取凭据。
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -14,7 +14,7 @@ import { ScheduleService } from "../src/hub/schedule.mjs";
 import { Kernel } from "../src/kernel.mjs";
 import { LocalScheduleService } from "../src/local-schedule.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";
-import { MockFeishuBus } from "./mocks/mock-bus.mjs";
+import { MockBus } from "./mocks/mock-bus.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ECHO = `${JSON.stringify(process.execPath)} ${JSON.stringify(path.join(ROOT, "src", "executors", "echo.mjs"))}`;
@@ -34,7 +34,7 @@ function layered() {
 
 function setup(dir, commands, extra = {}) {
   fs.writeFileSync(path.join(dir, "commands.json"), JSON.stringify(commands), { mode: 0o600 });
-  const mock = new MockFeishuBus({ tables: TABLES });
+  const mock = new MockBus({ tables: TABLES });
   const kernel = new Kernel({
     node: "node-a", role: "node", kind: extra.kind || "host", zone: "test", capPrefix: "test",
     events: false, configDir: dir, bus: mock,

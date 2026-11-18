@@ -3,8 +3,8 @@
 #      irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex
 #   2) 安装并一键接入已有 Hub：
 #      $env:AH_JOIN="http://<token>@<hub-ip>:8787"; irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex
-# 布局：%USERPROFILE%\.hub-node\ 是配置目录，其下 app\ 是程序本体，
-#       bin\ah.cmd、bin\a2a-hub.cmd、bin\ahub.cmd、bin\lah.cmd 与 bin\hub-node.cmd 是命令入口（加入当前用户 PATH）。
+# 布局：%USERPROFILE%\.a2a-hub\ 是配置目录（可用 AH_HOME 改），其下 app\ 是程序本体，
+#       bin\ah.cmd、bin\a2a-hub.cmd 与 bin\ahub.cmd 是命令入口（加入当前用户 PATH）。
 # Windows 不把无扩展名文件当命令，也不保证能建软链，所以入口是 cmd 包装，
 # 用 %~dp0 相对路径指向 app\bin\ah.mjs，用户名含非 ASCII 时也不靠代码页。
 # 不在这里写 node.json / commands.json。重跑本脚本 = 更新程序，已有配置不覆盖。
@@ -20,13 +20,12 @@
   $skipSkill = $false
   $showHelp = $false
   $bootstrapMode = ""
-  $joinUrl = if (-not [string]::IsNullOrWhiteSpace($env:AH_JOIN)) { $env:AH_JOIN } else { $env:LAH_JOIN }
+  $joinUrl = $env:AH_JOIN
   $useService = $true
-  $installForce = $false
   if (-not [string]::IsNullOrWhiteSpace($joinUrl)) {
     $bootstrapMode = "join"
   }
-  if ($env:AH_SKIP_SKILL -eq "1" -or $env:AH_SKIP_SKILL -eq "true" -or $env:LAH_SKIP_SKILL -eq "1" -or $env:LAH_SKIP_SKILL -eq "true") {
+  if ($env:AH_SKIP_SKILL -eq "1" -or $env:AH_SKIP_SKILL -eq "true") {
     $skipSkill = $true
   }
   for ($idx = 0; $idx -lt $args.Length; $idx++) {
@@ -35,7 +34,6 @@
       "^(-h|--help|-Help)$" { $showHelp = $true }
       "^(--skip-skill|-SkipSkill)$" { $skipSkill = $true }
       "^(--no-service|-NoService)$" { $useService = $false }
-      "^(--force|-Force)$" { $installForce = $true }
       "^(--hub|-Hub)$" { $bootstrapMode = "hub" }
       "^(--join|-Join)$" {
         if ($idx + 1 -ge $args.Length) { throw "--join 需要 Hub URL 参数" }
@@ -50,15 +48,13 @@
   }
 
   if ($showHelp) {
-    Write-Host "用法: install.ps1 [-Hub | -Join <url>] [-NoService] [-SkipSkill] [-Force]"
+    Write-Host "用法: install.ps1 [-Hub | -Join <url>] [-NoService] [-SkipSkill]"
     Write-Host "      irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex"
     Write-Host "  -Hub, --hub               安装后立即配置独立 SQLite Hub 并注册开机任务"
     Write-Host "  -Join, --join <url>       安装后立即接入已有 Hub 并注册开机任务（也可用 `$env:AH_JOIN）"
     Write-Host "  -NoService, --no-service  仅配置与自检，不注册开机任务"
     Write-Host "  -SkipSkill, --skip-skill  跳过安装 %USERPROFILE%\.agents\skills\ah"
-    Write-Host "  -Force, --force           已有旧版飞书 node.json 时仍覆盖。默认拒绝，以免拆掉正在运行的 lark-a2a-hub"
-    Write-Host "已装旧版 lark-a2a-hub 时请用独立目录，例如："
-    Write-Host '  $env:HUB_NODE_HOME = "$env:USERPROFILE\.a2a-hub"; irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex'
+    Write-Host "配置目录：AH_HOME，缺省 %USERPROFILE%\.a2a-hub。"
     return
   }
 
@@ -94,15 +90,6 @@
     return $raw -match '^(https?|ssh)://([^@/]+@)?github\.com/backtomyfuture/a2a-hub(\.git)?$|^git@github\.com:backtomyfuture/a2a-hub(\.git)?$'
   }
 
-  # 与 src/setup.mjs 的 isLegacyFeishuNodeConfig 同一口径。退出码 10 是旧飞书配置，11 是无法解析。
-  function Get-LegacyConfigStatus {
-    param([string]$NodeJson, [string]$NodeExe)
-    $code = 'const fs=require("node:fs"); let raw; try { raw=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); } catch { process.exit(11); } if (!raw || typeof raw !== "object" || Array.isArray(raw)) process.exit(11); const bus=String(raw.busType??"").trim().toLowerCase(); const keys=["baseToken","appId","appSecret","verificationToken","encryptKey","appToken"]; const has=keys.some((k)=>Object.hasOwn(raw,k)&&raw[k]!=null&&String(raw[k]).trim()!==""); const inferred=Boolean(raw.hubUrl||raw.dbPath||raw.listen); if (bus==="feishu" || (!bus && !inferred) || has) process.exit(10); process.exit(0);'
-    & $NodeExe -e $code $NodeJson
-    if ($null -eq $LASTEXITCODE) { return 11 }
-    return $LASTEXITCODE
-  }
-
   # 返回 added / present / manual。当前进程的 PATH 能补就补，让本次窗口立刻能跑 ah。
   function Add-UserPathEntry {
     param([string]$Dir)
@@ -132,14 +119,14 @@
 
   function Broadcast-EnvironmentChange {
     try {
-      if (-not ("LahWin32.Native" -as [type])) {
-        Add-Type -Namespace LahWin32 -Name Native -MemberDefinition @"
+      if (-not ("AhWin32.Native" -as [type])) {
+        Add-Type -Namespace AhWin32 -Name Native -MemberDefinition @"
 [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
 public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
 "@
       }
       $broadcastResult = [UIntPtr]::Zero
-      [LahWin32.Native]::SendMessageTimeout([IntPtr]0xffff, 0x001A, [UIntPtr]::Zero, "Environment", 2, 5000, [ref]$broadcastResult) | Out-Null
+      [AhWin32.Native]::SendMessageTimeout([IntPtr]0xffff, 0x001A, [UIntPtr]::Zero, "Environment", 2, 5000, [ref]$broadcastResult) | Out-Null
     } catch {
       Write-Host "未能通知其它窗口刷新 PATH。新开一个终端后再运行 ah。"
     }
@@ -180,9 +167,9 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
 
   $repoGit = "https://github.com/backtomyfuture/a2a-hub.git"
   $repoTar = "https://codeload.github.com/backtomyfuture/a2a-hub/tar.gz/refs/heads/main"
-  $configHome = $env:HUB_NODE_HOME
+  $configHome = $env:AH_HOME
   if ([string]::IsNullOrWhiteSpace($configHome)) {
-    $configHome = Join-Path $profileHome ".hub-node"
+    $configHome = Join-Path $profileHome ".a2a-hub"
   }
   $app = Join-Path $configHome "app"
   $binDir = Join-Path $configHome "bin"
@@ -194,7 +181,7 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
     $originText = ""
     try { $originText = [string](& git -C $app remote get-url origin) } catch { $originText = "" }
     if (-not (Test-A2aHubOrigin $originText)) {
-      throw "检测到 $app 是旧版或其他项目的 git 检出（origin 不是 backtomyfuture/a2a-hub）。不会更新它，也不会修改配置或命令入口。请改用独立目录：`$env:HUB_NODE_HOME = `"`$env:USERPROFILE\.a2a-hub`""
+      throw "检测到 $app 已是 git 检出，但 origin 不是 backtomyfuture/a2a-hub。不会更新它，也不会修改配置或命令入口。请换一个配置目录后再安装（环境变量 AH_HOME）。"
     }
     if ($skipFetch) {
       Write-Host "跳过 git pull（AH_INSTALL_SKIP_FETCH）。"
@@ -218,7 +205,7 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
       throw "未找到 git，且缺少 curl.exe 或 tar.exe。请安装 Git，或使用 Windows 10 及以上自带的 curl / tar。"
     }
     Write-Host "未找到 git，改用压缩包安装…"
-    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("lah-install-" + [Guid]::NewGuid().ToString("n"))
+    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("ah-install-" + [Guid]::NewGuid().ToString("n"))
     New-Item -ItemType Directory -Path $tmp | Out-Null
     try {
       $tarFile = Join-Path $tmp "src.tar.gz"
@@ -249,38 +236,13 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
 
   $entryMjs = Join-Path $app "bin\ah.mjs"
   if (-not (Test-Path -LiteralPath $entryMjs)) {
-    throw "安装结果里没有 $entryMjs，已停止。这通常表示目录不是 a2a-hub（旧版 lark-a2a-hub 没有该文件）。未修改配置与命令入口。"
+    throw "安装结果里没有 $entryMjs，已停止。未修改配置与命令入口。"
   }
 
-  if (-not [string]::IsNullOrEmpty($bootstrapMode)) {
-    $nodeJson = Join-Path $configHome "node.json"
-    if (Test-Path -LiteralPath $nodeJson) {
-      $legacyStatus = Get-LegacyConfigStatus -NodeJson $nodeJson -NodeExe $nodeCmd.Source
-      if ($legacyStatus -eq 10 -and -not $installForce) {
-        throw "检测到旧版飞书总线配置（$nodeJson）。不会覆盖它。请改用独立目录：`$env:HUB_NODE_HOME = `"`$env:USERPROFILE\.a2a-hub`" 。确认可以废弃这份配置时再加 -Force。未打印配置内容。"
-      }
-      if ($legacyStatus -eq 10 -and $installForce) {
-        Write-Host "已指定 -Force，将允许覆盖现有 node.json。未打印配置内容。"
-      } elseif ($legacyStatus -ne 0) {
-        throw "无法解析 $nodeJson，已停止，避免误覆盖。未打印文件内容。"
-      }
-    }
-  }
-
-  # 五个入口都进 ah.mjs（保留 lah.cmd / hub-node.cmd 向下兼容）。
-  # lah / hub-node 若已指向别的程序则保留，避免把旧版 lark-a2a-hub 的命令劫持走。
   New-Item -ItemType Directory -Force -Path $binDir | Out-Null
   $shim = "@echo off`r`nnode `"%~dp0..\app\bin\ah.mjs`" %*`r`n"
-  foreach ($name in @("ah.cmd", "a2a-hub.cmd", "ahub.cmd", "lah.cmd", "hub-node.cmd")) {
+  foreach ($name in @("ah.cmd", "a2a-hub.cmd", "ahub.cmd")) {
     $dest = Join-Path $binDir $name
-    $guarded = $name -eq "lah.cmd" -or $name -eq "hub-node.cmd"
-    if ($guarded -and (Test-Path -LiteralPath $dest)) {
-      $existingShim = [System.IO.File]::ReadAllText($dest)
-      if ($existingShim -notlike "*app\bin\ah.mjs*" -and $existingShim -notlike "*app/bin/ah.mjs*") {
-        Write-Host "警告：保留已有命令 $dest（它不是本次安装的入口，未覆盖）。"
-        continue
-      }
-    }
     [System.IO.File]::WriteAllText($dest, $shim, [System.Text.UTF8Encoding]::new($false))
   }
 
@@ -307,7 +269,6 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
     $setupArgs = @($entryMjs, "setup", "--role", "hub", "--bus", "sqlite", "--yes", "--auto-token")
     if ($useService) { $setupArgs += "--service" }
     if ($skipSkill) { $setupArgs += "--skip-skill" }
-    if ($installForce) { $setupArgs += "--force" }
     Invoke-Native -File $nodeCmd.Source -ArgumentList $setupArgs
     return
   }
@@ -326,7 +287,7 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
   Write-Host "  2) 接入已有 Hub：                 ah join http://[<token>@]<hub-ip>:8787 --service"
   Write-Host "  3) 自定义交互配置向导：           ah setup"
   Write-Host "命令入口：$binDir"
-  Write-Host "若本机已有旧版 lark-a2a-hub，请把配置放到独立目录再执行 ah up，例如：`$env:HUB_NODE_HOME = `"`$env:USERPROFILE\.a2a-hub`"; ah up --service"
+  Write-Host "配置目录：$configHome（可用 AH_HOME 指定）。"
   if ($pathState -eq "added") {
     Write-Host "已加入用户 PATH。用 iex 跑的当前窗口可以直接试 ah；单独开的窗口请新开一个终端。"
   } elseif ($pathState -eq "manual") {

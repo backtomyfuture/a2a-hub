@@ -50,7 +50,7 @@ function ensureEntrySymlinks(appDir) {
   }
   const binDir = path.join(os.homedir(), ".local", "bin");
   const entry = path.join(appDir, "bin", "ah.mjs");
-  for (const name of ["ah", "a2a-hub", "ahub", "lah", "hub-node"]) {
+  for (const name of ["ah", "a2a-hub", "ahub"]) {
     const link = path.join(binDir, name);
     const state = ensureSymlink(entry, link);
     if (state === "missing") {
@@ -82,12 +82,10 @@ export function refreshSkill(
         wanted.add(name);
       }
     }
-    // 兼容未传 configDir 与旧版名称：同步刷新本机已装过的 CLI Skill（含从 lah 迁移至 ah）；若均未安装则默认补全主控 ah
+    // 未传 configDir 时，同步刷新本机已装过的 CLI Skill；若均未安装则默认补全主控 ah
     for (const [installedName, targetName] of [
       ["ah", "ah"],
-      ["lah", "ah"],
       ["ah-inbox", "ah-inbox"],
-      ["lah-inbox", "ah-inbox"],
     ]) {
       if (fs.existsSync(path.join(skillsRoot, installedName, "SKILL.md"))) {
         wanted.add(targetName);
@@ -196,7 +194,7 @@ export async function update(appDir, { check = false, skipSkill = false, configD
   }
 
   try {
-    for (const bin of ["ah.mjs", "lah.mjs", "hub-node.mjs"]) fs.chmodSync(path.join(appDir, "bin", bin), 0o755);
+    fs.chmodSync(path.join(appDir, "bin", "ah.mjs"), 0o755);
   } catch (e) {
     console.log("  · bin 可执行位跳过：" + e.message);
   }

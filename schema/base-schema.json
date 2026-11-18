@@ -1,75 +1,45 @@
 {
- "name": "Agent Hub Base（飞书多维表格）",
- "generated_by": "schema/generate_schema.py",
- "note": "结构事实由线上 Base 字段 API 生成；字段语义见 docs/base-schema.md 与 docs/standard.md。",
+ "name": "a2a-hub SQLite 逻辑表",
+ "generated_by": "schema/generate_schema.mjs",
+ "note": "SQLite 将每行 fields 存为 JSON。本文件描述逻辑字段，不对应物理列。语义见 docs/base-schema.md 与 docs/standard.md。",
  "tables": [
   {
-   "name": "Tasks",
+   "name": "tasks",
    "role": "Task：一件工作的信封与状态机，一行一任务",
    "fields": [
     {
      "name": "Title",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": true
     },
     {
      "name": "Task_ID",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Source",
-     "ui_type": "SingleSelect",
-     "type": 3,
-     "primary": false,
-     "options": [
-      "muse",
-      "cron",
-      "manual",
-      "agent-derived",
-      "hub"
-     ]
+     "type": "text",
+     "primary": false
     },
     {
      "name": "Target_Node",
-     "ui_type": "SingleSelect",
-     "type": 3,
-     "primary": false,
-     "options": [
-      "mac-mini",
-      "ipad",
-      "nas",
-      "grokbot",
-      "work-mba",
-      "node-dev",
-      "setuptest",
-      "Workbuddy-cloud",
-      "workbuddy",
-      "jarod-macbook-air",
-      "mba",
-      "hub",
-      "hub-dev",
-      "no-such-node"
-     ]
+     "type": "text",
+     "primary": false
     },
     {
      "name": "Worker_Hint",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Skill_ID",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Status",
-     "ui_type": "SingleSelect",
-     "type": 3,
+     "type": "select",
      "primary": false,
      "options": [
       "submitted",
@@ -84,8 +54,7 @@
     },
     {
      "name": "Approval_Class",
-     "ui_type": "SingleSelect",
-     "type": 3,
+     "type": "select",
      "primary": false,
      "options": [
       "auto",
@@ -95,26 +64,22 @@
     },
     {
      "name": "Hop_Count",
-     "ui_type": "Number",
-     "type": 2,
+     "type": "number",
      "primary": false
     },
     {
      "name": "Idempotency_Key",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Latest_Run",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Presented",
-     "ui_type": "SingleSelect",
-     "type": 3,
+     "type": "select",
      "primary": false,
      "options": [
       "Yes",
@@ -123,80 +88,68 @@
     },
     {
      "name": "Claimed_By",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Heartbeat_At",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Retry_Count",
-     "ui_type": "Number",
-     "type": 2,
+     "type": "number",
      "primary": false
     },
     {
      "name": "Context_ID",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Status_Msg",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Metadata",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     }
    ]
   },
   {
-   "name": "Messages",
-   "role": "Message：任务内全部对话轮次，只追加，一行一消息（正文在 Parts）",
+   "name": "messages",
+   "role": "Message：任务内全部对话轮次，只追加，一行一消息（正文在 parts）",
    "fields": [
     {
      "name": "Msg_ID",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": true
     },
     {
      "name": "Task_ID",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Context_ID",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "From_Node",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "To_Node",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Role",
-     "ui_type": "SingleSelect",
-     "type": 3,
+     "type": "select",
      "primary": false,
      "options": [
       "user",
@@ -205,8 +158,7 @@
     },
     {
      "name": "Kind",
-     "ui_type": "SingleSelect",
-     "type": 3,
+     "type": "select",
      "primary": false,
      "options": [
       "instruction",
@@ -221,50 +173,43 @@
     },
     {
      "name": "Artifact_Ref",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "In_Reply_To",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Created_At",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Ref_Task_IDs",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     }
    ]
   },
   {
-   "name": "Parts",
+   "name": "parts",
    "role": "Part：消息与产物的内容块，一行一块，text/file/data 三型",
    "fields": [
     {
      "name": "Part_ID",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": true
     },
     {
      "name": "Parent_ID",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Parent_Type",
-     "ui_type": "SingleSelect",
-     "type": 3,
+     "type": "select",
      "primary": false,
      "options": [
       "message",
@@ -273,14 +218,12 @@
     },
     {
      "name": "Seq",
-     "ui_type": "Number",
-     "type": 2,
+     "type": "number",
      "primary": false
     },
     {
      "name": "Kind",
-     "ui_type": "SingleSelect",
-     "type": 3,
+     "type": "select",
      "primary": false,
      "options": [
       "text",
@@ -290,128 +233,109 @@
     },
     {
      "name": "Text",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "File_URI",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "File_Name",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Mime_Type",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Data",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     }
    ]
   },
   {
-   "name": "Runs",
-   "role": "（本地表）每次执行的起止、结果与报错",
+   "name": "runs",
+   "role": "每次执行的起止、结果与报错",
    "fields": [
     {
      "name": "Run_ID",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": true
     },
     {
      "name": "Task_Ref",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Node",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Worker",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Error_Log",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Started_At",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Finished_At",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Outcome",
-     "ui_type": "SingleSelect",
-     "type": 3,
+     "type": "select",
      "primary": false,
      "options": [
       "succeeded",
       "failed",
-      "paused",
-      "probe-ok"
+      "paused"
      ]
     }
    ]
   },
   {
-   "name": "Artifacts",
+   "name": "artifacts",
    "role": "Artifact：交付物登记，内容为其 FilePart，修订＝同名新 ID",
    "fields": [
     {
      "name": "Artifact_ID",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": true
     },
     {
      "name": "Task_ID",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Context_ID",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Name",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Is_Final",
-     "ui_type": "SingleSelect",
-     "type": 3,
+     "type": "select",
      "primary": false,
      "options": [
       "Yes",
@@ -420,118 +344,73 @@
     },
     {
      "name": "Created_By",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Created_At",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Description",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Metadata",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     }
    ]
   },
   {
-   "name": "AgentCards",
+   "name": "agentCards",
    "role": "AgentCard 规范化展开：一行一项能力",
    "fields": [
     {
      "name": "Cap_ID",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": true
     },
     {
      "name": "Node",
-     "ui_type": "SingleSelect",
-     "type": 3,
-     "primary": false,
-     "options": [
-      "mac-mini",
-      "ipad",
-      "nas",
-      "work-mba",
-      "work-5070ti",
-      "grokbot",
-      "node-dev",
-      "m3test",
-      "setuptest",
-      "Workbuddy-cloud",
-      "workbuddy",
-      "jarod-macbook-air",
-      "mba",
-      "hub",
-      "hub-dev",
-      "hub-test"
-     ]
+     "type": "text",
+     "primary": false
     },
     {
      "name": "Zone",
-     "ui_type": "SingleSelect",
-     "type": 3,
-     "primary": false,
-     "options": [
-      "personal",
-      "unit",
-      "home",
-      "test",
-      "work"
-     ]
+     "type": "text",
+     "primary": false
     },
     {
      "name": "Description",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Skill_ID",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Side_Effect",
-     "ui_type": "SingleSelect",
-     "type": 3,
+     "type": "select",
      "primary": false,
      "options": [
-      "read-only",
+      "read",
       "write",
-      "external",
-      "read"
+      "external"
      ]
     },
     {
      "name": "Availability",
-     "ui_type": "SingleSelect",
-     "type": 3,
-     "primary": false,
-     "options": [
-      "24x7",
-      "work-hours",
-      "on-demand",
-      "online",
-      "offline"
-     ]
+     "type": "text",
+     "primary": false
     },
     {
      "name": "Dispatchable",
-     "ui_type": "SingleSelect",
-     "type": 3,
+     "type": "select",
      "primary": false,
      "options": [
       "Yes",
@@ -540,150 +419,82 @@
     },
     {
      "name": "Daemon_Version",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Node_Desc",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Receive_Mode",
-     "ui_type": "SingleSelect",
-     "type": 3,
+     "type": "select",
      "primary": false,
      "options": [
-      "poll",
-      "automation",
-      "event"
+      "longpoll",
+      "poll"
      ]
     },
     {
      "name": "Skill_Name",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Input_Modes",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Output_Modes",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
-    },
-    {
-     "name": "Default_Input_Modes",
-     "ui_type": "Text",
-     "type": 1,
-     "primary": false
-    },
-    {
-     "name": "Default_Output_Modes",
-     "ui_type": "Text",
-     "type": 1,
-     "primary": false
-    },
-    {
-     "name": "Cap_Streaming",
-     "ui_type": "SingleSelect",
-     "type": 3,
-     "primary": false,
-     "options": [
-      "Yes",
-      "No"
-     ]
-    },
-    {
-     "name": "Cap_Push",
-     "ui_type": "SingleSelect",
-     "type": 3,
-     "primary": false,
-     "options": [
-      "Yes",
-      "No"
-     ]
-    },
-    {
-     "name": "Cap_State_History",
-     "ui_type": "SingleSelect",
-     "type": 3,
-     "primary": false,
-     "options": [
-      "Yes",
-      "No"
-     ]
     },
     {
      "name": "Metadata",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Worker",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     }
    ]
   },
   {
-   "name": "Rules_路由规则",
-   "role": "（本地表）路由与审批策略的唯一现行来源",
+   "name": "rules",
+   "role": "路由、审批策略与定时观察镜像",
    "fields": [
     {
      "name": "Rule_ID",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": true
     },
     {
      "name": "Match_Type",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Target_Node",
-     "ui_type": "SingleSelect",
-     "type": 3,
-     "primary": false,
-     "options": [
-      "home-mini",
-      "ipad",
-      "nas",
-      "grokbot",
-      "hub",
-      "mini",
-      "mba",
-      "hub-dev",
-      "mac-mini"
-     ]
+     "type": "text",
+     "primary": false
     },
     {
      "name": "Worker_Hint",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Skill_ID",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Approval_Class",
-     "ui_type": "SingleSelect",
-     "type": 3,
+     "type": "select",
      "primary": false,
      "options": [
       "auto",
@@ -693,14 +504,12 @@
     },
     {
      "name": "Priority",
-     "ui_type": "Number",
-     "type": 2,
+     "type": "number",
      "primary": false
     },
     {
      "name": "Enabled",
-     "ui_type": "SingleSelect",
-     "type": 3,
+     "type": "select",
      "primary": false,
      "options": [
       "Yes",
@@ -709,26 +518,118 @@
     },
     {
      "name": "Note",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Schedule",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Text",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
      "primary": false
     },
     {
      "name": "Last_Fired",
-     "ui_type": "Text",
-     "type": 1,
+     "type": "text",
+     "primary": false
+    }
+   ]
+  },
+  {
+   "name": "loops",
+   "role": "LoopForge 多阶段闭环：同一 Context_ID 下的阶段任务",
+   "fields": [
+    {
+     "name": "Loop_ID",
+     "type": "text",
+     "primary": true
+    },
+    {
+     "name": "Title",
+     "type": "text",
+     "primary": false
+    },
+    {
+     "name": "Goal",
+     "type": "text",
+     "primary": false
+    },
+    {
+     "name": "Context_ID",
+     "type": "text",
+     "primary": false
+    },
+    {
+     "name": "Status",
+     "type": "text",
+     "primary": false
+    },
+    {
+     "name": "Template",
+     "type": "text",
+     "primary": false
+    },
+    {
+     "name": "Stages",
+     "type": "text",
+     "primary": false
+    },
+    {
+     "name": "Stage_Index",
+     "type": "number",
+     "primary": false
+    },
+    {
+     "name": "Iteration",
+     "type": "number",
+     "primary": false
+    },
+    {
+     "name": "Max_Iterations",
+     "type": "number",
+     "primary": false
+    },
+    {
+     "name": "Active_Task_ID",
+     "type": "text",
+     "primary": false
+    },
+    {
+     "name": "Last_Result",
+     "type": "text",
+     "primary": false
+    },
+    {
+     "name": "Last_Error",
+     "type": "text",
+     "primary": false
+    },
+    {
+     "name": "History",
+     "type": "text",
+     "primary": false
+    },
+    {
+     "name": "Error",
+     "type": "text",
+     "primary": false
+    },
+    {
+     "name": "Created_By",
+     "type": "text",
+     "primary": false
+    },
+    {
+     "name": "Created_At",
+     "type": "text",
+     "primary": false
+    },
+    {
+     "name": "Updated_At",
+     "type": "text",
      "primary": false
     }
    ]

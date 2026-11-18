@@ -236,7 +236,7 @@ export function loadConfig(configDir, opts = {}) {
   }
 
   const hubUrl = String(cfg.hubUrl ?? kv.HUB_URL ?? process.env.HUB_URL ?? "").trim();
-  const apiToken = String(cfg.apiToken ?? kv.AH_API_TOKEN ?? kv.HUB_API_TOKEN ?? kv.LAH_API_TOKEN ?? process.env.AH_API_TOKEN ?? process.env.HUB_API_TOKEN ?? process.env.LAH_API_TOKEN ?? "").trim();
+  const apiToken = String(cfg.apiToken ?? kv.AH_API_TOKEN ?? process.env.AH_API_TOKEN ?? "").trim();
 
   let busType = String(cfg.busType ?? "").trim().toLowerCase();
   if (!busType) {

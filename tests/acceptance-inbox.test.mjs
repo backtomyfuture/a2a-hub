@@ -11,7 +11,7 @@ import { f1 } from "../src/bus/tables.mjs";
 import { createTask, parseCreateArgv, parseCriteriaInput } from "../src/hub/create.mjs";
 import { enqueueOrUpdateInbox, handleInboxDone, readInbox } from "../src/inbox.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";
-import { MockFeishuBus } from "./mocks/mock-bus.mjs";
+import { MockBus } from "./mocks/mock-bus.mjs";
 
 const AH_BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../bin/ah.mjs");
 
@@ -87,7 +87,7 @@ async function seedWorkingInboxTask(mock, dir, { taskId = "TASK-INBOX-ACC-1", cr
 
 test("createTask：--criteria 支持内联数组与 @文件写入首条 instruction DataPart", async () => {
   await withTemp(async (dir) => {
-    const mock = new MockFeishuBus({ tables: TABLES });
+    const mock = new MockBus({ tables: TABLES });
     await seedCard(mock);
 
     const file = path.join(dir, "criteria.json");
@@ -137,7 +137,7 @@ test("createTask：--criteria 支持内联数组与 @文件写入首条 instruct
 
 test("createTask：非法 --criteria 与非法 params.acceptance 在第一笔写之前拒绝", async () => {
   await withTemp(async (dir) => {
-    const mock = new MockFeishuBus({ tables: TABLES });
+    const mock = new MockBus({ tables: TABLES });
     await seedCard(mock);
     const badFile = path.join(dir, "bad.json");
     fs.writeFileSync(badFile, JSON.stringify([{ id: "bad id", text: "x" }]), { mode: 0o600 });
@@ -180,7 +180,7 @@ test("createTask：非法 --criteria 与非法 params.acceptance 在第一笔写
 
 test("inbox done --check：写出 Seq 2 DataPart 与 Tasks.Metadata.acceptance，且保留已有 Metadata", async () => {
   await withTemp(async (dir) => {
-    const mock = new MockFeishuBus({ tables: TABLES });
+    const mock = new MockBus({ tables: TABLES });
     const criteria = [
       { id: "c1", text: "提供截图路径", evidence_required: true },
       { id: "c2", text: "日志已核对" },
@@ -247,7 +247,7 @@ test("inbox done --check：写出 Seq 2 DataPart 与 Tasks.Metadata.acceptance�
 
 test("inbox done：DataPart 中途失败重跑走 outbox 幂等补齐；Metadata 写失败只记日志", async () => {
   await withTemp(async (dir) => {
-    const mock = new MockFeishuBus({ tables: TABLES });
+    const mock = new MockBus({ tables: TABLES });
     const { task } = await seedWorkingInboxTask(mock, dir, {
       taskId: "TASK-INBOX-RETRY-1",
       criteria: [{ id: "c1", text: "单测通过" }],
@@ -293,7 +293,7 @@ test("inbox done：DataPart 中途失败重跑走 outbox 幂等补齐；Metadata
 
 test("inbox done --check：非法格式与无清单时拒绝且不写任何表", async () => {
   await withTemp(async (dir) => {
-    const mock = new MockFeishuBus({ tables: TABLES });
+    const mock = new MockBus({ tables: TABLES });
     await seedWorkingInboxTask(mock, dir, { taskId: "TASK-NO-CRITERIA-1", criteria: null });
     mock.journal.length = 0;
 

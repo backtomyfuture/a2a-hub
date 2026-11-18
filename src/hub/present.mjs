@@ -170,9 +170,9 @@ function writeState(file, state) {
 }
 
 export class PresentService {
-  constructor({ bus, ownerOpenId = "", nodeName = "", role = "hub", statePath, queuePath, log }) {
+  constructor({ bus, ownerId = "", nodeName = "", role = "hub", statePath, queuePath, log }) {
     this.bus = bus;
-    this.ownerOpenId = String(ownerOpenId ?? "").trim();
+    this.ownerId = String(ownerId ?? "").trim();
     this.nodeName = String(nodeName ?? "").trim();
     this.role = String(role ?? "hub").trim();
     this.statePath = statePath;

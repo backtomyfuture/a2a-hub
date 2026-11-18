@@ -210,7 +210,7 @@ export function readQueueLines(queuePath) {
   }
 }
 
-// 与 bin/lah.mjs 的 acquireDaemonLock 同一口径：EPERM 说明 pid 还在，只是信号被拒绝。
+// 与 bin/ah.mjs 的 acquireDaemonLock 同一口径：EPERM 说明 pid 还在，只是信号被拒绝。
 export function daemonAlive(configDir) {
   let text;
   try {

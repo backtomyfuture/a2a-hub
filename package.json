@@ -5,9 +5,7 @@
   "bin": {
     "ah": "bin/ah.mjs",
     "a2a-hub": "bin/ah.mjs",
-    "ahub": "bin/ah.mjs",
-    "lah": "bin/lah.mjs",
-    "hub-node": "bin/hub-node.mjs"
+    "ahub": "bin/ah.mjs"
   },
   "type": "module",
   "scripts": {

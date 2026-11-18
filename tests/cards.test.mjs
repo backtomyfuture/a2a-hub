@@ -56,7 +56,7 @@ function buttonsOf(card) {
 }
 
 test("指令只出现一次，不读 auth_request 正文", () => {
-  const text = "向飞书 Agent 群发送一条测试消息";
+  const text = "向协作群发送一条测试消息";
   const card = cardOf({ title: "另一标题", text });
   const body = bodyOf(card);
   assert.equal(body.split(text).length - 1, 1);
@@ -71,7 +71,7 @@ test("指令只出现一次，不读 auth_request 正文", () => {
 });
 
 test("标题是指令前缀时不再单独成行", () => {
-  const text = "审批流程测试（第二单）：向飞书发一条消息";
+  const text = "审批流程测试（第二单）：向协作群发一条消息";
   const same = bodyOf(cardOf({ title: text, text }));
   assert.equal(same, text);
   const prefixed = bodyOf(cardOf({ title: "审批流程测试（第二单）", text }));
@@ -178,7 +178,7 @@ test("buildStatusCard 四种状态的颜色与按钮", () => {
 
 test("approvalBody 不重复标题和指令，空参数不写", async () => {
   const title = "审批流程测试（第二单）";
-  const instruction = `${title}：向飞书发一条消息`;
+  const instruction = `${title}：向协作群发一条消息`;
   const body = await approvalMethods.approvalBody.call({
     commands: { agent: { name: "agent" } },
     capLabel: () => "agent",

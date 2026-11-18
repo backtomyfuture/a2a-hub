@@ -11,7 +11,7 @@ import { ScheduleService } from "../src/hub/schedule.mjs";
 import { Kernel, parseAgentReceipt, parseJsonReceipt, parseLaterInstant } from "../src/kernel.mjs";
 import { formatWhyText, getTaskWhy } from "../src/why.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";
-import { MockFeishuBus } from "./mocks/mock-bus.mjs";
+import { MockBus } from "./mocks/mock-bus.mjs";
 
 const NOW = Date.parse("2026-06-15T00:00:00.000Z");
 const DAY = 24 * 60 * 60 * 1000;
@@ -79,7 +79,7 @@ function reap(dir, kernels) {
 
 async function setup(dir, commandEntry) {
   fs.writeFileSync(path.join(dir, "commands.json"), JSON.stringify({ echo: commandEntry }), { mode: 0o600 });
-  const mock = new MockFeishuBus({ tables: TABLES });
+  const mock = new MockBus({ tables: TABLES });
   const kernel = new Kernel({
     node: "node-a",
     role: "node",
@@ -458,7 +458,7 @@ test("Metadata.later 写失败不影响 completed", async () => {
 
 test("hub 到点建复查任务恰好一次，未到期、缺名片、跳数和 node 角色都不推进", async () => {
   await withTemp(async (dir) => {
-    const bus = new MockFeishuBus({ tables: HUB_TABLES });
+    const bus = new MockBus({ tables: HUB_TABLES });
     const dueAt = "2026-06-01T00:00:00Z";
     const waitAt = "2026-07-01T00:00:00Z";
     const due = await seedDone(bus, { Task_ID: "TASK-DUE" }, { at: dueAt, about: "看磁盘" });
@@ -529,7 +529,7 @@ test("hub 到点建复查任务恰好一次，未到期、缺名片、跳数和 
 
 test("task why 显示 later 待触发、已触发和跳数熔断", async () => {
   await withTemp(async (dir) => {
-    const bus = new MockFeishuBus({ tables: TABLES });
+    const bus = new MockBus({ tables: TABLES });
     await bus.createRecord(TABLES.tasks, {
       Task_ID: "TASK-WHY-LATER",
       Title: "复查",
