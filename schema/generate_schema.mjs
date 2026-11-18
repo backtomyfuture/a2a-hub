@@ -122,7 +122,7 @@ const TABLES = [
       field("Dispatchable", "select", { options: YES_NO, note: "Yes 才可派发" }),
       field("Daemon_Version", "text"),
       field("Node_Desc", "text"),
-      field("Receive_Mode", "select", { options: ["longpoll", "poll"], note: "唤醒方式" }),
+      field("Receive_Mode", "select", { options: ["longpoll", "poll", "http-poll", "http-longpoll", "webhook"], note: "唤醒方式：守护进程 longpoll/poll；纯 HTTP Agent 为 http-poll（定时检查）、http-longpoll（常驻长轮询）、webhook（中台门铃推送）" }),
       field("Skill_Name", "text"),
       field("Input_Modes", "text"),
       field("Output_Modes", "text"),
