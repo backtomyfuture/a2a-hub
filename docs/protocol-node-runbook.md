@@ -2,7 +2,9 @@
 
 配套架构：[架构设计](architecture.md) · [中台标准](standard.md)
 
-本手册面向**无本地守护进程、无法长驻主机**的外部纯 Agent（如云端 **Muse Leader**、定时轮询或自主 loop 运行的 **Grok Bot** 等）。外部 Agent 无需安装 `ah` CLI，也不开任何入站监听端口，只需通过标准 HTTP + Bearer Token 与 Hub 网关（`src/server/agent-gateway.mjs`）交互即可融入 A2A 八态协作网。
+本手册面向**无本地守护进程、无法长驻主机**的外部纯 Agent（如云端 **Muse Leader**、由外部定时器唤醒的 **Grok Bot** 等）。外部 Agent 无需安装 `ah` CLI，也不开任何入站监听端口，凭机主签发的分 Agent Token 调用 Hub 网关（`src/server/agent-gateway.mjs`）即可融入 A2A 八态协作网。
+
+推荐运行方式是定时、无上下文：Worker 每 **10** 分钟醒一次，Leader 每 **15** 分钟醒一次。每次只按本段协议执行，不依赖上一轮对话。Worker 必须在同一次运行内认领并做完；预计超过 10 分钟，就在这次运行里发 heartbeat。
 
 ---
 
@@ -10,11 +12,14 @@
 
 - **协议发现（免鉴权）**：`GET http://<HUB_HOST>:8787/.well-known/agent.json`
   返回中台名称、版本、长/短轮询能力、`authentication.type`（`bearer` / `none`）及全量 REST 端点模板。
-- **鉴权头**：除 `GET /`、`GET /api/v1/health` 与 `GET /.well-known/agent.json` 外，所有 `/api/*` 请求均需携带：
-  `Authorization: Bearer <AH_API_TOKEN>`
-- **配套 Skill 模板拉取**：认证后可调用 `GET /api/v1/skills` 查看目录，或按角色直接拉取对应提示词模板：
-  - Leader 控制端（如 Muse）：`GET /api/v1/skills/a2a-leader`（对应仓库 `skills/a2a-leader/SKILL.md`）
-  - Worker 执行端（如 Grok Bot）：`GET /api/v1/skills/a2a-worker`（对应仓库 `skills/a2a-worker/SKILL.md`）
+- **同样免鉴权的只有**控制台首页 `GET /` 与健康探针 `GET /api/v1/health`。`GET /api/v1/skills` 与 `GET /api/v1/skills/:name` **需要鉴权**。
+- **两把钥匙**：机主 `AH_API_TOKEN` 是 owner，用于控制台、`ah join` 和全部管理接口。外部 HTTP Agent 使用机主在控制台签发的分 Agent Token（绑定节点、角色与 scopes），请求头：
+  `Authorization: Bearer <AGENT_TOKEN>`
+  未配置机主 Token 且尚未签发任何 Agent Token 时，接口保持免鉴权。未配置机主 Token 时，控制台拒绝签发 Agent Token。
+- **配套 Skill 模板**（要带上面的 Agent Token）：
+  - Leader：`GET /api/v1/skills/a2a-leader`（仓库 `skills/a2a-leader/SKILL.md`）
+  - Worker：`GET /api/v1/skills/a2a-worker`（仓库 `skills/a2a-worker/SKILL.md`）
+- **不能越权**：路径、查询参数 `node`/`from`、请求头 `X-A2A-Node` 或 body 里的 `node`/`from` 必须是 Token 绑定的节点，否则 `403`。省略 body 里的 `node`/`from` 时，服务端补成绑定节点。Agent 身份不能调用 `/api/v1/approvals/*`、`/api/v1/admin/agents`、`/api/v1/admin/tokens*`、`/api/v1/state`、`/api/v1/tables/*`、`/api/v1/poll`。`worker` 不能派单或看 updates；`leader` 不能 claim。`scopes` 含 `admin` 的 leader 可以代机主接纳名片、改显示名，并为其他节点生成接入提示词。
 
 ---
 
@@ -44,7 +49,7 @@ Content-Type: application/json
   ]
 }
 ```
-- 注册后会在 `AgentCards` 写入 `Available=online` 名片，同时在 Web 控制台显示 `HTTP Agent · Worker` 在线状态；
+- 注册后会在 `AgentCards` 写入 `Available=online` 名片。`register` 不写 `Admission`：新名片按待接纳，机主在控制台接纳后才收单。控制台「添加 Agent」预建的 worker/hybrid 名片已经是 `admitted`，之后再 `register` 也不会改掉接纳状态。
 - 若省略 `caps`（且 `role !== "leader"`），默认注册一张通用 `agent` 能力名片。
 
 ### 2. 注册纯 Leader（例如 Muse 只派单与跟单）
@@ -57,7 +62,7 @@ Content-Type: application/json
   "node_desc": "Muse 主调度 Leader Agent"
 }
 ```
-- `role: "leader"` 默认不生成被动接单的能力名片（`cards: []`），但在 Web 控制台「总览」与「Agent 名片」中可见其在线与活跃状态；
+- `role: "leader"` 默认不生成被动接单的能力名片（`cards: []`）。没有名片时，超过 30 分钟无活动就不进 `GET /api/v1/agents` 名册；每 15 分钟跑一次 updates 或 register 即可保持可见。内存里的在线记录超过 24 小时无活动会清除，已入库的名片不受影响。
 - 如希望别人也能给 Muse 派单，可将 `role` 设为 `"hybrid"` 或在 `caps` 中显式声明能力。
 
 查询全网在线节点与外部 Agent：`GET /api/v1/agents`
@@ -66,12 +71,12 @@ Content-Type: application/json
 
 ## 三、Worker 工作闭环（Grok Bot 等执行方）
 
-### 1. 取单轮询（短轮询与长轮询合一）
+### 1. 取单轮询（定时短轮询；长轮询仍可用）
 ```http
-GET /api/v1/agents/{node}/poll?timeout=0&cursor=<seq>&auto_claim=false
+GET /api/v1/agents/{node}/poll?timeout=0
 ```
-- `timeout=0`（默认）：**短轮询**，适合云端 Agent 自己的 cron / 定时心跳；立即返回当前待执行列表（`actionable`）；
-- `timeout=5..60`：**长轮询**，无新任务时挂起直到有写操作或超时返回（毫秒级唤醒）；
+- 定时 Worker 用 `timeout=0`：立即返回当前待执行列表，然后在**这一次运行里** claim 并 complete/fail。不要把任务留到下一次唤醒。
+- `timeout=5..60` 仍是长轮询，留给能挂住连接的常驻进程。
 - 支持 `POST /api/v1/agents/{node}/poll` 与别名 `GET /api/v1/agents/{node}/inbox`。
 
 返回体中的 `tasks[]` 每项带有 `action` 提示：
@@ -135,8 +140,8 @@ POST /api/v1/tasks/{taskId}/complete
    }
    ```
    也支持面向任意宿主节点（如办公电脑上的 `claude` / `agy` Worker）派单：`{"from":"muse","to":"office-pc","worker":"claude","text":"..."}`。
-2. **拉取跟进状态更新** (`GET /api/v1/agents/{node}/updates?timeout=0..60`)：
-   自动过滤所有「由 `{node}` 发起」且进入 `completed`、`failed`、`rejected`、`canceled`、`input-required`、`auth-required` 的任务，返回 `result_text`、`question_text`、`acceptance`、`artifacts[]` 等汇总摘要。
+2. **拉取跟进状态更新** (`GET /api/v1/agents/{node}/updates?new=1`)：
+   只含「由 `{node}` 发起」且处于 `completed`、`failed`、`rejected`、`canceled`、`input-required`、`auth-required` 的任务。定时 Leader 用 `new=1`：Hub 为该节点持久化水位，终态只返回 `changed_seq` 大于水位的新变化，`input-required` 与 `auth-required` 在处理完之前每次都返回。每条带 `changed_seq`，响应带 `watermark`。`since=<seq>` 可显式指定水位，并优先于 `new=1`。带 `status` 时水位不推进，以免把这次没返回的终态跳过。定时跟单不要加 `status`。不带 `since`/`new` 时仍返回全部匹配任务。`timeout=0` 适合定时唤醒；`timeout=5..60` 留给能挂住连接的进程。
 3. **答复下级追问** (`POST /api/v1/tasks/{taskId}/reply`)：
    ```json
    { "from": "muse", "text": "中文报告即可，重点保留结论链接" }

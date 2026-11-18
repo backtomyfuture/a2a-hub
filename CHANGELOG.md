@@ -4,7 +4,14 @@
 
 ## [Unreleased]
 
-- **名片接纳**：AgentCards 增加本地扩展字段 `Admission`（`admitted` / `pending` / `rejected`，缺省 `pending`）、`Display_Name`、`Admin_Note`。守护进程对账与 `/agents/register` 不写这三列，因此新名片和升级前的老名片都回到待接纳，需在 Web 控制台接纳后才能派单。管理接口为 `/api/v1/admin/cards/:capId/admission`、`/api/v1/admin/nodes/:node/admission`、`/api/v1/admin/cards/:capId/profile`、`/api/v1/admin/agents` 与 `/api/v1/admin/onboarding`（逻辑在 `src/hub/admission.mjs`）。
+- **分 Agent Token**：配置目录 `agent_tokens.json`（0600，只存 sha256 与展示前缀）。机主 `apiToken` 仍是 owner。外部 HTTP Agent 使用绑定 `{node, role, scopes}` 的 Token。`worker` 只走 register、poll、inbox 与任务生命周期；`leader` 可派单、查看自己发起或指向自己的任务、答复和撤销自己发起的任务、loops 与 updates；`hybrid` 两边都有；`scopes` 含 `admin` 的 leader 可接纳名片、改显示名、为其他节点生成接入提示词。任何 Agent 身份不能访问 `/approvals/*`、`/admin/agents`、`/admin/tokens*`、`/state`、`/tables/*`、`/poll`。路径节点、`node`/`from` 与 `X-A2A-Node` 冒充返回 403。仅机主可 `POST /api/v1/admin/agents`（`access=http` 时签发，明文只出现一次）、`GET /api/v1/admin/tokens`、`POST /api/v1/admin/tokens/:node/rotate`、`DELETE /api/v1/admin/tokens/:node`。未配置机主 `apiToken` 时拒绝签发。两把钥匙都没有时接口仍免鉴权。
+- **鉴权收紧**：`/api/v1/skills` 与 `/api/v1/skills/:name` 需要鉴权。免鉴权只剩 `/`、`/api/v1/health`、`/.well-known/agent.json`。
+- **Leader 增量更新**：`GET /api/v1/agents/:node/updates` 支持 `since=<seq>` 与 `new=1`（Hub 为该 leader 持久化水位）。终态只返回新变化，`input-required` / `auth-required` 在处理完前一直返回。每条带 `changed_seq`，响应带 `watermark`。
+- **名册卫生**：无名片且 30 分钟无活动的在线记录不进名册。内存里的在线记录超过 24 小时无活动即清除，名片仍在表里。
+- **Hub 本机自动接纳**：`role=hub` 且名片属于本机节点时，空 `Admission` 在对账时补成 `admitted`。已有值（含显式 `pending` / `rejected`）不覆盖。远端节点与外部 Agent 自行 register 的名片仍须机主接纳。
+- **定时接入提示词**：外部 Agent 按 Worker 10 分钟、Leader 15 分钟被唤醒，每次无上下文。Worker 须在同一次运行内完成所认领任务。
+- **Web 控制台**：首页「待我处理」、Agent 按节点分组、大白话派单、添加 Agent 三步向导、Token 重新生成与吊销。
+- **名片接纳**：AgentCards 增加本地扩展字段 `Admission`（`admitted` / `pending` / `rejected`，缺省 `pending`）、`Display_Name`、`Admin_Note`。`/agents/register` 不写这三列。远端新名片和升级前的空 `Admission` 仍待接纳后才能派单。管理接口为 `/api/v1/admin/cards/:capId/admission`、`/api/v1/admin/nodes/:node/admission`、`/api/v1/admin/cards/:capId/profile`（`PATCH` 与 `POST`）、`/api/v1/admin/agents` 与 `/api/v1/admin/onboarding`（逻辑在 `src/hub/admission.mjs`）。
 - **命名独立化与目录/环境变量迁移（破坏性变更）**：
   - 默认配置目录改为 `~/.a2a-hub`（程序本体位于 `~/.a2a-hub/app/`），不再使用旧版默认配置目录；
   - 配置目录环境变量改为 `AH_HOME`（优先级：`--config <dir>` > `AH_HOME` > `~/.a2a-hub`），不再读取旧配置目录环境变量；

@@ -12,7 +12,8 @@
 | `node.json` | 节点身份、总线参数（`sqlite` / `http`）、长轮询与对账周期、角色 | 否 |
 | `commands.json` | 能力表：本机能干什么、怎么干 | 否 |
 | `schedules.json` | 定时调度表：本机定时任务计划（`id`, `cron`, `cap`, `text` 等） | 否 |
-| `app.env` | HTTP Bearer 访问口令 `AH_API_TOKEN`，权限 600 | 绝不 |
+| `app.env` | 机主 HTTP Bearer 口令 `AH_API_TOKEN`（owner），权限 600 | 绝不 |
+| `agent_tokens.json` | 分 Agent Token 账本（0600，version 1，只存 sha256 与展示前缀，无明文） | 绝不 |
 | `approval_key.pem` | `role=hub` 的 ed25519 审批签名私钥，权限 600 | 绝不 |
 | `hub.db` / `hub.db-wal` / `hub.db-shm` | `role=hub` SQLite WAL 主数据库文件 | 绝不 |
 | `runs/<Task_ID>/` | 每次执行的输入、输出与在途账本（`entry.json`） | 否 |
@@ -40,7 +41,7 @@
 - **`kind: agent`（本机独立 Agent，有守护进程壳）**：Agent 自己就是干活的人。setup 不扫描 PATH、不注册外部 CLI，只登记一张本尊 Worker 名片 `agent`（`mode: inbox`）。守护进程认领任务后写入本地 `agent_inbox.jsonl` 并刷新心跳，由本尊调 `ah inbox` 接单、办完回执。
 
 > [!IMPORTANT]
-> **Skill 自动匹配安装**：`ah setup` / `ah update` 会按当前节点 `role` 与 `kind` 向 `~/.agents/skills/` 精确写入本地 CLI Skill（`kind=host` 仅安装主控端 `ah`；`role=node, kind=agent` 仅安装执行端 `ah-inbox`；`role=hub, kind=agent` 两者都装）。云端或定时唤醒、无法运行守护进程的外部 Agent（如 **Muse Leader**、**Grok Bot**）无需跑 `ah setup`，直接通过 Hub 的 HTTP Agent 网关（`GET /.well-known/agent.json`、`GET /api/v1/skills/a2a-leader|a2a-worker`、`POST /api/v1/agents/register`、`GET /api/v1/agents/{node}/poll|updates`）接入即可，详见 [外部 HTTP Agent 运行手册](protocol-node-runbook.md)。
+> **Skill 自动匹配安装**：`ah setup` / `ah update` 会按当前节点 `role` 与 `kind` 向 `~/.agents/skills/` 精确写入本地 CLI Skill（`kind=host` 仅安装主控端 `ah`；`role=node, kind=agent` 仅安装执行端 `ah-inbox`；`role=hub, kind=agent` 两者都装）。云端定时唤醒、无法运行守护进程的外部 Agent（如 **Muse Leader**、**Grok Bot**）无需跑 `ah setup`。机主在控制台签发分 Agent Token 后，Agent 用它访问网关（`GET /.well-known/agent.json` 免鉴权；`GET /api/v1/skills/a2a-leader|a2a-worker` 需要鉴权）。详见 [外部 HTTP Agent 运行手册](protocol-node-runbook.md)。
 
 ## 4. commands.json：能力表
 
@@ -213,7 +214,7 @@ L2 是建单时冻在首条 instruction DataPart 的 `acceptance.criteria`（`ah
 ### 5.1 调度架构与双时钟
 
 - **终端类节点（`kind: host` 与 hub 所在机）**：由 `ah daemon` 内置的分钟定时器驱动，读取配置目录下的 `schedules.json`，到点以 `Status=submitted` 建单入总线，并立刻置本进程唤醒标志，走统一认领链路（在途账本、心跳、单并发、审批下限）。
-- **Agent 类节点（`kind: agent`，如 Muse、Grok 等）**：使用 Agent 自身定时器到点调用 `ah task begin` 建单，由本机守护进程认领写入收件箱，Agent 处理完后调用 `ah inbox done`。
+- **Agent 类节点（`kind: agent`，本机有守护进程）**：使用 Agent 自身定时器到点调用 `ah task begin` 建单，由本机守护进程认领写入收件箱，Agent 处理完后调用 `ah inbox done`。云端 Muse / Grok 不走这条，见 [外部 HTTP Agent 手册](protocol-node-runbook.md)。
 
 ### 5.2 schedules.json 字段表与示例
 
@@ -267,7 +268,7 @@ ah task begin --schedule <id> [--period <期次键>] [--cap <cap_id>] [--text <�
 
 ### 5.5 Agent 类自带时钟接入示例
 
-具有内置定时调度能力（如 Muse 或常驻 Grok 任务）的独立 Agent，接入流程：
+本机独立 Agent（`kind: agent`）自带定时器时的接入流程：
 1. **登记镜像**：`ah schedule register --id AGENT-MORNING --cron "0 9 * * *" --cap agent --text "每日早间同步"`
 2. **到点建单**：Agent 定时器触发时运行 `ah task begin --schedule AGENT-MORNING --text "每日早间同步"`
 3. **认领接单**：本节点 `ah daemon` 认领该任务写入 `agent_inbox.jsonl`
@@ -352,7 +353,7 @@ api backoff reason=http-429 kind=list retry=1/3 wait=2s
 | `dbPath` | Hub (`sqlite`) | SQLite WAL 数据库文件路径，支持相对配置目录路径，默认 `hub.db` |
 | `listen` | Hub (`sqlite`) | HTTP API 与 Web 控制台绑定地址，格式 `<host>:<port>`，默认 `0.0.0.0:8787` |
 | `publicUrl` | Hub (`sqlite`) | 可选外部访问地址（如 `http://192.168.1.10:8787` 或 Tailscale 地址），用于生成外部通知跳转链接，以及控制台「添加 Agent」接入提示词里的 Hub 地址 |
-| `apiToken` | Hub / 远端 `http` 节点 | 接口鉴权 Bearer Token。建议放在 0600 权限的 `app.env` 环境变量 `AH_API_TOKEN` 中，不直接提交到代码库 |
+| `apiToken` | Hub / 远端 `http` 节点 | 机主（owner）Bearer Token，权限覆盖全部接口。建议放在 0600 权限的 `app.env` 环境变量 `AH_API_TOKEN` 中。外部 HTTP Agent 不要用这把钥匙，用 §7.5 的分 Agent Token |
 | `hubUrl` | 远端节点 (`http`) | 中台 HTTP 根地址，如 `http://192.168.1.10:8787` |
 | `longPollSec` | 全部模式 | 长轮询单次挂起秒数，默认 `25`（服务端安全夹紧在 5–60 秒） |
 | `notifications` | Hub (`sqlite`) | 可选外部提醒配置对象：`feishuWebhookUrl`（飞书群机器人 Webhook，可选通知渠道）、`barkUrl`、`telegramBotToken`、`telegramChatId`、`webhookUrl`、`events`（默认 `auth-required`、`input-required`、`completed`、`failed`、`rejected`，另可加 `stale`） |
@@ -364,7 +365,7 @@ api backoff reason=http-429 kind=list retry=1/3 wait=2s
 - 手动非交互配置：
   - `ah setup --role hub --bus sqlite [--listen 0.0.0.0:8787] [--db-path ./hub.db] [--public-url http://...] [--api-token <token>] [--yes]`
   - `ah setup --role node --bus http --hub-url http://<HUB>:8787 --api-token <token> [--hub-key <pubkey>] [--yes]`
-- **纯 HTTP 外部 Agent（Muse Leader / Grok Bot 等无守护进程 Agent）**：直接访问 Hub HTTP 网关（`GET /.well-known/agent.json`、`POST /api/v1/agents/register`、`GET /api/v1/agents/{node}/poll|updates`），无需安装本地 `ah` 进程，完整接口规范见 [外部 HTTP Agent 手册](protocol-node-runbook.md)。
+- **纯 HTTP 外部 Agent（Muse Leader / Grok Bot 等无守护进程 Agent）**：在控制台添加并复制分 Agent Token，再按定时提示词接入（Worker 每 10 分钟 `poll?timeout=0`，Leader 每 15 分钟 `updates?new=1`）。无需安装本地 `ah` 进程。完整接口见 [外部 HTTP Agent 手册](protocol-node-runbook.md)。
 
 ### 7.3 LoopForge SOP 多阶段闭环 CLI（`ah loop`）
 
@@ -395,7 +396,7 @@ ah loop cancel <Loop_ID> [--text "说明"] [--config <dir>]
 
 ### 7.4 名片接纳与添加 Agent
 
-自动注册或守护进程对账写上的名片先进「待接纳」池。机主在 Web 控制台接纳后，名片才上墙，也才能派单。`Admission` 三种状态：
+远端节点对账，以及外部 Agent 自行 `register` 写上的名片，先进「待接纳」池。机主接纳后才能派单。`role=hub` 本机名片（`Node` 等于 Hub 自己的节点名）如果 `Admission` 为空，对账时补成 `admitted`；已经写过的值（含 `pending` / `rejected`）不覆盖。`Admission` 三种状态：
 
 | 状态 | 含义 |
 |---|---|
@@ -405,7 +406,7 @@ ah loop cancel <Loop_ID> [--text "说明"] [--config <dir>]
 
 控制台名片墙分段为已接纳（默认）、待接纳（带数量徽标）、已拒绝。待接纳里可单卡接纳或拒绝，节点标题可整节点接纳。已接纳卡可编辑显示名与备注、移回待接纳或拒绝；`Dispatchable=Yes` 时可向该能力派单。已拒绝卡可恢复为待接纳或直接接纳。
 
-「+ 添加 Agent」填写节点名、接入方式（云端 HTTP / 宿主机 `ah join` / 本机独立 Agent inbox）、角色（执行方 `worker` / 派单方 `leader` / 两者 `hybrid`）、显示名与备注。仅云端 HTTP 且角色为 `worker` 或 `hybrid` 时预建一张已接纳的默认 `agent` 名片；其余组合不预建卡（宿主机与 inbox 由守护进程登记后进入待接纳；纯 leader 没有名片）。提交成功后展示步骤、协议 Skill 链接和可复制的接入提示词。提示词里的 Hub 地址优先取 `node.json` 的 `publicUrl`；未配置时取本次请求的 `Host` 头（`http://<Host>`），没有 `Host` 时回退本机监听地址。在 Hub 本机用 `127.0.0.1` 打开控制台时，务必配置 `publicUrl`，否则远端拿到的地址不可达。提示词里的 Token 只出现占位符 `<AH_API_TOKEN>`。
+「+ 添加 Agent」是三步向导：选择接入类型、填写名字与角色、获取密钥与接入指引。接入类型为云端 HTTP、宿主机 `ah join` 或本机独立 Agent inbox；角色为执行方 `worker`、派单方 `leader` 或两者 `hybrid`。仅云端 HTTP 且角色为 `worker` 或 `hybrid` 时预建一张已接纳的默认 `agent` 名片；其余组合不预建卡（宿主机与 inbox 由守护进程登记后进入待接纳；纯 leader 没有名片）。云端 HTTP 会同时签发分 Agent Token，明文只在这一次响应和提示词里出现。宿主机与 inbox 的提示词仍用机主 Token 占位符 `<AH_API_TOKEN>`（`ah join` 认的是机主钥匙）。提示词是定时运行版：worker 每 10 分钟、leader 每 15 分钟，每次无上下文；worker 须在同一次运行内做完所认领任务。Hub 地址优先取 `node.json` 的 `publicUrl`；未配置时取本次请求的 `Host` 头（`http://<Host>`），没有 `Host` 时回退本机监听地址。在 Hub 本机用 `127.0.0.1` 打开控制台时，务必配置 `publicUrl`，否则远端拿到的地址不可达。
 
 管理 API（与其他 `/api/v1/*` 一样要 Bearer Token）：
 
@@ -413,10 +414,34 @@ ah loop cancel <Loop_ID> [--text "说明"] [--config <dir>]
 |---|---|
 | `POST /api/v1/admin/cards/:capId/admission` | 单卡设为 `admitted` / `pending` / `rejected` |
 | `POST /api/v1/admin/nodes/:node/admission` | 该节点全部名片设为同一状态 |
-| `PATCH /api/v1/admin/cards/:capId/profile` | 改 `display_name`（≤64）与 `admin_note`（≤500），只更新传入的键 |
-| `POST /api/v1/admin/agents` | 添加 Agent，返回名片（或 `null`）与 `onboarding` |
-| `GET /api/v1/admin/onboarding` | 只生成接入提示词，不写表 |
+| `PATCH` 或 `POST /api/v1/admin/cards/:capId/profile` | 改 `display_name`（≤64）与 `admin_note`（≤500），只更新传入的键 |
+| `POST /api/v1/admin/agents` | 添加 Agent。`access=http` 时一并签发 Token，响应含一次性明文 `token` 与 `onboarding`；该节点已有 Token 则 `409`，改走轮换 |
+| `GET /api/v1/admin/onboarding` | 只生成接入提示词，不写表。未附带刚签发的 Token 时，提示词里是占位符 `<AH_API_TOKEN>` |
 
-协议 Skill 按接入方式对应，URL 为 `<Hub>/api/v1/skills/<name>`：云端 HTTP 的 `worker` → `a2a-worker`，`leader` → `a2a-leader`，`hybrid` → 两者；`inbox` → `ah-inbox`；宿主机 Worker 不需要协议 Skill（回执约定由内核写进调度指令）。领域技能放在各 Agent 自己的技能目录（如 `~/.claude/skills`、`~/.agents/skills`），中台不登记、不展示。
+`POST /api/v1/admin/agents` 与 Token 管理只允许机主。名片接纳、改显示名、`GET /api/v1/admin/onboarding` 也允许 `scopes` 含 `admin` 的 leader（或 hybrid）；其中 `onboarding` 的查询参数 `node` 可以是别的节点。协议 Skill 按接入方式对应，URL 为 `<Hub>/api/v1/skills/<name>`，**需要鉴权**：云端 HTTP 的 `worker` → `a2a-worker`，`leader` → `a2a-leader`，`hybrid` → 两者；`inbox` → `ah-inbox`；宿主机 Worker 不需要协议 Skill（回执约定由内核写进调度指令）。领域技能放在各 Agent 自己的技能目录（如 `~/.claude/skills`、`~/.agents/skills`），中台不登记、不展示。
 
-升级后老名片没有 `Admission`，一律回到待接纳，要在控制台接纳后才能派单。
+远端节点上升级前没有 `Admission` 的老名片，仍按待接纳，要在控制台接纳后才能派单。Hub 本机的空 `Admission` 由对账补成已接纳。
+
+### 7.5 分 Agent Token
+
+外部 HTTP Agent 每人一把 Token，与机主 `apiToken` 分开。账本是配置目录 `agent_tokens.json`（0600）。文件里是 `version: 1` 和 `tokens[]`：`node`、`role`、`scopes`、`hash`（`sha256:` 前缀）、`prefix`（展示用，不含完整密钥）、`created_at`、`last_used_at`。`last_used_at` 同一节点同一分钟最多写一次。明文格式为 `aht_` 加 32 字节 base64url，只在签发或轮换的 JSON 里出现一次。
+
+未配置机主 `apiToken` 时拒绝签发：否则账本里一有 Token，鉴权就会打开，机主自己进不了管理接口。一份机主 Token 和 Agent Token 都没有时，`/api/*` 仍免鉴权。有了任一种钥匙之后，除 `/`、`/api/v1/health`、`/.well-known/agent.json` 外都要 Bearer，包括 `/api/v1/skills` 与 `/api/v1/skills/:name`。
+
+| 方法与路径 | 谁能调用 | 作用 |
+|---|---|---|
+| `GET /api/v1/admin/tokens` | 仅机主 | 列出节点、角色、scopes、前缀与时间，不含哈希与明文 |
+| `POST /api/v1/admin/tokens/:node/rotate` | 仅机主 | 重新生成。body 可带 `role`、`scopes`；省略则沿用旧值。没有旧记录时必须给 `role`。响应含新明文和已嵌入该 Token 的接入提示词 |
+| `DELETE /api/v1/admin/tokens/:node` | 仅机主 | 吊销。不存在则 `404` |
+
+控制台添加 HTTP Agent 时 `scopes` 为空。要让某个 Leader 代管接纳，轮换时写 `{"scopes":["admin"]}`。
+
+路由矩阵在 `src/hub/agent-access.mjs`。`hybrid` 同时具备 worker 与 leader：
+
+- 所有 Agent：`GET /api/v1/skills`、`GET /api/v1/skills/:name`、`POST /api/v1/agents/register`、`GET /api/v1/agents`。
+- worker：自己的 `poll` / `inbox`，以及 `claim`、`heartbeat`、`complete`、`fail`、`ask`、`auth`。
+- leader：自己的 `updates`；`GET`/`POST /api/v1/tasks`；自己发起或指向自己的任务详情；答复、撤销只限自己发起的任务；`loops` 的列表与取消只限自己发起的。
+- `scopes` 含 `admin` 的 leader：`POST /api/v1/admin/cards/:capId/admission`、`POST /api/v1/admin/nodes/:node/admission`、profile，以及 `GET /api/v1/admin/onboarding`。
+- 一律拒绝：`/api/v1/approvals/*`、`/api/v1/admin/agents`、`/api/v1/admin/tokens*`、`/api/v1/state`、`/api/v1/tables/*`、`/api/v1/poll`。
+
+路径上的节点、查询参数 `node`/`from`、请求头 `X-A2A-Node` 与绑定节点不一致返回 403。body 里这两个字段省略时补成绑定节点。任务列表会藏掉与自己无关的任务。
