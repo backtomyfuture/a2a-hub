@@ -74,6 +74,84 @@ async function failTask(bus, taskId, reason) {
   await bus.updateRecord(bus.tables.tasks, task.record_id, { Status: "failed", Status_Msg: msgId });
 }
 
+async function seedCard(bus, fields) {
+  await bus.createRecord(bus.tables.agentCards, {
+    Dispatchable: "Yes",
+    Availability: "online",
+    Admission: "admitted",
+    ...fields,
+  });
+}
+
+test("createLoop 在写单前校验每个阶段，任一阶段不通过则整单拒绝并点名阶段", async () => {
+  const bus = new SqliteBus({ dbPath: ":memory:", tables: DEFAULT_TABLES });
+  try {
+    await seedCard(bus, {
+      Cap_ID: "CAP-node-a-agent",
+      Node: "node-a",
+      Skill_ID: "agent",
+      Worker: "",
+    });
+    await seedCard(bus, {
+      Cap_ID: "CAP-node-b-review",
+      Node: "node-b",
+      Skill_ID: "review",
+      Admission: "pending",
+    });
+
+    await assert.rejects(
+      () => createLoop({
+        bus,
+        goal: "补齐导出",
+        template: "plan-code-verify",
+        to: "node-a",
+        cap: "agent",
+        stageBindings: {
+          verify: { to: "missing-node", cap: "agent" },
+        },
+      }),
+      /拒绝创建闭环：阶段 verify：/,
+    );
+    assert.equal((await bus.listRecords(bus.tables.loops)).length, 0);
+    assert.equal((await bus.listRecords(bus.tables.tasks)).length, 0);
+
+    await assert.rejects(
+      () => createLoop({
+        bus,
+        goal: "让 node-b 验收",
+        stages: [
+          { id: "draft", to: "node-a", cap: "agent", prompt: "{{goal}}" },
+          { id: "review", to: "node-b", cap: "review", prompt: "{{goal}}" },
+        ],
+      }),
+      /阶段 review：[\s\S]*未接纳（Admission=pending）[\s\S]*节点 → 待接纳/,
+    );
+    assert.equal((await bus.listRecords(bus.tables.tasks)).length, 0);
+
+    await assert.rejects(
+      () => createLoop({
+        bus,
+        goal: "点名不存在的 Worker",
+        stages: [{ id: "only", to: "node-a", worker: "nobody", cap: "agent", prompt: "{{goal}}" }],
+      }),
+      /阶段 only：[\s\S]*未登记 Worker "nobody"/,
+    );
+
+    const ok = await createLoop({
+      bus,
+      goal: "只派给已接纳的 node-a",
+      template: "plan-code-verify",
+      to: "node-a",
+      cap: "agent",
+      validateTarget: true,
+    });
+    assert.ok(ok.loopId.startsWith("LOOP-"));
+    assert.equal((await bus.listRecords(bus.tables.tasks)).length, 1);
+  } finally {
+    bus.close();
+  }
+});
+
 test("LoopService：plan -> implement -> verify 验收失败自动 goto:implement 注入反馈，修复后再 verify 通过完成", async () => {
   const bus = new SqliteBus({ dbPath: ":memory:", tables: DEFAULT_TABLES });
   const loopSvc = new LoopService({ bus, log: () => {} });

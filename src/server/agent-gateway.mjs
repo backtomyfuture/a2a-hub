@@ -13,6 +13,7 @@ import { f1 } from "../bus/tables.mjs";
 import { capIdOf } from "../config.mjs";
 import { agentCanSeeTask, assertAgentRoute } from "../hub/agent-access.mjs";
 import { admissionOf, httpError, validateNodeName } from "../hub/admission.mjs";
+import { removeHttpAgentSchedule, saveHttpAgentSchedule } from "../hub/capabilities.mjs";
 import { rosterNodeVisible } from "./longpoll-broker.mjs";
 import { submitAgentReceipt } from "../inbox.mjs";
 import { DAEMON_VERSION } from "../kernel.mjs";
@@ -40,6 +41,20 @@ function changedSeqOf(task, taskMsgs) {
     if (s > max) max = s;
   }
   return max;
+}
+
+function keepOwnerFlags(rawMeta, next) {
+  let prev = {};
+  try {
+    const parsed = typeof rawMeta === "object" && rawMeta ? rawMeta : JSON.parse(String(rawMeta || "{}"));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) prev = parsed;
+  } catch {
+    prev = {};
+  }
+  const out = { ...next };
+  if (prev.manual === true) out.manual = true;
+  if (prev.preset === true) out.preset = true;
+  return out;
 }
 
 function updatesWatermarkKey(node) {
@@ -827,6 +842,11 @@ export async function handleAgentGatewayRequest({
 
       const match = existingCards.find((r) => f1(r, "Node") === node && f1(r, "Cap_ID") === capId);
       if (match) {
+        // 重新注册只刷新在线字段。机主写过的接纳/显示名不在 fields 里；
+        // manual/preset 留在 Metadata，否则控制台添加的能力再注册后就删不掉。
+        fields.Metadata = JSON.stringify(keepOwnerFlags(f1(match, "Metadata"), {
+          kind, role, mode: receiveMode, worker: specWorker,
+        }));
         const resUpd = await bus.updateRecord(bus.tables.agentCards, match.record_id, fields);
         const current = resUpd?.record ?? match;
         admissionMap[capId] = admissionOf(current);
@@ -1251,6 +1271,33 @@ export async function handleAgentGatewayRequest({
     } catch (e) {
       throw mapInboxError(e);
     }
+    return true;
+  }
+
+  // HTTP Agent 自报计划，只写 Rules 镜像，中台不据此触发。
+  const schedMatch = pathname.match(/^\/api\/v1\/agents\/([^/]+)\/schedules\/([^/]+)$/);
+  if (schedMatch && (method === "PUT" || method === "DELETE")) {
+    let nodeRaw = "";
+    let scheduleRaw = "";
+    try {
+      nodeRaw = decodeURIComponent(schedMatch[1]);
+      scheduleRaw = decodeURIComponent(schedMatch[2]);
+    } catch {
+      throw httpError(400, "路径参数编码不合法");
+    }
+    const node = validateNodeName(nodeRaw);
+    const scheduleId = scheduleRaw;
+    if (principal?.kind === "agent" && principal.node !== node) {
+      throw httpError(403, `Token 绑定节点 ${principal.node}，不能以 ${node} 身份调用`);
+    }
+    if (method === "DELETE") {
+      const result = await removeHttpAgentSchedule({ bus, node, scheduleId });
+      sendJson(res, 200, result);
+      return true;
+    }
+    const body = await readJsonBody(req);
+    const result = await saveHttpAgentSchedule({ bus, node, scheduleId, body });
+    sendJson(res, 200, result);
     return true;
   }
 

@@ -19,6 +19,12 @@ import {
   validateProfileFields,
   validateRole,
 } from "../hub/admission.mjs";
+import {
+  buildCommandsSnippet,
+  createManualCard,
+  deleteManualCard,
+  listSchedules,
+} from "../hub/capabilities.mjs";
 import { cancelTask } from "../hub/cancel.mjs";
 import { createTask } from "../hub/create.mjs";
 import { initiatorOf } from "../inbox.mjs";
@@ -758,6 +764,57 @@ export async function startHubHttpServer({
           onWake();
         }
         sendJson(res, 200, { ok: true, card: formatAgentCard(latest) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/v1/admin/cards") {
+        // body.node 是要添加能力的目标节点，不是调用者身份。带 admin 的 Leader 会给别的节点建名片。
+        const body = await readJsonBody(req);
+        try {
+          const record = await createManualCard({ bus, tokenStore, body });
+          onWake();
+          sendJson(res, 201, { ok: true, card: formatAgentCard(record) });
+        } catch (e) {
+          if (Number(e?.status) === 409 && e.snippet) {
+            sendJson(res, 409, { error: e.message, snippet: e.snippet, text: e.text, hint: e.hint });
+            return;
+          }
+          throw e;
+        }
+        return;
+      }
+
+      const deleteCardMatch = pathname.match(/^\/api\/v1\/admin\/cards\/([^/]+)$/);
+      if (method === "DELETE" && deleteCardMatch) {
+        const capId = decodeParam(deleteCardMatch[1]);
+        const result = await deleteManualCard({ bus, tokenStore, capId });
+        onWake();
+        sendJson(res, 200, result);
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/v1/admin/commands-snippet") {
+        const body = await readJsonBodyBound();
+        sendJson(res, 200, buildCommandsSnippet(body));
+        return;
+      }
+
+      if (method === "GET" && pathname === "/api/v1/schedules") {
+        const [rules, tasks, cards] = await Promise.all([
+          bus.tables.rules ? bus.listRecords(bus.tables.rules) : Promise.resolve([]),
+          bus.listRecords(bus.tables.tasks),
+          bus.listRecords(bus.tables.agentCards),
+        ]);
+        sendJson(res, 200, {
+          schedules: listSchedules({
+            rules,
+            tasks,
+            cards,
+            connected: broker ? broker.connectedNodes() : [],
+            hubNode: cfg?.node || "",
+            hubTz: cfg?.tz || "",
+          }),
+        });
         return;
       }
 

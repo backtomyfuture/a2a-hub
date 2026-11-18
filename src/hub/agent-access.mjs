@@ -14,7 +14,7 @@ function decodeSeg(raw) {
   }
 }
 
-function foreverDeny(pathname) {
+function foreverDeny(pathname, method) {
   if (pathname.startsWith("/api/v1/approvals")) return "Agent 身份不能访问审批接口 /api/v1/approvals/*";
   if (pathname === "/api/v1/admin/agents" || pathname.startsWith("/api/v1/admin/agents/")) {
     return "Agent 身份不能调用 /api/v1/admin/agents";
@@ -25,6 +25,11 @@ function foreverDeny(pathname) {
   if (pathname === "/api/v1/state") return "Agent 身份不能访问 /api/v1/state";
   if (pathname.startsWith("/api/v1/tables/")) return "Agent 身份不能访问总线表 /api/v1/tables/*";
   if (pathname === "/api/v1/poll") return "Agent 身份不能使用 Hub 长轮询 /api/v1/poll";
+  if (pathname === "/api/v1/schedules") return "Agent 身份不能查看定时任务 /api/v1/schedules";
+  if (pathname === "/api/v1/admin/commands-snippet") return "Agent 身份不能生成 commands.json 片段";
+  if (method === "DELETE" && /^\/api\/v1\/admin\/cards\/[^/]+$/.test(pathname)) {
+    return "Agent 身份不能删除能力名片";
+  }
   return "";
 }
 
@@ -58,7 +63,9 @@ function routeAllowed(principal, method, pathname) {
     if (method === "POST" && /^\/api\/v1\/admin\/nodes\/[^/]+\/admission$/.test(pathname)) return true;
     if ((method === "POST" || method === "PATCH") && /^\/api\/v1\/admin\/cards\/[^/]+\/profile$/.test(pathname)) return true;
     if (method === "GET" && pathname === "/api/v1/admin/onboarding") return true;
+    if (method === "POST" && pathname === "/api/v1/admin/cards") return true;
   }
+  if ((method === "PUT" || method === "DELETE") && /^\/api\/v1\/agents\/[^/]+\/schedules\/[^/]+$/.test(pathname)) return true;
   return false;
 }
 
@@ -89,7 +96,7 @@ function collectClaims({ pathname, searchParams, headers }) {
 
 export function assertAgentRoute(principal, { method, pathname, searchParams, headers } = {}) {
   if (principal?.kind !== "agent") return;
-  const denied = foreverDeny(pathname);
+  const denied = foreverDeny(pathname, method);
   if (denied) throw httpError(403, denied);
   if (!routeAllowed(principal, method, pathname)) {
     throw httpError(403, `角色 ${principal.role} 无权访问 ${method} ${pathname}`);
@@ -97,6 +104,11 @@ export function assertAgentRoute(principal, { method, pathname, searchParams, he
   // 带 admin scope 的 Leader 替别的节点生成接入提示词是本意，查询串里的 node 是操作对象而非调用者身份。
   const claimSearch = pathname === "/api/v1/admin/onboarding" ? null : searchParams;
   for (const claimed of collectClaims({ pathname, searchParams: claimSearch, headers })) {
+    if (claimed !== principal.node) throw impersonation(principal.node, claimed);
+  }
+  const schedMatch = pathname.match(/^\/api\/v1\/agents\/([^/]+)\/schedules\/[^/]+$/);
+  if (schedMatch) {
+    const claimed = decodeSeg(schedMatch[1]);
     if (claimed !== principal.node) throw impersonation(principal.node, claimed);
   }
 }
