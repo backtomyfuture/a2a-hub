@@ -1,6 +1,6 @@
 ---
 name: a2a-leader
-description: A2A-Hub 纯 HTTP 控制端 / Leader Agent 接入协议（无 CLI 版，适配云端 Muse Leader 等外部编排 Agent）：用机主签发的分 Agent Token 做协议自发现、注册、名录、派单、SOP Loop、增量跟单、原任务答复与撤单。按每 15 分钟的定时任务运行，每次没有上一轮上下文。不含任何 Shell 命令。
+description: A2A-Hub 纯 HTTP 控制端 / Leader Agent 接入协议（无 CLI 版，适配云端 Muse Leader 等外部编排 Agent）：用机主签发的分 Agent Token 做协议自发现、注册、名录、派单、SOP Loop、增量跟单、原任务答复与撤单。定时器每 5 分钟跑检查脚本，输出 WORK 才执行本流程；跑不了脚本时每 15 分钟直接执行。每次没有上一轮上下文。不含任何 Shell 命令。
 ---
 
 # `a2a-leader` HTTP 控制端 Skill（无 CLI 的云端 Leader）
@@ -11,8 +11,21 @@ description: A2A-Hub 纯 HTTP 控制端 / Leader Agent 接入协议（无 CLI �
 > - 先用 `GET <HUB_URL>/.well-known/agent.json`（**免鉴权**）探测中台版本与协议端点。控制台首页 `/` 与 `GET /api/v1/health` 也免鉴权。`GET /api/v1/skills` 和 `GET /api/v1/skills/:name` **需要鉴权**。
 > - Token 由机主在 Web 控制台签发，绑定你的节点名。这不是机主自己的钥匙。请求头：`Authorization: Bearer <AGENT_TOKEN>`。JSON 请求带 `Content-Type: application/json`。
 > - **每个请求都带浏览器 UA**：`User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36`。Hub 可能在 Cloudflare 之后，默认 UA（curl、python-requests、node 等）会被 `403` / `error code: 1010` 拦截，这不是 Token 问题。
-> - 把下面的跟单流程设成**每 15 分钟**一次的定时任务。每次运行都没有上一轮上下文，只按本 Skill 执行。
+> - 优先用精简检查脚本门控（见下一节）：定时器每 **5** 分钟跑脚本，输出 `WORK` 才执行本 Skill。跑不了脚本时，把下面的跟单流程设成**每 15 分钟**一次的定时任务。每次运行都没有上一轮上下文，只按本 Skill 执行。
 > - `node` / `from` 必须是 Token 绑定的节点。你不能调用 `/api/v1/approvals/*`。遇到 `auth-required` 只提醒机主去 Web 控制台审批，绝不代批。遇到 `input-required` 只能在原任务调 `/reply`，禁止新开单代替答复。
+
+---
+
+## 精简检查脚本与门控运行
+
+云端定时器每次叫醒模型都很贵。有脚本时不要每 5 分钟读完整 Skill。
+
+- `GET /api/v1/agents/{node}/check` 只读。leader 的 `updates` 是自持久水位以来 `GET .../updates?new=1` 会返回的条数，含仍待处理的 `input-required` / `auth-required`。`{"work":false}` 表示没有新变化。
+- 检查**不推进水位**。被 `WORK` 唤醒后仍要自己调 `updates?new=1` 读取变化；漏跑这一步不会把变化标成已读。它只调用 `touchAgent` 刷新在线状态。
+- 下载：`GET <HUB_URL>/api/v1/kit/a2a_check.py`（没有 python3 则 `a2a_check.sh`）。脚本通用，不含 Token。运行：`python3 <保存路径>/a2a_check.py --hub <HUB_URL> --node <节点名>`。
+- Token 优先放进平台安全密钥空间，名称 `A2A_HUB_TOKEN`（环境变量或引用）。没有这种机制才用 `--token-file` 或 `--token` 明文。不要把明文写进定时指令、日志或回复。
+- 脚本 stdout：`IDLE` 立即结束，不回复、不调用其它接口。`ERROR ...` 结束，不重试，也不要改用别的方式猜。`WORK` 再按本 Skill 跟单。平台若支持「脚本有输出才唤醒模型」，加上 `--silent-idle`。
+- 频率：leader 每 5 分钟。请求带浏览器 User-Agent，超时 15 秒。
 
 ---
 

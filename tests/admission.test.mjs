@@ -142,6 +142,82 @@ test("纯函数：buildOnboarding 协议 Skill 映射、真实 join 参数与 To
   }
 });
 
+test("http 接入提示词改为脚本门控，host/inbox 仍是原来的句子", () => {
+  const secret = "aht_plain_once";
+  const httpWorker = buildOnboarding({
+    hubUrl: "https://hub.example",
+    node: "grok-bot",
+    access: "http",
+    role: "worker",
+    authRequired: true,
+    token: secret,
+  });
+  assert.match(httpWorker.prompt, /A2A_HUB_TOKEN/);
+  assert.match(httpWorker.prompt, /安全密钥空间/);
+  assert.match(httpWorker.prompt, /https:\/\/hub\.example\/api\/v1\/kit\/a2a_check\.py/);
+  assert.match(httpWorker.prompt, /a2a_check\.sh/);
+  assert.match(httpWorker.prompt, /每 2 分钟/);
+  assert.match(httpWorker.prompt, /IDLE 就立即结束/);
+  assert.match(httpWorker.prompt, /--silent-idle/);
+  assert.match(httpWorker.prompt, /【回退】/);
+  assert.match(httpWorker.prompt, /每 10 分钟直接执行上面的【处理流程】/);
+  assert.match(httpWorker.prompt, /\$A2A_HUB_TOKEN/);
+  assert.equal(httpWorker.prompt.split(secret).length - 1, 1);
+  assert.match(httpWorker.steps.join("\n"), /每 2 分钟/);
+  assert.match(httpWorker.steps.join("\n"), /a2a_check\.py/);
+
+  const leader = buildOnboarding({
+    hubUrl: "https://hub.example",
+    node: "muse",
+    access: "http",
+    role: "leader",
+    authRequired: true,
+    token: secret,
+  });
+  assert.match(leader.prompt, /每 5 分钟/);
+  assert.match(leader.prompt, /每 15 分钟直接执行上面的【处理流程】/);
+  assert.equal(leader.prompt.split(secret).length - 1, 1);
+
+  const hybrid = buildOnboarding({
+    hubUrl: "https://hub.example",
+    node: "both",
+    access: "http",
+    role: "hybrid",
+    authRequired: true,
+  });
+  assert.match(hybrid.prompt, /每 2 分钟/);
+  assert.match(hybrid.prompt, /<AH_API_TOKEN>/);
+  assert.match(hybrid.prompt, /每 10 分钟执行【处理流程】的 Worker 段/);
+  assert.match(hybrid.prompt, /每 15 分钟执行 Leader 段/);
+  assert.match(hybrid.prompt, /本段是取单与回执/);
+  assert.match(hybrid.prompt, /本段是跟单与派单/);
+  assert.match(hybrid.prompt, /a2a-hub-both-流程\.md/);
+
+  const host = buildOnboarding({
+    hubUrl: "http://hub.local:8787",
+    node: "agent-1",
+    access: "host",
+    role: "worker",
+    authRequired: true,
+  });
+  assert.equal(host.prompt.includes("a2a_check.py"), false);
+  assert.equal(host.prompt.includes("A2A_HUB_TOKEN"), false);
+  assert.match(host.prompt, /<AH_API_TOKEN>/);
+  assert.ok(host.steps.some((s) => s.includes("ah join http://hub.local:8787 --node agent-1 --api-token <AH_API_TOKEN>")));
+
+  const inbox = buildOnboarding({
+    hubUrl: "http://hub.local:8787",
+    node: "agent-1",
+    access: "inbox",
+    role: "worker",
+    authRequired: true,
+  });
+  assert.equal(inbox.prompt.includes("a2a_check.py"), false);
+  assert.equal(inbox.prompt.includes("A2A_HUB_TOKEN"), false);
+  assert.match(inbox.prompt, /ah-inbox/);
+  assert.ok(inbox.steps.some((s) => s.includes("--kind agent")));
+});
+
 test("派单门：未接纳（pending/缺省）与 rejected 拒单且不写表，接纳后可派", async () => {
   const tables = { ...TABLES, loops: "tbl_loops" };
   const mock = new MockBus({ tables });

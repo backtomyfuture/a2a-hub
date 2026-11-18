@@ -32,7 +32,7 @@
   - 每次写入只传递变更通知与 `seq` 游标，具体数据一律回表或经网关拉取，断线与重启不丢状态；
   - 远端宿主节点经出站 `GET /api/v1/poll?node=<node>&cursor=<seq>&timeout=25` 挂起等待，写入提交后毫秒级唤醒；Hub 进程内通过 `subscribeLocal` 零网络开销直连唤醒；无法长轮询时降级为 `poll` 定时扫表（默认 `pollSec=45`）；
   - 客户端游标落出环形缓冲时返回 `resync` 触发全量对账；所有守护进程保留低频对账扫表兜底（默认 `sweepSec=900`）以及面向 `input-required` / `auth-required` 的挂起短复查（`PENDING_RECHECK`：前 10 分钟不超 60 秒，60 分钟内不超 180 秒）。
-- **外部 Agent 网关（`src/server/agent-gateway.mjs`）**：为无守护进程、无 `ah` CLI 的纯 HTTP Agent 提供自发现（`GET /.well-known/agent.json`）、Skill 拉取（`GET /api/v1/skills/:name`，需鉴权）、注册（`POST /api/v1/agents/register`）、短/长轮询取单（`GET|POST /api/v1/agents/:node/poll`）、Leader 状态追踪（`GET /api/v1/agents/:node/updates`，`new=1` 由 Hub 为该 Leader 持久化水位、只返回新变化的终态任务与全部仍待处理的 `input-required` / `auth-required`，`since=<seq>` 可显式指定，每条带 `changed_seq`、响应带 `watermark`）及生命周期操作（`POST /api/v1/tasks/:id/{claim,heartbeat,ask,auth,complete,fail}`）。名片接纳、添加 Agent 与 Token 管理不在该网关，而在 `startHubHttpServer` 的 `/api/v1/admin/*`，状态归一与接入提示词在 `src/hub/admission.mjs`。
+- **外部 Agent 网关（`src/server/agent-gateway.mjs`）**：为无守护进程、无 `ah` CLI 的纯 HTTP Agent 提供自发现（`GET /.well-known/agent.json`）、Skill 拉取（`GET /api/v1/skills/:name`，需鉴权）、检查脚本下载（`GET /api/v1/kit/a2a_check.py` 与 `.sh`，需鉴权，正文不含 Token）、只读检查（`GET /api/v1/agents/:node/check`：复用 poll 可认领任务与本节点 working 租约，Leader 侧只数 `selectLeaderUpdates` 自持久水位以来的条数，**不写水位**；唯一副作用是 `touchAgent`）、注册（`POST /api/v1/agents/register`）、短/长轮询取单（`GET|POST /api/v1/agents/:node/poll`）、Leader 状态追踪（`GET /api/v1/agents/:node/updates`，`new=1` 由 Hub 为该 Leader 持久化水位、只返回新变化的终态任务与全部仍待处理的 `input-required` / `auth-required`，`since=<seq>` 可显式指定，每条带 `changed_seq`、响应带 `watermark`）及生命周期操作（`POST /api/v1/tasks/:id/{claim,heartbeat,ask,auth,complete,fail}`）。名片接纳、添加 Agent 与 Token 管理不在该网关，而在 `startHubHttpServer` 的 `/api/v1/admin/*`，状态归一与接入提示词在 `src/hub/admission.mjs`。
 - **名册卫生**：无名片且 30 分钟无活动的内存在线记录不进名册（纯 Leader 没有名片，停更超过 30 分钟也会从名册消失）。内存里的在线记录超过 24 小时无活动即清除，名片仍留在表里。`role=hub` 且名片 `Node` 等于本机节点名时，空的 `Admission` 在对账时补成 `admitted`（已有值，含显式 `pending` / `rejected`，不覆盖）；远端节点与外部 Agent 自行 `register` 的名片仍须机主接纳。
 
 ## 5. 三种接入形态
@@ -41,7 +41,7 @@
 |---|---|---|---|
 | **宿主守护进程型**（`kind: host`） | 办公电脑、Mac mini、Linux 工作站、GPU 服务器 | `ah daemon` 出站长轮询（`/api/v1/poll`），按 `commands.json` 拉起本机 CLI/脚本 | 守护内核强制租约、心跳、单并发账本、退避与验收 |
 | **本地独立 Agent 型**（`kind: agent`） | 同机常驻但自主消费任务的独立 Agent | `ah daemon` 认领后写入 `0600` `agent_inbox.jsonl` 并持续续心跳；本尊调 `ah inbox` 取单/交付 | 内核维护租约与 `inbox_timeout_sec`，`inbox` 出站计划保证防重与终态守卫 |
-| **纯 HTTP 外部 Agent** | 云端或由外部 cron/tick 驱动的 Leader / Worker | 凭分 Agent Token 调 `agent-gateway`（`/agents/:node/poll` 或 `/updates`）；接入提示词为「定时运行版」：Worker 每 10 分钟、Leader 每 15 分钟被唤醒，每次无上下文，Worker 须在同一次运行内完成所认领任务 | `agent-gateway` 在网关侧执行目标匹配、静态/动态审批门与状态守卫 |
+| **纯 HTTP 外部 Agent** | 云端或由外部 cron/tick 驱动的 Leader / Worker | 凭分 Agent Token 调 `agent-gateway`。定时器高频跑 `a2a_check.py`（worker / hybrid 每 2 分钟，leader 每 5 分钟）：`IDLE` 结束，`WORK` 才执行【处理流程】（`poll` 或 `updates?new=1`）。跑不了脚本时回退为 worker 每 10 分钟、leader 每 15 分钟。Token 优先放进平台安全密钥空间 `A2A_HUB_TOKEN` | `agent-gateway` 在网关侧执行目标匹配、静态/动态审批门与状态守卫。`check` 不推进 Leader 水位 |
 
 ## 6. executor × context 抽象
 

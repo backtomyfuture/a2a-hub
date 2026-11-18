@@ -15,7 +15,7 @@
 - **常驻中枢（Mac mini / Linux / 云主机），免外部数据库**：`hub` 角色直接启动本地 SQLite WAL（Node >= 24 内置 `node:sqlite`）+ HTTP API 与静态控制台（默认监听 `0.0.0.0:8787`），无任何第三方 npm 运行时依赖（`dependencies: {}`）。
 - **两类终端统一走 HTTP，节点零入站端口**：
   - **宿主守护节点（`ah join`）**：远端电脑（办公 Mac、Linux 工作站、GPU 服务器等）运行轻量守护进程 `ah daemon`，通过 `GET /api/v1/poll` 维持纯出站长轮询，收到新任务、审批或追问答复时毫秒级唤醒并拉起本机 CLI/脚本。
-  - **纯 HTTP 外部 Agent（Muse / Grok Bot 等）**：无常驻进程。机主在控制台签发分 Agent Token（不是机主自己的 `AH_API_TOKEN`）。`GET /.well-known/agent.json` 免鉴权；`/api/v1/skills*` 与其余接口要这把 Token。Worker 每 10 分钟 `poll?timeout=0`，并在同一次运行内做完；Leader 每 15 分钟 `updates?new=1` 跟单。每次唤醒都没有上一轮上下文。
+  - **纯 HTTP 外部 Agent（Muse / Grok Bot 等）**：无常驻进程。机主在控制台签发分 Agent Token（不是机主自己的 `AH_API_TOKEN`）。`GET /.well-known/agent.json` 免鉴权；`/api/v1/skills*` 与其余接口要这把 Token。定时器跑检查脚本（worker / hybrid 每 2 分钟，leader 每 5 分钟）：`IDLE` 结束，`WORK` 再 `poll?timeout=0` 或 `updates?new=1`。跑不了脚本时回退为 worker 每 10 分钟、leader 每 15 分钟。每次唤醒都没有上一轮上下文。
 - **内置 Web 控制台**：单文件零构建内嵌于中台（打开 `http://<hub>:8787`，用机主 Token）：
   - **待我处理**：首页集中待审批、待答复和需要看一眼的任务；
   - **Agent**：按节点分组，接纳名片、改显示名、重新生成或吊销 Token；

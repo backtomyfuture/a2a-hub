@@ -9,7 +9,8 @@
 - **Leader 增量更新**：`GET /api/v1/agents/:node/updates` 支持 `since=<seq>` 与 `new=1`（Hub 为该 leader 持久化水位）。终态只返回新变化，`input-required` / `auth-required` 在处理完前一直返回。每条带 `changed_seq`，响应带 `watermark`。
 - **名册卫生**：无名片且 30 分钟无活动的在线记录不进名册。内存里的在线记录超过 24 小时无活动即清除，名片仍在表里。
 - **Hub 本机自动接纳**：`role=hub` 且名片属于本机节点时，空 `Admission` 在对账时补成 `admitted`。已有值（含显式 `pending` / `rejected`）不覆盖。远端节点与外部 Agent 自行 register 的名片仍须机主接纳。
-- **定时接入提示词**：外部 Agent 按 Worker 10 分钟、Leader 15 分钟被唤醒，每次无上下文。Worker 须在同一次运行内完成所认领任务。
+- **定时接入提示词**：外部 Agent 用检查脚本门控。worker / hybrid 每 2 分钟、leader 每 5 分钟跑 `a2a_check.py`（或 `.sh`）；`IDLE` 结束，`WORK` 才执行处理流程。跑不了脚本时回退为 worker 每 10 分钟、leader 每 15 分钟。Token 优先存为 `A2A_HUB_TOKEN`。每次无上下文。Worker 须在同一次运行内完成所认领任务。
+- **轻量检查**：`GET /api/v1/agents/:node/check` 只读，不推进 Leader 的 `updates` 水位，只刷新在线状态。`GET /api/v1/kit/a2a_check.py` 与 `.sh` 需要鉴权，返回的脚本不含 Token。
 - **Web 控制台**：首页「待我处理」、Agent 按节点分组、大白话派单、添加 Agent 三步向导、Token 重新生成与吊销。
 - **名片接纳**：AgentCards 增加本地扩展字段 `Admission`（`admitted` / `pending` / `rejected`，缺省 `pending`）、`Display_Name`、`Admin_Note`。`/agents/register` 不写这三列。远端新名片和升级前的空 `Admission` 仍待接纳后才能派单。管理接口为 `/api/v1/admin/cards/:capId/admission`、`/api/v1/admin/nodes/:node/admission`、`/api/v1/admin/cards/:capId/profile`（`PATCH` 与 `POST`）、`/api/v1/admin/agents` 与 `/api/v1/admin/onboarding`（逻辑在 `src/hub/admission.mjs`）。
 - **命名独立化与目录/环境变量迁移（破坏性变更）**：

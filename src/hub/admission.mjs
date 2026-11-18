@@ -151,6 +151,7 @@ function credentialOf(token, authRequired) {
   if (secret) {
     return {
       mode: "token",
+      secret,
       header: `Authorization: Bearer ${secret}`,
       promptLine: `Bearer Token：${secret}（每次请求都带请求头 Authorization: Bearer ${secret}）`,
     };
@@ -174,24 +175,30 @@ const UA_NOTE = `所有请求（含免鉴权地址）都要带浏览器请求头
 
 function authBullet(cred) {
   if (cred.mode === "none") return `当前 Hub 未开启鉴权，请求不带 Authorization 头。${UA_NOTE}`;
-  return `除 GET /.well-known/agent.json 与 GET /api/v1/health 外，所有 /api/*（含 /api/v1/skills/*）都要带请求头 ${cred.header}。不要把 Skill 地址当成免鉴权。${UA_NOTE}`;
+  const header = cred.mode === "token" ? "Authorization: Bearer $A2A_HUB_TOKEN" : cred.header;
+  return `除 GET /.well-known/agent.json 与 GET /api/v1/health 外，所有 /api/*（含 /api/v1/skills/* 与 /api/v1/kit/*）都要带请求头 ${header}。不要把 Skill 或检查脚本地址当成免鉴权。${UA_NOTE}`;
 }
 
 function scheduleHeaders(cred) {
-  return cred.mode === "none"
-    ? `（当前免鉴权，不要加 Authorization）请求头：${UA_HEADER}`
-    : `请求头：${cred.header}；${UA_HEADER}（不带浏览器 UA 会被 Cloudflare 403 / 1010 拦截）`;
+  if (cred.mode === "none") {
+    return `（当前免鉴权，不要加 Authorization）请求头：${UA_HEADER}`;
+  }
+  // 明文只在一次性接入里出现一次。处理流程用环境变量，避免每段定时指令都带着密钥。
+  const auth = cred.mode === "token"
+    ? "Authorization: Bearer $A2A_HUB_TOKEN（从平台安全密钥空间或环境变量读取；没有安全存储时，把 $A2A_HUB_TOKEN 换成一次性接入给出的明文）"
+    : "Authorization: Bearer <AH_API_TOKEN>（向机主索取后存为 A2A_HUB_TOKEN；没有安全存储时再写明文）";
+  return `请求头：${auth}；${UA_HEADER}（不带浏览器 UA 会被 Cloudflare 403 / 1010 拦截）`;
 }
 
 function workerSchedule(base, node, cred, role = "worker") {
   const head = scheduleHeaders(cred);
   return [
-    `【定时指令】（每 10 分钟运行一次；每次都没有上一轮上下文，只按本段原文执行）`,
+    "【处理流程】（输出 WORK 或走回退时执行；每次都没有上一轮上下文，只按本段原文执行）",
     `你是节点 ${node} 的 ${role}（本段是取单与回执）。Hub：${base}。${head}`,
     "只处理分配给自己的任务，不要认领或改别人的任务。",
     `1. 报到：POST ${base}/api/v1/agents/register ，body {"node":"${node}","role":"${role}","kind":"agent","receive_mode":"http-poll"}`,
     `2. 短轮询取单：GET ${base}/api/v1/agents/${node}/poll?timeout=0 （timeout=0，不要长轮询挂起）`,
-    `3. 对返回的每个任务：POST ${base}/api/v1/tasks/<task_id>/claim ，body {"node":"${node}"}`,
+    `3. 对返回的每个任务：POST ${base}/api/v1/tasks/<task_id>/claim ，body {"node":"${node}"}。check 返回的 working 里是你已认领、仍为 working 的任务，直接续心跳或收尾，不要重复认领。`,
     `4. 在本次运行内做完。若预计超过 10 分钟，处理期间 POST ${base}/api/v1/tasks/<task_id>/heartbeat ，body {"node":"${node}","text":"当前进度"}`,
     `5. 成功：POST ${base}/api/v1/tasks/<task_id>/complete ，body {"node":"${node}","text":"结果摘要"}。失败：POST ${base}/api/v1/tasks/<task_id>/fail ，body {"node":"${node}","text":"失败原因"}`,
     `6. 缺信息：POST ${base}/api/v1/tasks/<task_id>/ask ，body {"node":"${node}","text":"缺什么"}，然后停下该任务，不要猜。`,
@@ -203,7 +210,7 @@ function workerSchedule(base, node, cred, role = "worker") {
 function leaderSchedule(base, node, cred, role = "leader") {
   const head = scheduleHeaders(cred);
   return [
-    `【定时指令】（每 15 分钟运行一次；每次都没有上一轮上下文，只按本段原文执行）`,
+    "【处理流程】（输出 WORK 或走回退时执行；每次都没有上一轮上下文，只按本段原文执行）",
     `你是节点 ${node} 的 ${role}（本段是跟单与派单）。Hub：${base}。${head}`,
     `1. 报到：POST ${base}/api/v1/agents/register ，body {"node":"${node}","role":"${role}","kind":"agent","receive_mode":"http-poll"}`,
     `2. 拉取自上次以来的新动态：GET ${base}/api/v1/agents/${node}/updates?new=1`,
@@ -215,37 +222,80 @@ function leaderSchedule(base, node, cred, role = "leader") {
   ];
 }
 
+function tokenSaveLines(cred) {
+  const how = "首选存进你所在平台的安全密钥空间（Secrets / Vault / 凭据管理 / 加密环境变量等），名称 A2A_HUB_TOKEN，之后以环境变量或引用方式取用，不要把明文写进定时指令、日志或回复。只有平台没有任何安全存储机制时，才把明文写进本地配置文件（尽量 0600）或直接写进定时指令。";
+  if (cred.mode === "none") {
+    return ["当前 Hub 未开启鉴权，不必保存 Token，运行检查脚本时不要加 --token。"];
+  }
+  if (cred.mode === "token") {
+    return [
+      `Token 保存：${how}`,
+      `这一次的明文 Token（只为存起来，不要再抄进定时指令）：${cred.secret}`,
+    ];
+  }
+  return [
+    `Token 保存：向机主索取真实 Token 后，${how}`,
+    cred.promptLine,
+  ];
+}
+
+function gateLines(base, node, role) {
+  const minutes = role === "leader" ? "5" : "2";
+  return [
+    "【定时任务】",
+    `创建定时任务，每 ${minutes} 分钟运行一次。每次唤醒都没有上一轮上下文。【定时指令】只有下面这几行：`,
+    `运行 python3 <保存路径>/a2a_check.py --hub ${base} --node ${node}。没有 python3 时改为 sh <保存路径>/a2a_check.sh --hub ${base} --node ${node}。`,
+    "Token 从环境变量 A2A_HUB_TOKEN 或平台安全空间引用读取，不要写进这几行。免鉴权 Hub 不要传 --token。",
+    "输出 IDLE 就立即结束，不回复、不做任何其它调用。",
+    "输出 ERROR 就结束（不重试，不要改用其它方式猜）。",
+    "输出 WORK 就读取已保存的【处理流程】并按其执行。",
+    "若平台支持「脚本有输出才唤醒模型」，给命令加上 --silent-idle：空闲时脚本没有输出，模型不会被叫醒。",
+  ];
+}
+
+function fallbackLines(role) {
+  if (role === "leader") {
+    return ["【回退】", "若无法运行任何脚本，按旧方式：每 15 分钟直接执行上面的【处理流程】。"];
+  }
+  if (role === "hybrid") {
+    return ["【回退】", "若无法运行任何脚本，按旧方式：每 10 分钟执行【处理流程】的 Worker 段，每 15 分钟执行 Leader 段。"];
+  }
+  return ["【回退】", "若无法运行任何脚本，按旧方式：每 10 分钟直接执行上面的【处理流程】。"];
+}
+
 function scheduledPrompt({ base, node, role, cred, skills }) {
   const skillLines = skills.map((s) => `GET ${s.url}`);
   const once = [
     "【一次性接入】（只做一次）",
     `Hub：${base}。节点名：${node}。角色：${role}。`,
+    ...tokenSaveLines(cred),
     authBullet(cred),
     `读取并遵守协议 Skill：${skillLines.join(" ；")}`,
     `然后注册：POST ${base}/api/v1/agents/register ，body {"node":"${node}","role":"${role}","kind":"agent","receive_mode":"http-poll"}`,
+    `下载检查脚本：GET ${base}/api/v1/kit/a2a_check.py （带与其它接口相同的鉴权头和浏览器 UA），保存到自己的空间，例如 <保存路径>/a2a_check.py。没有 python3 就改下载 GET ${base}/api/v1/kit/a2a_check.sh ，保存为 <保存路径>/a2a_check.sh。`,
+    `把下面的【处理流程】原文保存为自己空间里的文件（如 a2a-hub-${node}-流程.md）。`,
   ];
-  let cadence;
   let blocks;
   if (role === "leader") {
-    cadence = "请为自己创建定时任务，每 15 分钟运行一次。每次把下面的【定时指令】当作全部任务说明（不要依赖记忆或上一轮对话）。";
     blocks = leaderSchedule(base, node, cred, "leader");
   } else if (role === "hybrid") {
-    cadence = "请为自己创建定时任务：每 10 分钟执行下面的 Worker 段，每 15 分钟执行 Leader 段（也可以每 10 分钟两段都做）。每次运行都没有上下文，两段原文都要带上地址、节点名和鉴权头。";
     blocks = [
       ...workerSchedule(base, node, cred, "hybrid"),
       "",
       ...leaderSchedule(base, node, cred, "hybrid"),
     ];
   } else {
-    cadence = "请为自己创建定时任务，每 10 分钟运行一次。每次把下面的【定时指令】当作全部任务说明（不要依赖记忆或上一轮对话）。";
     blocks = workerSchedule(base, node, cred, "worker");
   }
   return [
-    "你是被定时唤醒的 HTTP Agent，每次运行都没有上一轮上下文。请接入 a2a-hub，并按下面两段执行。",
+    "你是被定时唤醒的 HTTP Agent，每次运行都没有上一轮上下文。请接入 a2a-hub。能跑脚本时只执行【定时指令】；输出 WORK 才读取已保存的【处理流程】。",
     ...once,
     "",
-    cadence,
+    ...gateLines(base, node, role),
+    "",
     ...blocks,
+    "",
+    ...fallbackLines(role),
   ].join("\n");
 }
 
@@ -296,14 +346,17 @@ export function buildOnboarding({ hubUrl, node, access, role, authRequired = fal
     ].join("\n");
   } else {
     const scheduleHint = role === "leader"
-      ? "每 15 分钟按 prompt 里的【定时指令】跟单：updates?new=1、汇报终态、reply 答复 input-required、auth-required 只提醒机主去控制台审批。"
+      ? `每 5 分钟运行 a2a_check.py --hub ${base} --node ${node}。输出 IDLE 立即结束；输出 WORK 再按【处理流程】跟单（updates?new=1、汇报终态、reply 答复 input-required、auth-required 只提醒机主）。无法跑脚本时回退为每 15 分钟直接执行【处理流程】。`
       : role === "hybrid"
-        ? "每 10 分钟按 prompt 里的 Worker【定时指令】取单收尾，每 15 分钟按 Leader【定时指令】跟单与派单。"
-        : "每 10 分钟按 prompt 里的【定时指令】执行：register → poll?timeout=0 → claim → 本次运行内完成（超过 10 分钟发 heartbeat）→ complete/fail。";
+        ? `每 2 分钟运行 a2a_check.py --hub ${base} --node ${node}。输出 IDLE 立即结束；输出 WORK 时 Worker 与 Leader 两段【处理流程】都做。无法跑脚本时 Worker 段每 10 分钟、Leader 段每 15 分钟。`
+        : `每 2 分钟运行 a2a_check.py --hub ${base} --node ${node}。输出 IDLE 立即结束；输出 WORK 再按【处理流程】取单收尾（register → poll?timeout=0 → claim → 本次运行内完成，超过 10 分钟发 heartbeat → complete/fail）。无法跑脚本时回退为每 10 分钟直接执行【处理流程】。`;
+    const authNoteHttp = cred.mode === "token"
+      ? "携带请求头 Authorization: Bearer $A2A_HUB_TOKEN（明文只在 prompt 的一次性接入里出现一次，请存进名为 A2A_HUB_TOKEN 的安全空间）"
+      : authNote;
     steps = [
-      `一次性接入：拉取协议 Skill（${authNote}；${UA_HEADER}）：${skills.map((s) => `GET ${s.url}`).join("、")}。/api/v1/skills/* 需要鉴权，只有 /.well-known/agent.json 与 /api/v1/health 免鉴权。`,
+      `一次性接入：把 Token 存进平台安全密钥空间，名称 A2A_HUB_TOKEN（没有任何安全存储时才写明文）。拉取协议 Skill（${authNoteHttp}；${UA_HEADER}）：${skills.map((s) => `GET ${s.url}`).join("、")}。下载 GET ${base}/api/v1/kit/a2a_check.py（无 python3 则 GET ${base}/api/v1/kit/a2a_check.sh）。把【处理流程】原文保存为 a2a-hub-${node}-流程.md。/api/v1/skills/* 与 /api/v1/kit/* 需要鉴权，只有 /.well-known/agent.json 与 /api/v1/health 免鉴权。`,
       `一次性注册：POST ${base}/api/v1/agents/register ，body {"node":"${node}","role":"${role}","kind":"agent","receive_mode":"http-poll"}`,
-      `为自己创建定时任务。${scheduleHint}完整原文在 prompt 的【定时指令】中，每次运行无上下文，地址、节点名和鉴权头都已写全。`,
+      `为自己创建定时任务。${scheduleHint}【定时指令】只有运行检查脚本那几行；完整处理步骤在 prompt 的【处理流程】中。`,
     ];
     prompt = scheduledPrompt({ base, node, role, cred, skills });
   }

@@ -30,8 +30,11 @@ function foreverDeny(pathname) {
 
 function routeAllowed(principal, method, pathname) {
   if (method === "GET" && (pathname === "/api/v1/skills" || /^\/api\/v1\/skills\/[^/]+$/.test(pathname))) return true;
+  if (method === "GET" && /^\/api\/v1\/kit\/a2a_check\.(py|sh)$/.test(pathname)) return true;
   if (method === "POST" && pathname === "/api/v1/agents/register") return true;
   if (method === "GET" && pathname === "/api/v1/agents") return true;
+  // 只读检查不区分角色：worker 看任务，leader 看 updates 条数，hybrid 两边都看。具体算哪些由网关按 role 决定。
+  if (method === "GET" && /^\/api\/v1\/agents\/[^/]+\/check$/.test(pathname)) return true;
 
   const role = principal.role;
   const workerish = role === "worker" || role === "hybrid";
@@ -60,7 +63,7 @@ function routeAllowed(principal, method, pathname) {
 }
 
 function callerFromPath(pathname) {
-  const m = pathname.match(/^\/api\/v1\/agents\/([^/]+)\/(?:poll|inbox|updates)$/);
+  const m = pathname.match(/^\/api\/v1\/agents\/([^/]+)\/(?:poll|inbox|updates|check)$/);
   if (!m) return "";
   return decodeSeg(m[1]);
 }

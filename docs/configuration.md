@@ -365,7 +365,7 @@ api backoff reason=http-429 kind=list retry=1/3 wait=2s
 - 手动非交互配置：
   - `ah setup --role hub --bus sqlite [--listen 0.0.0.0:8787] [--db-path ./hub.db] [--public-url http://...] [--api-token <token>] [--yes]`
   - `ah setup --role node --bus http --hub-url http://<HUB>:8787 --api-token <token> [--hub-key <pubkey>] [--yes]`
-- **纯 HTTP 外部 Agent（Muse Leader / Grok Bot 等无守护进程 Agent）**：在控制台添加并复制分 Agent Token，再按定时提示词接入（Worker 每 10 分钟 `poll?timeout=0`，Leader 每 15 分钟 `updates?new=1`）。无需安装本地 `ah` 进程。完整接口见 [外部 HTTP Agent 手册](protocol-node-runbook.md)。
+- **纯 HTTP 外部 Agent（Muse Leader / Grok Bot 等无守护进程 Agent）**：在控制台添加并复制分 Agent Token，存进平台安全密钥空间 `A2A_HUB_TOKEN`。定时器跑 `a2a_check.py`（worker / hybrid 每 2 分钟，leader 每 5 分钟）；输出 `IDLE` 就结束，输出 `WORK` 再按【处理流程】执行 `poll?timeout=0` 或 `updates?new=1`。跑不了脚本时回退为 worker 每 10 分钟、leader 每 15 分钟。无需安装本地 `ah` 进程。完整接口见 [外部 HTTP Agent 手册](protocol-node-runbook.md)。
 
 ### 7.3 LoopForge SOP 多阶段闭环 CLI（`ah loop`）
 
@@ -406,7 +406,7 @@ ah loop cancel <Loop_ID> [--text "说明"] [--config <dir>]
 
 控制台名片墙分段为已接纳（默认）、待接纳（带数量徽标）、已拒绝。待接纳里可单卡接纳或拒绝，节点标题可整节点接纳。已接纳卡可编辑显示名与备注、移回待接纳或拒绝；`Dispatchable=Yes` 时可向该能力派单。已拒绝卡可恢复为待接纳或直接接纳。
 
-「+ 添加 Agent」是三步向导：选择接入类型、填写名字与角色、获取密钥与接入指引。接入类型为云端 HTTP、宿主机 `ah join` 或本机独立 Agent inbox；角色为执行方 `worker`、派单方 `leader` 或两者 `hybrid`。仅云端 HTTP 且角色为 `worker` 或 `hybrid` 时预建一张已接纳的默认 `agent` 名片；其余组合不预建卡（宿主机与 inbox 由守护进程登记后进入待接纳；纯 leader 没有名片）。云端 HTTP 会同时签发分 Agent Token，明文只在这一次响应和提示词里出现。宿主机与 inbox 的提示词仍用机主 Token 占位符 `<AH_API_TOKEN>`（`ah join` 认的是机主钥匙）。提示词是定时运行版：worker 每 10 分钟、leader 每 15 分钟，每次无上下文；worker 须在同一次运行内做完所认领任务。Hub 地址优先取 `node.json` 的 `publicUrl`；未配置时取本次请求的 `Host` 头（`http://<Host>`），没有 `Host` 时回退本机监听地址。在 Hub 本机用 `127.0.0.1` 打开控制台时，务必配置 `publicUrl`，否则远端拿到的地址不可达。Hub 放在 Cloudflare 之后时，浏览器完整性检查会以 `403` / `error code: 1010` 拦下 curl、python-requests、node 等默认 UA，所以云端 HTTP 提示词与 `a2a-leader` / `a2a-worker` Skill 都要求每个请求带浏览器 `User-Agent`，远端节点的 `HttpBus` 也固定发送同一串浏览器 UA。
+「+ 添加 Agent」是三步向导：选择接入类型、填写名字与角色、获取密钥与接入指引。接入类型为云端 HTTP、宿主机 `ah join` 或本机独立 Agent inbox；角色为执行方 `worker`、派单方 `leader` 或两者 `hybrid`。仅云端 HTTP 且角色为 `worker` 或 `hybrid` 时预建一张已接纳的默认 `agent` 名片；其余组合不预建卡（宿主机与 inbox 由守护进程登记后进入待接纳；纯 leader 没有名片）。云端 HTTP 会同时签发分 Agent Token，明文只在这一次响应和提示词里出现。宿主机与 inbox 的提示词仍用机主 Token 占位符 `<AH_API_TOKEN>`（`ah join` 认的是机主钥匙）。提示词是脚本门控版：worker / hybrid 每 2 分钟、leader 每 5 分钟跑检查脚本，`IDLE` 立即结束，`WORK` 才执行【处理流程】；跑不了脚本时回退为 worker 每 10 分钟、leader 每 15 分钟。Token 优先存进平台安全密钥空间，名称 `A2A_HUB_TOKEN`，明文只在提示词里出现一次。每次运行无上下文；worker 须在同一次运行内做完所认领任务。Hub 地址优先取 `node.json` 的 `publicUrl`；未配置时取本次请求的 `Host` 头（`http://<Host>`），没有 `Host` 时回退本机监听地址。在 Hub 本机用 `127.0.0.1` 打开控制台时，务必配置 `publicUrl`，否则远端拿到的地址不可达。Hub 放在 Cloudflare 之后时，浏览器完整性检查会以 `403` / `error code: 1010` 拦下 curl、python-requests、node 等默认 UA，所以云端 HTTP 提示词与 `a2a-leader` / `a2a-worker` Skill 都要求每个请求带浏览器 `User-Agent`，远端节点的 `HttpBus` 也固定发送同一串浏览器 UA。
 
 管理 API（与其他 `/api/v1/*` 一样要 Bearer Token）：
 
@@ -427,7 +427,7 @@ ah loop cancel <Loop_ID> [--text "说明"] [--config <dir>]
 
 外部 HTTP Agent 每人一把 Token，与机主 `apiToken` 分开。账本是配置目录 `agent_tokens.json`（0600）。文件里是 `version: 1` 和 `tokens[]`：`node`、`role`、`scopes`、`hash`（`sha256:` 前缀）、`prefix`（展示用，不含完整密钥）、`created_at`、`last_used_at`。`last_used_at` 同一节点同一分钟最多写一次。明文格式为 `aht_` 加 32 字节 base64url，只在签发或轮换的 JSON 里出现一次。
 
-未配置机主 `apiToken` 时拒绝签发：否则账本里一有 Token，鉴权就会打开，机主自己进不了管理接口。一份机主 Token 和 Agent Token 都没有时，`/api/*` 仍免鉴权。有了任一种钥匙之后，除 `/`、`/api/v1/health`、`/.well-known/agent.json` 外都要 Bearer，包括 `/api/v1/skills` 与 `/api/v1/skills/:name`。
+未配置机主 `apiToken` 时拒绝签发：否则账本里一有 Token，鉴权就会打开，机主自己进不了管理接口。一份机主 Token 和 Agent Token 都没有时，`/api/*` 仍免鉴权。有了任一种钥匙之后，除 `/`、`/api/v1/health`、`/.well-known/agent.json` 外都要 Bearer，包括 `/api/v1/skills`、`/api/v1/skills/:name` 与 `/api/v1/kit/a2a_check.py|.sh`。
 
 | 方法与路径 | 谁能调用 | 作用 |
 |---|---|---|
@@ -439,10 +439,14 @@ ah loop cancel <Loop_ID> [--text "说明"] [--config <dir>]
 
 路由矩阵在 `src/hub/agent-access.mjs`。`hybrid` 同时具备 worker 与 leader：
 
-- 所有 Agent：`GET /api/v1/skills`、`GET /api/v1/skills/:name`、`POST /api/v1/agents/register`、`GET /api/v1/agents`。
+- 所有 Agent：`GET /api/v1/skills`、`GET /api/v1/skills/:name`、`GET /api/v1/kit/a2a_check.py`、`GET /api/v1/kit/a2a_check.sh`、`POST /api/v1/agents/register`、`GET /api/v1/agents`、自己的 `GET /api/v1/agents/:node/check`。
 - worker：自己的 `poll` / `inbox`，以及 `claim`、`heartbeat`、`complete`、`fail`、`ask`、`auth`。
 - leader：自己的 `updates`；`GET`/`POST /api/v1/tasks`；自己发起或指向自己的任务详情；答复、撤销只限自己发起的任务；`loops` 的列表与取消只限自己发起的。
 - `scopes` 含 `admin` 的 leader：`POST /api/v1/admin/cards/:capId/admission`、`POST /api/v1/admin/nodes/:node/admission`、profile，以及 `GET /api/v1/admin/onboarding`。
 - 一律拒绝：`/api/v1/approvals/*`、`/api/v1/admin/agents`、`/api/v1/admin/tokens*`、`/api/v1/state`、`/api/v1/tables/*`、`/api/v1/poll`。
+
+`GET /api/v1/agents/:node/check` 是给定时脚本的只读探测。worker 部分的 `tasks` 与 `poll` 的可认领任务同一口径，`working` 是本节点已认领且仍为 `working` 的任务。leader 部分的 `updates` 是自持久水位以来 `updates?new=1` 会返回的条数（含仍待处理的 `input-required` / `auth-required`）。它不写水位，所以随后的 `updates?new=1` 仍能看到这些变化。唯一副作用是刷新该节点在线状态。Agent Token 按绑定角色计算；机主调用可用查询参数 `role`（`worker` / `leader` / `hybrid`，缺省两边都算）。空闲时 `{"work":false}`。
+
+检查脚本由 Hub 按文件返回（`skills/a2a-check/`），正文不含 Token。Token 读取顺序是环境变量 `A2A_HUB_TOKEN`、`--token-file`、`--token`。脚本输出：空闲一行 `IDLE`（`--silent-idle` 则不输出），有事先 `WORK` 再一行 JSON，出错一行 `ERROR ...` 且退出码 2。请求带浏览器 `User-Agent`。
 
 路径上的节点、查询参数 `node`/`from`、请求头 `X-A2A-Node` 与绑定节点不一致返回 403。body 里这两个字段省略时补成绑定节点。任务列表会藏掉与自己无关的任务。

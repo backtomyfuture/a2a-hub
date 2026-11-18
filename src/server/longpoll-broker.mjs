@@ -6,7 +6,7 @@ const DEFAULT_MAX_HISTORY = 1024;
 const DEFAULT_STALE_NODE_MS = 90_000;
 // 探针节点只碰一次 poll/register 就会留在内存里。超过一天仍无活动就删掉，避免名册无限增长。
 export const NODE_EXPIRE_MS = 24 * 60 * 60 * 1000;
-// Leader / Worker 大约 10～15 分钟醒一次。无名片且超过 30 分钟没活动，视为幽灵，不进名册。
+// 检查脚本大约 2～5 分钟碰一次；没有脚本时大约 10～15 分钟。无名片且超过 30 分钟没活动，视为幽灵，不进名册。
 export const ROSTER_IDLE_MS = 30 * 60 * 1000;
 
 // 有名片的节点离线也要留在名册里。没有名片时，只保留 30 分钟内活动过的在线记录。

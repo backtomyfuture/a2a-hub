@@ -71,6 +71,28 @@ function selectLeaderUpdates(updates, since) {
   return updates.filter((u) => LEADER_PENDING_STATUSES.has(u.status) || u.changed_seq > since);
 }
 
+// 机主用 query role，缺省 worker 与 leader 都算。Agent Token 只用绑定角色，避免用查询参数扩权。
+function checkScopeOf(principal, searchParams) {
+  if (principal?.kind === "agent") {
+    const role = principal.role === "leader" || principal.role === "hybrid" ? principal.role : "worker";
+    return {
+      role,
+      worker: role === "worker" || role === "hybrid",
+      leader: role === "leader" || role === "hybrid",
+    };
+  }
+  const raw = String(searchParams?.get("role") ?? "").trim().toLowerCase();
+  if (!raw) return { role: "hybrid", worker: true, leader: true };
+  if (raw !== "worker" && raw !== "leader" && raw !== "hybrid") {
+    throw httpError(400, "role 只能是 worker / leader / hybrid");
+  }
+  return {
+    role: raw,
+    worker: raw === "worker" || raw === "hybrid",
+    leader: raw === "leader" || raw === "hybrid",
+  };
+}
+
 // 2×2 四类 Skill 目录：控制端/执行端 × 有 ah CLI / 纯 HTTP，避免向工作机或云端 Agent 下发无关指令
 const SKILL_CATALOG = [
   { name: "ah", role: "leader", mode: "cli", audience: "装有 ah CLI 的 Hub / 工作机中控 Agent" },
@@ -80,6 +102,12 @@ const SKILL_CATALOG = [
 ];
 const SKILL_BY_NAME = new Map(SKILL_CATALOG.map((item) => [item.name, item]));
 const SKILLS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "skills");
+// 检查脚本是通用文件，不内嵌 Token。Hub 只按文件名白名单读出原文。
+const KIT_DIR = path.join(SKILLS_DIR, "a2a-check");
+const KIT_FILES = new Map([
+  ["a2a_check.py", "a2a_check.py"],
+  ["a2a_check.sh", "a2a_check.sh"],
+]);
 
 function nowIso() {
   return new Date().toISOString();
@@ -498,6 +526,8 @@ async function collectAgentMailbox({ bus, node, verifyKey, onWake, includeUpdate
 
   const actionable = [];
   const updates = [];
+  // poll 的 actionable 不含仍在 working 的租约。检查接口要用同一趟扫描把它叫醒，避免再扫一遍表。
+  const working = [];
 
   for (const task of tasks) {
     const taskId = f1(task, "Task_ID");
@@ -552,6 +582,10 @@ async function collectAgentMailbox({ bus, node, verifyKey, onWake, includeUpdate
       }
     }
 
+    if (target === node && st === "working" && claimed === node) {
+      working.push(taskId);
+    }
+
     if (includeUpdates && LEADER_UPDATE_STATUSES.has(st)) {
       const instr = instructionOfTask(taskMsgs, partsByParent);
       const initiator = instr.fromNode || f1(task, "Source");
@@ -561,7 +595,31 @@ async function collectAgentMailbox({ bus, node, verifyKey, onWake, includeUpdate
     }
   }
 
-  return { actionable, updates };
+  return { actionable, updates, working };
+}
+
+// 与 GET updates 同一口径，含仍待处理的 input-required / auth-required。调用方决定要不要写水位。
+async function listSelectableLeaderUpdates(bus, node, { wantedStatuses = LEADER_UPDATE_STATUSES, threshold = null } = {}) {
+  const [tasks, messages, parts, artifacts] = await Promise.all([
+    bus.listRecords(bus.tables.tasks),
+    bus.listRecords(bus.tables.messages),
+    bus.listRecords(bus.tables.parts),
+    bus.tables.artifacts ? bus.listRecords(bus.tables.artifacts) : Promise.resolve([]),
+  ]);
+  const { msgByTask, partsByParent, artsByTask } = groupByTask(messages, parts, artifacts);
+  const out = [];
+  for (const task of tasks) {
+    const st = f1(task, "Status");
+    if (!wantedStatuses.has(st)) continue;
+    const taskMsgs = msgByTask.get(f1(task, "Task_ID")) ?? [];
+    const instr = instructionOfTask(taskMsgs, partsByParent);
+    const initiator = instr.fromNode || f1(task, "Source");
+    if (initiator !== node) continue;
+    const brief = buildTaskBrief(task, taskMsgs, partsByParent, artsByTask);
+    // 只取任务行和它的消息行。Parts 是另一张表，不能把无关写入算进这条任务的变更。
+    out.push({ ...brief, changed_seq: changedSeqOf(task, taskMsgs) });
+  }
+  return selectLeaderUpdates(out.reverse(), threshold);
 }
 
 function normalizeChecksInput(raw) {
@@ -635,7 +693,10 @@ export async function handleAgentGatewayRequest({
         auth: "/api/v1/tasks/{taskId}/auth",
         reply: "/api/v1/tasks/{taskId}/reply",
         cancel: "/api/v1/tasks/{taskId}/cancel",
+        check: "/api/v1/agents/{node}/check",
         skills: "/api/v1/skills/{name}",
+        checkScript: "/api/v1/kit/a2a_check.py",
+        checkScriptShell: "/api/v1/kit/a2a_check.sh",
       },
     });
     return true;
@@ -682,6 +743,28 @@ export async function handleAgentGatewayRequest({
       filename: `skills/${meta.name}/SKILL.md`,
       content,
     });
+    return true;
+  }
+
+  const mKit = pathname.match(/^\/api\/v1\/kit\/([^/]+)$/);
+  if (method === "GET" && mKit) {
+    let rawName = "";
+    try {
+      rawName = decodeURIComponent(mKit[1]).trim();
+    } catch {
+      throw httpError(404, "脚本不存在");
+    }
+    const fileName = KIT_FILES.get(rawName);
+    if (!fileName) throw httpError(404, "脚本不存在");
+    const filePath = path.join(KIT_DIR, fileName);
+    if (!fs.existsSync(filePath)) throw httpError(404, `脚本文件缺失：${fileName}`);
+    const content = fs.readFileSync(filePath, "utf8");
+    res.writeHead(200, {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-store",
+      "Access-Control-Allow-Origin": "*",
+    });
+    res.end(content);
     return true;
   }
 
@@ -831,6 +914,41 @@ export async function handleAgentGatewayRequest({
     return true;
   }
 
+  // 2.5) 轻量检查。只读：不认领、不补预审、不推进 Leader 水位。唯一副作用是刷新在线状态。
+  const checkMatch = pathname.match(/^\/api\/v1\/agents\/([^/]+)\/check$/);
+  if (method === "GET" && checkMatch) {
+    const node = validateNodeName(decodeURIComponent(checkMatch[1]));
+    const scope = checkScopeOf(principal, reqUrl.searchParams);
+    broker?.touchAgent?.(node, {
+      remoteAddr,
+      mode: "http-poll",
+      kind: "agent",
+      role: scope.role,
+    });
+    const payload = { work: false };
+    if (scope.worker) {
+      const mailbox = await collectAgentMailbox({
+        bus,
+        node,
+        verifyKey,
+        onWake,
+        includeUpdates: false,
+        touchPreflight: false,
+      });
+      payload.tasks = mailbox.actionable.map((item) => item.task_id);
+      payload.working = mailbox.working;
+      if (payload.tasks.length || payload.working.length) payload.work = true;
+    }
+    if (scope.leader) {
+      const watermark = await readUpdatesWatermark(bus, node);
+      const updates = await listSelectableLeaderUpdates(bus, node, { threshold: watermark });
+      payload.updates = updates.length;
+      if (payload.updates > 0) payload.work = true;
+    }
+    sendJson(res, 200, payload);
+    return true;
+  }
+
   // 3) 外部 Agent 短轮询 / 长轮询取单（支持 GET / POST poll 与 GET inbox）
   const pollMatch = pathname.match(/^\/api\/v1\/agents\/([^/]+)\/(poll|inbox)$/);
   if (pollMatch && (method === "GET" || (method === "POST" && pollMatch[2] === "poll"))) {
@@ -957,28 +1075,7 @@ export async function handleAgentGatewayRequest({
       role: "leader",
     });
 
-    const queryUpdates = async () => {
-      const [tasks, messages, parts, artifacts] = await Promise.all([
-        bus.listRecords(bus.tables.tasks),
-        bus.listRecords(bus.tables.messages),
-        bus.listRecords(bus.tables.parts),
-        bus.tables.artifacts ? bus.listRecords(bus.tables.artifacts) : Promise.resolve([]),
-      ]);
-      const { msgByTask, partsByParent, artsByTask } = groupByTask(messages, parts, artifacts);
-      const out = [];
-      for (const task of tasks) {
-        const st = f1(task, "Status");
-        if (!wantedStatuses.has(st)) continue;
-        const taskMsgs = msgByTask.get(f1(task, "Task_ID")) ?? [];
-        const instr = instructionOfTask(taskMsgs, partsByParent);
-        const initiator = instr.fromNode || f1(task, "Source");
-        if (initiator !== node) continue;
-        const brief = buildTaskBrief(task, taskMsgs, partsByParent, artsByTask);
-        // 只取任务行和它的消息行。Parts 是另一张表，不能把无关写入算进这条任务的变更。
-        out.push({ ...brief, changed_seq: changedSeqOf(task, taskMsgs) });
-      }
-      return selectLeaderUpdates(out.reverse(), threshold);
-    };
+    const queryUpdates = () => listSelectableLeaderUpdates(bus, node, { wantedStatuses, threshold });
 
     let list = await queryUpdates();
     let wake = list.length > 0;

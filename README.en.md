@@ -15,7 +15,7 @@
 - **Self-Hosted Standalone Hub (`busType: "sqlite"`)**: Run `ah daemon --role hub` on a persistent server (such as a Mac mini or Linux VPS) backed by Node >= 24's built-in `node:sqlite` (WAL mode) and zero third-party npm dependencies (`dependencies: {}`).
 - **Two Connection Modes Over Pure HTTP, Zero Open Node Ports**:
   - **Host Daemon Nodes (`ah join`)**: Workstations, office Macs, or GPU hosts run a thin outbound daemon (`GET /api/v1/poll`) that wakes within milliseconds to execute local CLIs/scripts safely via `commands.json`.
-  - **Pure HTTP External Agents (Muse, Grok Bot, etc.)**: No daemon. The owner issues a per-agent token in the console (not the owner `AH_API_TOKEN`). `GET /.well-known/agent.json` is public; `/api/v1/skills*` and every other API call need that token. A worker wakes every 10 minutes (`poll?timeout=0`) and finishes claimed work in the same run. A leader wakes every 15 minutes (`updates?new=1`). Each run starts with no prior context.
+  - **Pure HTTP External Agents (Muse, Grok Bot, etc.)**: No daemon. The owner issues a per-agent token in the console (not the owner `AH_API_TOKEN`). `GET /.well-known/agent.json` is public; `/api/v1/skills*` and every other API call need that token. A timer runs the check script (worker or hybrid every 2 minutes, leader every 5): `IDLE` stops, `WORK` then calls `poll?timeout=0` or `updates?new=1`. If no script can run, fall back to every 10 minutes (worker) or 15 minutes (leader). Each run starts with no prior context.
 - **Built-in Web Console** (`http://<hub>:8787`, owner token):
   - **Needs you**: Home list of approvals, questions, and tasks worth a look.
   - **Agents**: Grouped by node, with admission, display names, and token rotate/revoke.
