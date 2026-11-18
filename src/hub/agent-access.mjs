@@ -91,7 +91,9 @@ export function assertAgentRoute(principal, { method, pathname, searchParams, he
   if (!routeAllowed(principal, method, pathname)) {
     throw httpError(403, `角色 ${principal.role} 无权访问 ${method} ${pathname}`);
   }
-  for (const claimed of collectClaims({ pathname, searchParams, headers })) {
+  // 带 admin scope 的 Leader 替别的节点生成接入提示词是本意，查询串里的 node 是操作对象而非调用者身份。
+  const claimSearch = pathname === "/api/v1/admin/onboarding" ? null : searchParams;
+  for (const claimed of collectClaims({ pathname, searchParams: claimSearch, headers })) {
     if (claimed !== principal.node) throw impersonation(principal.node, claimed);
   }
 }

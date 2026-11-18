@@ -775,6 +775,11 @@ export async function startHubHttpServer({
             sendJson(res, 500, { error: "未配置 configDir，无法签发 Agent Token" });
             return;
           }
+          // 没有机主 Token 时一旦签发 Agent Token，鉴权就会生效，机主自己将被挡在管理接口之外。
+          if (!apiToken) {
+            sendJson(res, 400, { error: "请先在 node.json 配置机主 apiToken，再签发 Agent Token" });
+            return;
+          }
           if (tokenStore.get(node)) {
             sendJson(res, 409, { error: `节点 ${node} 已有 Token，请使用 POST /api/v1/admin/tokens/${node}/rotate 轮换` });
             return;
@@ -857,6 +862,7 @@ export async function startHubHttpServer({
       const rotateTokenMatch = pathname.match(/^\/api\/v1\/admin\/tokens\/([^/]+)\/rotate$/);
       if (method === "POST" && rotateTokenMatch) {
         if (!tokenStore) throw httpError(500, "未配置 configDir，无法管理 Agent Token");
+        if (!apiToken) throw httpError(400, "请先在 node.json 配置机主 apiToken，再签发 Agent Token");
         const node = validateNodeName(decodeParam(rotateTokenMatch[1]));
         const body = await readJsonBodyBound();
         const existing = tokenStore.get(node);

@@ -418,7 +418,8 @@ test("HTTP：机主不受影响，Agent 按角色隔离，冒充与撤单受绑�
       "/api/v1/admin/onboarding?node=grok-bot&access=http&role=worker",
       { token: leaderAdmin.data.token },
     );
-    assert.equal(obOther.status, 403);
+    assert.equal(obOther.status, 200);
+    assert.match(obOther.data.onboarding.prompt, /grok-bot/);
     assert.equal((await apiJson(baseUrl, "/api/v1/admin/tokens", { token: leaderAdmin.data.token })).status, 403);
     assert.equal((await apiJson(baseUrl, "/api/v1/state", { token: leaderAdmin.data.token })).status, 403);
 
@@ -452,17 +453,17 @@ test("HTTP：机主不受影响，Agent 按角色隔离，冒充与撤单受绑�
   });
 });
 
-test("未配置机主 Token 且没有 Agent Token 时免鉴权；签发之后必须带 Token", async () => {
+test("未配置机主 Token 时拒绝签发 Agent Token，避免机主被挡在管理接口之外", async () => {
   await withHub(async ({ baseUrl }) => {
     assert.equal((await apiJson(baseUrl, "/api/v1/state")).status, 200);
     const added = await apiJson(baseUrl, "/api/v1/admin/agents", {
       method: "POST",
       body: { node: "solo", access: "http", role: "worker" },
     });
-    assert.equal(added.status, 200);
-    assert.match(added.data.token, /^aht_/);
-    assert.equal((await apiJson(baseUrl, "/api/v1/state")).status, 401);
-    assert.equal((await apiJson(baseUrl, "/api/v1/agents/solo/poll?timeout=0", { token: added.data.token })).status, 200);
-    assert.equal((await apiJson(baseUrl, "/api/v1/state", { token: added.data.token })).status, 403);
+    assert.equal(added.status, 400);
+    assert.match(added.data.error, /apiToken/);
+    const rotated = await apiJson(baseUrl, "/api/v1/admin/tokens/solo/rotate", { method: "POST", body: {} });
+    assert.equal(rotated.status, 400);
+    assert.equal((await apiJson(baseUrl, "/api/v1/state")).status, 200);
   }, { apiToken: "" });
 });
