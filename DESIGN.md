@@ -41,7 +41,7 @@
 |---|---|---|---|
 | **宿主守护进程型**（`kind: host`） | 办公电脑、Mac mini、Linux 工作站、GPU 服务器 | `ah daemon` 出站长轮询（`/api/v1/poll`），按 `commands.json` 拉起本机 CLI/脚本 | 守护内核强制租约、心跳、单并发账本、退避与验收 |
 | **本地独立 Agent 型**（`kind: agent`） | 同机常驻但自主消费任务的独立 Agent | `ah daemon` 认领后写入 `0600` `agent_inbox.jsonl` 并持续续心跳；本尊调 `ah inbox` 取单/交付 | 内核维护租约与 `inbox_timeout_sec`，`inbox` 出站计划保证防重与终态守卫 |
-| **纯 HTTP 外部 Agent** | 云端或由外部 cron/tick 驱动的 Leader / Worker | 凭分 Agent Token 调 `agent-gateway`。定时器高频跑 `a2a_check.py`（worker / hybrid 每 2 分钟，leader 每 5 分钟）：`IDLE` 结束，`WORK` 才执行【处理流程】（`poll` 或 `updates?new=1`）。跑不了脚本时回退为 worker 每 10 分钟、leader 每 15 分钟。Token 优先放进平台安全密钥空间 `A2A_HUB_TOKEN` | `agent-gateway` 在网关侧执行目标匹配、静态/动态审批门与状态守卫。`check` 不推进 Leader 水位 |
+| **纯 HTTP 外部 Agent** | 云端 Leader / Worker。接收方式三选一 | 凭分 Agent Token 调 `agent-gateway`。定时检查（`http-poll`，默认）：`a2a_check.py` 门控后 `poll?timeout=0` 或 `updates?new=1`。常驻长轮询（`http-longpoll`）：循环 `poll?timeout=25`（Leader 循环 `updates?new=1`），断线 1/3/8/30 秒退避。Webhook（`webhook`）：Hub 向机主登记的 URL POST 门铃，接收方验签后回网关拉详情，每 30 分钟检查脚本兜底。Token 放 `A2A_HUB_TOKEN`；Webhook 密钥放 `A2A_HUB_WEBHOOK_SECRET` | `agent-gateway` 在网关侧执行目标匹配、静态/动态审批门与状态守卫。`check` 不推进 Leader 水位。Webhook URL 只由机主配置 |
 
 ## 6. executor × context 抽象
 
@@ -70,7 +70,8 @@
 
 - **控制键拦截**：`EXEC_CONTROL_KEYS`（`command`、`cmd`、`cwd`、`context`、`agent`、`worker`、`mode`、`side_effect`、`approval_class`、`permissions`、`shell`、`env`、`executable`、`argv`、`bin`、`max_timeout_sec`、`verify`、`verify_timeout_sec`）出现在任务参数中时，建单端与执行节点一律拒收；唯一可由任务参数覆盖的执行控制键为 `timeout_sec`（且受节点本地 `max_timeout_sec` 夹紧）。
 - **审批下限与 ed25519 签名**：认领前静态审批下限取「任务行 `Approval_Class`、本地 Worker 下限、本地 Skill 下限」中最严者；执行中可由 `agent-auth` / `need_auth` / `ah inbox auth` / 网关 `/auth` 触发动态审批。Hub 使用配置目录 `0600` 私钥 `approval_key.pem` 为 `auth_decision` 签名，配了 `hubPublicKey` 的节点与网关严格验签。
-- **分 Agent Token（`src/hub/agent-tokens.mjs` + `src/hub/agent-access.mjs`）**：机主 `apiToken` 即 owner，权限不变。每个外部 HTTP Agent 由机主在控制台（`POST /api/v1/admin/agents`，`access=http`）签发独立 Token，绑定 `{node, role, scopes}`，`<configDir>/agent_tokens.json`（0600）只存 sha256 哈希与展示前缀，明文只在签发/轮换响应出现一次；可 `rotate` 重新生成、`DELETE` 吊销。控制台添加时 `scopes` 为空，`admin` 要在轮换 body 里写入。未配置机主 `apiToken` 时拒绝签发（否则鉴权一开机主自己会被挡在外）。`hybrid` 同时具备两边权限。`worker` 只能 register / poll / inbox / 任务生命周期（claim、heartbeat、complete、fail、ask、auth）；`leader` 可派单，查看自己发起或指向自己的任务，答复和撤销仅限自己发起的任务，loops 的列表与取消也仅限自己发起的，并用 updates；scopes 含 `admin` 的 leader 另可接纳名片（单卡或整节点）、改显示名、为别的节点生成接入提示词；任何 Agent 身份都不能访问 `/approvals/*`、`/admin/agents`、`/admin/tokens*`、`/state`、`/tables/*`、`/poll`。路径节点、查询参数 `node`/`from`、请求头 `X-A2A-Node` 与绑定节点不一致返回 403；body 里省略 `node`/`from` 则补成绑定节点。`GET /api/v1/admin/onboarding` 的 `node` 是操作对象，不按冒充拒绝。
+- **分 Agent Token（`src/hub/agent-tokens.mjs` + `src/hub/agent-access.mjs`）**：机主 `apiToken` 即 owner，权限不变。每个外部 HTTP Agent 由机主在控制台（`POST /api/v1/admin/agents`，`access=http`）签发独立 Token，绑定 `{node, role, scopes}`，`<configDir>/agent_tokens.json`（0600）只存 sha256 哈希与展示前缀，明文只在签发/轮换响应出现一次；可 `rotate` 重新生成、`DELETE` 吊销。控制台添加时 `scopes` 为空，`admin` 要在轮换 body 里写入。未配置机主 `apiToken` 时拒绝签发（否则鉴权一开机主自己会被挡在外）。`hybrid` 同时具备两边权限。`worker` 只能 register / poll / inbox / 任务生命周期（claim、heartbeat、complete、fail、ask、auth）；`leader` 可派单，查看自己发起或指向自己的任务，答复和撤销仅限自己发起的任务，loops 的列表与取消也仅限自己发起的，并用 updates；scopes 含 `admin` 的 leader 另可接纳名片（单卡或整节点）、改显示名、为别的节点生成接入提示词，以及 `POST /api/v1/admin/cards`。任何角色可 `PUT`/`DELETE` 自己的 `/api/v1/agents/:node/schedules/:id`。任何 Agent 身份都不能访问 `/approvals/*`、`/admin/agents`、`/admin/tokens*`、`/admin/webhooks*`、`/admin/commands-snippet`、`DELETE /admin/cards/:capId`、`/schedules`、`/state`、`/tables/*`、`/poll`。路径节点、查询参数 `node`/`from`、请求头 `X-A2A-Node` 与绑定节点不一致返回 403；body 里省略 `node`/`from` 则补成绑定节点。`GET /api/v1/admin/onboarding` 的 `node` 是操作对象，不按冒充拒绝。
+- **Webhook 门铃（`src/hub/webhooks.mjs`）**：URL 与 HMAC 密钥只由机主写入 `<configDir>/agent_webhooks.json`（0600）。`secret` 明文落盘是因为出站签名每次都要用；GET 列表、日志和门铃正文都不含它，明文只在新建或 `rotate_secret=true` 时返回一次。只允许 `http`/`https`，长度 ≤ 2048，禁止用户名密码。推送是门铃（`task.assigned` / `task.updated` / `ping`），不含指令正文。签名 `HMAC-SHA256(secret, "<X-A2A-Timestamp>.<rawBody>")`，头为 `sha256=<hex>`。接收方核对 5 分钟时间窗，失败返回非 2xx。Hub 不跟随重定向，单次超时 10 秒，失败按 0/1/3/8 秒重试后放弃。进程内按 `(node, task_id, status)` 去重。Agent 不能自报或改 URL。这与 `notifications.webhookUrl`（机主提醒）不是同一条通道。
 - **熔断与防重跑**：派生任务 `Hop_Count` 累加不清零，超过 `HOP_LIMIT = 8` 熔断；执行失败与心跳超时（`STALE_MIN = 20`）共享 `MAX_RETRIES = 2` 预算，退避水位记在 `retry_state.json`（60 秒起翻倍至 10 分钟）；节点写表先落 `outbox/`（或 `inbox-outbox/`），失败只补缺不重跑命令；Hub 宽限 30 分钟仍无心跳则由 `StaleService` 置 `failed` 回收。
 
 ## 9. LoopForge SOP 闭环引擎
@@ -133,7 +134,9 @@ a2a-hub/
       schedule.mjs              # ScheduleService（later 预约复查时钟）
       loop.mjs                  # LoopService（LoopForge 多阶段 SOP 闭环引擎）
       notifier.mjs              # ExternalNotifier（可选外部 Webhook / Bark / Telegram 通知）
-      admission.mjs             # 名片接纳归一化、管理参数校验与定时运行版接入提示词（/api/v1/admin/*）
+      admission.mjs             # 名片接纳归一化、管理参数校验与接入提示词（poll / longpoll / webhook）
+      webhooks.mjs              # AgentWebhookStore + WebhookDispatcher（agent_webhooks.json，门铃 HMAC）
+      capabilities.mjs          # 添加能力、宿主 commands.json 片段、定时任务只读汇总与 HTTP Agent 自报计划
       agent-tokens.mjs          # AgentTokenStore（agent_tokens.json 哈希存储、签发/轮换/吊销/验证）
       agent-access.mjs          # Agent Token 路由矩阵、node/from 身份绑定与任务可见性
       create.mjs                # 建单（参数校验、名册校验、先消息后任务行）

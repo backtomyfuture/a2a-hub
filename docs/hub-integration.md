@@ -9,7 +9,7 @@
 ## 职责清单
 
 1. **建单与路由**：任何宿主节点、CLI、Web 控制台与已接入的 HTTP Leader Agent（如 Muse）都可以作为任务入口。按 AgentCards 校验目标节点与能力（或触发 `LoopService` 多阶段闭环），生成 Task_ID / Context_ID / Idempotency_Key 并建单（先写 `instruction` 与 Parts，最后写 `Tasks` 行）。
-2. **唤醒与网关服务**：Hub 单进程运行本地 SQLite WAL、REST API、`LongPollBroker`（对宿主节点提供 `GET /api/v1/poll`，对纯外部 Agent 提供 `agent-gateway` `/api/v1/agents/:node/poll|updates`）以及内嵌 Web 控制台。除长期对账兜底（默认 `sweepSec` 900s）外，写操作发生后通过单调递增 `seq` 毫秒级唤醒长轮询连接。
+2. **唤醒与网关服务**：Hub 单进程运行本地 SQLite WAL、REST API、`LongPollBroker`（对宿主节点提供 `GET /api/v1/poll`，对纯外部 Agent 提供 `agent-gateway` `/api/v1/agents/:node/poll|updates`）、可选 `WebhookDispatcher`（向机主登记的 URL 推门铃）以及内嵌 Web 控制台。除长期对账兜底（默认 `sweepSec` 900s）外，写操作发生后通过单调递增 `seq` 毫秒级唤醒长轮询连接。
 3. **结果呈递（原路落盘，静默协作）**：
    - `role=hub` 与各宿主节点在收到唤醒事件或对账扫表时，将属于本节点发起的任务结果（`completed`、`failed`、`rejected`、`canceled`、`input-required`）写入本机 `present_queue.jsonl`，供本机 Agent / CLI (`ah present`) 消费；
    - 外部 HTTP Leader Agent 用自己的分 Agent Token 调用 `GET /api/v1/agents/{node}/updates?new=1` 拉取由自己发起的新终态，以及仍待处理的 `input-required` / `auth-required`（响应带 `watermark`，每条带 `changed_seq`）；
@@ -25,16 +25,19 @@
 
 - **单机主枢纽（Mac mini / 常驻主机，推荐）**：以 `ah up` / `ah daemon --role hub` 启动本地 `SqliteBus` + HTTP 服务（默认 `0.0.0.0:8787`），单进程既托管全网状态、Web 控制台与外部通知，也可同时按本机 `commands.json` 接单。
 - **远端宿主节点（`busType: "http"`）**：通过 `ah join http://<token>@<hub-ip>:8787` 自动拉取 `hubPublicKey` 并保存 `0600` Bearer Token 至 `app.env`，以纯出站 HTTP 长轮询接入，**绝不开设任何入站监听端口**。
-- **纯 HTTP 外部 Agent（Muse / Grok Bot 等）**：`GET /.well-known/agent.json` 自发现（免鉴权）。钥匙是机主在控制台签发的分 Agent Token，不是机主 `AH_API_TOKEN`。`/api/v1/skills*` 与其余 `/api/*` 都要这把 Token。定时器跑 `a2a_check.py`（worker / hybrid 每 2 分钟，leader 每 5 分钟）：`IDLE` 结束，`WORK` 再 `poll?timeout=0` 或 `updates?new=1`。跑不了脚本时回退为 worker 每 10 分钟、leader 每 15 分钟。详见 [外部 HTTP Agent 手册](protocol-node-runbook.md)。
+- **纯 HTTP 外部 Agent（Muse / Grok Bot 等）**：`GET /.well-known/agent.json` 自发现（免鉴权）。钥匙是机主在控制台签发的分 Agent Token，不是机主 `AH_API_TOKEN`。`/api/v1/skills*` 与其余 `/api/*` 都要这把 Token。接收方式三选一：定时检查（默认，检查脚本门控后 `poll?timeout=0` 或 `updates?new=1`）、常驻出站长轮询（`poll?timeout=25` 或 Leader 的 `updates?new=1`）、Webhook（机主登记 URL，中台只推门铃，接收方验签后再拉详情）。详见 [外部 HTTP Agent 手册](protocol-node-runbook.md)。
 
 ## 传输方式
 
 | 方式 | 机制 | 适用 |
 |---|---|---|
-| `longpoll` | 节点 / Agent 向 Hub 发起出站长轮询（`/api/v1/poll` 或 `/api/v1/agents/:node/poll?timeout=25`），写后毫秒级唤醒 | **默认推荐**：Hub、远端宿主节点与常驻/长连接 HTTP Agent |
-| `poll` | 定时轮询（宿主守护节点默认 45s；外部 Agent 先跑检查脚本，worker / hybrid 每 2 分钟、leader 每 5 分钟，`WORK` 才短轮询 `?timeout=0`；无脚本时回退 worker 10 分钟、leader 15 分钟） | 无法维持长连接的无状态云端 Agent 或降级环境 |
+| `longpoll` | 节点 / Agent 向 Hub 发起出站长轮询（`/api/v1/poll` 或 `/api/v1/agents/:node/poll?timeout=25`；HTTP Leader 循环 `updates?new=1`），写后毫秒级唤醒 | **默认推荐**：Hub、远端宿主节点与常驻 HTTP Agent（`Receive_Mode=event` 或 `http-longpoll`） |
+| `poll` | 定时轮询（宿主守护节点默认 45s；外部 Agent 先跑检查脚本，worker / hybrid 每 2 分钟、leader 每 5 分钟，`WORK` 才短轮询 `?timeout=0`；无脚本时回退 worker 10 分钟、leader 15 分钟） | 无法维持长连接的无状态云端 Agent（`http-poll`）或降级环境 |
+| `webhook` | Hub `POST` 门铃到机主登记的 URL（HMAC-SHA256，不跟随重定向，不含指令正文）。接收方验签后用 Agent Token 回网关拉详情；每 30 分钟检查脚本兜底 | 能提供 HTTP 端点的外部 Agent（`Receive_Mode=webhook`） |
 
-宿主守护节点保留低频对账扫表兜底（默认 15 分钟）及面向 `input-required`/`auth-required` 的 `PENDING_RECHECK` 短复查。
+宿主守护节点保留低频对账扫表兜底（默认 15 分钟）及面向 `input-required`/`auth-required` 的 `PENDING_RECHECK` 短复查。Webhook 的格式、重试与验签以 [标准 §10.3](standard.md) 为准；Python / Node 标准库示例见 [外部 HTTP Agent 手册](protocol-node-runbook.md)。
+
+本地状态目录另有 `agent_webhooks.json`（0600，含 HMAC 明文密钥，不进仓库）。它和机主通知用的 `notifications.webhookUrl` 不是同一条通道。
 
 ## 建单纪律
 
@@ -67,5 +70,5 @@
 ## 运维要点
 
 - **进程托管**：使用 `ah up --service` 或 `ah join <hub-url> --service` 注册用户级自启（macOS launchd `ah-<role>.<node>` / Linux systemd `ah-<role>-<node>.service` / Windows 任务计划 `ah-<role>-<node>`，非默认配置目录追加配置路径 SHA-256 前 8 位摘要），日志在配置目录 `daemon.log`。
-- **本地状态**：`approval_state.json`、`present_state.json`、`stale_state.json`、`schedule_state.json`、`hub.db*`、`approval_key.pem`、`app.env` 保存在配置目录，不进仓库。
+- **本地状态**：`approval_state.json`、`present_state.json`、`stale_state.json`、`schedule_state.json`、`hub.db*`、`approval_key.pem`、`app.env`、`agent_tokens.json`、`agent_webhooks.json` 保存在配置目录，不进仓库。
 - **留痕与溯源**：排查具体单据时运行 `ah task why <Task_ID> [--config <dir>] [--json]` 查阅单任务全链时间线与本地在途状态，亦可通过 Web 控制台或 `ah task show <Task_ID>` 查看。

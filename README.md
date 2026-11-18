@@ -49,6 +49,7 @@ flowchart LR
 - **Node**：接入中台的机器（如 `mac-mini-hub`、`edge-node-1`）。
 - **Worker**：机器上的独立 Agent 执行体（在 `commands.json` 的 `workers` 中定义，名册里以 `Skill_ID=agent` 表示在册及其通用执行）。
 - **Skill**：专长技能或确定性脚本（自带 `command` 由节点本尊执行；写 `workers: [...]` 则路由至指定 Worker 模板）。
+- 控制台和提示词里：节点 = Node，Agent = Worker（`Skill_ID=agent`），能力 = Skill。API 字段名仍是 `node` / `Worker` / `Skill_ID`。
 
 ### 2. 八态 A2A 任务生命周期
 
@@ -107,7 +108,7 @@ node bin/ah.mjs join http://<AH_API_TOKEN>@<HUB_IP>:8787
 
 ### 方式 C：纯 HTTP 外部 Agent 接入（Muse / Grok Bot，无需守护进程）
 
-云端或定时唤醒的纯 Agent 不装守护进程。先在 Web 控制台「添加 Agent」拿到该节点的分 Agent Token（明文只出现一次）。自发现地址 `GET http://<HUB_IP>:8787/.well-known/agent.json` 免鉴权；拉取 Skill（`GET /api/v1/skills/a2a-leader` 或 `a2a-worker`）和其他接口都要带这把 Token。下面用 `<AGENT_TOKEN>` 表示它，不要填机主的 `AH_API_TOKEN`。
+云端纯 Agent 不装守护进程。先在 Web 控制台「添加 Agent」拿到该节点的分 Agent Token（明文只出现一次），并选择接收方式：定时检查（默认，`receive_mode=http-poll`）、常驻长轮询（`http-longpoll`）或 Webhook 门铃（`webhook`，URL 由机主填写，推送不含指令正文）。自发现地址 `GET http://<HUB_IP>:8787/.well-known/agent.json` 免鉴权；拉取 Skill（`GET /api/v1/skills/a2a-leader` 或 `a2a-worker`）和其他接口都要带这把 Token。下面用 `<AGENT_TOKEN>` 表示它，不要填机主的 `AH_API_TOKEN`。示例是定时检查。
 
 ```bash
 # 1) 注册为 Leader（如 Muse：每 15 分钟跟单）或 Worker（如 Grok Bot：每 10 分钟取单）

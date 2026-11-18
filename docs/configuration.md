@@ -14,6 +14,7 @@
 | `schedules.json` | 定时调度表：本机定时任务计划（`id`, `cron`, `cap`, `text` 等） | 否 |
 | `app.env` | 机主 HTTP Bearer 口令 `AH_API_TOKEN`（owner），权限 600 | 绝不 |
 | `agent_tokens.json` | 分 Agent Token 账本（0600，version 1，只存 sha256 与展示前缀，无明文） | 绝不 |
+| `agent_webhooks.json` | HTTP Agent 门铃（0600，`version: 1`，`hooks[]` 含 URL 与 HMAC `secret` 明文；列表接口不返回 secret） | 绝不 |
 | `approval_key.pem` | `role=hub` 的 ed25519 审批签名私钥，权限 600 | 绝不 |
 | `hub.db` / `hub.db-wal` / `hub.db-shm` | `role=hub` SQLite WAL 主数据库文件 | 绝不 |
 | `runs/<Task_ID>/` | 每次执行的输入、输出与在途账本（`entry.json`） | 否 |
@@ -280,6 +281,7 @@ ah task begin --schedule <id> [--period <期次键>] [--cap <cap_id>] [--text <�
 - **升级顺序：先升级 hub，再升级各节点。** 旧版本 hub 仍会把 Rules 里 `Enabled=Yes` 且 `Schedule` 非空的行当成计划建单；新版节点一旦写入镜像行，就会被旧 hub 误触发，造成同一计划双跑。迁移存量计划（如 `SCHED-HUB-MORNING`）时，先把 Rules 旧行 `Enabled` 置 No，再用 `ah schedule add` 在对应节点落计划。
 - **已知限制：定时任务中途提问需要人答复。** 本地定时任务的发起方是本节点自己，`question` 会原路回给本节点并进入 `present_queue.jsonl`，需要本机 Agent 消费后执行 `ah task reply`。无人值守时任务会停在 `input-required`，hub 的陈旧告警只处理 `working` 与无人认领的 `submitted`，不会提醒。无人值守的计划请选不会提问的能力。
 - **`ah doctor` 增检**：存在 `schedules.json` 时，自检会逐条验证 cap 存在性、cron 表达式合法性、时区 `tz` 合法性与控制键拦截。若有异常仅打印告警，不改变 doctor 退出码，不阻断守护进程启动。时区检查放开至所有含有 `schedules.json` 的节点。
+- **只读总览**：机主用 `GET /api/v1/schedules` 或控制台「定时任务」页看各节点镜像（cron、下次触发、上次任务、异常）。改计划仍用本机 `ah schedule`。HTTP Agent 可 `PUT /api/v1/agents/:node/schedules/:id` 自报计划，中台只展示、不据此触发。详见 §7.6。
 
 ## 6. CLI 速查
 
@@ -365,7 +367,7 @@ api backoff reason=http-429 kind=list retry=1/3 wait=2s
 - 手动非交互配置：
   - `ah setup --role hub --bus sqlite [--listen 0.0.0.0:8787] [--db-path ./hub.db] [--public-url http://...] [--api-token <token>] [--yes]`
   - `ah setup --role node --bus http --hub-url http://<HUB>:8787 --api-token <token> [--hub-key <pubkey>] [--yes]`
-- **纯 HTTP 外部 Agent（Muse Leader / Grok Bot 等无守护进程 Agent）**：在控制台添加并复制分 Agent Token，存进平台安全密钥空间 `A2A_HUB_TOKEN`。定时器跑 `a2a_check.py`（worker / hybrid 每 2 分钟，leader 每 5 分钟）；输出 `IDLE` 就结束，输出 `WORK` 再按【处理流程】执行 `poll?timeout=0` 或 `updates?new=1`。跑不了脚本时回退为 worker 每 10 分钟、leader 每 15 分钟。无需安装本地 `ah` 进程。控制台的在线判定按 Hub 观测到的唤醒周期放宽：距上次报到不超过周期的 2.5 倍算在线（下限 3 分钟，上限 30 分钟；Hub 刚重启、周期未知时按 16 分钟）。长轮询的宿主节点仍是 90 秒。完整接口见 [外部 HTTP Agent 手册](protocol-node-runbook.md)。
+- **纯 HTTP 外部 Agent（Muse Leader / Grok Bot 等无守护进程 Agent）**：在控制台添加并复制分 Agent Token，存进平台安全密钥空间 `A2A_HUB_TOKEN`。`access=http` 时选一种接收方式：定时检查（默认，`receive=poll`，名片 `Receive_Mode=http-poll`）、常驻长轮询（`longpoll` → `http-longpoll`）或 Webhook 门铃（`webhook`，必填机主提供的 `webhook_url`）。定时检查仍是：定时器跑 `a2a_check.py`（worker / hybrid 每 2 分钟，leader 每 5 分钟）；输出 `IDLE` 就结束，输出 `WORK` 再按【处理流程】执行 `poll?timeout=0` 或 `updates?new=1`。跑不了脚本时回退为 worker 每 10 分钟、leader 每 15 分钟。常驻长轮询不跑检查脚本。Webhook 先验签再拉详情，另每 30 分钟跑一次检查脚本兜底。无需安装本地 `ah` 进程。控制台的在线判定按 Hub 观测到的唤醒周期放宽：距上次报到不超过周期的 2.5 倍算在线（下限 3 分钟，上限 30 分钟；Hub 刚重启、周期未知时按 16 分钟）。长轮询的宿主节点仍是 90 秒。三种方式怎么选、门铃怎么验签，见 [外部 HTTP Agent 手册](protocol-node-runbook.md)。
 
 ### 7.3 LoopForge SOP 多阶段闭环 CLI（`ah loop`）
 
@@ -404,9 +406,13 @@ ah loop cancel <Loop_ID> [--text "说明"] [--config <dir>]
 | `admitted` | 已接纳。还要 `Dispatchable=Yes` 才能派单 |
 | `rejected` | 已拒绝，不派单 |
 
-控制台名片墙分段为已接纳（默认）、待接纳（带数量徽标）、已拒绝。待接纳里可单卡接纳或拒绝，节点标题可整节点接纳。已接纳卡可编辑显示名与备注、移回待接纳或拒绝；`Dispatchable=Yes` 时可向该能力派单。已拒绝卡可恢复为待接纳或直接接纳。
+控制台「节点」页按节点分组：节点下列出 Agent（`Skill_ID=agent`），Agent 下列出能力；Worker 为空且 `Skill_ID` 不是 `agent` 的能力归在「节点直属能力」。筛选为已接纳（默认）、待接纳（带数量徽标）、已拒绝。待接纳里可单卡接纳或拒绝，节点标题可整节点接纳。已接纳卡可编辑显示名与备注、移回待接纳或拒绝；`Dispatchable=Yes` 时可向该能力派单。已拒绝卡可恢复为待接纳或直接接纳。
 
-「+ 添加 Agent」是三步向导：选择接入类型、填写名字与角色、获取密钥与接入指引。接入类型为云端 HTTP、宿主机 `ah join` 或本机独立 Agent inbox；角色为执行方 `worker`、派单方 `leader` 或两者 `hybrid`。仅云端 HTTP 且角色为 `worker` 或 `hybrid` 时预建一张已接纳的默认 `agent` 名片；其余组合不预建卡（宿主机与 inbox 由守护进程登记后进入待接纳；纯 leader 没有名片）。云端 HTTP 会同时签发分 Agent Token，明文只在这一次响应和提示词里出现。宿主机与 inbox 的提示词仍用机主 Token 占位符 `<AH_API_TOKEN>`（`ah join` 认的是机主钥匙）。提示词是脚本门控版：worker / hybrid 每 2 分钟、leader 每 5 分钟跑检查脚本，`IDLE` 立即结束，`WORK` 才执行【处理流程】；跑不了脚本时回退为 worker 每 10 分钟、leader 每 15 分钟。Token 优先存进平台安全密钥空间，名称 `A2A_HUB_TOKEN`，明文只在提示词里出现一次。每次运行无上下文；worker 须在同一次运行内做完所认领任务。Hub 地址优先取 `node.json` 的 `publicUrl`；未配置时取本次请求的 `Host` 头（`http://<Host>`），没有 `Host` 时回退本机监听地址。在 Hub 本机用 `127.0.0.1` 打开控制台时，务必配置 `publicUrl`，否则远端拿到的地址不可达。Hub 放在 Cloudflare 之后时，浏览器完整性检查会以 `403` / `error code: 1010` 拦下 curl、python-requests、node 等默认 UA，所以云端 HTTP 提示词与 `a2a-leader` / `a2a-worker` Skill 都要求每个请求带浏览器 `User-Agent`，远端节点的 `HttpBus` 也固定发送同一串浏览器 UA。
+节点卡片上的「+ 添加能力」：http 节点提交 `POST /api/v1/admin/cards`，建成已接纳名片；宿主节点提交 `POST /api/v1/admin/commands-snippet`，只展示可合并进该节点 `commands.json` 的片段和复制按钮，中台不下发。`Metadata.manual` 或 `preset` 的 http 名片可以 `DELETE /api/v1/admin/cards/:capId`；宿主名片返回 409，要改本机 `commands.json`。
+
+「+ 添加 Agent」是三步向导：选择接入类型、填写名字与角色、获取密钥与接入指引。接入类型为云端 HTTP、宿主机 `ah join` 或本机独立 Agent inbox；角色为执行方 `worker`、派单方 `leader` 或两者 `hybrid`。云端 HTTP 再选接收方式：定时检查（默认）、常驻长连接、Webhook 推送（要填 URL）。仅云端 HTTP 且角色为 `worker` 或 `hybrid` 时预建一张已接纳的默认 `agent` 名片，`Receive_Mode` 按接收方式写入；其余组合不预建卡（宿主机与 inbox 由守护进程登记后进入待接纳；纯 leader 没有名片）。云端 HTTP 会同时签发分 Agent Token，明文只在这一次响应和提示词里出现。选了 Webhook 时，响应另带 `webhook.url`，新建时还有 `webhook.secret`（同样只这一次，提示词要求存成 `A2A_HUB_WEBHOOK_SECRET`）。宿主机与 inbox 的提示词仍用机主 Token 占位符 `<AH_API_TOKEN>`（`ah join` 认的是机主钥匙），并说明这是 `ah daemon` 出站常驻长连接，接入后到「节点 → 待接纳」接纳。定时检查的提示词是脚本门控版：worker / hybrid 每 2 分钟、leader 每 5 分钟跑检查脚本，`IDLE` 立即结束，`WORK` 才执行【处理流程】；跑不了脚本时回退为 worker 每 10 分钟、leader 每 15 分钟。常驻长连接的提示词是进程内循环 `poll?timeout=25`（Leader 为 `updates?new=1`），断线按 1 / 3 / 8 / 30 秒退避，不建定时任务。Webhook 提示词要求先验签和 5 分钟时间窗，再按事件拉详情，并每 30 分钟跑一次检查脚本兜底。Token 优先存进平台安全密钥空间，名称 `A2A_HUB_TOKEN`，明文只在提示词里出现一次。每次运行无上下文；worker 须在同一次运行内做完所认领任务。节点详情可查看、修改、测试、删除 Webhook，并显示最近投递状态。Hub 地址优先取 `node.json` 的 `publicUrl`；未配置时取本次请求的 `Host` 头（`http://<Host>`），没有 `Host` 时回退本机监听地址。在 Hub 本机用 `127.0.0.1` 打开控制台时，务必配置 `publicUrl`，否则远端拿到的地址不可达。Hub 放在 Cloudflare 之后时，浏览器完整性检查会以 `403` / `error code: 1010` 拦下 curl、python-requests、node 等默认 UA，所以云端 HTTP 提示词与 `a2a-leader` / `a2a-worker` Skill 都要求每个请求带浏览器 `User-Agent`，远端节点的 `HttpBus` 与 Webhook 出站也固定发送同一串浏览器 UA。
+
+「定时任务」页只读，调用 `GET /api/v1/schedules`，按节点分组展示 cron、下次触发、指向的能力、启用状态、上次任务（可进任务详情）和异常标记。页顶说明：计划在各节点本地管理，用 `ah schedule` 修改。HTTP Agent 自报的计划 `source` 为 `http-agent`，中台不据此触发。
 
 管理 API（与其他 `/api/v1/*` 一样要 Bearer Token）：
 
@@ -415,11 +421,19 @@ ah loop cancel <Loop_ID> [--text "说明"] [--config <dir>]
 | `POST /api/v1/admin/cards/:capId/admission` | 单卡设为 `admitted` / `pending` / `rejected` |
 | `POST /api/v1/admin/nodes/:node/admission` | 该节点全部名片设为同一状态 |
 | `PATCH` 或 `POST /api/v1/admin/cards/:capId/profile` | 改 `display_name`（≤64）与 `admin_note`（≤500），只更新传入的键 |
-| `POST /api/v1/admin/agents` | 添加 Agent。`access=http` 时一并签发 Token，响应含一次性明文 `token` 与 `onboarding`；该节点已有 Token 则 `409`，改走轮换 |
-| `DELETE /api/v1/admin/agents/:node` | 删除 Agent：先吊销该节点 Token，再删它的全部名片，并从在线名册移除。历史任务与消息保留；响应里的 `openTasks` 是仍指向它的未结束任务数，需要另行撤销。不能删 Hub 本机；宿主节点要先停掉它的 `ah` 服务，否则下次对账会重新登记名片。什么都没找到时 `404` |
-| `GET /api/v1/admin/onboarding` | 只生成接入提示词，不写表。未附带刚签发的 Token 时，提示词里是占位符 `<AH_API_TOKEN>` |
+| `POST /api/v1/admin/cards` | 给已存在的 http 节点加一张已接纳能力。body：`node`、`skill_id`（规则同节点名，不能是保留键 `workers`）、可选 `worker`、`skill_name`、`description`、`side_effect`（`read`/`write`，默认 `write`）、`approval_class`（`auto`/`notify`/`approve`，默认 `auto`）、`display_name`、`admin_note`。`Cap_ID` 与 `register` 相同。`Receive_Mode`、Availability 沿用该节点现有名片。Metadata 含 `kind:"agent"`、`manual:true`、`preset:true`。已存在 409；节点不存在 404；宿主节点 409，并尽量附上 `snippet` / `text` / `hint`。成功 201 |
+| `DELETE /api/v1/admin/cards/:capId` | 只删 `Metadata.manual` 或 `preset` 的 http 名片，响应 `{ok:true}`。宿主名片 409。仅机主 |
+| `POST /api/v1/admin/commands-snippet` | 生成可合并进 `commands.json` 的片段，不下发。有 `worker` 时条目含 `workers`；否则必须有 `command`，`mode` 为 `agent` 或 `json`。响应 `{snippet, text, hint}`。仅机主 |
+| `POST /api/v1/admin/agents` | 添加 Agent。`access=http` 时可选 `receive`（`poll`/`longpoll`/`webhook`，默认 `poll`）与 `webhook_url`（`receive=webhook` 时必填）。一并签发 Token，响应含一次性明文 `token` 与 `onboarding`；Webhook 新建时另含 `webhook:{url, secret}`。该节点已有 Token 则 `409`，改走轮换。`access` 不是 `http` 时忽略 `receive` |
+| `DELETE /api/v1/admin/agents/:node` | 删除 Agent：先吊销该节点 Token，再删 Webhook 与全部名片，并从在线名册移除。响应含 `tokenRevoked`、`webhookRemoved`、`cardsRemoved`。历史任务与消息保留；`openTasks` 是仍指向它的未结束任务数，需要另行撤销。不能删 Hub 本机；宿主节点要先停掉它的 `ah` 服务，否则下次对账会重新登记名片。什么都没找到时 `404` |
+| `GET /api/v1/admin/onboarding` | 只生成接入提示词，不写表。查询参数增加 `receive`（仅 `access=http`，默认 `poll`）。未附带刚签发的 Token 时，提示词里是占位符 `<AH_API_TOKEN>`；Webhook 密钥未随本次签发时，提示词要求向机主索取 |
+| `GET /api/v1/admin/webhooks` | 仅机主。`{webhooks:[{node,url,created_at,updated_at,last_status,last_error,last_delivered_at}]}`，无 secret |
+| `PUT /api/v1/admin/webhooks/:node` | 仅机主。body `{url, rotate_secret?:boolean}`。新建或轮换密钥时响应 `{ok, webhook:{node, url, secret}}`，只改 URL 时不含 secret |
+| `DELETE /api/v1/admin/webhooks/:node` | 仅机主。没有记录则 404，成功 `{ok:true}` |
+| `POST /api/v1/admin/webhooks/:node/test` | 仅机主。同步发一次 `ping`，返回 `{ok, status, error}` |
+| `GET /api/v1/schedules` | 仅机主。见 §7.6 |
 
-`POST /api/v1/admin/agents`、删除 Agent 与 Token 管理只允许机主。名片接纳、改显示名、`GET /api/v1/admin/onboarding` 也允许 `scopes` 含 `admin` 的 leader（或 hybrid）；其中 `onboarding` 的查询参数 `node` 可以是别的节点。协议 Skill 按接入方式对应，URL 为 `<Hub>/api/v1/skills/<name>`，**需要鉴权**：云端 HTTP 的 `worker` → `a2a-worker`，`leader` → `a2a-leader`，`hybrid` → 两者；`inbox` → `ah-inbox`；宿主机 Worker 不需要协议 Skill（回执约定由内核写进调度指令）。领域技能放在各 Agent 自己的技能目录（如 `~/.claude/skills`、`~/.agents/skills`），中台不登记、不展示。
+`POST /api/v1/admin/agents`、删除 Agent、Token 管理、`/api/v1/admin/webhooks*`、`commands-snippet`、`DELETE /api/v1/admin/cards/:capId` 与 `GET /api/v1/schedules` 只允许机主。名片接纳、改显示名、`GET /api/v1/admin/onboarding`，以及 `POST /api/v1/admin/cards`，也允许 `scopes` 含 `admin` 的 leader（或 hybrid）；其中 `onboarding` 的查询参数 `node` 可以是别的节点。协议 Skill 按接入方式对应，URL 为 `<Hub>/api/v1/skills/<name>`，**需要鉴权**：云端 HTTP 的 `worker` → `a2a-worker`，`leader` → `a2a-leader`，`hybrid` → 两者；`inbox` → `ah-inbox`；宿主机 Worker 不需要协议 Skill（回执约定由内核写进调度指令）。领域技能放在各 Agent 自己的技能目录（如 `~/.claude/skills`、`~/.agents/skills`），中台不登记、不展示。
 
 远端节点上升级前没有 `Admission` 的老名片，仍按待接纳，要在控制台接纳后才能派单。Hub 本机的空 `Admission` 由对账补成已接纳。
 
@@ -442,11 +456,24 @@ ah loop cancel <Loop_ID> [--text "说明"] [--config <dir>]
 - 所有 Agent：`GET /api/v1/skills`、`GET /api/v1/skills/:name`、`GET /api/v1/kit/a2a_check.py`、`GET /api/v1/kit/a2a_check.sh`、`POST /api/v1/agents/register`、`GET /api/v1/agents`、自己的 `GET /api/v1/agents/:node/check`。
 - worker：自己的 `poll` / `inbox`，以及 `claim`、`heartbeat`、`complete`、`fail`、`ask`、`auth`。
 - leader：自己的 `updates`；`GET`/`POST /api/v1/tasks`；自己发起或指向自己的任务详情；答复、撤销只限自己发起的任务；`loops` 的列表与取消只限自己发起的。
-- `scopes` 含 `admin` 的 leader：`POST /api/v1/admin/cards/:capId/admission`、`POST /api/v1/admin/nodes/:node/admission`、profile，以及 `GET /api/v1/admin/onboarding`。
-- 一律拒绝：`/api/v1/approvals/*`、`/api/v1/admin/agents`、`/api/v1/admin/tokens*`、`/api/v1/state`、`/api/v1/tables/*`、`/api/v1/poll`。
+- `scopes` 含 `admin` 的 leader：`POST /api/v1/admin/cards/:capId/admission`、`POST /api/v1/admin/nodes/:node/admission`、profile、`GET /api/v1/admin/onboarding`，以及 `POST /api/v1/admin/cards`（给别的节点加能力）。不能 `DELETE` 名片。
+- 任何角色：`PUT` / `DELETE /api/v1/agents/:node/schedules/:id`，且只能操作 Token 绑定的节点。这是自报计划，中台不据此触发。
+- 一律拒绝：`/api/v1/approvals/*`、`/api/v1/admin/agents`、`/api/v1/admin/tokens*`、`/api/v1/admin/webhooks*`、`/api/v1/admin/commands-snippet`、`DELETE /api/v1/admin/cards/:capId`、`/api/v1/schedules`、`/api/v1/state`、`/api/v1/tables/*`、`/api/v1/poll`。
 
 `GET /api/v1/agents/:node/check` 是给定时脚本的只读探测。worker 部分的 `tasks` 与 `poll` 的可认领任务同一口径，`working` 是本节点已认领且仍为 `working` 的任务。leader 部分的 `updates` 是自持久水位以来 `updates?new=1` 会返回的条数（含仍待处理的 `input-required` / `auth-required`）。它不写水位，所以随后的 `updates?new=1` 仍能看到这些变化。唯一副作用是刷新该节点在线状态。Agent Token 按绑定角色计算；机主调用可用查询参数 `role`（`worker` / `leader` / `hybrid`，缺省两边都算）。空闲时 `{"work":false}`。
 
 检查脚本由 Hub 按文件返回（`skills/a2a-check/`），正文不含 Token。Token 读取顺序是环境变量 `A2A_HUB_TOKEN`、`--token-file`、`--token`。脚本输出：空闲一行 `IDLE`（`--silent-idle` 则不输出），有事先 `WORK` 再一行 JSON，出错一行 `ERROR ...` 且退出码 2。请求带浏览器 `User-Agent`。
 
-路径上的节点、查询参数 `node`/`from`、请求头 `X-A2A-Node` 与绑定节点不一致返回 403。body 里这两个字段省略时补成绑定节点。任务列表会藏掉与自己无关的任务。
+路径上的节点、查询参数 `node`/`from`、请求头 `X-A2A-Node` 与绑定节点不一致返回 403。body 里这两个字段省略时补成绑定节点。`/api/v1/agents/:node/schedules/:id` 的路径节点同样不能冒充。任务列表会藏掉与自己无关的任务。
+
+### 7.6 Webhook 账本与定时任务只读接口
+
+`agent_webhooks.json` 由 `src/hub/webhooks.mjs` 读写。字段见 [标准 §10.3](standard.md)。不要把真实 URL 或 `secret` 写进仓库、日志或提示词以外的回复。
+
+定时任务汇总读 Rules 镜像行（`Rule_ID=<Node>:<Schedule_ID>`），不改本机 `schedules.json`：
+
+| 方法与路径 | 谁能调用 | 作用 |
+|---|---|---|
+| `GET /api/v1/schedules` | 仅机主 | `{schedules:[{rule_id, node, schedule_id, cron, tz, cap, text, enabled, last_fired, next_fire_at, source, note, last_task, anomaly}]}`。`source` 为 `node`（守护进程镜像）或 `http-agent`（Note 含「http-agent 自报」）。`last_task` 为 `{task_id, status, updated_at}` 或 `null`，按幂等键 `sched:<Node>:<Schedule_ID>:<期次键>`、Note 里的「上次运行」、或同前缀最近一条关联。`next_fire_at` 为 ISO 或空字符串。`anomaly` 先看节点离线（`node-offline`），再看最近任务 `failed`/`rejected`（`failed`），再看启用中的计划该触发却超过 10 分钟没有 `Last_Fired`（`missed`） |
+| `PUT /api/v1/agents/:node/schedules/:id` | 该节点自己的 Agent Token（任何角色）或机主 | body `{cron, tz?, cap?, text?, enabled?}`。`id` 只允许字母、数字、短横线或下划线，最长 64。写入 Rules 镜像，Note 为「http-agent 自报」（有时区则加 `tz=`）。响应 `{ok, rule_id, at}`。中台不按这行建单 |
+| `DELETE` 同路径 | 同上 | 删除该镜像行。不存在则 404 |
