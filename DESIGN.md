@@ -1,6 +1,6 @@
 # a2a-hub 系统设计
 
-- 状态：现行（v1.0.0）。系统级规范见 [docs/standard.md](docs/standard.md)，架构决策见 [docs/architecture.md](docs/architecture.md)，配置与 CLI 参考见 [docs/configuration.md](docs/configuration.md)。
+- 状态：现行（v1.1.0）。系统级规范见 [docs/standard.md](docs/standard.md)，架构决策见 [docs/architecture.md](docs/architecture.md)，配置与 CLI 参考见 [docs/configuration.md](docs/configuration.md)。
 
 ## 1. 定位
 
