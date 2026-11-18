@@ -35,6 +35,7 @@ import {
   nodeStoredReceiveMode,
 } from "../hub/capabilities.mjs";
 import { cancelTask } from "../hub/cancel.mjs";
+import { appendFileParts, attachmentsView, normalizeAttachments } from "../attachments.mjs";
 import { createTask } from "../hub/create.mjs";
 import { FileStore, findFileRefs, normalizeMime, sanitizeFileName } from "../hub/files.mjs";
 import { initiatorOf } from "../inbox.mjs";
@@ -348,6 +349,8 @@ export async function startHubHttpServer({
         sendJson,
         principal,
         webhookStore: webhooks?.store ?? null,
+        hubUrl: requestHubUrl(req),
+        fileStore: activeFileStore,
       })) {
         return;
       }
@@ -616,16 +619,24 @@ export async function startHubHttpServer({
             const msgParts = parts
               .filter((p) => f1(p, "Parent_Type") === "message" && f1(p, "Parent_ID") === msgId)
               .sort((a, b) => (Number(f1(a, "Seq")) || 0) - (Number(f1(b, "Seq")) || 0))
-              .map((p) => ({
-                part_id: f1(p, "Part_ID"),
-                seq: Number(f1(p, "Seq")) || 0,
-                kind: f1(p, "Kind"),
-                text: f1(p, "Text"),
-                file_uri: f1(p, "File_URI"),
-                file_name: f1(p, "File_Name"),
-                mime_type: f1(p, "Mime_Type"),
-                data: f1(p, "Data"),
-              }));
+              .map((p) => {
+                const base = {
+                  part_id: f1(p, "Part_ID"),
+                  seq: Number(f1(p, "Seq")) || 0,
+                  kind: f1(p, "Kind"),
+                  text: f1(p, "Text"),
+                  file_uri: f1(p, "File_URI"),
+                  file_name: f1(p, "File_Name"),
+                  mime_type: f1(p, "Mime_Type"),
+                  data: f1(p, "Data"),
+                };
+                // 文件块补下载地址、大小与过期标记（docs/attachments.md §7）。
+                if (base.kind === "file") {
+                  const [view] = attachmentsView([p], requestHubUrl(req), activeFileStore);
+                  Object.assign(base, { download_url: view.download_url, size: view.size, deleted: view.deleted });
+                }
+                return base;
+              });
             return {
               msg_id: msgId,
               kind: f1(m, "Kind"),
@@ -652,13 +663,11 @@ export async function startHubHttpServer({
           .filter((a) => f1(a, "Task_ID") === taskId)
           .map((a) => {
             const artId = f1(a, "Artifact_ID");
-            const files = parts
-              .filter((p) => f1(p, "Parent_Type") === "artifact" && f1(p, "Parent_ID") === artId)
-              .map((p) => ({
-                file_uri: f1(p, "File_URI"),
-                file_name: f1(p, "File_Name"),
-                mime_type: f1(p, "Mime_Type"),
-              }));
+            const files = attachmentsView(
+              parts.filter((p) => f1(p, "Parent_Type") === "artifact" && f1(p, "Parent_ID") === artId),
+              requestHubUrl(req),
+              activeFileStore,
+            );
             return {
               artifact_id: artId,
               name: f1(a, "Name"),
@@ -686,6 +695,12 @@ export async function startHubHttpServer({
       // 6) 创建任务
       if (method === "POST" && pathname === "/api/v1/tasks") {
         const body = await readJsonBodyBound();
+        const attachments = normalizeAttachments(body.attachments, { fileStore: activeFileStore });
+        // 有附件时 text 可以为空，但两者不能同时为空。
+        if (!String(body.text ?? "").trim() && !attachments.length) {
+          sendJson(res, 400, { error: "text 与 attachments 不能同时为空" });
+          return;
+        }
         const taskId = await createTask({
           bus,
           from: body.from || cfg?.node || "hub",
@@ -701,6 +716,8 @@ export async function startHubHttpServer({
           approval: body.approval || "",
           idempotencyKey: body.idempotencyKey || "",
           validateTarget: body.validateTarget !== false,
+          attachments,
+          fileStore: activeFileStore,
         });
         onWake();
         sendJson(res, 201, { task_id: taskId });
@@ -713,8 +730,9 @@ export async function startHubHttpServer({
         const taskId = decodeURIComponent(replyMatch[1]);
         const body = await readJsonBodyBound();
         const text = String(body.text ?? "").trim();
-        if (!text) {
-          sendJson(res, 400, { error: "答复内容 text 不能为空" });
+        const attachments = normalizeAttachments(body.attachments, { fileStore: activeFileStore });
+        if (!text && !attachments.length) {
+          sendJson(res, 400, { error: "答复内容 text 与 attachments 不能同时为空" });
           return;
         }
         const tasks = await bus.listRecords(bus.tables.tasks);
@@ -745,14 +763,20 @@ export async function startHubHttpServer({
         const p = (n) => String(n).padStart(2, "0");
         const nowMinute = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 
-        await bus.createRecord(bus.tables.parts, {
-          Part_ID: `${msgId}-P1`,
-          Parent_ID: msgId,
-          Parent_Type: "message",
-          Seq: 1,
-          Kind: "text",
-          Text: text.slice(0, 4000),
-        });
+        // 没有文字就不写 text 块，文件块从 Seq 1 开始。
+        let nextSeq = 1;
+        if (text) {
+          await bus.createRecord(bus.tables.parts, {
+            Part_ID: `${msgId}-P1`,
+            Parent_ID: msgId,
+            Parent_Type: "message",
+            Seq: 1,
+            Kind: "text",
+            Text: text.slice(0, 4000),
+          });
+          nextSeq = 2;
+        }
+        await appendFileParts(bus, msgId, nextSeq, attachments);
         await bus.createRecord(bus.tables.messages, {
           Msg_ID: msgId,
           Task_ID: taskId,

@@ -2,7 +2,8 @@
 import { normalizeJsonChecks, parseCheckLine } from "./acceptance.mjs";
 import { log } from "./kernel-util.mjs";
 
-const JSON_RECEIPT_KEYS = new Set(["summary", "artifact", "artifact_name", "need_input", "need_auth", "usage", "session", "later", "checks"]);
+const MAX_ARTIFACTS = 20;
+const JSON_RECEIPT_KEYS = new Set(["summary", "artifact", "artifacts", "artifact_name", "need_input", "need_auth", "usage", "session", "later", "checks"]);
 const USAGE_CAP = 1e12;
 export const SESSION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const USAGE_NUMBER = /^(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?$/;
@@ -320,8 +321,9 @@ export function parseAgentReceipt(out, logFn = log, now = Date.now()) {
   for (const fence of closed) {
     for (let i = fence.start; i <= fence.end; i++) inside.add(i);
   }
-  let artifact = "";
-  let artName = "";
+  // 每行 ARTIFACT: 登记一个交付文件；ARTIFACT_NAME: 作用于紧邻的上一条（还没有上一条时留给下一条）。
+  const artifacts = [];
+  let pendingName = "";
   // 最后一条才算数。非法则整条丢掉，不退回更早的一条。
   let usageBody;
   let sessionBody;
@@ -338,8 +340,20 @@ export function parseAgentReceipt(out, logFn = log, now = Date.now()) {
       const name = /^ARTIFACT_NAME:\s*(.*?)\s*$/.exec(line);
       const usage = /^USAGE:\s*(.*)$/.exec(line);
       const session = /^SESSION:\s*(.*)$/.exec(line);
-      if (art) { artifact = art[1]; continue; }
-      if (name) { artName = name[1]; continue; }
+      if (art) {
+        if (art[1] && artifacts.length < MAX_ARTIFACTS) {
+          artifacts.push(pendingName ? { uri: art[1], name: pendingName } : { uri: art[1] });
+          pendingName = "";
+        } else if (art[1]) {
+          logFn(`ARTIFACT 超过 ${MAX_ARTIFACTS} 个，忽略多余的：${art[1].slice(0, 120)}`);
+        }
+        continue;
+      }
+      if (name) {
+        if (artifacts.length) artifacts[artifacts.length - 1].name = name[1];
+        else pendingName = name[1];
+        continue;
+      }
       if (usage) { usageBody = usage[1]; continue; }
       if (session) { sessionBody = session[1]; continue; }
       // 围栏里的 LATER 留在正文里，不当预约。围栏外的整行从摘要里拿掉，避免说明混进结果。
@@ -389,9 +403,49 @@ export function parseAgentReceipt(out, logFn = log, now = Date.now()) {
   // 未截断时仍从开头留 4000，和原来的回执一致。截断后正文在尾部，从末尾留 4000，避免结论被日志挤掉。
   if (summary.length > 4000) summary = cut > 0 ? summary.slice(-4000) : summary.slice(0, 4000);
   const later = laterLine === undefined ? null : parseLaterLine(laterLine, logFn, now);
-  const r = { summary, artifact, usage, session, later, checks };
+  const r = { summary, artifact: artifacts[0]?.uri ?? "", artifacts, usage, session, later, checks };
+  const artName = artifacts[0]?.name || pendingName;
   if (artName) r.artifact_name = artName;
   return r;
+}
+
+// JSON 回执的交付文件：旧的 artifact 字符串在前（附 artifact_name），再接 artifacts 数组；
+// 数组元素是字符串或 { uri, name?, mime? }。非法元素只记日志跳过，不废整份回执。
+function jsonArtifacts(res, logFn) {
+  const out = [];
+  const seen = new Set();
+  const push = (item) => {
+    if (seen.has(item.uri)) return;
+    if (out.length >= MAX_ARTIFACTS) {
+      logFn(`artifacts 超过 ${MAX_ARTIFACTS} 个，忽略多余的`);
+      return;
+    }
+    seen.add(item.uri);
+    out.push(item);
+  };
+  const legacy = String(res.artifact ?? "").trim();
+  if (legacy) {
+    const legacyName = res.artifact_name ? String(res.artifact_name) : "";
+    push(legacyName ? { uri: legacy, name: legacyName } : { uri: legacy });
+  }
+  if (res.artifacts == null) return out;
+  if (!Array.isArray(res.artifacts)) {
+    logFn("artifacts 不是数组，已忽略");
+    return out;
+  }
+  for (const raw of res.artifacts) {
+    if (typeof raw === "string" && raw.trim()) {
+      push({ uri: raw.trim() });
+    } else if (raw && typeof raw === "object" && !Array.isArray(raw) && typeof raw.uri === "string" && raw.uri.trim()) {
+      const item = { uri: raw.uri.trim() };
+      if (raw.name != null && String(raw.name).trim()) item.name = String(raw.name);
+      if (raw.mime != null && String(raw.mime).trim()) item.mime = String(raw.mime);
+      push(item);
+    } else {
+      logFn("artifacts 忽略非法元素");
+    }
+  }
+  return out;
 }
 
 // json 模式仍只看最后一行对象。未知顶层键不执行，只留一条日志，避免回执里的 command 被当成控制项。
@@ -426,15 +480,18 @@ export function parseJsonReceipt(res, logFn = log, now = Date.now()) {
   }
   const later = hasLater ? parseLaterValue(res.later, logFn, now) : null;
   const checks = hasChecks ? normalizeJsonChecks(res.checks, logFn) : {};
+  const artifacts = jsonArtifacts(res, logFn);
   const r = {
     summary: String(res.summary ?? "").slice(0, 4000),
-    artifact: String(res.artifact ?? ""),
+    artifact: artifacts[0]?.uri ?? "",
+    artifacts,
     usage,
     session,
     later,
     checks,
   };
-  if (res.artifact_name) r.artifact_name = String(res.artifact_name);
+  const artName = res.artifact_name ? String(res.artifact_name) : (artifacts[0]?.name || "");
+  if (artName) r.artifact_name = artName;
   return r;
 }
 

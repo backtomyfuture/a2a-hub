@@ -8,6 +8,7 @@ import fs from "node:fs";
 import { parseCriteria } from "../acceptance.mjs";
 import { controlKeysIn } from "../config.mjs";
 import { f1 } from "../bus/tables.mjs";
+import { appendFileParts, normalizeAttachments } from "../attachments.mjs";
 import { admissionOf } from "./admission.mjs";
 
 const APPROVALS = new Set(["auto", "notify", "approve"]);
@@ -112,7 +113,7 @@ function buildInstructionData(params, criteria) {
 
 export function parseCreateArgv(argv) {
   const out = {
-    configDir: "", from: "", source: "", to: "", cap: "", worker: "", text: "", paramsRaw: undefined, criteriaRaw: undefined, context: "", ref: "", approval: "", idempotencyKey: "",
+    configDir: "", from: "", source: "", to: "", cap: "", worker: "", text: "", paramsRaw: undefined, criteriaRaw: undefined, context: "", ref: "", approval: "", idempotencyKey: "", files: [],
   };
   const take = (i, flag) => {
     const value = argv[i + 1];
@@ -134,6 +135,7 @@ export function parseCreateArgv(argv) {
     else if (flag === "--ref") out.ref = take(i, flag);
     else if (flag === "--approval") out.approval = take(i, flag);
     else if (flag === "--idempotency-key") out.idempotencyKey = take(i, flag);
+    else if (flag === "--file") out.files.push(take(i, flag));
     else throw new Error("无法识别的参数：" + flag);
     if (flag.startsWith("--")) i++;
   }
@@ -370,11 +372,14 @@ export async function resolveDispatchTarget({ bus, to = "", cap = "", worker = "
 
 export async function createTask({
   bus, from = "", source = "", to, cap, worker = "", text = "", params, criteria, context = "", ref = "", approval = "", idempotencyKey = "", now = new Date(), validateTarget = true,
+  attachments, fileStore = null,
 }) {
   if (!bus?.tables?.messages || !bus.tables.parts || !bus.tables.tasks) {
     throw new Error("总线缺少 messages / parts / tasks 表");
   }
   const data = buildInstructionData(params, criteria);
+  // 附件校验也在第一笔写之前：hub:// 不存在或外部 URL 非法时不留半截消息。
+  const files = normalizeAttachments(attachments, { fileStore });
   const { node, skill, workerHint } = await resolveDispatchTarget({ bus, to, cap, worker, validateTarget });
   const sender = String(from || source || "hub").trim();
   const taskSource = String(source || from || "hub").trim();
@@ -464,6 +469,8 @@ export async function createTask({
       Data: JSON.stringify(data),
     });
   }
+  // 文件块排在 text、data 之后，按传入顺序递增 Seq。
+  await appendFileParts(bus, msgId, seq + 1, files);
 
   const taskFields = {
     Task_ID: taskId,

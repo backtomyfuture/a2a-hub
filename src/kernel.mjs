@@ -7,6 +7,8 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { buildAcceptance, judgeChecks, parseCriteria } from "./acceptance.mjs";
+import { createFileClient } from "./files-client.mjs";
+import { parseHubFileUri, sanitizeFileName } from "./hub/files.mjs";
 import { f1 } from "./bus/tables.mjs";
 import { createWaker } from "./transport/index.mjs";
 import { runDetachedCommand } from "./proc.mjs";
@@ -127,6 +129,8 @@ export class Kernel {
     this._minuteTimerOn = false;
     // 挂起任务首次被本进程看到的时刻，键为 Task_ID＋Status_Msg：同一任务再次提问或申请审批要重新计时。
     this._pendingSince = new Map();
+    // 文件客户端懒创建一次：只有真要上传 / 下载附件时才打开 FileStore 或建 HTTP 客户端。
+    this._fileClient = null;
     this.present = new PresentService({
       bus: this.bus,
       nodeName: this.cfg.node,
@@ -518,10 +522,11 @@ export class Kernel {
       if (target) target.answer = text;
       else turns.push({ question: "", answer: text });
     }
+    // instruction / question / answer 里的文件块都交给执行方；hub:// 的先下载到 runs/<Task_ID>/files/。
     const files = [];
     for (const m of msgs) {
       const kind = f1(m, "Kind");
-      if (kind !== "instruction" && kind !== "answer") continue;
+      if (kind !== "instruction" && kind !== "question" && kind !== "answer") continue;
       for (const p of await this.listParts(f1(m, "Msg_ID"))) {
         if (f1(p, "Kind") !== "file") continue;
         const uri = String(f1(p, "File_URI") ?? "");
@@ -530,10 +535,51 @@ export class Kernel {
           uri,
           name: String(f1(p, "File_Name") ?? ""),
           mime: String(f1(p, "Mime_Type") ?? ""),
+          from_kind: kind,
         });
       }
     }
+    await this.downloadDialogueFiles(f1(task, "Task_ID"), files);
     return { qa, turns, files };
+  }
+
+  getFileClient() {
+    if (!this._fileClient) this._fileClient = this.cfg.fileClient ?? createFileClient(this.cfg);
+    return this._fileClient;
+  }
+
+  // 把 hub:// 文件下载到 runs/<Task_ID>/files/<两位序号>-<清洗后文件名>（0600）。
+  // 序号取在 files 里的位置，消息只追加，所以重复调用路径稳定；已下载（rename 落地，必然完整）且大小与
+  // 中台索引一致就不重下。下载失败只给该项记 error，不让任务失败。外部 URL 不下载，原样交给执行方。
+  async downloadDialogueFiles(taskId, files) {
+    if (!files.some((f) => parseHubFileUri(f.uri))) return;
+    const id = String(taskId ?? "");
+    if (!/^[\w-]+$/.test(id)) return;
+    const dir = path.join(this.cfg.configDir, "runs", id, "files");
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const fileId = parseHubFileUri(file.uri);
+      if (!fileId) continue;
+      const dest = path.join(dir, `${String(i + 1).padStart(2, "0")}-${sanitizeFileName(file.name, "file")}`);
+      try {
+        const have = fs.existsSync(dest) ? fs.statSync(dest) : null;
+        if (have?.isFile()) {
+          const metaSize = this._fileClient?.store?.get?.(fileId)?.size;
+          if (metaSize === undefined || Number(metaSize) === have.size) {
+            file.local_path = dest;
+            continue;
+          }
+        }
+        fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+        try { fs.chmodSync(path.dirname(dir), 0o700); fs.chmodSync(dir, 0o700); } catch { /* 目录权限失败不挡下载 */ }
+        const got = await this.getFileClient().download(file.uri, dest);
+        file.local_path = got.path;
+        if (!file.mime && got.mime) file.mime = got.mime;
+      } catch (e) {
+        file.error = e?.code === "EXPIRED" ? "expired" : e?.code === "NOT_FOUND" ? "not_found" : "download_failed";
+        log(`附件下载失败 ${file.uri}（${file.error}）：${String(e?.message ?? e).slice(0, 200)}`);
+      }
+    }
   }
 
   async writeAgentInput(task, params, extraAnswers) {
@@ -1098,6 +1144,7 @@ export class Kernel {
           text: instruction,
           params,
           turns: dialogue.turns,
+          files: dialogue.files,
           inbox_timeout_sec: Number(entry.inbox_timeout_sec) || 86400,
           claimed_at: Date.now(),
         });
@@ -1468,6 +1515,7 @@ export class Kernel {
           task_id: f1(task, "Task_ID"),
           from_node: await this.initiatorOf(task),
           turns: dialogue.turns,
+          files: dialogue.files,
           answers,
           status: "pending",
         });
