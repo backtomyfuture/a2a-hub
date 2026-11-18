@@ -24,10 +24,13 @@ a2a-hub：自托管独立多 Agent 编排中台（基于 A2A 八态数据模型�
 - `src/kernel.mjs`：状态机骨架（构造、`sweepOnce`/`run` 主循环与状态迁移），唯一写任务状态的节点代码。辅助拆在 `receipt.mjs`、`retry-state.mjs`、`session-store.mjs`、`config.mjs`、`kernel-util.mjs`，以及原型混入的 `kernel-direct.mjs`、`kernel-approval.mjs`、`kernel-outbox.mjs`、`kernel-metadata.mjs`。常量 `DAEMON_VERSION`、`HOP_LIMIT=8`、`MAX_RETRIES=2`、`STALE_MIN=20`、`HEARTBEAT_MIN_SEC=90` 留在本文件。
 - `src/config.mjs`：节点配置加载（识别 `busType`: `sqlite` / `http`）、监听地址解析、能力表归一（`normalizeCommands` / `resolveCapKey` / `capIdOf`）。
 - `src/acceptance.mjs`：验收层纯函数（标准 §11）：清单校验、自检归一、逐条判定、overall、回执 DataPart 与 Metadata 索引。
+- `src/attachments.mjs`：附件入参校验、外部 URL 规范、消息与产物 FilePart 构建及任务视图附件展开。
+- `src/files-client.mjs`：统一文件客户端（`LocalFileClient` / `HttpFileClient`），供内核、CLI 与 inbox 上传/下载 `hub://` 文件。
 - `src/approval-sign.mjs`：审批决定的 ed25519 签名与验签；hub 私钥在其配置目录 `approval_key.pem`，节点按 `node.json` 的 `hubPublicKey` 验。
 - `src/transport/`：唤醒工厂（`createWaker`），支持 `longpoll`（`src/transport/longpoll.mjs`，统一默认模式）与 `poll`，外加 15 分钟对账定时兜底及 `PENDING_RECHECK` 挂起短复查。
 - `src/setup.mjs` / `src/doctor.mjs` / `src/service.mjs` / `src/inventory.mjs` / `src/update.mjs`：支持独立 `sqlite` Hub 与远端 `http` 节点（`up` / `join`）的向导、只读自检、用户级自启注册、名片盘点与程序更新。
-- `src/hub/`：`hub` 角色组件（`approval.mjs`、`present.mjs`、`stale.mjs`、`schedule.mjs`、`loop.mjs`、`notifier.mjs`、`webhooks.mjs`、`capabilities.mjs`、`admission.mjs`、`create.mjs`、`cancel.mjs`、`cards.mjs`、`owner.mjs`、`index.mjs`）。
+- `src/hub/files.mjs`：`FileStore`（`<configDir>/files/blobs` + `files.db`）、`FileRetentionService` 定时清理与任务引用查找。
+- `src/hub/`：`hub` 角色组件（`approval.mjs`、`present.mjs`、`stale.mjs`、`schedule.mjs`、`loop.mjs`、`notifier.mjs`、`webhooks.mjs`、`capabilities.mjs`、`admission.mjs`、`files.mjs`、`create.mjs`、`cancel.mjs`、`cards.mjs`、`owner.mjs`、`index.mjs`）。
 - `docs/standard.md`：**中台标准，权威**。`docs/base-schema.md` 与 `schema/base-schema.json` 是生成物，由 `schema/generate_schema.mjs` 产出。
 - `docs/configuration.md`：配置目录、`node.json` / `commands.json` / `schedules.json`、独立中台、HTTP Agent 协议接入与 LoopForge SOP 配置及 CLI 速查。
 - `config/*.example.json`：配置样例（`hub.standalone.example.json`、`node.remote.example.json`、`commands.example.json`、`schedules.example.json`、`node.example.json`），只放占位符。

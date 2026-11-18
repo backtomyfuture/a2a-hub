@@ -24,7 +24,7 @@ ah inbox --pop [--json]
 
 - 无输出表示当前没有待办任务；
 - `--pop` 会同时把本地条目状态标为 `acked`（避免重复消费），并返回：
-  - `task_id`、`from_node`（任务发起方）、`title`、`text`（主指令）、`params`（结构化参数与 `acceptance.criteria`）、`turns`（历史多轮问答与审批记录）。
+  - `task_id`、`from_node`（任务发起方）、`title`、`text`（主指令）、`params`（结构化参数与 `acceptance.criteria`）、`turns`（历史多轮问答与审批记录）、`files`（附件数组 `{ uri, name, mime, from_kind, local_path?, error? }`；`hub://` 文件已由守护进程下载至 `runs/<Task_ID>/files/` 并填 `local_path`，失败时 `error` 取 `expired`、`not_found` 或 `download_failed`；`direct` 执行器的 `runs/<Task_ID>/input.json` 同此结构）。
 
 ---
 
@@ -34,15 +34,16 @@ ah inbox --pop [--json]
 任务挂起为 `input-required`，停止继续执行等待发起方回复；发起方回复后任务会自动回到收件箱并带上新答复：
 
 ```bash
-ah inbox ask --task <Task_ID> --text "<需要发起方补充的具体问题或选项>"
+ah inbox ask --task <Task_ID> --text "<需要发起方补充的具体问题或选项>" [--file <本地文件路径>]...
 ```
 
 ### 2. 高危动作前请求机主批准 (`ah inbox auth`)
 在真正执行外部发送、删改、扣费、提权等敏感副作用**之前**暂停申请批准：
 
 ```bash
-ah inbox auth --task <Task_ID> --text "<具体动作、目标对象与潜在风险>"
+ah inbox auth --task <Task_ID> --text "<具体动作、目标对象与潜在风险>" [--file <本地文件路径>]...
 ```
+- `ask` 与 `auth` 的 `--file` 均可重复（最多 20 个附件），提交前自动上传为 `hub://`。
 
 - 本地条目立即变为 `waiting-auth`，不会被 `ah inbox --pop` 再次取出；
 - 机主在 Hub Web 控制台完成 ed25519 签名批准后，任务自动回到收件箱恢复；若被驳回则任务终止。
@@ -56,10 +57,11 @@ ah inbox auth --task <Task_ID> --text "<具体动作、目标对象与潜在风�
 ah inbox done \
   --task <Task_ID> \
   --text "<清晰结果总结>" \
-  [--artifact <本地文件路径或URL>] \
+  [--artifact <本地文件路径或URL>]... \
   [--check <criterion_id>=<pass|fail|blocked>[:<简要证据>]]
 ```
 
+- `--artifact` 可重复；本地路径会在提交时自动上传为 `hub://files/<file_id>`，`http`/`https` 链接原样登记。
 - 如果来单的 `params.acceptance.criteria` 包含验收清单，用可重复的 `--check` 逐条回报每项 `id` 的自检结果与证据。
 
 ### 2. 无法完成时明确失败 (`ah inbox fail`)

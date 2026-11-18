@@ -34,6 +34,7 @@
   - 客户端游标落出环形缓冲时返回 `resync` 触发全量对账；所有守护进程保留低频对账扫表兜底（默认 `sweepSec=900`）以及面向 `input-required` / `auth-required` 的挂起短复查（`PENDING_RECHECK`：前 10 分钟不超 60 秒，60 分钟内不超 180 秒）。
 - **外部 Agent 网关（`src/server/agent-gateway.mjs`）**：为无守护进程、无 `ah` CLI 的纯 HTTP Agent 提供自发现（`GET /.well-known/agent.json`）、Skill 拉取（`GET /api/v1/skills/:name`，需鉴权）、检查脚本下载（`GET /api/v1/kit/a2a_check.py` 与 `.sh`，需鉴权，正文不含 Token）、只读检查（`GET /api/v1/agents/:node/check`：复用 poll 可认领任务与本节点 working 租约，Leader 侧只数 `selectLeaderUpdates` 自持久水位以来的条数，**不写水位**；唯一副作用是 `touchAgent`）、注册（`POST /api/v1/agents/register`）、短/长轮询取单（`GET|POST /api/v1/agents/:node/poll`）、Leader 状态追踪（`GET /api/v1/agents/:node/updates`，`new=1` 由 Hub 为该 Leader 持久化水位、只返回新变化的终态任务与全部仍待处理的 `input-required` / `auth-required`，`since=<seq>` 可显式指定，每条带 `changed_seq`、响应带 `watermark`）及生命周期操作（`POST /api/v1/tasks/:id/{claim,heartbeat,ask,auth,complete,fail}`）。名片接纳、添加 Agent 与 Token 管理不在该网关，而在 `startHubHttpServer` 的 `/api/v1/admin/*`，状态归一与接入提示词在 `src/hub/admission.mjs`。
 - **名册卫生**：无名片且 30 分钟无活动的内存在线记录不进名册。Leader 不报能力时会有一张可派单身份名片，因此会留在名册里。内存里的在线记录超过 24 小时无活动即清除，名片仍留在表里。`role=hub` 且名片 `Node` 等于本机节点名时，空的 `Admission` 在对账时补成 `admitted`（已有值，含显式 `pending` / `rejected`，不覆盖）；远端节点与外部 Agent 自行 `register` 的显式能力名片仍须机主接纳。身份名片在新建时已是 `admitted`。
+- **附件存储与文件网关（`src/hub/files.mjs`）**：中台托管文件落盘 `<configDir>/files/blobs/`（目录 0700、文件 0600）并由 `files.db`（WAL）索引，`FileRetentionService` 定时清理未引用（24 小时）与已终态过期（30 天）文件；`/api/v1/files`（原始字节流上传、流式下载、`meta`）按上传者与引用任务可见性鉴权，不走 JSON 解析。
 
 ## 5. 三种接入形态
 
@@ -98,6 +99,8 @@ a2a-hub/
     kernel-util.mjs             # 日志、时间格式、脱敏与终态常量
     config.mjs                  # 配置加载（sqlite / http）、控制键校验、能力表归一（Node/Worker/Skill）
     acceptance.mjs              # 验收层纯函数（标准 §11：清单校验、自检归一、overall 判定）
+    attachments.mjs             # 附件入参校验、FilePart 构建与任务视图附件展开
+    files-client.mjs            # 统一文件客户端（LocalFileClient / HttpFileClient）
     approval-sign.mjs           # ed25519 审批决策签名与验签
     direct-ledger.mjs           # direct 在途执行账本（runs/<Task_ID>/entry.json）
     proc.mjs                    # 独立进程组拉起、超时 SIGTERM/SIGKILL、输出头尾截断
@@ -139,6 +142,7 @@ a2a-hub/
       capabilities.mjs          # 添加能力、宿主 commands.json 片段、定时任务只读汇总与 HTTP Agent 自报计划
       agent-tokens.mjs          # AgentTokenStore（agent_tokens.json 哈希存储、签发/轮换/吊销/验证）
       agent-access.mjs          # Agent Token 路由矩阵、node/from 身份绑定与任务可见性
+      files.mjs                 # FileStore（blobs + files.db）、FileRetentionService 与引用查找
       create.mjs                # 建单（参数校验、名册校验、先消息后任务行）
       cancel.mjs                # 任务取消（发起方 / hub）
       cards.mjs                 # 消息正文提取与审批交互载荷构建

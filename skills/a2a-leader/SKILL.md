@@ -104,10 +104,12 @@ POST /api/v1/tasks
     { "id": "c2", "text": "附上可访问参考来源", "verify": "agent" }
   ],
   "approval": "auto",
+  "attachments": [{ "file_id": "F-..." }],
   "context": "",
   "idempotencyKey": "optional-dedup-key"
 }
 ```
+- `attachments`（可选，最多 20 个）：支持 `{ "file_id": "F-..." }`（先 `POST /api/v1/files` 上传）或 `{ "uri": "https://...", "name": "...", "mime": "..." }`；有附件时 `text` 可为空。
 - 若要派给某台固定主机上的特定本地 CLI（如 `office-pc` 上的 `claude`），填 `"to": "office-pc", "worker": "claude"`（省略 `cap` 会用其通用执行名片）。
 - 成功返回 HTTP `201`，包含 `task_id`（例如 `"TASK-20261115-xxxxxx"`）。
 
@@ -142,7 +144,8 @@ GET /api/v1/agents/muse/updates?new=1
 - 需要自己指定水位时用 `since=<seq>`，它优先于 `new=1`。
 - 不要同时加 `status`。带了 `status` 时水位不向前走，以免漏掉没返回的终态。
 - 能挂住连接时才用 `timeout=25`（最多 60 秒）。定时任务保持默认短返回，不要长轮询。
-- 返回条目还包含：`task_id`、`status`、`target_node`、`result_text`、`question_text`、`auth_text`、`notice_text`、`acceptance`、`artifacts[]`。
+- 返回条目还包含：`task_id`、`status`、`target_node`、`result_text`、`question_text`、`auth_text`、`notice_text`、`acceptance`、`artifacts[]`（含 `files[]`），以及 `instruction_attachments`、`question_attachments`、`answer_attachments`（每项 `{ file_uri, file_name, mime_type, download_url, size, deleted }`）。
+- 下载附件/产物：若 `deleted` 为 `false`，对 `hub://` 文件用 `GET <download_url>` 带 `Authorization: Bearer <AGENT_TOKEN>` 与浏览器 UA 下载（`410` 表示已过期清理）；外部 `http`/`https` 链接直接访问。
 - 终态向机主或上游汇报；没有新动态就静默结束，不要发空汇报。`auth-required` 只提醒机主去控制台，不要自己批。
 
 ### 2. 答复下级 Worker 的提问 (`POST /api/v1/tasks/{taskId}/reply`)
@@ -153,18 +156,25 @@ POST /api/v1/tasks/{taskId}/reply
 ```json
 {
   "from": "muse",
-  "text": "请优先关注 HTTP REST 场景，保留完整引用链接。"
+  "text": "请优先关注 HTTP REST 场景，保留完整引用链接。",
+  "attachments": [{ "file_id": "F-..." }]
 }
 ```
+- 同样支持 `attachments`（最多 20 个）；有附件时 `text` 可为空。
 
 ### 3. 全量查询与撤销自己发起的任务
 - 筛选查单：`GET /api/v1/tasks?from=muse&status=working&limit=50`
 - 查单条完整明细（含 Messages / Runs / Artifacts）：`GET /api/v1/tasks/{taskId}`
 - 取消未终态任务：`POST /api/v1/tasks/{taskId}/cancel`，请求体 `{ "from": "muse", "text": "需求变更，终止该任务" }`（注意：中台仅允许任务发起方或 Hub 取消）。
 
+### 4. 上传中台托管文件 (`POST /api/v1/files`)
+建单或答复需附带本地/生成文件时，先上传原始字节（非 JSON），再把返回的 `file_id` 放进 `attachments`：
+- 请求头：`Authorization: Bearer <AGENT_TOKEN>`、浏览器 `User-Agent`、`Content-Type`（MIME，缺省 `application/octet-stream`）、`X-File-Name`（URL 编码的文件名）。
+- 响应 `201`：`{ file_id, uri, name, mime, size, sha256 }`。
+
 ## 四、接单
 
-Leader 可以认领派给自己的任务。步骤与 `a2a-worker` 相同，这里只列最小流程；心跳、提问、审批和验收回执的细节以 `a2a-worker` 为准。
+Leader 可以认领派给自己的任务。步骤与 `a2a-worker` 相同，这里只列最小流程；心跳、提问、审批、附件/产物上传与验收回执的细节以 `a2a-worker` 为准。
 
 1. `GET /api/v1/agents/{node}/poll?timeout=0`（常驻进程用 `timeout=25`）。
 2. 对每个任务 `POST /api/v1/tasks/{taskId}/claim`，body `{"node":"<节点名>"}`。已经是 `working` 的任务直接续做。
