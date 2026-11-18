@@ -241,8 +241,46 @@ test("四次失败后放弃，last_status 与 last_error 留下，不再投递�
     assert.equal(pub.last_status, "error");
     assert.equal(pub.last_error, "socket hang up");
     assert.equal(pub.last_delivered_at, "");
+    assert.ok(pub.last_attempt_at);
     assert.equal(await dispatcher.onBusEvent(ev), null);
     assert.equal(n, 4);
+  });
+});
+
+test("成功投递刷新在线且不改周期，失败投递不刷新", async () => {
+  await withTemp(async (dir) => {
+    const store = new AgentWebhookStore(dir);
+    store.put({ node: "hook", url: "https://hooks.example/h", key: "receiver-key-hook" });
+    const broker = new LongPollBroker();
+    broker.touchAgent("hook", { mode: "webhook", receiveFromCard: true });
+    const seen = broker._nodes.get("hook").lastSeenAt;
+    const interval = broker._nodes.get("hook").intervalMs || 0;
+    const fail = new WebhookDispatcher({
+      store,
+      broker,
+      sleep: async () => {},
+      retryDelays: [0],
+      fetchImpl: async () => ({ status: 503 }),
+    });
+    const failed = await fail.ping("hook");
+    assert.equal(failed.ok, false);
+    assert.equal(broker._nodes.get("hook").lastSeenAt, seen);
+    assert.equal(broker._nodes.get("hook").lastDeliveredAt, undefined);
+    assert.equal(store.get("hook").last_delivered_at ?? "", "");
+    assert.ok(store.get("hook").last_attempt_at);
+
+    const okDisp = new WebhookDispatcher({
+      store,
+      broker,
+      sleep: async () => {},
+      fetchImpl: async () => ({ status: 204 }),
+    });
+    const ok = await okDisp.ping("hook");
+    assert.equal(ok.ok, true);
+    assert.ok(broker._nodes.get("hook").lastDeliveredAt >= seen);
+    assert.equal(broker._nodes.get("hook").intervalMs || 0, interval);
+    assert.equal(broker._nodes.get("hook").mode, "webhook");
+    assert.equal(broker.connectedNodes().find((n) => n.node === "hook").online, true);
   });
 });
 
@@ -466,6 +504,11 @@ test("管理 API：登记、列表无密钥、测试、轮换、删除 Agent 顺
 
       const afterTest = await apiJson(base, "/api/v1/admin/webhooks", { token: "owner-token" });
       assert.equal(afterTest.data.webhooks[0].last_status, "202");
+      assert.equal(broker.connectedNodes().find((n) => n.node === "grok-bot")?.mode, "webhook");
+      assert.equal(broker.connectedNodes().find((n) => n.node === "grok-bot")?.online, true);
+      const checked = await apiJson(base, `/api/v1/agents/grok-bot/check`, { token: added.data.token });
+      assert.equal(checked.status, 200);
+      assert.equal(broker._nodes.get("grok-bot").mode, "webhook");
 
       const keep = await apiJson(base, "/api/v1/admin/webhooks/grok-bot", {
         method: "PUT",

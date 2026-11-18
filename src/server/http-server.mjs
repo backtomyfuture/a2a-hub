@@ -189,9 +189,12 @@ export async function startHubHttpServer({
         configDir: cfg.configDir,
         hubNode: cfg?.node || "hub",
         taskTable: bus?.tables?.tasks || "tasks",
+        broker,
         log,
       })
       : null);
+  // 调用方先建好的 dispatcher 也要能在投递成功时刷新在线，不能只靠自己 new 的那条路径。
+  if (webhooks && broker && !webhooks.broker) webhooks.broker = broker;
   if (tokenStore && bus) {
     try {
       const created = await ensureLeaderIdentityCards({

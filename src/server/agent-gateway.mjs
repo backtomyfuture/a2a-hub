@@ -123,6 +123,19 @@ function checkScopeOf(principal, searchParams) {
   return { role: raw, worker: raw === "worker" || leader, leader };
 }
 
+// 在线窗口认名片上的 Receive_Mode。检查请求本身不带这个字段，不查的话重启后会按普通 http-poll 的 12.5 分钟判离线。
+async function nodeCardReceiveMode(bus, node) {
+  const cards = await bus.listRecords(bus.tables.agentCards);
+  let fallback = "";
+  for (const card of cards) {
+    if (f1(card, "Node") !== node) continue;
+    const mode = f1(card, "Receive_Mode");
+    if (mode === "webhook") return "webhook";
+    if (!fallback && (mode === "http-poll" || mode === "http-longpoll")) fallback = mode;
+  }
+  return fallback;
+}
+
 // 2×2 四类 Skill 目录：控制端/执行端 × 有 ah CLI / 纯 HTTP，避免向工作机或云端 Agent 下发无关指令
 const SKILL_CATALOG = [
   { name: "ah", role: "leader", mode: "cli", audience: "装有 ah CLI 的 Hub / 工作机中控 Agent" },
@@ -1005,11 +1018,14 @@ export async function handleAgentGatewayRequest({
   if (method === "GET" && checkMatch) {
     const node = validateNodeName(decodeURIComponent(checkMatch[1]));
     const scope = checkScopeOf(principal, reqUrl.searchParams);
+    const cardMode = await nodeCardReceiveMode(bus, node);
     broker?.touchAgent?.(node, {
       remoteAddr,
-      mode: "http-poll",
+      // 只有 webhook 要换窗口。其余检查仍记成 http-poll，避免长轮询节点被一次检查改成 75 分钟。
+      mode: cardMode === "webhook" ? "webhook" : "http-poll",
       kind: "agent",
       role: scope.role,
+      receiveFromCard: true,
     });
     const payload = { work: false };
     if (scope.worker) {
