@@ -5,10 +5,10 @@ import test from "node:test";
 import { f1 } from "../src/bus/tables.mjs";
 import { cancelTask, WORKING_CANCEL_HINT } from "../src/hub/cancel.mjs";
 import { TABLES } from "./helpers.mjs";
-import { MockFeishuBus } from "./mocks/mock-bus.mjs";
+import { MockBus } from "./mocks/mock-bus.mjs";
 
 function bus() {
-  return new MockFeishuBus({ tables: TABLES });
+  return new MockBus({ tables: TABLES });
 }
 
 async function seed(mock, status, from = "node-a") {
@@ -94,7 +94,7 @@ test("发起方取消时按 notice、Part、任务行的顺序写", async () => 
 test("hub 可以取消 working 任务并给出迟到回执提示", async () => {
   const mock = bus();
   await seed(mock, "working", "someone-else");
-  const result = await cancelTask({ bus: mock, node: "hub-node", role: "hub", taskId: "TASK-CXL" });
+  const result = await cancelTask({ bus: mock, node: "desk-hub", role: "hub", taskId: "TASK-CXL" });
   assert.equal(result.previousStatus, "working");
   assert.equal(result.workingHint, WORKING_CANCEL_HINT);
   const note = (await mock.findRecords(TABLES.messages, "Kind", "notice"))[0];

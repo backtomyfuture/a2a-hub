@@ -271,7 +271,7 @@ export async function startHubHttpServer({
           body.receive_id,
           body.msg_type || "interactive",
           body.content,
-          body.receive_id_type || "open_id",
+          body.receive_id_type || "owner",
         );
         sendJson(res, 200, { data: result });
         return;
@@ -534,11 +534,11 @@ export async function startHubHttpServer({
           return;
         }
         const statusMsg = String(f1(task, "Status_Msg") ?? "").trim();
-        const opId = String(approval.ownerOpenId ?? "").trim() || "web-owner";
+        const opId = String(approval.ownerId ?? "").trim() || "web-owner";
         const resp = await approval.handleCardAction({
           _source: "web",
           event_id: `web_${randomUUID()}`,
-          operator: { open_id: opId },
+          operator: { id: opId },
           action: {
             value: {
               record_id: task.record_id,

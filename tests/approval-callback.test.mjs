@@ -1,4 +1,4 @@
-// 审批卡回调先回读一次再交回终态卡。写表在后台，不能堵住飞书的 3 秒预算。
+// 审批卡回调先回读一次再交回终态卡。写表在后台，不能把同步回读拖过超时。
 // 总线是内存 mock。写操作被人为拖慢，用来证明 handleCardAction 不会等它们。
 
 import assert from "node:assert/strict";
@@ -8,7 +8,7 @@ import { f1 } from "../src/bus/tables.mjs";
 import { ApprovalService } from "../src/hub/approval.mjs";
 import { buildStatusCard } from "../src/hub/cards.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";
-import { MockFeishuBus } from "./mocks/mock-bus.mjs";
+import { MockBus } from "./mocks/mock-bus.mjs";
 
 const OWNER = "ou_test_owner";
 const NOW = "2026-01-15T10:00:00+0800";
@@ -59,11 +59,11 @@ function valueOf(record, decision, taskId = "TASK-CB-1", statusMsg = "MSG-CB-1-0
 
 function click(record, decision, { operator = OWNER, eventId = "ev-1", taskId, statusMsg, messageId = MESSAGE_ID } = {}) {
   const event = {
-    operator: { open_id: operator },
+    operator: { id: operator },
     token: "c-delay-token-not-used",
     action: { value: valueOf(record, decision, taskId, statusMsg) },
   };
-  if (messageId) event.context = { open_message_id: messageId };
+  if (messageId) event.context = { message_id: messageId };
   return {
     _source: "test",
     header: { event_id: eventId, token: VERIFY, event_type: "card.action.trigger" },
@@ -110,7 +110,7 @@ async function seed(bus, { taskId = "TASK-CB-1", status = "auth-required", statu
 function service(dir, bus) {
   return new ApprovalService({
     bus,
-    ownerOpenId: OWNER,
+    ownerId: OWNER,
     statePath: path.join(dir, "approval_state.json"),
     log: () => {},
     now: () => NOW,
@@ -131,7 +131,7 @@ function assertPatched(bus, info, patch, messageId = MESSAGE_ID) {
 
 test("回读通过后立即返回终态卡，写表拖慢也不卡住", { timeout: 30_000 }, async () => {
   await withTemp(async (dir) => {
-    const bus = new MockFeishuBus({ tables: TABLES });
+    const bus = new MockBus({ tables: TABLES });
     const approval = service(dir, bus);
     const record = await seed(bus);
     slowWrites(bus);
@@ -168,7 +168,7 @@ test("回读通过后立即返回终态卡，写表拖慢也不卡住", { timeou
 
 test("后台写表失败时 PATCH 成可重试的失败卡，并清掉已决定标记", async () => {
   await withTemp(async (dir) => {
-    const bus = new MockFeishuBus({ tables: TABLES });
+    const bus = new MockBus({ tables: TABLES });
     const approval = service(dir, bus);
     const record = await seed(bus);
     const info = valueOf(record, "approve");
@@ -200,7 +200,7 @@ test("后台写表失败时 PATCH 成可重试的失败卡，并清掉已决定�
 
 test("决定写下但改任务行失败，改点驳回时追加新决定并以驳回收口", async () => {
   await withTemp(async (dir) => {
-    const bus = new MockFeishuBus({ tables: TABLES });
+    const bus = new MockBus({ tables: TABLES });
     const approval = service(dir, bus);
     const record = await seed(bus);
     bus.failNext({ op: "update", table: TABLES.tasks }, new Error("write conflict 1254291"));
@@ -226,7 +226,7 @@ test("决定写下但改任务行失败，改点驳回时追加新决定并以�
 
 test("过期卡在同步路径返回 expired，不写表也不 PATCH", async () => {
   await withTemp(async (dir) => {
-    const bus = new MockFeishuBus({ tables: TABLES });
+    const bus = new MockBus({ tables: TABLES });
     const approval = service(dir, bus);
     const record = await seed(bus, { status: "working" });
     const info = valueOf(record, "reject");
@@ -246,7 +246,7 @@ test("过期卡在同步路径返回 expired，不写表也不 PATCH", async () 
 
 test("写前再次回读发现任务已变时 PATCH 成 expired，并用状态文件里的 message_id", async () => {
   await withTemp(async (dir) => {
-    const bus = new MockFeishuBus({ tables: TABLES });
+    const bus = new MockBus({ tables: TABLES });
     const approval = service(dir, bus);
     const record = await seed(bus);
     const info = valueOf(record, "approve");
@@ -280,7 +280,7 @@ test("写前再次回读发现任务已变时 PATCH 成 expired，并用状态�
 
 test("回读失败或超时不标记已决定，卡片保持不变", async () => {
   await withTemp(async (dir) => {
-    const bus = new MockFeishuBus({ tables: TABLES });
+    const bus = new MockBus({ tables: TABLES });
     const approval = service(dir, bus);
     const record = await seed(bus);
     const before = bus.journal.length;
@@ -300,7 +300,7 @@ test("回读失败或超时不标记已决定，卡片保持不变", async () =>
 
 test("回读超过 2 秒就放弃，不标记已决定", { timeout: 10_000 }, async () => {
   await withTemp(async (dir) => {
-    const bus = new MockFeishuBus({ tables: TABLES });
+    const bus = new MockBus({ tables: TABLES });
     const approval = service(dir, bus);
     const record = await seed(bus);
     bus.getRecord = () => new Promise(() => {});
@@ -318,7 +318,7 @@ test("回读超过 2 秒就放弃，不标记已决定", { timeout: 10_000 }, as
 
 test("非机主的点击被拒绝，不写表也不改卡", async () => {
   await withTemp(async (dir) => {
-    const bus = new MockFeishuBus({ tables: TABLES });
+    const bus = new MockBus({ tables: TABLES });
     const approval = service(dir, bus);
     const record = await seed(bus);
     const before = bus.journal.length;

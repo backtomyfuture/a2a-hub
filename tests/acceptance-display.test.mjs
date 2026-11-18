@@ -9,7 +9,7 @@ import { acceptanceFromParts, acceptanceLine } from "../src/acceptance.mjs";
 import { PresentService, presentBody } from "../src/hub/present.mjs";
 import { formatWhyText, getTaskWhy } from "../src/why.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";
-import { MockFeishuBus } from "./mocks/mock-bus.mjs";
+import { MockBus } from "./mocks/mock-bus.mjs";
 
 const EVIDENCE = "证".repeat(150);
 
@@ -83,7 +83,7 @@ async function seedTask(bus, taskId, { status, metadata, receipt }) {
 
 test("why 有 DataPart 时 JSON 用原对象，文本标出捕获与自述", async () => {
   await withTemp(async (dir) => {
-    const bus = new MockFeishuBus({ tables: TABLES });
+    const bus = new MockBus({ tables: TABLES });
     const taskId = "TASK-ACC-PART";
     const msgId = `MSG-${taskId}-02`;
     const acceptance = {
@@ -112,7 +112,7 @@ test("why 有 DataPart 时 JSON 用原对象，文本标出捕获与自述", asy
 
 test("why 只有 Metadata 时退回索引，都没有则显示未配置", async () => {
   await withTemp(async (dir) => {
-    const bus = new MockFeishuBus({ tables: TABLES });
+    const bus = new MockBus({ tables: TABLES });
     const indexed = {
       version: 1,
       verify: { verdict: "pass", exit_code: 0 },
@@ -161,7 +161,7 @@ function presentService(dir, bus) {
 
 test("呈递在验收失败时带索引，正文首行是验收未通过", async () => {
   await withTemp(async (dir) => {
-    const bus = new MockFeishuBus({ tables: TABLES });
+    const bus = new MockBus({ tables: TABLES });
     const taskId = "TASK-ACC-PRESENT";
     const msgId = `MSG-${taskId}-02`;
     const acceptance = {

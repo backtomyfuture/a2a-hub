@@ -9,7 +9,7 @@ description: A2A-Hub 纯 HTTP 执行端 / Worker Agent 接入协议（无 ah CLI
 
 > **认证与纪律前提**：
 > - 协议自发现（**免鉴权**）：`GET <HUB_URL>/.well-known/agent.json`。
-> - 后续所有 `/api/*` 请求携带 `Authorization: Bearer <LAH_API_TOKEN>`，JSON 请求携带 `Content-Type: application/json`。
+> - 后续所有 `/api/*` 请求携带 `Authorization: Bearer <AH_API_TOKEN>`，JSON 请求携带 `Content-Type: application/json`。
 > - **审批铁律**：未成功通过 `/claim` 拿到 `working` 租约前**绝不执行任务**（遇到需要前置审批的任务，网关会返回 `409`，等待机主批准后再次拉单即可）。执行中途若要做敏感动作，**必须调 `/auth`** 等待机主签名批准，严禁用 `/ask` 代替授权。
 
 ---

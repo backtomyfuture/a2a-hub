@@ -7,7 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { PresentService } from "../src/hub/present.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";
-import { MockFeishuBus } from "./mocks/mock-bus.mjs";
+import { MockBus } from "./mocks/mock-bus.mjs";
 
 async function seed(bus, { taskId, from, source }) {
   await bus.createRecord(TABLES.tasks, {
@@ -63,7 +63,7 @@ function queuedIds(svc) {
 
 test("节点发起的 cron 单只由该节点入队，hub 不吞", async () => {
   await withTemp(async (dir) => {
-    const bus = new MockFeishuBus({ tables: TABLES });
+    const bus = new MockBus({ tables: TABLES });
     await seed(bus, { taskId: "TASK-NODE-CRON", from: "node-a", source: "cron" });
     const node = service(dir, bus, { nodeName: "node-a", role: "node" });
     const hub = service(dir, bus, { nodeName: "hub", role: "hub" });
@@ -77,7 +77,7 @@ test("节点发起的 cron 单只由该节点入队，hub 不吞", async () => {
 
 test("hub 本机发起的 cron 单由 hub 入队", async () => {
   await withTemp(async (dir) => {
-    const bus = new MockFeishuBus({ tables: TABLES });
+    const bus = new MockBus({ tables: TABLES });
     await seed(bus, { taskId: "TASK-HUB-CRON", from: "hub", source: "cron" });
     const hub = service(dir, bus, { nodeName: "hub", role: "hub" });
     const other = service(dir, bus, { nodeName: "node-a", role: "node" });
@@ -90,7 +90,7 @@ test("hub 本机发起的 cron 单由 hub 入队", async () => {
 
 test("发起方为空的 cron 单由 hub 入队", async () => {
   await withTemp(async (dir) => {
-    const bus = new MockFeishuBus({ tables: TABLES });
+    const bus = new MockBus({ tables: TABLES });
     await seed(bus, { taskId: "TASK-BARE-CRON", from: null, source: "cron" });
     const hub = service(dir, bus, { nodeName: "hub", role: "hub" });
     const node = service(dir, bus, { nodeName: "node-a", role: "node" });
@@ -103,7 +103,7 @@ test("发起方为空的 cron 单由 hub 入队", async () => {
 
 test("非 cron 的手动单仍只回给发起方", async () => {
   await withTemp(async (dir) => {
-    const bus = new MockFeishuBus({ tables: TABLES });
+    const bus = new MockBus({ tables: TABLES });
     await seed(bus, { taskId: "TASK-MANUAL-NODE", from: "node-a", source: "user" });
     await seed(bus, { taskId: "TASK-MANUAL-HUB", from: "hub", source: "user" });
     const node = service(dir, bus, { nodeName: "node-a", role: "node" });

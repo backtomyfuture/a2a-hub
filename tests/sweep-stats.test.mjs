@@ -1,4 +1,4 @@
-// 扫表结束要留下一行计数。状态只写临时目录，不连飞书。
+// 扫表结束要留下一行计数。状态只写临时目录，不连外部服务。
 // 串行：都在改 console.log，并行会把行混在一起。
 
 import assert from "node:assert/strict";
@@ -11,7 +11,7 @@ import { ApprovalService } from "../src/hub/approval.mjs";
 import { PresentService } from "../src/hub/present.mjs";
 import { StaleService } from "../src/hub/stale.mjs";
 import { ScheduleService } from "../src/hub/schedule.mjs";
-import { MockFeishuBus } from "./mocks/mock-bus.mjs";
+import { MockBus } from "./mocks/mock-bus.mjs";
 import { TABLES, withTemp } from "./helpers.mjs";
 
 function kernelCfg(dir, mock) {
@@ -44,7 +44,7 @@ test.describe("扫表统计行", { concurrency: false }, () => {
   test("空闲一轮恰有一行 sweep end，list 等于本轮 listRecords", async (t) => {
     await withTemp(async (dir) => {
       fs.writeFileSync(path.join(dir, "commands.json"), "{}\n", { mode: 0o600 });
-      const mock = new MockFeishuBus({ tables: TABLES });
+      const mock = new MockBus({ tables: TABLES });
       const kernel = new Kernel(kernelCfg(dir, mock));
       const logMock = t.mock.method(console, "log");
       const before = listOps(mock);
@@ -66,7 +66,7 @@ test.describe("扫表统计行", { concurrency: false }, () => {
   test("计数是自上一行以来的增量", async (t) => {
     await withTemp(async (dir) => {
       fs.writeFileSync(path.join(dir, "commands.json"), "{}\n", { mode: 0o600 });
-      const mock = new MockFeishuBus({ tables: TABLES });
+      const mock = new MockBus({ tables: TABLES });
       const kernel = new Kernel(kernelCfg(dir, mock));
       const logMock = t.mock.method(console, "log");
       await kernel.sweepOnce();
@@ -88,7 +88,7 @@ test.describe("扫表统计行", { concurrency: false }, () => {
   test("扫表抛错仍留下 ok=0", async (t) => {
     await withTemp(async (dir) => {
       fs.writeFileSync(path.join(dir, "commands.json"), "{}\n", { mode: 0o600 });
-      const mock = new MockFeishuBus({ tables: TABLES });
+      const mock = new MockBus({ tables: TABLES });
       const kernel = new Kernel(kernelCfg(dir, mock));
       // 第一次 Tasks 列表在 serviceDirectFlight 里被吞掉，不会让 sweepOnce 抛错。
       // 第二次是 reclaimStale，异常会冒出来。
@@ -112,7 +112,7 @@ test.describe("扫表统计行", { concurrency: false }, () => {
     await withTemp(async (dir) => {
       fs.writeFileSync(path.join(dir, "commands.json"), "{}\n", { mode: 0o600 });
       const tables = { ...TABLES, rules: "tbl_rules" };
-      const mock = new MockFeishuBus({ tables });
+      const mock = new MockBus({ tables });
       const cfg = {
         node: "node-a",
         role: "hub",
@@ -128,7 +128,7 @@ test.describe("扫表统计行", { concurrency: false }, () => {
       const log = (msg) => lines.push(String(msg));
       const approval = new ApprovalService({
         bus: mock,
-        ownerOpenId: "ou_owner",
+        ownerId: "ou_owner",
         statePath: path.join(dir, "approval_state.json"),
         log,
       });
@@ -142,7 +142,7 @@ test.describe("扫表统计行", { concurrency: false }, () => {
       });
       const stale = new StaleService({
         bus: mock,
-        ownerOpenId: "ou_owner",
+        ownerId: "ou_owner",
         statePath: path.join(dir, "stale_state.json"),
         log,
       });

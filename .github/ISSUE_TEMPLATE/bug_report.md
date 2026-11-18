@@ -15,10 +15,10 @@ labels: bug
 
 ## 环境 / Environment
 
-- lah 版本（`lah --version` 输出的 DAEMON_VERSION）：
-- 角色与类型（role: node/hub，kind: host/agent，协议节点请注明）：
+- ah 版本（`ah --version` 输出的 DAEMON_VERSION）：
+- 角色与类型（role: node/hub，kind: host/agent，纯 HTTP Agent 请注明）：
 - Node 版本与操作系统：
 
 ## 相关日志 / Logs
 
-（请删去 app_secret、token、open_id 等凭据后再粘贴）
+（请删去 `AH_API_TOKEN`、Webhook 地址、私钥等凭据后再粘贴）

@@ -1,5 +1,5 @@
 {
-  "appEnv": "~/.hub-node/app.env",
+  "appEnv": "~/.a2a-hub/app.env",
   "busType": "http",
   "capPrefix": "dev",
   "hubPublicKey": "<HUB_ED25519_PUBLIC_KEY_BASE64>",

@@ -1,5 +1,5 @@
 // 守住内核状态机：认领后按 commands.json 执行，熔断、控制键、幂等、退避、非法语境（含已移除的 carrier）都不得真跑。
-// 总线是 tests/mocks/mock-bus.mjs。不读 ~/.hub-node，不取凭据。run({ once: true }) 不打开长连接。
+// 总线是 tests/mocks/mock-bus.mjs。不读 ~/.a2a-hub，不取凭据。run({ once: true }) 不打开长连接。
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { f1 } from "../src/bus/tables.mjs";
 import { Kernel } from "../src/kernel.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";
-import { MockFeishuBus } from "./mocks/mock-bus.mjs";
+import { MockBus } from "./mocks/mock-bus.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ECHO = path.join(ROOT, "src", "executors", "echo.mjs");
@@ -24,7 +24,7 @@ function echoCommand() {
 
 async function setup(dir, commandEntry) {
   fs.writeFileSync(path.join(dir, "commands.json"), JSON.stringify({ echo: commandEntry }), { mode: 0o600 });
-  const mock = new MockFeishuBus({ tables: TABLES });
+  const mock = new MockBus({ tables: TABLES });
   const kernel = new Kernel({
     node: "node-a",
     role: "node",

@@ -47,7 +47,7 @@ test("HTTP Agent 网关：发现 / 注册 / 问答闭环 / 长轮询 / ed25519 �
     });
     const approval = new ApprovalService({
       bus,
-      ownerOpenId: "",
+      ownerId: "",
       allowLocalOwner: true,
       statePath: path.join(hubDir, "approval_state.json"),
       signKey: key.privateKey,

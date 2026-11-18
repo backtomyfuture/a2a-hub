@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 export async function withTemp(fn) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lah-test-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ah-test-"));
   try {
     return await fn(dir);
   } finally {

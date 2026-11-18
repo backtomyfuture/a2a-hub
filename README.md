@@ -22,7 +22,7 @@
   - **A2A 对话流、在线审批与追问**：查看任务全历史（Tasks / Messages / Parts / Runs / Artifacts），对 `auth-required` 一键 ed25519 签名批准/驳回，对 `input-required` 在线回复续跑；
   - **LoopForge SOP 编排室**：可视化创建并追踪多阶段自动闭环（`plan → code → verify`），支持阶段失败重跑与回跳。
 - **LoopForge 风格多阶段 SOP 闭环**：内置 `LoopService` 与 `ah loop` CLI，同一 `Context_ID` 下自动推进多阶段任务，借 `acceptance.mjs` 验收结果驱动 `retry` / `goto:<stage_id>` / `abort`，受 `Max_Iterations` 与 `HOP_LIMIT=8` 双重熔断保护。
-- **可选多通道提醒**：`node.json` 配置 `notifications` 后可向飞书普通群机器人 Webhook、Bark、Telegram 或通用 Webhook 推送审批/问答/终态/陈旧告警。
+- **可选多通道提醒**：`node.json` 配置 `notifications` 后可向飞书群机器人 Webhook（可选通知渠道）、Bark、Telegram 或通用 Webhook 推送审批/问答/终态/陈旧告警。
 
 ---
 
@@ -71,12 +71,6 @@ flowchart LR
 curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --hub
 ```
 
-若这台机器已经装着旧版 lark-a2a-hub（配置在 `~/.hub-node`，origin 往往是 `lark-a2a-hub`），不要直接覆盖。请用独立目录：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | HUB_NODE_HOME="$HOME/.a2a-hub" sh -s -- --hub
-```
-
 安装完成后终端会直接输出：
 - 带免密参数的 Web 控制台地址：`http://<你的IP>:8787/?token=...`（首次打开自动写入浏览器本地存储并清洗地址栏）
 - 供其他机器复制即连的一行接入命令（含 Token，默认 0.0.0.0:8787 监听；加 `--no-service` 可仅在前台运行）。
@@ -85,10 +79,10 @@ curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install
 
 ```bash
 # macOS / Linux：
-curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --join "http://<HUB_API_TOKEN>@<HUB_IP>:8787"
+curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --join "http://<AH_API_TOKEN>@<HUB_IP>:8787"
 
 # Windows PowerShell：
-$env:AH_JOIN = "http://<HUB_API_TOKEN>@<HUB_IP>:8787"; irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex
+$env:AH_JOIN = "http://<AH_API_TOKEN>@<HUB_IP>:8787"; irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex
 ```
 
 `--join` 会自动将 Token 写入 `0600` 权限的 `app.env`（不进入 `node.json`）、从 `GET /api/v1/health` 同步 `hubPublicKey`，并注册后台长轮询服务。
@@ -100,14 +94,14 @@ $env:AH_JOIN = "http://<HUB_API_TOKEN>@<HUB_IP>:8787"; irm https://raw.githubuse
 ```bash
 git clone https://github.com/backtomyfuture/a2a-hub.git
 cd a2a-hub
-# 如需全局注册 `ah` / `a2a-hub` / `ahub` / `lah` / `hub-node` 命令（可选）：
+# 如需全局注册 `ah` / `a2a-hub` / `ahub` 命令（可选）：
 npm link
 
 # 1) 在 Mac mini / 主机一行启动 Hub（加 --service 可顺便注册开机自启）：
 node bin/ah.mjs up
 
 # 2) 在其他机器一行接入节点（加 --service 注册开机自启）：
-node bin/ah.mjs join http://<HUB_API_TOKEN>@<HUB_IP>:8787
+node bin/ah.mjs join http://<AH_API_TOKEN>@<HUB_IP>:8787
 ```
 
 ### 方式 C：纯 HTTP 外部 Agent 接入（Muse / Grok Bot，无需守护进程）
@@ -117,27 +111,27 @@ node bin/ah.mjs join http://<HUB_API_TOKEN>@<HUB_IP>:8787
 ```bash
 # 1) 注册为 Leader（如 Muse：仅派单与跟单）或 Worker（如 Grok Bot：认领并执行）
 curl -X POST http://<HUB_IP>:8787/api/v1/agents/register \
-  -H "Authorization: Bearer <HUB_API_TOKEN>" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <AH_API_TOKEN>" -H "Content-Type: application/json" \
   -d '{"node":"muse","role":"leader","kind":"agent","receive_mode":"http-poll"}'
 
 curl -X POST http://<HUB_IP>:8787/api/v1/agents/register \
-  -H "Authorization: Bearer <HUB_API_TOKEN>" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <AH_API_TOKEN>" -H "Content-Type: application/json" \
   -d '{"node":"grok-bot","role":"worker","kind":"agent","receive_mode":"http-poll","caps":[{"skill_id":"research","skill_name":"Grok 搜索"}]}'
 
 # 2) Muse 派单并跟单（/updates 支持 ?timeout=25 长轮询，也支持短轮询）
 curl -X POST http://<HUB_IP>:8787/api/v1/tasks \
-  -H "Authorization: Bearer <HUB_API_TOKEN>" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <AH_API_TOKEN>" -H "Content-Type: application/json" \
   -d '{"from":"muse","to":"grok-bot","cap":"research","text":"调研 A2A 网关最佳方案"}'
-curl -H "Authorization: Bearer <HUB_API_TOKEN>" \
+curl -H "Authorization: Bearer <AH_API_TOKEN>" \
   "http://<HUB_IP>:8787/api/v1/agents/muse/updates?timeout=25"
 
 # 3) Grok Bot 轮询取单 -> 认领 -> 提问/审批/交付
-curl -H "Authorization: Bearer <HUB_API_TOKEN>" \
+curl -H "Authorization: Bearer <AH_API_TOKEN>" \
   "http://<HUB_IP>:8787/api/v1/agents/grok-bot/poll?timeout=25"
 curl -X POST "http://<HUB_IP>:8787/api/v1/tasks/<TASK_ID>/claim" \
-  -H "Authorization: Bearer <HUB_API_TOKEN>" -H "Content-Type: application/json" -d '{"node":"grok-bot"}'
+  -H "Authorization: Bearer <AH_API_TOKEN>" -H "Content-Type: application/json" -d '{"node":"grok-bot"}'
 curl -X POST "http://<HUB_IP>:8787/api/v1/tasks/<TASK_ID>/complete" \
-  -H "Authorization: Bearer <HUB_API_TOKEN>" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <AH_API_TOKEN>" -H "Content-Type: application/json" \
   -d '{"node":"grok-bot","text":"已完成调研","artifact":"https://example.com/report.md"}'
 ```
 
@@ -172,7 +166,7 @@ node bin/ah.mjs setup \
   --role node \
   --bus http \
   --hub-url http://<HUB_IP>:8787 \
-  --api-token "<HUB_API_TOKEN>" \
+  --api-token "<AH_API_TOKEN>" \
   --hub-key "<HUB_ED25519_PUBLIC_KEY>" \
   --node edge-node-1 \
   --zone office \
@@ -198,9 +192,9 @@ node bin/ah.mjs daemon
 
 ---
 
-## 常用命令（CLI 简称 `ah`，兼容别名 `a2a-hub` / `ahub` / `lah` / `hub-node`）
+## 常用命令（CLI 简称 `ah`，别名 `a2a-hub` / `ahub`）
 
-默认配置目录为 `~/.hub-node`（可通过 `--config <dir>` 或环境变量 `HUB_NODE_HOME` 指定）。完整参数见 [配置与 CLI 手册](docs/configuration.md)。
+默认配置目录为 `~/.a2a-hub`（程序本体位于 `~/.a2a-hub/app/`，可通过 `--config <dir>` 或环境变量 `AH_HOME` 指定）。完整参数见 [配置与 CLI 手册](docs/configuration.md)。
 
 | 分类 | 命令 | 用途 |
 |---|---|---|

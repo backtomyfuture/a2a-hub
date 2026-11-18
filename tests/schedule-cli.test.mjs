@@ -24,7 +24,7 @@ import {
 import { parseCron } from "../src/schedule-cron.mjs";
 import { ScheduleMirror } from "../src/schedule-mirror.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";
-import { MockFeishuBus } from "./mocks/mock-bus.mjs";
+import { MockBus } from "./mocks/mock-bus.mjs";
 
 const TABLES_WITH_RULES = {
   ...TABLES,
@@ -55,7 +55,7 @@ function setupDir(dir, { tz = "Asia/Shanghai", withRules = true, caps = { echo: 
 }
 
 function mockBus(withRules = true) {
-  const bus = new MockFeishuBus({ tables: withRules ? TABLES_WITH_RULES : TABLES });
+  const bus = new MockBus({ tables: withRules ? TABLES_WITH_RULES : TABLES });
   return bus;
 }
 
@@ -622,7 +622,7 @@ test("用户手改 register 行 Note 后，镜像刷新不会把该行置 No（�
     assert.ok(row);
     assert.equal(f1(row, "Enabled"), "Yes");
 
-    // 2. 模拟用户在多维表格界面手改 Note，删除了 "register" 等一切关键字
+    // 2. 模拟用户在界面手改 Note，删除了 "register" 等一切关键字
     await bus.updateRecord(TABLES_WITH_RULES.rules, row.record_id, {
       Note: "机主手写的备忘录：今天开会，不要删除我",
     });

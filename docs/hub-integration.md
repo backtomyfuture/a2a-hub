@@ -2,8 +2,8 @@
 
 枢纽是中台的操作者侧：负责把意图变成任务、把结果带回操作者。它不是
 一个独立进程，而是一个**逻辑角色**，并且是 node 角色的单进程超集（标准 §10.1）。实现是 Node 版
-`ah daemon --role node|hub`（代码在 `src/hub/`，兼容别名 `lah` / `hub-node`）。省略 `--role` 时
-读该配置目录 `node.json` 的 `role`，缺省 node。`role=hub` 单进程单配置目录（默认 `~/.hub-node`）
+`ah daemon --role node|hub`（代码在 `src/hub/`）。省略 `--role` 时
+读该配置目录 `node.json` 的 `role`，缺省 node。`role=hub` 单进程单配置目录（默认 `~/.a2a-hub`）
 即可同时承载干活与枢纽职责，无需再拆两个进程。本篇是对接规范。
 
 ## 职责清单
@@ -52,7 +52,7 @@
   - `Source="hub"` 或 `"cron"`（定时任务）归 `role=hub` 主节点消费；
   - 纯 HTTP Leader Agent（如 Muse）则直接通过 `GET /api/v1/agents/{node}/updates` 拉取所属任务回执。
 - 去重键：中断态是 `(Task_ID, Status_Msg)`；终态带上 `Status`。
-- 本地与总线双向记账：已呈递的键保存在本地配置目录的 `present_state.json`，并回写 `Tasks.Metadata.presented_keys` 与 `Presented="Yes"`。
+- 本地与总线双向记账：已呈递的键保存在本地配置目录的 `present_state.json`，并读-合并写回 `Tasks.Metadata.presented_keys`。
 - 陈旧告警与呈递分开：`working` 心跳为空或早于 20 分钟，以及 `submitted` 超过 20 分钟无人认领，每种情况每个任务只告警一次，记在 `stale_state.json`。
 
 ## 审批回路
@@ -66,6 +66,6 @@
 
 ## 运维要点
 
-- **进程托管**：使用 `ah up --service` 或 `ah join <hub-url> --service` 注册用户级 launchd / systemd / Windows 任务计划程序，日志在配置目录 `daemon.log`。
+- **进程托管**：使用 `ah up --service` 或 `ah join <hub-url> --service` 注册用户级自启（macOS launchd `ah-<role>.<node>` / Linux systemd `ah-<role>-<node>.service` / Windows 任务计划 `ah-<role>-<node>`，非默认配置目录追加配置路径 SHA-256 前 8 位摘要），日志在配置目录 `daemon.log`。
 - **本地状态**：`approval_state.json`、`present_state.json`、`stale_state.json`、`schedule_state.json`、`hub.db*`、`approval_key.pem`、`app.env` 保存在配置目录，不进仓库。
 - **留痕与溯源**：排查具体单据时运行 `ah task why <Task_ID> [--config <dir>] [--json]` 查阅单任务全链时间线与本地在途状态，亦可通过 Web 控制台或 `ah task show <Task_ID>` 查看。

@@ -4,7 +4,7 @@
 // 通过后按「消息 → Parts → 任务行」写 auth_decision。认领前批准回 submitted；
 // 执行中（Claimed_By 非空）保持 auth-required，由原节点核验后自己续跑。驳回置 canceled 并写 notice。
 // 写操作经调用方逐条 await；本模块用一条队列串行回调，避免两张卡同时改同一张表。
-// 飞书要求卡片回调大约 3 秒内返回。同步路径只做本地校验和一次回读，
+// 审批回调要尽快返回。同步路径只做本地校验和一次回读，
 // 通过就当场交回批准或驳回卡，写表放进后台。写失败或写前发现任务已变，才 PATCH 纠正卡片。
 
 import { pickSignedDecision, publicKeyOf, signDecision } from "../approval-sign.mjs";
@@ -13,7 +13,7 @@ import path from "node:path";
 import { f1 } from "../bus/tables.mjs";
 import { buildCard, buildStatusCard } from "./cards.mjs";
 
-// 同步回读的上限。飞书 3 秒预算里只留这一次读，读挂住不能把回调拖过超时。
+// 同步回读的上限。读挂住不能把回调拖过超时。
 const READ_FRESH_MS = 2000;
 
 function toast(type, content) {
@@ -30,7 +30,7 @@ export function extractEventId(data) {
   const id = data.event_id
     ?? data.header?.event_id
     ?? data.uuid
-    ?? data.open_message_id
+    ?? data.message_id
     ?? data.event?.header?.event_id
     ?? data.payload?.header?.event_id
     ?? data.payload?.event_id;
@@ -38,7 +38,7 @@ export function extractEventId(data) {
   return "";
 }
 
-export function operatorOpenId(data) {
+export function operatorId(data) {
   if (!data || typeof data !== "object") return "";
   const candidates = [
     data,
@@ -52,13 +52,11 @@ export function operatorOpenId(data) {
     if (!c || typeof c !== "object") continue;
     const op = c.operator;
     if (op && typeof op === "object") {
-      const id = op.open_id ?? op.openId ?? op.user_id;
+      const id = op.id;
       if (id) return String(id).trim();
     } else if (typeof op === "string" && op.trim()) {
       return op.trim();
     }
-    const directId = c.open_id ?? c.openId ?? c.user_id;
-    if (directId) return String(directId).trim();
   }
   return "";
 }
@@ -102,11 +100,11 @@ export function cardMessageId(data) {
     if (!layer || typeof layer !== "object" || Array.isArray(layer)) continue;
     const ctx = layer.context;
     if (ctx && typeof ctx === "object") {
-      const id = ctx.open_message_id ?? ctx.openMessageId ?? ctx.message_id;
+      const id = ctx.message_id;
       if (typeof id === "string" && id.trim()) return id.trim();
     }
     if (!(layer.action || layer.operator || layer.context)) continue;
-    const direct = layer.open_message_id ?? layer.openMessageId;
+    const direct = layer.message_id;
     if (typeof direct === "string" && direct.trim()) return direct.trim();
   }
   return "";
@@ -146,11 +144,11 @@ function bumpMsgId(msgId) {
 }
 
 export class ApprovalService {
-  constructor({ bus, ownerOpenId = "", allowLocalOwner = false, statePath, log, now = nowIso, dedupWindowMs = 60_000, signKey = null }) {
+  constructor({ bus, ownerId = "", allowLocalOwner = false, statePath, log, now = nowIso, dedupWindowMs = 60_000, signKey = null }) {
     // hub 的签名私钥（KeyObject）。有它就给每条决定签名，节点按固定公钥验签（标准 §8.3 第 5 条）。
     this.signKey = signKey;
     this.bus = bus;
-    this.ownerOpenId = String(ownerOpenId ?? "").trim();
+    this.ownerId = String(ownerId ?? "").trim();
     this.allowLocalOwner = Boolean(allowLocalOwner);
     this.statePath = statePath;
     this.log = log ?? (() => {});
@@ -212,9 +210,9 @@ export class ApprovalService {
 
   // 没有待发卡的任务就不拉 Messages/Parts。每成功一张立刻落盘。
   async scan() {
-    const owner = String(this.ownerOpenId ?? "").trim() || (this.allowLocalOwner ? "web-owner" : "");
+    const owner = String(this.ownerId ?? "").trim() || (this.allowLocalOwner ? "web-owner" : "");
     if (!owner) {
-      this.log("hub 未配置机主 open_id，跳过审批发卡");
+      this.log("hub 未配置机主标识，跳过审批发卡");
       return 0;
     }
     const state = this.loadState();
@@ -282,12 +280,12 @@ export class ApprovalService {
 
     const eventId = extractEventId(data);
     const src = data?._source || "unknown";
-    const configuredOwner = String(this.ownerOpenId ?? "").trim();
+    const configuredOwner = String(this.ownerId ?? "").trim();
     const isLocalWeb = !configuredOwner && this.allowLocalOwner && src === "web";
     const owner = isLocalWeb ? "web-owner" : configuredOwner;
-    const operator = operatorOpenId(data) || (isLocalWeb ? "web-owner" : "");
+    const operator = operatorId(data) || (isLocalWeb ? "web-owner" : "");
     if (!owner) {
-      this.log("WARN card action rejected: owner open_id is unset");
+      this.log("WARN card action rejected: owner id is unset");
       return toast("error", "未配置机主，已拒绝。");
     }
     if (operator !== owner) {

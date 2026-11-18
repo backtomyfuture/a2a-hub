@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// ah —— a2a-hub 命令行入口（同时兼容 lah / a2a-hub / ahub / hub-node 别名）。
+// ah —— a2a-hub 命令行入口（别名 a2a-hub / ahub，都进本文件）。
 // 子命令：
 //   up       一键初始化并启动独立中台 Hub（SQLite + HTTP 网关 + Web 控制台）
 //   join     一行接入远端 Hub 并启动 HTTP 长轮询节点
@@ -13,7 +13,7 @@
 //   reconcile 单次回表认领/对账后退出
 //   service  注册/卸载开机自启：macOS launchd / Linux systemd / Windows 任务计划程序（均用户级，无需管理员）
 //   update   自更新程序本体：git pull + 依赖重装 + 软链/Skill 补齐；--check 只看有没有新版本
-// 配置目录：--config <dir>，或环境变量 HUB_NODE_HOME，默认 ~/.hub-node。
+// 配置目录：--config <dir>，或环境变量 AH_HOME，默认 ~/.a2a-hub。
 // 配置目录内含 node.json（节点身份与总线参数）与 commands.json（能力 -> 命令模板）。
 
 import os from "node:os";
@@ -27,8 +27,8 @@ const APP_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 function configDirFrom(argv) {
   const i = argv.indexOf("--config");
   if (i >= 0 && argv[i + 1]) return argv[i + 1];
-  if (process.env.HUB_NODE_HOME) return process.env.HUB_NODE_HOME;
-  return path.join(os.homedir(), ".hub-node");
+  if (process.env.AH_HOME) return process.env.AH_HOME;
+  return path.join(os.homedir(), ".a2a-hub");
 }
 
 // 命令行写了 --role 就取出；没写返回 undefined。非法值抛错，不静默当成 node。
@@ -279,20 +279,14 @@ if (cmd === "up") {
     process.exitCode = 1;
   } else {
     const configDir = path.resolve(configDirFrom(rest));
-    const { runSetup, isLegacyFeishuNodeConfig } = await import("../src/setup.mjs");
-    // join 以往总是带 --force，好让重复接入刷新地址。旧飞书配置不能走这条捷径，否则会覆盖生产 node.json。
-    let legacyFeishu = false;
-    try {
-      const raw = JSON.parse(fs.readFileSync(path.join(configDir, "node.json"), "utf8"));
-      legacyFeishu = isLegacyFeishuNodeConfig(raw);
-    } catch { /* 没有可读配置就按普通接入 */ }
-    const userForced = rest.includes("--force");
+    const { runSetup } = await import("../src/setup.mjs");
+    // join 的语义就是「接入或重新接入这个 Hub」，重复执行要能刷新地址、Token 与公钥，所以总是覆盖 node.json。
     const setupArgs = [
       "--role", "node",
       "--bus", "http",
       "--join", joinTarget,
       "--yes",
-      ...(legacyFeishu && !userForced ? [] : ["--force"]),
+      "--force",
       ...forwarded,
     ];
     const setupCode = await runSetup(configDir, setupArgs, APP_DIR);

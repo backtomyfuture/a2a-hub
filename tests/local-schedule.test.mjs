@@ -1,5 +1,5 @@
 // 节点本地调度：基线、补期、时区、幂等键、坏计划和内核同一轮认领。
-// 时钟由构造参数注入。总线是内存 mock。不读 ~/.hub-node，不连飞书。
+// 时钟由构造参数注入。总线是内存 mock。不读 ~/.a2a-hub，不连外部服务。
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -12,7 +12,7 @@ import { Kernel } from "../src/kernel.mjs";
 import { LocalScheduleService } from "../src/local-schedule.mjs";
 import { HubRuntime } from "../src/hub/index.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";
-import { MockFeishuBus } from "./mocks/mock-bus.mjs";
+import { MockBus } from "./mocks/mock-bus.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ECHO = path.join(ROOT, "src", "executors", "echo.mjs");
@@ -30,7 +30,7 @@ function echoCommand() {
 }
 
 function bus() {
-  return new MockFeishuBus({ tables: TABLES });
+  return new MockBus({ tables: TABLES });
 }
 
 function writeSchedules(file, schedules) {

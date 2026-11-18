@@ -14,7 +14,7 @@ import { PresentService } from "../src/hub/present.mjs";
 import { ScheduleService } from "../src/hub/schedule.mjs";
 import { StaleService } from "../src/hub/stale.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";
-import { MockFeishuBus } from "./mocks/mock-bus.mjs";
+import { MockBus } from "./mocks/mock-bus.mjs";
 
 // commands.json 的 command 会交给 sh -c。单引号才能保住脚本里的引号和换行；
 // JSON.stringify 的 \" 与 \n 会被 shell 拆开，node -e 收到的不是原脚本。
@@ -87,7 +87,7 @@ function reap(dir, kernels) {
 
 async function setup(dir, commandEntry) {
   fs.writeFileSync(path.join(dir, "commands.json"), JSON.stringify({ echo: commandEntry }), { mode: 0o600 });
-  const mock = new MockFeishuBus({ tables: TABLES });
+  const mock = new MockBus({ tables: TABLES });
   const kernel = new Kernel({
     node: "node-a",
     role: "node",
@@ -473,7 +473,7 @@ test("hub 的审批、呈递、陈旧回收和定时扫描不被 direct 命令�
           timeout_sec: 30,
         },
       }), { mode: 0o600 });
-      const mock = new MockFeishuBus({ tables });
+      const mock = new MockBus({ tables });
       const cfg = {
         node: "node-a",
         role: "hub",
@@ -487,7 +487,7 @@ test("hub 的审批、呈递、陈旧回收和定时扫描不被 direct 命令�
       };
       const approval = new ApprovalService({
         bus: mock,
-        ownerOpenId: "ou_owner",
+        ownerId: "ou_owner",
         statePath: path.join(dir, "approval_state.json"),
         log: () => {},
       });
@@ -501,7 +501,7 @@ test("hub 的审批、呈递、陈旧回收和定时扫描不被 direct 命令�
       });
       const stale = new StaleService({
         bus: mock,
-        ownerOpenId: "ou_owner",
+        ownerId: "ou_owner",
         statePath: path.join(dir, "stale_state.json"),
         log: () => {},
       });

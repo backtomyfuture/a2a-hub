@@ -1,6 +1,6 @@
 // hub 不再在 submitted 阶段替节点写 auth_request。
 // 行级 Approval_Class 与 commands.json 下限仍由目标节点在认领前落静态门。
-// 总线是内存 mock。不读 ~/.hub-node，不打开长连接。
+// 总线是内存 mock。不读 ~/.a2a-hub，不打开长连接。
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -11,7 +11,7 @@ import { f1 } from "../src/bus/tables.mjs";
 import { ApprovalService } from "../src/hub/approval.mjs";
 import { Kernel } from "../src/kernel.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";
-import { MockFeishuBus } from "./mocks/mock-bus.mjs";
+import { MockBus } from "./mocks/mock-bus.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ECHO = path.join(ROOT, "src", "executors", "echo.mjs");
@@ -100,7 +100,7 @@ async function authRequests(mock, taskId) {
 function approvalFor(dir, mock, kernel) {
   return new ApprovalService({
     bus: mock,
-    ownerOpenId: OWNER,
+    ownerId: OWNER,
     statePath: path.join(dir, "approval_state.json"),
     log: () => {},
   });
@@ -108,7 +108,7 @@ function approvalFor(dir, mock, kernel) {
 
 async function decide(approval, task, statusMsg, decision) {
   const res = await approval.handleCardAction({
-    operator: { open_id: OWNER },
+    operator: { id: OWNER },
     action: {
       value: {
         record_id: task.record_id,
@@ -139,7 +139,7 @@ test("hub 扫描不抢跑，节点认领前只写一条静态 auth_request", asy
       cap_id: "CAP-test-echo",
       name: "echo",
     });
-    const mock = new MockFeishuBus({ tables: TABLES });
+    const mock = new MockBus({ tables: TABLES });
     const hub = new Kernel(kernelCfg(dir, mock, "hub", "hub"));
     const node = new Kernel(kernelCfg(dir, mock, "node-a", "node"));
     const approval = approvalFor(dir, mock, hub);
@@ -191,7 +191,7 @@ test("静态门 client_token 在重扫看不见原消息时仍不插入第二条
       context: "direct",
       timeout_sec: 30,
     });
-    const mock = new MockFeishuBus({ tables: TABLES });
+    const mock = new MockBus({ tables: TABLES });
     const node = new Kernel(kernelCfg(dir, mock, "node-a", "node"));
     await seedTask(mock, {
       Task_ID: "TASK-TOK-1",
@@ -236,7 +236,7 @@ test("节点静态门批准后才执行到 completed", async () => {
       cap_id: "CAP-test-echo",
       name: "echo",
     });
-    const mock = new MockFeishuBus({ tables: TABLES });
+    const mock = new MockBus({ tables: TABLES });
     const hub = new Kernel(kernelCfg(dir, mock, "hub", "hub"));
     const node = new Kernel(kernelCfg(dir, mock, "node-a", "node"));
     const approval = approvalFor(dir, mock, hub);
@@ -290,7 +290,7 @@ test("驳回后任务 canceled，节点不会认领", async () => {
       timeout_sec: 30,
       cap_id: "CAP-test-echo",
     });
-    const mock = new MockFeishuBus({ tables: TABLES });
+    const mock = new MockBus({ tables: TABLES });
     const hub = new Kernel(kernelCfg(dir, mock, "hub", "hub"));
     const node = new Kernel(kernelCfg(dir, mock, "node-a", "node"));
     const approval = approvalFor(dir, mock, hub);
@@ -337,7 +337,7 @@ test("执行中批准保持 auth-required，不写 submitted", async () => {
       context: "direct",
       timeout_sec: 30,
     });
-    const mock = new MockFeishuBus({ tables: TABLES });
+    const mock = new MockBus({ tables: TABLES });
     const hub = new Kernel(kernelCfg(dir, mock, "hub", "hub"));
     const approval = approvalFor(dir, mock, hub);
     await seedTask(mock, {
@@ -383,7 +383,7 @@ test("非 approve 任务不提前审批，本地下限仍在认领时触发", as
       cap_id: "CAP-test-echo",
       approval_class: "approve",
     });
-    const mock = new MockFeishuBus({ tables: TABLES });
+    const mock = new MockBus({ tables: TABLES });
     const hub = new Kernel(kernelCfg(dir, mock, "hub", "hub"));
     const node = new Kernel(kernelCfg(dir, mock, "node-a", "node"));
     const approval = approvalFor(dir, mock, hub);
@@ -431,7 +431,7 @@ test("行级与本机都不是 approve 时认领直接完成", async () => {
       timeout_sec: 30,
       cap_id: "CAP-test-echo",
     });
-    const mock = new MockFeishuBus({ tables: TABLES });
+    const mock = new MockBus({ tables: TABLES });
     const hub = new Kernel(kernelCfg(dir, mock, "hub", "hub"));
     const node = new Kernel(kernelCfg(dir, mock, "node-a", "node"));
     const approval = approvalFor(dir, mock, hub);

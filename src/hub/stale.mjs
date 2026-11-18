@@ -127,9 +127,9 @@ function alertText(kind, task) {
 }
 
 export class StaleService {
-  constructor({ bus, ownerOpenId = "", allowLocalAlert = false, notifier = null, statePath, log, now = () => Date.now() }) {
+  constructor({ bus, ownerId = "", allowLocalAlert = false, notifier = null, statePath, log, now = () => Date.now() }) {
     this.bus = bus;
-    this.ownerOpenId = String(ownerOpenId ?? "").trim();
+    this.ownerId = String(ownerId ?? "").trim();
     this.allowLocalAlert = !!allowLocalAlert;
     this.notifier = notifier ?? null;
     this.statePath = statePath;
@@ -173,7 +173,7 @@ export class StaleService {
         From_Node: "hub", To_Node: initiator, Role: "agent", Kind: "notice",
         Artifact_Ref: "", In_Reply_To: "", Created_At: nowIso(),
       });
-      // createRecord 回的是飞书原始响应，record_id 在 record 里（与 kernel._asRow 同口径）。
+      // createRecord 回的是总线响应，record_id 在 record 里（与 kernel._asRow 同口径）。
       const newId = createdMsg?.record?.record_id || createdMsg?.record_id || "";
       if (!newId) throw new Error("notice 消息写入失败");
     }
@@ -283,11 +283,11 @@ export class StaleService {
         seenDirty = true;
       }
     }
-    const owner = String(this.ownerOpenId ?? "").trim();
+    const owner = String(this.ownerId ?? "").trim();
     const hasNotifier = !!this.notifier?.isEnabled?.();
     let sent = 0;
     if (!owner && !hasNotifier && !this.allowLocalAlert) {
-      if (due.length) this.log("hub 未配置机主 open_id，陈旧任务只记在日志里，本轮不标记已告警");
+      if (due.length) this.log("hub 未配置机主标识，陈旧任务只记在日志里，本轮不标记已告警");
       for (const item of due) this.log("stale " + item.kind + " " + f1(item.task, "Task_ID"));
     } else {
       for (const item of due) {
@@ -316,7 +316,7 @@ export class StaleService {
         this.log("stale alerted " + item.kind + " " + f1(item.task, "Task_ID"));
       }
     }
-    // 回收不依赖机主 open_id：告警发过（或旧状态已有记录）且宽限届满就执行。
+    // 回收不依赖机主标识：告警发过（或旧状态已有记录）且宽限届满就执行。
     // 成功才清告警记录；失败保留记录与原计时，下一轮 scan 直接重试（回收
     // 本身对重复执行安全：复用已写的 notice、只关未结束的 Run）。
     let reclaimed = 0;

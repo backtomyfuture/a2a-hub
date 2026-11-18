@@ -7,7 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { PresentService } from "../src/hub/present.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";
-import { MockFeishuBus } from "./mocks/mock-bus.mjs";
+import { MockBus } from "./mocks/mock-bus.mjs";
 
 async function seedCanceled(bus, taskId, from = "node-a") {
   await bus.createRecord(TABLES.tasks, {
@@ -86,7 +86,7 @@ function queued(svc) {
 
 test("审批驳回的 canceled 落入发起方队列，正文取 notice，且只呈递一次", async () => {
   await withTemp(async (dir) => {
-    const bus = new MockFeishuBus({ tables: TABLES });
+    const bus = new MockBus({ tables: TABLES });
     const svc = service(dir, bus, { keys: [], canceledBaseline: true });
     await seedCanceled(bus, "TASK-REJ-1");
     assert.equal(await svc.scan(), 1);
@@ -102,7 +102,7 @@ test("审批驳回的 canceled 落入发起方队列，正文取 notice，且只
 
 test("旧版状态文件升级：历史 canceled 只建水位线，之后的新撤单照常呈递", async () => {
   await withTemp(async (dir) => {
-    const bus = new MockFeishuBus({ tables: TABLES });
+    const bus = new MockBus({ tables: TABLES });
     await seedCanceled(bus, "TASK-OLD-1");
     // 旧版本写出的状态文件没有 canceledBaseline。
     const svc = service(dir, bus, { keys: [] });
@@ -119,7 +119,7 @@ test("旧版状态文件升级：历史 canceled 只建水位线，之后的新�
 
 test("首次启动的水位线同样吞掉存量 canceled，并写上 canceledBaseline", async () => {
   await withTemp(async (dir) => {
-    const bus = new MockFeishuBus({ tables: TABLES });
+    const bus = new MockBus({ tables: TABLES });
     await seedCanceled(bus, "TASK-HIST-1");
     const svc = service(dir, bus, null);
     assert.equal(await svc.scan(), 0);

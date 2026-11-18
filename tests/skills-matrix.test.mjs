@@ -1,4 +1,4 @@
-// 2×2 四类 Skill 矩阵、按角色隔离安装、ah/lah 刷新迁移与 CLI 兼容测试。
+// 2×2 四类 Skill 矩阵、按角色隔离安装、已装 Skill 刷新与 CLI 入口测试。
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -71,7 +71,7 @@ test("installLocalSkills：host 机器不误装 ah-inbox，kind=agent 按节点�
   });
 });
 
-test("refreshSkill：升级时结合 node.json 与已装 Skill 精准刷新并迁移旧版 lah", async () => {
+test("refreshSkill：升级时结合 node.json 与已装 Skill 精准刷新", async () => {
   await withTemp(async (tmpDir) => {
     const cfgDir = path.join(tmpDir, "agent-cfg");
     fs.mkdirSync(cfgDir, { recursive: true });
@@ -95,16 +95,13 @@ test("refreshSkill：升级时结合 node.json 与已装 Skill 精准刷新并�
       fs.readFileSync(path.join(REPO_ROOT, "skills", "ah", "SKILL.md"), "utf8"),
     );
 
-    // 旧版仅装过 lah / lah-inbox 时，upgrade 自动映射生成新版 ah / ah-inbox
-    const legacyRoot = path.join(tmpDir, "legacy-skills");
-    fs.mkdirSync(path.join(legacyRoot, "lah"), { recursive: true });
-    fs.mkdirSync(path.join(legacyRoot, "lah-inbox"), { recursive: true });
-    fs.writeFileSync(path.join(legacyRoot, "lah", "SKILL.md"), "legacy");
-    fs.writeFileSync(path.join(legacyRoot, "lah-inbox", "SKILL.md"), "legacy");
-    const migrated = refreshSkill(REPO_ROOT, false, "", legacyRoot);
-    assert.deepEqual(migrated.sort(), ["ah", "ah-inbox"]);
-    assert.equal(fs.existsSync(path.join(legacyRoot, "ah", "SKILL.md")), true);
-    assert.equal(fs.existsSync(path.join(legacyRoot, "ah-inbox", "SKILL.md")), true);
+    // 目录里只有无关文件时，不把它当成已装 Skill；无 configDir 则默认补齐主控 ah
+    const unrelatedRoot = path.join(tmpDir, "unrelated-skills");
+    fs.mkdirSync(path.join(unrelatedRoot, "notes"), { recursive: true });
+    fs.writeFileSync(path.join(unrelatedRoot, "notes", "SKILL.md"), "keep");
+    const unrelated = refreshSkill(REPO_ROOT, false, "", unrelatedRoot);
+    assert.deepEqual(unrelated, ["ah"]);
+    assert.equal(fs.readFileSync(path.join(unrelatedRoot, "notes", "SKILL.md"), "utf8"), "keep");
 
     // 全空目录且无 configDir 时默认补齐主控 ah
     const freshRoot = path.join(tmpDir, "fresh-skills");
@@ -120,18 +117,19 @@ test("4 套 Skill 文件格式完整且角色边界隔离清晰", () => {
   }
   const leaderHttp = fs.readFileSync(path.join(REPO_ROOT, "skills", "a2a-leader", "SKILL.md"), "utf8");
   const workerHttp = fs.readFileSync(path.join(REPO_ROOT, "skills", "a2a-worker", "SKILL.md"), "utf8");
-  assert.doesNotMatch(leaderHttp, /\b(ah|lah)\s+(task|inbox|setup|inventory|loop)\b/);
-  assert.doesNotMatch(workerHttp, /\b(ah|lah)\s+(task|inbox|setup|inventory|loop)\b/);
+  assert.doesNotMatch(leaderHttp, /\bah\s+(task|inbox|setup|inventory|loop)\b/);
+  assert.doesNotMatch(workerHttp, /\bah\s+(task|inbox|setup|inventory|loop)\b/);
   assert.match(leaderHttp, /POST \/api\/v1\/tasks/);
   assert.match(workerHttp, /GET \/api\/v1\/agents\/\{node\}\/poll|\/poll\?timeout=/);
 });
 
-test("CLI 入口：ah 与兼容别名 lah / hub-node 均正常响应 --version", () => {
-  for (const binFile of ["bin/ah.mjs", "bin/lah.mjs", "bin/hub-node.mjs"]) {
-    const res = spawnSync(process.execPath, [path.join(REPO_ROOT, binFile), "--version"], {
-      encoding: "utf8",
-    });
-    assert.equal(res.status, 0, `${binFile} --version failed: ${res.stderr}`);
-    assert.equal(res.stdout.trim(), DAEMON_VERSION);
-  }
+test("CLI 入口 ah 响应 --version，package.json 只登记 ah / a2a-hub / ahub", () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8"));
+  assert.deepEqual(Object.keys(pkg.bin).sort(), ["a2a-hub", "ah", "ahub"]);
+  for (const target of Object.values(pkg.bin)) assert.equal(target, "bin/ah.mjs");
+  const res = spawnSync(process.execPath, [path.join(REPO_ROOT, "bin", "ah.mjs"), "--version"], {
+    encoding: "utf8",
+  });
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(res.stdout.trim(), DAEMON_VERSION);
 });

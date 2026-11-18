@@ -10,7 +10,7 @@ import { f1 } from "../src/bus/tables.mjs";
 import { readInbox } from "../src/inbox.mjs";
 import { Kernel } from "../src/kernel.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";
-import { MockFeishuBus } from "./mocks/mock-bus.mjs";
+import { MockBus } from "./mocks/mock-bus.mjs";
 
 function shellSingleQuote(text) {
   return `'${String(text).replaceAll("'", "'\\''")}'`;
@@ -138,7 +138,7 @@ test("direct 在途时 inbox 心跳仍刷新且不被回收", async () => {
           name: "agent",
         },
       }), { mode: 0o600 });
-      const mock = new MockFeishuBus({ tables: TABLES });
+      const mock = new MockBus({ tables: TABLES });
       const kernel = new Kernel({
         node: "node-a",
         role: "node",

@@ -123,7 +123,7 @@ export class HttpBus {
     );
   }
 
-  sendMessage(receiveId, msgType, content, receiveIdType = "open_id") {
+  sendMessage(receiveId, msgType, content, receiveIdType = "owner") {
     return this.api("POST", "/api/v1/im/messages", {
       receive_id: receiveId,
       receive_id_type: receiveIdType,
@@ -132,8 +132,8 @@ export class HttpBus {
     }, "other");
   }
 
-  sendCard(openId, card) {
-    return this.sendMessage(openId, "interactive", card, "open_id");
+  sendCard(receiveId, card) {
+    return this.sendMessage(receiveId, "interactive", card, "owner");
   }
 
   patchInteractiveCard(messageId, card) {

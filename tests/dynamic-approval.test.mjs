@@ -1,5 +1,5 @@
 // 执行中动态审批：NeedAuth、inbox auth、验签去重、竞态双检、槽忙与终态清理。
-// 总线是内存 mock。不读 ~/.hub-node，不打开长连接。
+// 总线是内存 mock。不读 ~/.a2a-hub，不打开长连接。
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -20,7 +20,7 @@ import {
 import { Kernel } from "../src/kernel.mjs";
 import { formatWhyText, getTaskWhy } from "../src/why.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";
-import { MockFeishuBus } from "./mocks/mock-bus.mjs";
+import { MockBus } from "./mocks/mock-bus.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OWNER = "ou_test_owner";
@@ -120,7 +120,7 @@ async function requestViews(mock, taskId) {
 function approvalFor(dir, mock, kernel, signKey = null) {
   return new ApprovalService({
     bus: mock,
-    ownerOpenId: OWNER,
+    ownerId: OWNER,
     statePath: path.join(dir, "approval_state.json"),
     signKey,
     log: () => {},
@@ -129,7 +129,7 @@ function approvalFor(dir, mock, kernel, signKey = null) {
 
 async function decide(approval, task, decision) {
   const res = await approval.handleCardAction({
-    operator: { open_id: OWNER },
+    operator: { id: OWNER },
     action: {
       value: {
         record_id: task.record_id,
@@ -171,7 +171,7 @@ function jsonAuthCommand(dir, name, body) {
 }
 
 function historicalToken(taskId, scope = "") {
-  let input = "lah-auth-request\0" + taskId;
+  let input = "ah-auth-request\0" + taskId;
   if (scope) input += "\0" + scope;
   const hex = createHash("sha256").update(input).digest("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
@@ -179,7 +179,7 @@ function historicalToken(taskId, scope = "") {
 
 test("静态 client_token 与空 scope 历史哈希逐字节相同", async () => {
   await withTemp(async (dir) => {
-    const mock = new MockFeishuBus({ tables: TABLES });
+    const mock = new MockBus({ tables: TABLES });
     const node = new Kernel(kernelCfg(dir, mock, "node-a", "node"));
     assert.equal(node.authRequestToken("TASK-TOK-1"), historicalToken("TASK-TOK-1"));
     assert.equal(node.authRequestToken("TASK-TOK-1", ""), historicalToken("TASK-TOK-1"));
@@ -206,7 +206,7 @@ test("direct json 的 NeedAuth 批准后不回 submitted，续跑带上 approval
       timeout_sec: 30,
       cap_id: "CAP-test-echo",
     });
-    const mock = new MockFeishuBus({ tables: TABLES });
+    const mock = new MockBus({ tables: TABLES });
     const node = new Kernel(kernelCfg(dir, mock, "node-a", "node"));
     const approval = approvalFor(dir, mock, node);
     await seedTask(mock, { Task_ID: "TASK-DJ-1", Context_ID: "CTX-DJ-1" });
@@ -252,7 +252,7 @@ test("direct agent 批准后续跑改走 resume_command", async () => {
       timeout_sec: 30,
       cap_id: "CAP-test-echo",
     });
-    const mock = new MockFeishuBus({ tables: TABLES });
+    const mock = new MockBus({ tables: TABLES });
     const node = new Kernel(kernelCfg(dir, mock, "node-a", "node"));
     const approval = approvalFor(dir, mock, node);
     await seedTask(mock, { Task_ID: "TASK-DA-1", Context_ID: "CTX-DA-1" });
@@ -279,7 +279,7 @@ test("inbox auth 写总线前即 waiting-auth，批准后刷新 pending", async 
       timeout_sec: 30,
       cap_id: "CAP-test-echo",
     });
-    const mock = new MockFeishuBus({ tables: TABLES });
+    const mock = new MockBus({ tables: TABLES });
     const node = new Kernel(kernelCfg(dir, mock, "node-a", "node"));
     const approval = approvalFor(dir, mock, node);
     await seedTask(mock, { Task_ID: "TASK-IN-1", Context_ID: "CTX-IN-1" });
@@ -345,7 +345,7 @@ test("同一任务两次动态审批使用不同 runId，paused 重试仍复用 
       timeout_sec: 30,
       cap_id: "CAP-test-echo",
     });
-    const mock = new MockFeishuBus({ tables: TABLES });
+    const mock = new MockBus({ tables: TABLES });
     const node = new Kernel(kernelCfg(dir, mock, "node-a", "node"));
     const approval = approvalFor(dir, mock, node);
     await seedTask(mock, { Task_ID: "TASK-MULTI-1", Context_ID: "CTX-MULTI-1" });
@@ -378,7 +378,7 @@ test("writeRun 已 paused 后第二次收口仍复用 flight.runId，不发第�
       timeout_sec: 30,
       cap_id: "CAP-test-echo",
     });
-    const mock = new MockFeishuBus({ tables: TABLES });
+    const mock = new MockBus({ tables: TABLES });
     const node = new Kernel(kernelCfg(dir, mock, "node-a", "node"));
     const approval = approvalFor(dir, mock, node);
     await seedTask(mock, { Task_ID: "TASK-RETRYAUTH-1", Context_ID: "CTX-RETRYAUTH-1" });
@@ -420,7 +420,7 @@ test("伪造决定不续跑，也不挡住随后的合法签名点击", async ()
       timeout_sec: 30,
       cap_id: "CAP-test-echo",
     });
-    const mock = new MockFeishuBus({ tables: TABLES });
+    const mock = new MockBus({ tables: TABLES });
     const node = new Kernel(kernelCfg(dir, mock, "node-a", "node", { hubPublicKey: publicKey }));
     await seedTask(mock, { Task_ID: "TASK-FORGE-1", Context_ID: "CTX-FORGE-1" });
     await node.run({ once: true });
@@ -487,7 +487,7 @@ test("节点后写的 working 盖住撤单后，双检落 failed 且不执行", 
       timeout_sec: 30,
       cap_id: "CAP-test-echo",
     });
-    const mock = new MockFeishuBus({ tables: TABLES });
+    const mock = new MockBus({ tables: TABLES });
     const node = new Kernel(kernelCfg(dir, mock, "node-a", "node"));
     const approval = approvalFor(dir, mock, node);
     await seedTask(mock, { Task_ID: "TASK-RACE-1", Context_ID: "CTX-RACE-1" });
@@ -536,7 +536,7 @@ test("inbox 续跑被撤单双检拦住时不放回 pending", async () => {
       timeout_sec: 30,
       cap_id: "CAP-test-echo",
     });
-    const mock = new MockFeishuBus({ tables: TABLES });
+    const mock = new MockBus({ tables: TABLES });
     const node = new Kernel(kernelCfg(dir, mock, "node-a", "node"));
     const approval = approvalFor(dir, mock, node);
     await seedTask(mock, { Task_ID: "TASK-INR-1", Context_ID: "CTX-INR-1" });
@@ -589,7 +589,7 @@ test("direct 槽忙时推迟 auth 续跑", async () => {
       timeout_sec: 30,
       cap_id: "CAP-test-echo",
     });
-    const mock = new MockFeishuBus({ tables: TABLES });
+    const mock = new MockBus({ tables: TABLES });
     const node = new Kernel(kernelCfg(dir, mock, "node-a", "node"));
     const approval = approvalFor(dir, mock, node);
     await seedTask(mock, { Task_ID: "TASK-SLOT-1", Context_ID: "CTX-SLOT-1" });
@@ -614,7 +614,7 @@ test("canceled 后清掉 session 与收件箱，pop 不再返回", async () => {
       context: "direct",
       timeout_sec: 30,
     });
-    const mock = new MockFeishuBus({ tables: TABLES });
+    const mock = new MockBus({ tables: TABLES });
     const node = new Kernel(kernelCfg(dir, mock, "node-a", "node"));
     await seedTask(mock, {
       Task_ID: "TASK-CLEAN-1",
@@ -646,7 +646,7 @@ test("input-required 上的静态门因 Claimed_By 非空走续跑", async () =>
       cap_id: "CAP-test-echo",
       approval_class: "approve",
     });
-    const mock = new MockFeishuBus({ tables: TABLES });
+    const mock = new MockBus({ tables: TABLES });
     const node = new Kernel(kernelCfg(dir, mock, "node-a", "node"));
     const approval = approvalFor(dir, mock, node);
     await seedTask(mock, {
@@ -697,7 +697,7 @@ test("input-required 上的静态门因 Claimed_By 非空走续跑", async () =>
 
 test("why 显示 waiting-auth，已批准时提示续跑且不泄露 DataPart 值", async () => {
   await withTemp(async (dir) => {
-    const mock = new MockFeishuBus({ tables: TABLES });
+    const mock = new MockBus({ tables: TABLES });
     await seedTask(mock, {
       Task_ID: "TASK-WHY-1",
       Context_ID: "CTX-WHY-1",
@@ -763,7 +763,7 @@ test("静态门不认动态批准：本机下限要求 approve 时仍另写一�
       cap_id: "CAP-test-echo",
       approval_class: "approve",
     });
-    const mock = new MockFeishuBus({ tables: TABLES });
+    const mock = new MockBus({ tables: TABLES });
     const node = new Kernel(kernelCfg(dir, mock, "node-a", "node"));
     await seedTask(mock, { Task_ID: "TASK-STAT-1", Context_ID: "CTX-STAT-1", Approval_Class: "auto" });
     // 先前某次执行段留下的、已被批准的动态请求。它不是这条本机下限要的那一次审批。
@@ -807,7 +807,7 @@ test("inbox 条目在 waiting-auth 时，总线仍是 working 也不被心跳回
       timeout_sec: 30,
       cap_id: "CAP-test-echo",
     });
-    const mock = new MockFeishuBus({ tables: TABLES });
+    const mock = new MockBus({ tables: TABLES });
     const node = new Kernel(kernelCfg(dir, mock, "node-a", "node"));
     const staleHeartbeat = "2026-01-15T09:00:00+0800";
     await seedTask(mock, {

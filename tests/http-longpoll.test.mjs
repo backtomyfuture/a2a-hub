@@ -52,7 +52,7 @@ test("端到端：HttpBus + 长轮询毫秒级唤醒 + Web ed25519 审批 + 问�
     });
     const approval = new ApprovalService({
       bus: sqliteBus,
-      ownerOpenId: "",
+      ownerId: "",
       allowLocalOwner: true,
       statePath: path.join(hubDir, "approval_state.json"),
       signKey: key.privateKey,
@@ -269,10 +269,10 @@ test("一键部署：--hub 自动生成 Token、/api/v1/health 暴露公钥、--
       assert.ok(fs.existsSync(hubEnvPath));
       assert.strictEqual(fs.statSync(hubEnvPath).mode & 0o777, 0o600);
       const hubEnv = readEnvFile(hubEnvPath);
-      const apiToken = hubEnv.LAH_API_TOKEN || hubEnv.HUB_API_TOKEN || "";
+      const apiToken = hubEnv.AH_API_TOKEN || hubEnv.AH_API_TOKEN || "";
       assert.ok(apiToken.length >= 16, "auto-generated apiToken should be non-empty");
-      assert.strictEqual(hubEnv.HUB_API_TOKEN, apiToken);
-      assert.strictEqual(hubEnv.LAH_API_TOKEN, apiToken);
+      assert.strictEqual(hubEnv.AH_API_TOKEN, apiToken);
+      assert.strictEqual(hubEnv.AH_API_TOKEN, apiToken);
 
       const key = loadOrCreateHubKey(hubDir);
       broker = new LongPollBroker({ initialSeq: 0 });
@@ -283,7 +283,7 @@ test("一键部署：--hub 自动生成 Token、/api/v1/health 暴露公钥、--
       });
       const approval = new ApprovalService({
         bus: sqliteBus,
-        ownerOpenId: "",
+        ownerId: "",
         allowLocalOwner: true,
         statePath: path.join(hubDir, "approval_state.json"),
         signKey: key.privateKey,
@@ -331,8 +331,8 @@ test("一键部署：--hub 自动生成 Token、/api/v1/health 暴露公钥、--
       assert.ok(fs.existsSync(edgeEnvPath));
       assert.strictEqual(fs.statSync(edgeEnvPath).mode & 0o777, 0o600);
       const edgeEnv = readEnvFile(edgeEnvPath);
-      assert.strictEqual(edgeEnv.HUB_API_TOKEN, apiToken);
-      assert.strictEqual(edgeEnv.LAH_API_TOKEN, apiToken);
+      assert.strictEqual(edgeEnv.AH_API_TOKEN, apiToken);
+      assert.strictEqual(edgeEnv.AH_API_TOKEN, apiToken);
 
       const loadedCfg = loadConfig(nodeDir);
       assert.strictEqual(loadedCfg.apiToken, apiToken);

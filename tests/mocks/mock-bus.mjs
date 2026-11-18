@@ -1,8 +1,8 @@
-// 内存版飞书总线，给 Kernel 与 hub 的测试用。不读环境变量，不访问网络，不碰 ~/.hub-node。
+// 内存版总线，给 Kernel 与 hub 的测试用。不读环境变量，不访问网络，不碰 ~/.a2a-hub。
 //
 // 用法：
 //   import { f1 } from "../../src/bus/tables.mjs";
-//   const bus = new MockFeishuBus({
+//   const bus = new MockBus({
 //     tables: { tasks: "tbl_tasks", messages: "tbl_messages", parts: "tbl_parts",
 //               runs: "tbl_runs", artifacts: "tbl_artifacts", agentCards: "tbl_cards" },
 //   });
@@ -11,10 +11,10 @@
 //   await bus.findRecords(bus.tables.tasks, "Task_ID", "TASK-1")
 //
 // 字段按线上形态保存：写入的标量收成单元素数组，读的时候仍用 f1() 取标量。
-// 已经是数组的值原样保存（飞书多选），不再套一层。
-// createRecord 的返回值对齐飞书 data：{ record: { record_id, fields } }。
+// 已经是数组的值原样保存（标量数组），不再套一层。
+// createRecord 的返回值对齐总线 data：{ record: { record_id, fields } }。
 // getRecord 对齐 d.record；没有这条记录时返回 null，不抛网络错误。
-// 带了 client_token 的再次 create 返回已有行，不插第二行（对齐飞书幂等创建）。
+// 带了 client_token 的再次 create 返回已有行，不插第二行（client_token 幂等创建）。
 //
 // 失败注入（落库前抛出，不会留下半行）：
 //   bus.failNext({ op: "update", table: bus.tables.tasks }); // 默认错误含 1254291
@@ -22,9 +22,9 @@
 // journal 只记录已经成功的调用，元素为 { op, table, recordId, fields }。
 // 后续波次（在途执行账本、回执 later/session/usage）直接复用本类，不要再包一层假 HTTP。
 
-export class MockFeishuBus {
+export class MockBus {
   constructor({ tables } = {}) {
-    if (!tables || typeof tables !== "object") throw new Error("MockFeishuBus 需要 tables");
+    if (!tables || typeof tables !== "object") throw new Error("MockBus 需要 tables");
     this.tables = tables;
     this._seq = 1;
     this._rows = new Map();
@@ -39,7 +39,7 @@ export class MockFeishuBus {
     }
   }
 
-  // 对齐 FeishuBus.tenantToken：测试里内核启动会调一次，这里不打开放平台。
+  // 对齐总线 tenantToken：测试里内核启动会调一次，这里不访问网络。
   async tenantToken() {
     return "test-tenant-token";
   }
@@ -109,7 +109,7 @@ export class MockFeishuBus {
     return { record: this._clone(row) };
   }
 
-  async sendMessage(receiveId, msgType, content, receiveIdType = "open_id") {
+  async sendMessage(receiveId, msgType, content, receiveIdType = "owner") {
     await this._gate({ op: "send", table: "", receiveId, msgType });
     const item = {
       receive_id: receiveId,
@@ -122,11 +122,11 @@ export class MockFeishuBus {
     return { message_id: `om_${this._seq++}` };
   }
 
-  sendCard(openId, card) {
-    return this.sendMessage(openId, "interactive", card, "open_id");
+  sendCard(receiveId, card) {
+    return this.sendMessage(receiveId, "interactive", card, "owner");
   }
 
-  // 对齐 FeishuBus.patchInteractiveCard。content 是卡片 JSON 字符串，card 留下解析后的对象方便断言。
+  // 对齐总线 patchInteractiveCard。content 是卡片 JSON 字符串，card 留下解析后的对象方便断言。
   async patchInteractiveCard(messageId, card) {
     await this._gate({ op: "card_update", table: "", messageId });
     const content = typeof card === "string" ? card : JSON.stringify(card);
@@ -151,7 +151,7 @@ export class MockFeishuBus {
     throw fault.error;
   }
 
-  // 与 FeishuBus.takeStats 同一口径：取走清零，journal 保留给测试断言。
+  // 与总线 takeStats 同一口径：取走清零，journal 保留给测试断言。
   // 失败注入在 _note 之前抛，所以没发出去的调用不计。backoff 在内存总线里恒为 0。
   takeStats() {
     const snap = { ...this._stats };

@@ -7,10 +7,10 @@ import test from "node:test";
 import { f1 } from "../src/bus/tables.mjs";
 import { createTask, parseCreateArgv, parseParams } from "../src/hub/create.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";
-import { MockFeishuBus } from "./mocks/mock-bus.mjs";
+import { MockBus } from "./mocks/mock-bus.mjs";
 
 function bus() {
-  return new MockFeishuBus({ tables: TABLES });
+  return new MockBus({ tables: TABLES });
 }
 
 function writes(mock) {

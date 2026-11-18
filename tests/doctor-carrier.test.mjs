@@ -1,5 +1,5 @@
 // carrier 语境已移除。doctor 对残留的 context=carrier 必须报问题并写明原因，不能只当成普通拼写错误放过。
-// 状态只写临时目录，不读 ~/.hub-node。
+// 状态只写临时目录，不读 ~/.a2a-hub。
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
