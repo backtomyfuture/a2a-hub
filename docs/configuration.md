@@ -416,9 +416,10 @@ ah loop cancel <Loop_ID> [--text "说明"] [--config <dir>]
 | `POST /api/v1/admin/nodes/:node/admission` | 该节点全部名片设为同一状态 |
 | `PATCH` 或 `POST /api/v1/admin/cards/:capId/profile` | 改 `display_name`（≤64）与 `admin_note`（≤500），只更新传入的键 |
 | `POST /api/v1/admin/agents` | 添加 Agent。`access=http` 时一并签发 Token，响应含一次性明文 `token` 与 `onboarding`；该节点已有 Token 则 `409`，改走轮换 |
+| `DELETE /api/v1/admin/agents/:node` | 删除 Agent：先吊销该节点 Token，再删它的全部名片，并从在线名册移除。历史任务与消息保留；响应里的 `openTasks` 是仍指向它的未结束任务数，需要另行撤销。不能删 Hub 本机；宿主节点要先停掉它的 `ah` 服务，否则下次对账会重新登记名片。什么都没找到时 `404` |
 | `GET /api/v1/admin/onboarding` | 只生成接入提示词，不写表。未附带刚签发的 Token 时，提示词里是占位符 `<AH_API_TOKEN>` |
 
-`POST /api/v1/admin/agents` 与 Token 管理只允许机主。名片接纳、改显示名、`GET /api/v1/admin/onboarding` 也允许 `scopes` 含 `admin` 的 leader（或 hybrid）；其中 `onboarding` 的查询参数 `node` 可以是别的节点。协议 Skill 按接入方式对应，URL 为 `<Hub>/api/v1/skills/<name>`，**需要鉴权**：云端 HTTP 的 `worker` → `a2a-worker`，`leader` → `a2a-leader`，`hybrid` → 两者；`inbox` → `ah-inbox`；宿主机 Worker 不需要协议 Skill（回执约定由内核写进调度指令）。领域技能放在各 Agent 自己的技能目录（如 `~/.claude/skills`、`~/.agents/skills`），中台不登记、不展示。
+`POST /api/v1/admin/agents`、删除 Agent 与 Token 管理只允许机主。名片接纳、改显示名、`GET /api/v1/admin/onboarding` 也允许 `scopes` 含 `admin` 的 leader（或 hybrid）；其中 `onboarding` 的查询参数 `node` 可以是别的节点。协议 Skill 按接入方式对应，URL 为 `<Hub>/api/v1/skills/<name>`，**需要鉴权**：云端 HTTP 的 `worker` → `a2a-worker`，`leader` → `a2a-leader`，`hybrid` → 两者；`inbox` → `ah-inbox`；宿主机 Worker 不需要协议 Skill（回执约定由内核写进调度指令）。领域技能放在各 Agent 自己的技能目录（如 `~/.claude/skills`、`~/.agents/skills`），中台不登记、不展示。
 
 远端节点上升级前没有 `Admission` 的老名片，仍按待接纳，要在控制台接纳后才能派单。Hub 本机的空 `Admission` 由对账补成已接纳。
 

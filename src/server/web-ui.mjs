@@ -1593,6 +1593,51 @@ async function doRevokeToken(node) {
   }
 }
 
+function deleteNodeButton(g) {
+  const hubNode = (state.data && state.data.hubNode) || "";
+  if (!g || !g.node || g.node === hubNode || g.node === "unknown") return "";
+  return '<button class="btn sm danger" data-action="delete-node" data-node="' + esc(g.node) + '" data-kind="' + esc(g.kind || "") + '">删除</button>';
+}
+
+function openDeleteNodeConfirm(node, kind) {
+  const g = buildNodeGroups(state.data).find((x) => x.node === node);
+  const name = g ? g.displayName : node;
+  const openTasks = ((state.data && state.data.tasks) || [])
+    .filter((t) => t.target_node === node && ["submitted", "working", "input-required", "auth-required"].includes(t.status)).length;
+  document.getElementById("tmTitle").textContent = "删除 Agent · " + name;
+  let html = '<div style="margin-bottom:14px;line-height:1.7;">'
+    + '将从中台移除 <strong>' + esc(name) + '</strong>（<span class="mono">' + esc(node) + '</span>）：'
+    + '<ul style="margin:6px 0 0 18px;padding:0;">'
+    + '<li>删除它的全部能力名片，不再出现在 Agent 列表与派单选项里</li>'
+    + '<li>吊销它的专属密钥（如有），它之后的请求会被拒绝</li>'
+    + '<li>历史任务与消息保留，不受影响</li>'
+    + '</ul></div>';
+  if (openTasks) {
+    html += '<div class="err-banner">还有 <strong>' + openTasks + '</strong> 个未结束的任务指向它，删除后不会自动撤销，请到任务页手动处理。</div>';
+  }
+  if (kind === "host") {
+    html += '<div class="err-banner">这是宿主节点：请先在那台机器上停止 ah 服务（<span class="mono">ah service --remove</span>），否则它下次对账会把名片重新登记回来。</div>';
+  }
+  html += '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px;">'
+    + '<button type="button" class="btn" data-close-modal="tokenManageModal">取消</button>'
+    + '<button type="button" class="btn danger" data-action="do-delete-node" data-node="' + esc(node) + '">确认删除</button>'
+    + '</div>';
+  document.getElementById("tmBody").innerHTML = html;
+  openModal("tokenManageModal");
+}
+
+async function doDeleteNode(node) {
+  try {
+    const res = await api("/api/v1/admin/agents/" + encodeURIComponent(node), { method: "DELETE" });
+    closeModal("tokenManageModal");
+    state.expandedNodes.delete(node);
+    showToast("已删除 " + node + (res.openTasks ? "，仍有 " + res.openTasks + " 个未结束任务待处理" : ""));
+    await refreshState();
+  } catch (e) {
+    showToast("删除失败: " + e.message);
+  }
+}
+
 function renderOverview(d) {
   const todos = computeTodos(d);
   const groups = buildNodeGroups(d);
@@ -1934,6 +1979,7 @@ function renderAgents(d) {
           html += '<button class="btn sm" data-action="toggle-node" data-node="' + esc(g.node) + '">'
             + (expanded ? '收起能力' : ('展开能力 (' + g.admittedCards.length + ')')) + '</button>';
         }
+        html += deleteNodeButton(g);
         html += '</div>';
 
         if (expanded && g.admittedCards.length > 0) {
@@ -1955,8 +2001,10 @@ function renderAgents(d) {
           + '<div class="node-head">'
           + '<div><div class="node-name">' + esc(g.displayName) + '</div>'
           + '<div class="hint">节点标识：<span class="mono">' + esc(g.node) + '</span> · ' + g.pendingCards.length + ' 项能力等待确认</div></div>'
+          + '<div style="display:flex;gap:6px;">'
           + '<button class="btn sm success" data-action="admit-node" data-node="' + esc(g.node) + '">全部接纳</button>'
-          + '</div>'
+          + deleteNodeButton(g)
+          + '</div></div>'
           + '<div class="cap-list">';
         for (const c of g.pendingCards) html += renderCapabilityItem(c, "pending");
         html += '</div></div>';
@@ -1971,7 +2019,7 @@ function renderAgents(d) {
       for (const g of rejectedGroups) {
         html += '<div class="node-card">'
           + '<div class="node-head"><div><div class="node-name">' + esc(g.displayName) + '</div>'
-          + '<div class="hint mono">' + esc(g.node) + '</div></div></div>'
+          + '<div class="hint mono">' + esc(g.node) + '</div></div>' + deleteNodeButton(g) + '</div>'
           + '<div class="cap-list">';
         for (const c of g.rejectedCards) html += renderCapabilityItem(c, "rejected");
         html += '</div></div>';
@@ -2328,6 +2376,8 @@ document.addEventListener("click", (e) => {
   else if (act === "revoke-token") openTokenRevokeStep1(actEl.dataset.node);
   else if (act === "revoke-token-step2") openTokenRevokeStep2(actEl.dataset.node);
   else if (act === "do-revoke-token") doRevokeToken(actEl.dataset.node);
+  else if (act === "delete-node") openDeleteNodeConfirm(actEl.dataset.node, actEl.dataset.kind);
+  else if (act === "do-delete-node") doDeleteNode(actEl.dataset.node);
   else if (act === "copy-rotated-token") {
     const box = document.getElementById("rotatedTokenBox");
     copyText(box ? box.value : "", "已复制新 Token");

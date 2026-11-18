@@ -87,6 +87,7 @@ export class SqliteBus {
       putToken: this.db.prepare("INSERT OR IGNORE INTO idempotency_tokens (table_name, client_token, record_id, created_at) VALUES (?, ?, ?, ?)"),
       insert: this.db.prepare("INSERT INTO records (table_name, record_id, seq, fields_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)"),
       update: this.db.prepare("UPDATE records SET seq = ?, fields_json = ?, updated_at = ? WHERE table_name = ? AND record_id = ?"),
+      remove: this.db.prepare("DELETE FROM records WHERE table_name = ? AND record_id = ?"),
       insertCard: this.db.prepare("INSERT INTO cards (message_id, receive_id, receive_id_type, msg_type, content_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"),
       updateCard: this.db.prepare("UPDATE cards SET content_json = ?, updated_at = ? WHERE message_id = ?"),
       listCards: this.db.prepare("SELECT * FROM cards ORDER BY rowid DESC"),
@@ -301,6 +302,37 @@ export class SqliteBus {
     this.broker?.publish(ev);
     this._notifyAsync(ev, updated.fields);
     return { record: structuredClone(updated) };
+  }
+
+  // 只给名片这类登记表用。Messages / Parts 只追加，调用方不得对它们删行。
+  async deleteRecord(table, recordId) {
+    this._stats.write += 1;
+    const tbl = String(table);
+    const id = String(recordId);
+    let fields = null;
+    let seq = 0;
+
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = this._stmts.get.get(tbl, id);
+      if (!existing) throw new Error(`record not found: ${tbl}/${id}`);
+      fields = this._toRow(existing).fields;
+      seq = this._bumpSeq();
+      this._stmts.remove.run(tbl, id);
+      this.db.exec("COMMIT");
+    } catch (e) {
+      try { this.db.exec("ROLLBACK"); } catch { /* ignore */ }
+      throw e;
+    }
+
+    this.broker?.publish({
+      seq,
+      op: "delete",
+      table: tbl,
+      recordId: id,
+      nodes: eventNodesFor(tbl, fields, this.tables, (msgId) => this._lookupMessageFields(msgId)),
+    });
+    return { ok: true };
   }
 
   async sendMessage(receiveId, msgType, content, receiveIdType = "owner") {

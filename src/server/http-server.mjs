@@ -22,6 +22,7 @@ import {
 import { cancelTask } from "../hub/cancel.mjs";
 import { createTask } from "../hub/create.mjs";
 import { initiatorOf } from "../inbox.mjs";
+import { TERMINAL_STATUSES } from "../kernel-util.mjs";
 import { BUILTIN_LOOP_TEMPLATES, cancelLoop, createLoop } from "../hub/loop.mjs";
 import { getTaskWhy } from "../why.mjs";
 import { handleAgentGatewayRequest } from "./agent-gateway.mjs";
@@ -833,6 +834,34 @@ export async function startHubHttpServer({
         sendJson(res, 200, issued
           ? { ok: true, node, card, token: issued.token, onboarding }
           : { ok: true, node, card, onboarding });
+        return;
+      }
+
+      const deleteAgentMatch = pathname.match(/^\/api\/v1\/admin\/agents\/([^/]+)$/);
+      if (method === "DELETE" && deleteAgentMatch) {
+        const node = validateNodeName(decodeParam(deleteAgentMatch[1]));
+        if (node === (cfg?.node || "hub")) {
+          sendJson(res, 400, { error: "不能删除 Hub 本机节点" });
+          return;
+        }
+        if (typeof bus.deleteRecord !== "function") {
+          sendJson(res, 501, { error: "当前总线不支持删除名片" });
+          return;
+        }
+        const cards = (await bus.listRecords(bus.tables.agentCards)).filter((c) => f1(c, "Node") === node);
+        // 先吊销再删名片：顺序反过来时，对方恰好在这之间注册会把名片写回来。
+        const tokenRevoked = tokenStore ? tokenStore.revoke(node) : false;
+        for (const c of cards) await bus.deleteRecord(bus.tables.agentCards, c.record_id);
+        const forgotten = broker?.forgetNode ? broker.forgetNode(node) : false;
+        if (!cards.length && !tokenRevoked && !forgotten) {
+          sendJson(res, 404, { error: `节点不存在：${node}` });
+          return;
+        }
+        // 未结束的任务不动：它们仍可在任务页撤销，删 Agent 不应顺带改任务状态。
+        const tasks = await bus.listRecords(bus.tables.tasks);
+        const openTasks = tasks.filter((t) => f1(t, "Target_Node") === node && !TERMINAL_STATUSES.has(f1(t, "Status"))).length;
+        if (cards.length) onWake();
+        sendJson(res, 200, { ok: true, node, cardsRemoved: cards.length, tokenRevoked, openTasks });
         return;
       }
 

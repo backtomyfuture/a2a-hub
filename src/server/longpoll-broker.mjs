@@ -141,6 +141,11 @@ export class LongPollBroker {
     return this._touchNode(node, cursor, remoteAddr, 0, { mode, kind, role });
   }
 
+  // 删除 Agent 后立刻从名册消失，不必等 24 小时过期。对方若仍在轮询会被重新记上，所以要先吊销 Token。
+  forgetNode(node) {
+    return this._nodes.delete(String(node ?? "").trim());
+  }
+
   async wait({ node = "*", cursor = 0, timeoutMs = 25_000, signal = null, remoteAddr = "" } = {}) {
     const cur = Number.isFinite(Number(cursor)) ? Number(cursor) : 0;
     const waitMs = Math.max(0, Math.min(60_000, Number(timeoutMs) || 0));

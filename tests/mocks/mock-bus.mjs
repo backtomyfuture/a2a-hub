@@ -113,6 +113,18 @@ export class MockBus {
     return { record: this._clone(row) };
   }
 
+  async deleteRecord(table, recordId) {
+    this._known(table);
+    await this._gate({ op: "delete", table, recordId });
+    const rows = this._rows.get(table);
+    const idx = rows.findIndex((item) => item.record_id === recordId);
+    if (idx < 0) throw new Error(`record not found: ${table}/${recordId}`);
+    rows.splice(idx, 1);
+    this._changeSeq += 1;
+    this._note({ op: "delete", table, recordId });
+    return { ok: true };
+  }
+
   async sendMessage(receiveId, msgType, content, receiveIdType = "owner") {
     await this._gate({ op: "send", table: "", receiveId, msgType });
     const item = {
@@ -167,7 +179,7 @@ export class MockBus {
     this.journal.push(entry);
     if (entry.op === "list") this._stats.list += 1;
     else if (entry.op === "get") this._stats.get += 1;
-    else if (entry.op === "create" || entry.op === "update") this._stats.write += 1;
+    else if (entry.op === "create" || entry.op === "update" || entry.op === "delete") this._stats.write += 1;
     else if (entry.op === "send") this._stats.other += 1;
   }
 
