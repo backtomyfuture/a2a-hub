@@ -667,12 +667,12 @@ export async function doctor(configDir, appDir, opts = {}) {
   try {
     if (process.platform === "darwin") {
       const out = execFileSync("launchctl", ["list"], { encoding: "utf8" });
-      const mine = out.split("\n").filter((l) => l.includes("hub-node") || l.includes("agenthub"));
+      const mine = out.split("\n").filter((l) => l.includes("hub-node") || l.includes("agenthub") || /(?:^|\s)ah-(?:hub|node)\./.test(l));
       if (mine.length) ok(`launchd 自启在册：${mine.map((l) => l.trim().split(/\s+/).pop()).join(", ")}`);
       else info("未发现 launchd 自启（可用 ah service 安装）");
     } else if (process.platform === "linux") {
       const units = fs.existsSync(path.join(os.homedir(), ".config/systemd/user"))
-        ? fs.readdirSync(path.join(os.homedir(), ".config/systemd/user")).filter((f) => f.startsWith("hub-node"))
+        ? fs.readdirSync(path.join(os.homedir(), ".config/systemd/user")).filter((f) => f.startsWith("hub-node") || f.startsWith("ah-hub-") || f.startsWith("ah-node-"))
         : [];
       if (units.length) ok(`systemd 用户单元在册：${units.join(", ")}`);
       else info("未发现 systemd 用户单元（可用 ah service 安装）");
@@ -680,7 +680,9 @@ export async function doctor(configDir, appDir, opts = {}) {
       try {
         const out = execFileSync("schtasks", ["/Query", "/TN", "\\lah\\", "/FO", "LIST"], { encoding: "utf8" });
         const mine = [...new Set(out.split(/\r?\n/).map((line) => {
-          const at = line.indexOf("\\lah\\hub-node");
+          const atHub = line.indexOf("\\lah\\hub-node");
+          const atAh = line.indexOf("\\lah\\ah-");
+          const at = atHub >= 0 ? atHub : atAh;
           return at >= 0 ? line.slice(at).trim() : "";
         }).filter(Boolean))];
         if (mine.length) ok(`任务计划程序自启在册：${mine.join(", ")}`);

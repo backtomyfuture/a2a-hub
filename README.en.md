@@ -71,6 +71,12 @@ Tasks progress strictly across the eight A2A states: `submitted` â†’ `working` â
 curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --hub
 ```
 
+If this machine still runs the old lark-a2a-hub install under `~/.hub-node`, do not overwrite it. Use a separate directory:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | HUB_NODE_HOME="$HOME/.a2a-hub" sh -s -- --hub
+```
+
 This generates an ed25519 approval keypair + random `apiToken`, configures SQLite WAL, registers user-level autostart (add `--no-service` to run foreground-only), and prints:
 - A one-click Web Console URL `http://<LAN_IP>:8787/?token=...` (saved to `localStorage` and scrubbed from the address bar on load)
 - A copy-paste 1-line join command for worker machines.

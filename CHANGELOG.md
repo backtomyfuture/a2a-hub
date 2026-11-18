@@ -3,6 +3,12 @@
 本项目的主要变更记录如下。节点适配器版本号见 `package.json` /
 `lah --version`；中台标准版本独立编号（现行 v3.9）。
 
+## [Unreleased]
+
+- **安装脚本不再误伤旧版 lark-a2a-hub**：`install.sh` / `install.ps1` 只对 origin 为 `backtomyfuture/a2a-hub` 的检出执行 `git pull`。旧仓库或其他项目直接退出，不改目录、不改命令入口。安装结果缺少 `bin/ah.mjs` 时失败退出，并且只对存在的文件 `chmod`。`--hub` / `--join` 遇到旧飞书 `node.json`（无 `busType`、`busType=feishu`，或含 `baseToken` 等字段）拒绝覆盖，除非显式 `--force`。`lah` / `hub-node` 已指向别的安装时保留原命令。`~/.local/bin` 不在 PATH 时打印 zsh 与 bash 的加入命令。
+- **`ah setup --yes` 拒绝覆盖旧飞书配置**（`--force` 才覆盖，且不把配置内容打到终端）。`ah join` 不再对这类配置自动加上 `--force`。`ah up` 在已有 `node.json` 且未给 `--force` / `--setup` 时本来就不会重写配置。
+- **自定义配置目录的自启名字与默认目录分开**。`~/.hub-node` 仍注册 `hub-node-<role>.<node>`（macOS）/ `hub-node-<role>-<node>.service`（Linux），已有 a2a-hub 重跑会更新同一项。其它 `HUB_NODE_HOME` 使用 `ah-<role>.<node>.<目录摘要>`，避免覆盖正在运行的 `hub-node-node.<node>` 或 `hub-node-hub.<node>`。历史名字的 plist / unit 若已经指向本配置目录，则继续沿用。
+
 ## [1.0.0] - 2026-11-15（`a2a-hub` 独立中台首发：SQLite WAL、HTTP 长轮询、Web 控制台与 LoopForge SOP 闭环）
 
 `DAEMON_VERSION` 升级至 `node-1.0.0`，正式从飞书多维表格单一总线演进为零外部依赖的独立自托管多 Agent 编排中台（保留 `busType: "feishu"` 向下兼容）：

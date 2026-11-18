@@ -138,6 +138,23 @@ function isPlaceholderToken(v) {
   return s.startsWith("<") || s.includes("REPLACE");
 }
 
+// 旧版 lark-a2a-hub 的 node.json 没有 busType，或写着 feishu，并带 baseToken 等飞书字段。
+// 新配置只使用 sqlite / http。notifications.feishuWebhookUrl 是提醒地址，不算飞书总线。
+const LEGACY_FEISHU_KEYS = ["baseToken", "appId", "appSecret", "verificationToken", "encryptKey", "appToken"];
+
+export function isLegacyFeishuNodeConfig(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+  const bus = String(raw.busType ?? "").trim().toLowerCase();
+  if (bus === "feishu") return true;
+  // 缺 busType 时 config.mjs 会按 hubUrl / dbPath / listen 推断为 http 或 sqlite；这类手写的新配置不能误判为旧版。
+  if (!bus && !raw.hubUrl && !raw.dbPath && !raw.listen) return true;
+  return LEGACY_FEISHU_KEYS.some((key) => {
+    if (!Object.hasOwn(raw, key)) return false;
+    const value = raw[key];
+    return value != null && String(value).trim() !== "";
+  });
+}
+
 function isUnfinishedExample(raw) {
   if (!raw || typeof raw !== "object") return false;
   const fields = [raw.hubUrl, raw.node];
@@ -398,6 +415,7 @@ export function setupHelpText() {
   --hub         快捷等价于 --role hub --bus sqlite --auto-token
   --join        快捷接入地址（支持内嵌 token：http://<token>@<host>:8787），自动拉取公钥
   --auto-token  若未传口令，自动生成高强度随机 API Token
+  --force       覆盖已有 node.json。旧版飞书总线配置默认拒绝覆盖，只有显式加上本参数才会改
   --help        打印本帮助并退出`;
 }
 
@@ -423,11 +441,26 @@ async function confirmOverwriteNodeJson(configDir, flags, interactive, ask) {
   fs.mkdirSync(configDir, { recursive: true });
   const nodeJsonPath = path.join(configDir, "node.json");
   const nodeExisted = fs.existsSync(nodeJsonPath);
-  let placeholder = false;
+  let existingRaw = null;
+  let parsed = false;
   if (nodeExisted) {
-    try { placeholder = isUnfinishedExample(JSON.parse(fs.readFileSync(nodeJsonPath, "utf8"))); }
-    catch { /* 解析不了就按已有配置保护 */ }
+    try {
+      existingRaw = JSON.parse(fs.readFileSync(nodeJsonPath, "utf8"));
+      parsed = true;
+    } catch { /* 解析不了就按已有配置保护 */ }
   }
+  // 先于「示例占位符可覆盖」判断。飞书生产配置里的表 ID 偶尔含占位形状，不能当成未完成示例静默换掉。
+  if (nodeExisted && parsed && isLegacyFeishuNodeConfig(existingRaw)) {
+    if (!flags.force) {
+      console.error("  ✗ 检测到旧版飞书总线配置，已拒绝覆盖，未改动任何文件。");
+      console.error("    这份配置多半属于仍在运行的 lark-a2a-hub。请换一个独立配置目录，例如：");
+      console.error('    HUB_NODE_HOME="$HOME/.a2a-hub" ah up --service');
+      console.error("    只有确认可以废弃这份飞书配置时才加 --force。未打印配置内容。");
+      return { ok: false, code: 4 };
+    }
+    console.error("  ! 已指定 --force，将覆盖旧版飞书总线配置。未打印配置内容。");
+  }
+  const placeholder = parsed && isUnfinishedExample(existingRaw);
   if (nodeExisted && !flags.force) {
     if (placeholder) {
       if (interactive) {

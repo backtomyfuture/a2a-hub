@@ -5,7 +5,7 @@
 
 ## 1. 配置目录
 
-配置目录取 `--config <dir>` > 环境变量 `HUB_NODE_HOME` > `~/.hub-node`（Windows 为 `%USERPROFILE%\.hub-node`）。里面有：
+配置目录取 `--config <dir>` > 环境变量 `HUB_NODE_HOME` > `~/.hub-node`（Windows 为 `%USERPROFILE%\.hub-node`）。已安装旧版 lark-a2a-hub 时，请把新 Hub 放到独立目录（例如 `HUB_NODE_HOME="$HOME/.a2a-hub"`），不要覆盖仍在运行的 `~/.hub-node`。里面有：
 
 | 文件 | 作用 | 能否提交仓库 |
 |---|---|---|
