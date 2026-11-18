@@ -79,12 +79,15 @@ export class SqliteBus {
     this._stmts = {
       getSeq: this.db.prepare("SELECT v FROM meta WHERE k = 'seq'"),
       setSeq: this.db.prepare("INSERT INTO meta (k, v) VALUES ('seq', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v"),
+      getMeta: this.db.prepare("SELECT v FROM meta WHERE k = ?"),
+      setMeta: this.db.prepare("INSERT INTO meta (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v"),
       list: this.db.prepare("SELECT record_id, seq, fields_json FROM records WHERE table_name = ? ORDER BY seq ASC, rowid ASC"),
       get: this.db.prepare("SELECT record_id, seq, fields_json FROM records WHERE table_name = ? AND record_id = ?"),
       getToken: this.db.prepare("SELECT record_id FROM idempotency_tokens WHERE table_name = ? AND client_token = ?"),
       putToken: this.db.prepare("INSERT OR IGNORE INTO idempotency_tokens (table_name, client_token, record_id, created_at) VALUES (?, ?, ?, ?)"),
       insert: this.db.prepare("INSERT INTO records (table_name, record_id, seq, fields_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)"),
       update: this.db.prepare("UPDATE records SET seq = ?, fields_json = ?, updated_at = ? WHERE table_name = ? AND record_id = ?"),
+      remove: this.db.prepare("DELETE FROM records WHERE table_name = ? AND record_id = ?"),
       insertCard: this.db.prepare("INSERT INTO cards (message_id, receive_id, receive_id_type, msg_type, content_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"),
       updateCard: this.db.prepare("UPDATE cards SET content_json = ?, updated_at = ? WHERE message_id = ?"),
       listCards: this.db.prepare("SELECT * FROM cards ORDER BY rowid DESC"),
@@ -153,6 +156,17 @@ export class SqliteBus {
     return Number.isFinite(n) ? n : 0;
   }
 
+  // 水位一类的小状态放 meta，不写 records，也就不会把总线 seq 往前推。
+  // Leader 增量水位若跟着 latestSeq 走，读表和推进之间插入的写入会被跳过。
+  async getMeta(key) {
+    const row = this._stmts.getMeta.get(String(key));
+    return row ? String(row.v) : null;
+  }
+
+  async setMeta(key, value) {
+    this._stmts.setMeta.run(String(key), String(value ?? ""));
+  }
+
   _bumpSeq() {
     const next = this.currentSeq() + 1;
     this._stmts.setSeq.run(String(next));
@@ -178,6 +192,8 @@ export class SqliteBus {
     }
     return {
       record_id: row.record_id,
+      // Leader 增量要拿任务行和消息行的变更序号做比较，字段 JSON 里没有这一列。
+      seq: Number(row.seq) || 0,
       fields,
     };
   }
@@ -230,7 +246,7 @@ export class SqliteBus {
         if (token) {
           this._stmts.putToken.run(tbl, token, recordId, now);
         }
-        created = { record_id: recordId, fields: cleanFields };
+        created = { record_id: recordId, seq, fields: cleanFields };
       }
       this.db.exec("COMMIT");
     } catch (e) {
@@ -269,7 +285,7 @@ export class SqliteBus {
       const merged = { ...prevFields, ...structuredClone(fields ?? {}) };
       seq = this._bumpSeq();
       this._stmts.update.run(seq, JSON.stringify(merged), now, tbl, id);
-      updated = { record_id: id, fields: merged };
+      updated = { record_id: id, seq, fields: merged };
       this.db.exec("COMMIT");
     } catch (e) {
       try { this.db.exec("ROLLBACK"); } catch { /* ignore */ }
@@ -286,6 +302,37 @@ export class SqliteBus {
     this.broker?.publish(ev);
     this._notifyAsync(ev, updated.fields);
     return { record: structuredClone(updated) };
+  }
+
+  // 只给名片这类登记表用。Messages / Parts 只追加，调用方不得对它们删行。
+  async deleteRecord(table, recordId) {
+    this._stats.write += 1;
+    const tbl = String(table);
+    const id = String(recordId);
+    let fields = null;
+    let seq = 0;
+
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = this._stmts.get.get(tbl, id);
+      if (!existing) throw new Error(`record not found: ${tbl}/${id}`);
+      fields = this._toRow(existing).fields;
+      seq = this._bumpSeq();
+      this._stmts.remove.run(tbl, id);
+      this.db.exec("COMMIT");
+    } catch (e) {
+      try { this.db.exec("ROLLBACK"); } catch { /* ignore */ }
+      throw e;
+    }
+
+    this.broker?.publish({
+      seq,
+      op: "delete",
+      table: tbl,
+      recordId: id,
+      nodes: eventNodesFor(tbl, fields, this.tables, (msgId) => this._lookupMessageFields(msgId)),
+    });
+    return { ok: true };
   }
 
   async sendMessage(receiveId, msgType, content, receiveIdType = "owner") {

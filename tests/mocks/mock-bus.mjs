@@ -27,6 +27,8 @@ export class MockBus {
     if (!tables || typeof tables !== "object") throw new Error("MockBus 需要 tables");
     this.tables = tables;
     this._seq = 1;
+    // 与 SqliteBus 的 records.seq 对齐，供 Leader 增量比较。不占用 record_id 的计数。
+    this._changeSeq = 0;
     this._rows = new Map();
     this._tokens = new Map();
     this._faults = [];
@@ -90,6 +92,7 @@ export class MockBus {
     }
     const record = {
       record_id: `rec_${this._seq++}`,
+      seq: ++this._changeSeq,
       fields: this._wrap(fields),
     };
     this._rows.get(table).push(record);
@@ -105,8 +108,21 @@ export class MockBus {
     if (!row) throw new Error(`record not found: ${table}/${recordId}`);
     const wrapped = this._wrap(fields);
     row.fields = { ...row.fields, ...wrapped };
+    row.seq = ++this._changeSeq;
     this._note({ op: "update", table, recordId, fields: this._clone({ fields: wrapped }).fields });
     return { record: this._clone(row) };
+  }
+
+  async deleteRecord(table, recordId) {
+    this._known(table);
+    await this._gate({ op: "delete", table, recordId });
+    const rows = this._rows.get(table);
+    const idx = rows.findIndex((item) => item.record_id === recordId);
+    if (idx < 0) throw new Error(`record not found: ${table}/${recordId}`);
+    rows.splice(idx, 1);
+    this._changeSeq += 1;
+    this._note({ op: "delete", table, recordId });
+    return { ok: true };
   }
 
   async sendMessage(receiveId, msgType, content, receiveIdType = "owner") {
@@ -163,7 +179,7 @@ export class MockBus {
     this.journal.push(entry);
     if (entry.op === "list") this._stats.list += 1;
     else if (entry.op === "get") this._stats.get += 1;
-    else if (entry.op === "create" || entry.op === "update") this._stats.write += 1;
+    else if (entry.op === "create" || entry.op === "update" || entry.op === "delete") this._stats.write += 1;
     else if (entry.op === "send") this._stats.other += 1;
   }
 

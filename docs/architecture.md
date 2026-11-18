@@ -76,7 +76,7 @@ flowchart TB
   node 角色从不写 `auth_decision` 与 `canceled`，hub 角色是唯一写方。
   Hub 单进程启动本地 HTTP 网关（`src/server/http-server.mjs`，默认 `0.0.0.0:8787`），集中托管 `SqliteBus`（`src/bus/sqlite-bus.mjs`）、`LongPollBroker`（`src/server/longpoll-broker.mjs`）、`agent-gateway`（`src/server/agent-gateway.mjs`）、内置 Web 控制台（`src/server/web-ui.mjs`）与可选外部通知器（`src/hub/notifier.mjs`）。
   hub 逻辑代码主要在 `src/hub/` 与 `src/server/`。
-- **鉴权与审批身份。** 通过 `AH_API_TOKEN`（Bearer Token）保护 Hub HTTP API，通过 `approval_key.pem` / `hubPublicKey`（ed25519 签名）校验审批真实性；远端宿主节点配置 `busType: "http"` 仅出站拉取总线并接受长轮询唤醒，外部纯 Agent 则经 Bearer Token 直接访问网关 REST 接口。
+- **鉴权与审批身份。** 通过机主 `AH_API_TOKEN` 与分 Agent Token（`agent_tokens.json`，绑定节点与角色，路由矩阵见 `src/hub/agent-access.mjs`）两类 Bearer Token 保护 Hub HTTP API，通过 `approval_key.pem` / `hubPublicKey`（ed25519 签名）校验审批真实性；远端宿主节点配置 `busType: "http"` 仅出站拉取总线并接受长轮询唤醒，外部纯 Agent 则经 Bearer Token 直接访问网关 REST 接口。
 - **传输与门铃方式**，长轮询本身仍只是通知机制，任务与消息内容均按统一表模型校验读写：
 
   | 方式 | 机制 | 适用 |

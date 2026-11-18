@@ -11,7 +11,7 @@
 - **零依赖**：`package.json` 的 `dependencies` 为空，全部能力基于 Node >= 24 内置模块实现（`node:sqlite`、`node:http`、全局 `fetch`、`node:crypto`、`node:test`），安装即跑、无第三方构建链路。
 - **薄内核**：`src/kernel.mjs` 只承载 A2A 协议状态机与调度循环（认领、心跳、派发、收回执、重试退避、熔断、对账），不内嵌任何具体 Agent 或业务执行器；能力完全由节点本地 `commands.json` 声明。
 - **失败要响**：能力未登记、点名 Worker 不存在、配置语法或字段取值非法、参数夹带执行控制键、L1 验收失败或审批验签未通过，一律明确拒收或报错并留痕，绝不静默降级或伪装成功。
-- **节点只出不进**：边缘执行节点与纯 HTTP Agent 只向 Hub 发起出站 HTTP 请求，不开设任何入站监听端口、不做端口映射或反向隧道；仅 Hub 进程按 `listen` 配置对外提供 HTTP 服务，并对除健康探针、静态首页与自发现名片外的 `/api/*` 端点执行 Bearer Token（`AH_API_TOKEN`）鉴权。
+- **节点只出不进**：边缘执行节点与纯 HTTP Agent 只向 Hub 发起出站 HTTP 请求，不开设任何入站监听端口、不做端口映射或反向隧道；仅 Hub 进程按 `listen` 配置对外提供 HTTP 服务。除 `/api/v1/health`、控制台首页与 `/.well-known/agent.json` 外，`/api/*`（含 `/api/v1/skills*`）一律要 Bearer Token：机主 `apiToken`（`AH_API_TOKEN`）为 owner 全权限，外部 HTTP Agent 用机主在控制台签发的分 Agent Token（见 §8）。
 - **指令与数据分离**：可执行命令、`cwd`、`verify` 与 `approval_class` 下限只来自执行节点本地可信的 `commands.json`；来自总线的指令正文、参数与问答上下文只作为数据写入 `0600` 权限的 `runs/<Task_ID>/input.json`（或经 `json` 模式标准输入传入），请求参数中携带执行控制键的任务直接拒收。
 
 ## 3. 总体形态
@@ -32,7 +32,8 @@
   - 每次写入只传递变更通知与 `seq` 游标，具体数据一律回表或经网关拉取，断线与重启不丢状态；
   - 远端宿主节点经出站 `GET /api/v1/poll?node=<node>&cursor=<seq>&timeout=25` 挂起等待，写入提交后毫秒级唤醒；Hub 进程内通过 `subscribeLocal` 零网络开销直连唤醒；无法长轮询时降级为 `poll` 定时扫表（默认 `pollSec=45`）；
   - 客户端游标落出环形缓冲时返回 `resync` 触发全量对账；所有守护进程保留低频对账扫表兜底（默认 `sweepSec=900`）以及面向 `input-required` / `auth-required` 的挂起短复查（`PENDING_RECHECK`：前 10 分钟不超 60 秒，60 分钟内不超 180 秒）。
-- **外部 Agent 网关（`src/server/agent-gateway.mjs`）**：为无守护进程、无 `ah` CLI 的纯 HTTP Agent 提供自发现（`GET /.well-known/agent.json`）、Skill 拉取（`GET /api/v1/skills/:name`）、注册（`POST /api/v1/agents/register`）、短/长轮询取单（`GET|POST /api/v1/agents/:node/poll`）、Leader 状态追踪（`GET /api/v1/agents/:node/updates`）及生命周期操作（`POST /api/v1/tasks/:id/{claim,heartbeat,ask,auth,complete,fail}`）。名片接纳与添加 Agent 不在该网关，而在 `startHubHttpServer` 的 `/api/v1/admin/*`，状态归一与接入提示词在 `src/hub/admission.mjs`。
+- **外部 Agent 网关（`src/server/agent-gateway.mjs`）**：为无守护进程、无 `ah` CLI 的纯 HTTP Agent 提供自发现（`GET /.well-known/agent.json`）、Skill 拉取（`GET /api/v1/skills/:name`，需鉴权）、检查脚本下载（`GET /api/v1/kit/a2a_check.py` 与 `.sh`，需鉴权，正文不含 Token）、只读检查（`GET /api/v1/agents/:node/check`：复用 poll 可认领任务与本节点 working 租约，Leader 侧只数 `selectLeaderUpdates` 自持久水位以来的条数，**不写水位**；唯一副作用是 `touchAgent`）、注册（`POST /api/v1/agents/register`）、短/长轮询取单（`GET|POST /api/v1/agents/:node/poll`）、Leader 状态追踪（`GET /api/v1/agents/:node/updates`，`new=1` 由 Hub 为该 Leader 持久化水位、只返回新变化的终态任务与全部仍待处理的 `input-required` / `auth-required`，`since=<seq>` 可显式指定，每条带 `changed_seq`、响应带 `watermark`）及生命周期操作（`POST /api/v1/tasks/:id/{claim,heartbeat,ask,auth,complete,fail}`）。名片接纳、添加 Agent 与 Token 管理不在该网关，而在 `startHubHttpServer` 的 `/api/v1/admin/*`，状态归一与接入提示词在 `src/hub/admission.mjs`。
+- **名册卫生**：无名片且 30 分钟无活动的内存在线记录不进名册（纯 Leader 没有名片，停更超过 30 分钟也会从名册消失）。内存里的在线记录超过 24 小时无活动即清除，名片仍留在表里。`role=hub` 且名片 `Node` 等于本机节点名时，空的 `Admission` 在对账时补成 `admitted`（已有值，含显式 `pending` / `rejected`，不覆盖）；远端节点与外部 Agent 自行 `register` 的名片仍须机主接纳。
 
 ## 5. 三种接入形态
 
@@ -40,7 +41,7 @@
 |---|---|---|---|
 | **宿主守护进程型**（`kind: host`） | 办公电脑、Mac mini、Linux 工作站、GPU 服务器 | `ah daemon` 出站长轮询（`/api/v1/poll`），按 `commands.json` 拉起本机 CLI/脚本 | 守护内核强制租约、心跳、单并发账本、退避与验收 |
 | **本地独立 Agent 型**（`kind: agent`） | 同机常驻但自主消费任务的独立 Agent | `ah daemon` 认领后写入 `0600` `agent_inbox.jsonl` 并持续续心跳；本尊调 `ah inbox` 取单/交付 | 内核维护租约与 `inbox_timeout_sec`，`inbox` 出站计划保证防重与终态守卫 |
-| **纯 HTTP 外部 Agent** | 云端或由外部 cron/tick 驱动的 Leader / Worker | 直接调 `agent-gateway`（`/agents/:node/poll` 或 `/updates`，支持短轮询 `timeout=0` 与长轮询） | `agent-gateway` 在网关侧执行目标匹配、静态/动态审批门与状态守卫 |
+| **纯 HTTP 外部 Agent** | 云端或由外部 cron/tick 驱动的 Leader / Worker | 凭分 Agent Token 调 `agent-gateway`。定时器高频跑 `a2a_check.py`（worker / hybrid 每 2 分钟，leader 每 5 分钟）：`IDLE` 结束，`WORK` 才执行【处理流程】（`poll` 或 `updates?new=1`）。跑不了脚本时回退为 worker 每 10 分钟、leader 每 15 分钟。Token 优先放进平台安全密钥空间 `A2A_HUB_TOKEN` | `agent-gateway` 在网关侧执行目标匹配、静态/动态审批门与状态守卫。`check` 不推进 Leader 水位 |
 
 ## 6. executor × context 抽象
 
@@ -69,6 +70,7 @@
 
 - **控制键拦截**：`EXEC_CONTROL_KEYS`（`command`、`cmd`、`cwd`、`context`、`agent`、`worker`、`mode`、`side_effect`、`approval_class`、`permissions`、`shell`、`env`、`executable`、`argv`、`bin`、`max_timeout_sec`、`verify`、`verify_timeout_sec`）出现在任务参数中时，建单端与执行节点一律拒收；唯一可由任务参数覆盖的执行控制键为 `timeout_sec`（且受节点本地 `max_timeout_sec` 夹紧）。
 - **审批下限与 ed25519 签名**：认领前静态审批下限取「任务行 `Approval_Class`、本地 Worker 下限、本地 Skill 下限」中最严者；执行中可由 `agent-auth` / `need_auth` / `ah inbox auth` / 网关 `/auth` 触发动态审批。Hub 使用配置目录 `0600` 私钥 `approval_key.pem` 为 `auth_decision` 签名，配了 `hubPublicKey` 的节点与网关严格验签。
+- **分 Agent Token（`src/hub/agent-tokens.mjs` + `src/hub/agent-access.mjs`）**：机主 `apiToken` 即 owner，权限不变。每个外部 HTTP Agent 由机主在控制台（`POST /api/v1/admin/agents`，`access=http`）签发独立 Token，绑定 `{node, role, scopes}`，`<configDir>/agent_tokens.json`（0600）只存 sha256 哈希与展示前缀，明文只在签发/轮换响应出现一次；可 `rotate` 重新生成、`DELETE` 吊销。控制台添加时 `scopes` 为空，`admin` 要在轮换 body 里写入。未配置机主 `apiToken` 时拒绝签发（否则鉴权一开机主自己会被挡在外）。`hybrid` 同时具备两边权限。`worker` 只能 register / poll / inbox / 任务生命周期（claim、heartbeat、complete、fail、ask、auth）；`leader` 可派单，查看自己发起或指向自己的任务，答复和撤销仅限自己发起的任务，loops 的列表与取消也仅限自己发起的，并用 updates；scopes 含 `admin` 的 leader 另可接纳名片（单卡或整节点）、改显示名、为别的节点生成接入提示词；任何 Agent 身份都不能访问 `/approvals/*`、`/admin/agents`、`/admin/tokens*`、`/state`、`/tables/*`、`/poll`。路径节点、查询参数 `node`/`from`、请求头 `X-A2A-Node` 与绑定节点不一致返回 403；body 里省略 `node`/`from` 则补成绑定节点。`GET /api/v1/admin/onboarding` 的 `node` 是操作对象，不按冒充拒绝。
 - **熔断与防重跑**：派生任务 `Hop_Count` 累加不清零，超过 `HOP_LIMIT = 8` 熔断；执行失败与心跳超时（`STALE_MIN = 20`）共享 `MAX_RETRIES = 2` 预算，退避水位记在 `retry_state.json`（60 秒起翻倍至 10 分钟）；节点写表先落 `outbox/`（或 `inbox-outbox/`），失败只补缺不重跑命令；Hub 宽限 30 分钟仍无心跳则由 `StaleService` 置 `failed` 回收。
 
 ## 9. LoopForge SOP 闭环引擎
@@ -119,10 +121,10 @@ a2a-hub/
       sqlite-bus.mjs            # Node 内置 node:sqlite WAL 总线
       http-bus.mjs              # 远端节点 HTTP REST 总线客户端
     server/
-      http-server.mjs           # Hub HTTP 网关主服务（REST API、鉴权、hub_runtime.json、/api/v1/admin/*）
+      http-server.mjs           # Hub HTTP 网关主服务（REST API、owner/agent 双身份鉴权、hub_runtime.json、/api/v1/admin/*）
       longpoll-broker.mjs       # 单调 seq 事件代理与长轮询连接管理
       agent-gateway.mjs         # 纯 HTTP 外部 Agent A2A 网关
-      web-ui.mjs                # 零构建内嵌 Web 控制台
+      web-ui.mjs                # 零构建内嵌机主视角 Web 控制台
     hub/
       index.mjs                 # hub 角色主运行时与 hubDoctor
       approval.mjs              # ApprovalService（审批登记、ed25519 签名写入与状态流转）
@@ -131,7 +133,9 @@ a2a-hub/
       schedule.mjs              # ScheduleService（later 预约复查时钟）
       loop.mjs                  # LoopService（LoopForge 多阶段 SOP 闭环引擎）
       notifier.mjs              # ExternalNotifier（可选外部 Webhook / Bark / Telegram 通知）
-      admission.mjs             # 名片接纳归一化、管理参数校验与接入提示词（/api/v1/admin/*）
+      admission.mjs             # 名片接纳归一化、管理参数校验与定时运行版接入提示词（/api/v1/admin/*）
+      agent-tokens.mjs          # AgentTokenStore（agent_tokens.json 哈希存储、签发/轮换/吊销/验证）
+      agent-access.mjs          # Agent Token 路由矩阵、node/from 身份绑定与任务可见性
       create.mjs                # 建单（参数校验、名册校验、先消息后任务行）
       cancel.mjs                # 任务取消（发起方 / hub）
       cards.mjs                 # 消息正文提取与审批交互载荷构建

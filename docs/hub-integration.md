@@ -12,7 +12,7 @@
 2. **唤醒与网关服务**：Hub 单进程运行本地 SQLite WAL、REST API、`LongPollBroker`（对宿主节点提供 `GET /api/v1/poll`，对纯外部 Agent 提供 `agent-gateway` `/api/v1/agents/:node/poll|updates`）以及内嵌 Web 控制台。除长期对账兜底（默认 `sweepSec` 900s）外，写操作发生后通过单调递增 `seq` 毫秒级唤醒长轮询连接。
 3. **结果呈递（原路落盘，静默协作）**：
    - `role=hub` 与各宿主节点在收到唤醒事件或对账扫表时，将属于本节点发起的任务结果（`completed`、`failed`、`rejected`、`canceled`、`input-required`）写入本机 `present_queue.jsonl`，供本机 Agent / CLI (`ah present`) 消费；
-   - 外部 HTTP Leader Agent 可直接调用 `GET /api/v1/agents/{node}/updates` 拉取由自己发起任务的状态变更；
+   - 外部 HTTP Leader Agent 用自己的分 Agent Token 调用 `GET /api/v1/agents/{node}/updates?new=1` 拉取由自己发起的新终态，以及仍待处理的 `input-required` / `auth-required`（响应带 `watermark`，每条带 `changed_seq`）；
    - 配置 `notifications` 后，`ExternalNotifier` 可向群机器人 Webhook / Bark / Telegram / 通用 Webhook 发送精简提醒与控制台链接。
 4. **审批签名中继**：`ApprovalService` 与 Web 控制台 `/api/v1/approvals/:taskId/decide` 使用配置目录 `0600` 私钥 `approval_key.pem` 为 `auth_decision` 生成 **ed25519 签名**（绑定 `Task_ID` 与 `In_Reply_To` / `Status_Msg`）。节点与外部 HTTP 网关均按公钥验签。
 5. **取消**：`canceled` 只由发起方或 `hub` 角色写入；普通 Worker 节点不能越权取消他方发起的任务。
@@ -25,14 +25,14 @@
 
 - **单机主枢纽（Mac mini / 常驻主机，推荐）**：以 `ah up` / `ah daemon --role hub` 启动本地 `SqliteBus` + HTTP 服务（默认 `0.0.0.0:8787`），单进程既托管全网状态、Web 控制台与外部通知，也可同时按本机 `commands.json` 接单。
 - **远端宿主节点（`busType: "http"`）**：通过 `ah join http://<token>@<hub-ip>:8787` 自动拉取 `hubPublicKey` 并保存 `0600` Bearer Token 至 `app.env`，以纯出站 HTTP 长轮询接入，**绝不开设任何入站监听端口**。
-- **纯 HTTP 外部 Agent（Muse / Grok Bot 等）**：直接走 `GET /.well-known/agent.json` 自发现，凭 Bearer Token 调用 `/api/v1/agents/register`、`/api/v1/agents/{node}/poll|updates` 与 `/api/v1/tasks/{id}/claim|complete|...`，详见 [外部 HTTP Agent 手册](protocol-node-runbook.md)。
+- **纯 HTTP 外部 Agent（Muse / Grok Bot 等）**：`GET /.well-known/agent.json` 自发现（免鉴权）。钥匙是机主在控制台签发的分 Agent Token，不是机主 `AH_API_TOKEN`。`/api/v1/skills*` 与其余 `/api/*` 都要这把 Token。定时器跑 `a2a_check.py`（worker / hybrid 每 2 分钟，leader 每 5 分钟）：`IDLE` 结束，`WORK` 再 `poll?timeout=0` 或 `updates?new=1`。跑不了脚本时回退为 worker 每 10 分钟、leader 每 15 分钟。详见 [外部 HTTP Agent 手册](protocol-node-runbook.md)。
 
 ## 传输方式
 
 | 方式 | 机制 | 适用 |
 |---|---|---|
 | `longpoll` | 节点 / Agent 向 Hub 发起出站长轮询（`/api/v1/poll` 或 `/api/v1/agents/:node/poll?timeout=25`），写后毫秒级唤醒 | **默认推荐**：Hub、远端宿主节点与常驻/长连接 HTTP Agent |
-| `poll` | 定时轮询（宿主守护节点默认 45s；外部 bot 按自有 cron 短轮询 `?timeout=0`） | 无法维持长连接的无状态云端 Agent 或降级环境 |
+| `poll` | 定时轮询（宿主守护节点默认 45s；外部 Agent 先跑检查脚本，worker / hybrid 每 2 分钟、leader 每 5 分钟，`WORK` 才短轮询 `?timeout=0`；无脚本时回退 worker 10 分钟、leader 15 分钟） | 无法维持长连接的无状态云端 Agent 或降级环境 |
 
 宿主守护节点保留低频对账扫表兜底（默认 15 分钟）及面向 `input-required`/`auth-required` 的 `PENDING_RECHECK` 短复查。
 
@@ -50,7 +50,7 @@
 - 原路分流与落盘：
   - 发起节点（`From_Node === 本节点`）将结果写入本机配置目录的 `present_queue.jsonl`，供本机 Agent / CLI 消费；
   - `Source="hub"` 或 `"cron"`（定时任务）归 `role=hub` 主节点消费；
-  - 纯 HTTP Leader Agent（如 Muse）则直接通过 `GET /api/v1/agents/{node}/updates` 拉取所属任务回执。
+  - 纯 HTTP Leader Agent（如 Muse）则通过 `GET /api/v1/agents/{node}/updates?new=1` 拉取所属任务回执。
 - 去重键：中断态是 `(Task_ID, Status_Msg)`；终态带上 `Status`。
 - 本地与总线双向记账：已呈递的键保存在本地配置目录的 `present_state.json`，并读-合并写回 `Tasks.Metadata.presented_keys`。
 - 陈旧告警与呈递分开：`working` 心跳为空或早于 20 分钟，以及 `submitted` 超过 20 分钟无人认领，每种情况每个任务只告警一次，记在 `stale_state.json`。

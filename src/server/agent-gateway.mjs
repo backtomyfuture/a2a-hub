@@ -11,7 +11,9 @@ import { acceptanceFromParts, parseCriteria } from "../acceptance.mjs";
 import { pickSignedDecision, publicKeyOf } from "../approval-sign.mjs";
 import { f1 } from "../bus/tables.mjs";
 import { capIdOf } from "../config.mjs";
+import { agentCanSeeTask, assertAgentRoute } from "../hub/agent-access.mjs";
 import { admissionOf, httpError, validateNodeName } from "../hub/admission.mjs";
+import { rosterNodeVisible } from "./longpoll-broker.mjs";
 import { submitAgentReceipt } from "../inbox.mjs";
 import { DAEMON_VERSION } from "../kernel.mjs";
 
@@ -24,6 +26,73 @@ const LEADER_UPDATE_STATUSES = new Set([
   "auth-required",
 ]);
 
+// 这两态还等着 Leader 处理，不能因为水位已经走过就藏起来。
+const LEADER_PENDING_STATUSES = new Set(["input-required", "auth-required"]);
+
+// SqliteBus 用 meta 表持久化水位。没有 getMeta/setMeta 的总线（测试 Mock、旧客户端）退回进程内 Map。
+const watermarkFallback = new Map();
+
+function changedSeqOf(task, taskMsgs) {
+  let max = Number(task?.seq) || 0;
+  if (!Number.isFinite(max) || max < 0) max = 0;
+  for (const m of taskMsgs || []) {
+    const s = Number(m?.seq) || 0;
+    if (s > max) max = s;
+  }
+  return max;
+}
+
+function updatesWatermarkKey(node) {
+  return `updates_watermark:${node}`;
+}
+
+function busHasMeta(bus) {
+  return typeof bus?.getMeta === "function" && typeof bus?.setMeta === "function";
+}
+
+async function readUpdatesWatermark(bus, node) {
+  if (busHasMeta(bus)) {
+    const n = Number(await bus.getMeta(updatesWatermarkKey(node)));
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }
+  return watermarkFallback.get(node) ?? 0;
+}
+
+async function writeUpdatesWatermark(bus, node, seq) {
+  if (busHasMeta(bus)) {
+    await bus.setMeta(updatesWatermarkKey(node), String(seq));
+    return;
+  }
+  watermarkFallback.set(node, seq);
+}
+
+function selectLeaderUpdates(updates, since) {
+  if (since == null) return updates;
+  return updates.filter((u) => LEADER_PENDING_STATUSES.has(u.status) || u.changed_seq > since);
+}
+
+// 机主用 query role，缺省 worker 与 leader 都算。Agent Token 只用绑定角色，避免用查询参数扩权。
+function checkScopeOf(principal, searchParams) {
+  if (principal?.kind === "agent") {
+    const role = principal.role === "leader" || principal.role === "hybrid" ? principal.role : "worker";
+    return {
+      role,
+      worker: role === "worker" || role === "hybrid",
+      leader: role === "leader" || role === "hybrid",
+    };
+  }
+  const raw = String(searchParams?.get("role") ?? "").trim().toLowerCase();
+  if (!raw) return { role: "hybrid", worker: true, leader: true };
+  if (raw !== "worker" && raw !== "leader" && raw !== "hybrid") {
+    throw httpError(400, "role 只能是 worker / leader / hybrid");
+  }
+  return {
+    role: raw,
+    worker: raw === "worker" || raw === "hybrid",
+    leader: raw === "leader" || raw === "hybrid",
+  };
+}
+
 // 2×2 四类 Skill 目录：控制端/执行端 × 有 ah CLI / 纯 HTTP，避免向工作机或云端 Agent 下发无关指令
 const SKILL_CATALOG = [
   { name: "ah", role: "leader", mode: "cli", audience: "装有 ah CLI 的 Hub / 工作机中控 Agent" },
@@ -33,6 +102,12 @@ const SKILL_CATALOG = [
 ];
 const SKILL_BY_NAME = new Map(SKILL_CATALOG.map((item) => [item.name, item]));
 const SKILLS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "skills");
+// 检查脚本是通用文件，不内嵌 Token。Hub 只按文件名白名单读出原文。
+const KIT_DIR = path.join(SKILLS_DIR, "a2a-check");
+const KIT_FILES = new Map([
+  ["a2a_check.py", "a2a_check.py"],
+  ["a2a_check.sh", "a2a_check.sh"],
+]);
 
 function nowIso() {
   return new Date().toISOString();
@@ -451,6 +526,8 @@ async function collectAgentMailbox({ bus, node, verifyKey, onWake, includeUpdate
 
   const actionable = [];
   const updates = [];
+  // poll 的 actionable 不含仍在 working 的租约。检查接口要用同一趟扫描把它叫醒，避免再扫一遍表。
+  const working = [];
 
   for (const task of tasks) {
     const taskId = f1(task, "Task_ID");
@@ -505,6 +582,10 @@ async function collectAgentMailbox({ bus, node, verifyKey, onWake, includeUpdate
       }
     }
 
+    if (target === node && st === "working" && claimed === node) {
+      working.push(taskId);
+    }
+
     if (includeUpdates && LEADER_UPDATE_STATUSES.has(st)) {
       const instr = instructionOfTask(taskMsgs, partsByParent);
       const initiator = instr.fromNode || f1(task, "Source");
@@ -514,7 +595,31 @@ async function collectAgentMailbox({ bus, node, verifyKey, onWake, includeUpdate
     }
   }
 
-  return { actionable, updates };
+  return { actionable, updates, working };
+}
+
+// 与 GET updates 同一口径，含仍待处理的 input-required / auth-required。调用方决定要不要写水位。
+async function listSelectableLeaderUpdates(bus, node, { wantedStatuses = LEADER_UPDATE_STATUSES, threshold = null } = {}) {
+  const [tasks, messages, parts, artifacts] = await Promise.all([
+    bus.listRecords(bus.tables.tasks),
+    bus.listRecords(bus.tables.messages),
+    bus.listRecords(bus.tables.parts),
+    bus.tables.artifacts ? bus.listRecords(bus.tables.artifacts) : Promise.resolve([]),
+  ]);
+  const { msgByTask, partsByParent, artsByTask } = groupByTask(messages, parts, artifacts);
+  const out = [];
+  for (const task of tasks) {
+    const st = f1(task, "Status");
+    if (!wantedStatuses.has(st)) continue;
+    const taskMsgs = msgByTask.get(f1(task, "Task_ID")) ?? [];
+    const instr = instructionOfTask(taskMsgs, partsByParent);
+    const initiator = instr.fromNode || f1(task, "Source");
+    if (initiator !== node) continue;
+    const brief = buildTaskBrief(task, taskMsgs, partsByParent, artsByTask);
+    // 只取任务行和它的消息行。Parts 是另一张表，不能把无关写入算进这条任务的变更。
+    out.push({ ...brief, changed_seq: changedSeqOf(task, taskMsgs) });
+  }
+  return selectLeaderUpdates(out.reverse(), threshold);
 }
 
 function normalizeChecksInput(raw) {
@@ -552,6 +657,7 @@ export async function handleAgentGatewayRequest({
   readJsonBody,
   sendJson,
   discoverOnly = false,
+  principal = null,
 } = {}) {
   const remoteAddr = req.socket?.remoteAddress || "";
   const verifyKey = approvalVerifyKey(cfg, approval);
@@ -587,12 +693,25 @@ export async function handleAgentGatewayRequest({
         auth: "/api/v1/tasks/{taskId}/auth",
         reply: "/api/v1/tasks/{taskId}/reply",
         cancel: "/api/v1/tasks/{taskId}/cancel",
+        check: "/api/v1/agents/{node}/check",
         skills: "/api/v1/skills/{name}",
+        checkScript: "/api/v1/kit/a2a_check.py",
+        checkScriptShell: "/api/v1/kit/a2a_check.sh",
       },
     });
     return true;
   }
   if (discoverOnly) return false;
+
+  // 路由矩阵与路径/查询/头里的节点身份。body 里的 node/from 由 http-server 读 body 时绑定。
+  if (principal?.kind === "agent") {
+    assertAgentRoute(principal, {
+      method,
+      pathname,
+      searchParams: reqUrl.searchParams,
+      headers: req.headers,
+    });
+  }
 
   // 0.5) 只读 Skill 模板分发（白名单校验，便于无 CLI 的云端 HTTP Agent 直接按角色拉取 SKILL.md）
   if (method === "GET" && pathname === "/api/v1/skills") {
@@ -624,6 +743,28 @@ export async function handleAgentGatewayRequest({
       filename: `skills/${meta.name}/SKILL.md`,
       content,
     });
+    return true;
+  }
+
+  const mKit = pathname.match(/^\/api\/v1\/kit\/([^/]+)$/);
+  if (method === "GET" && mKit) {
+    let rawName = "";
+    try {
+      rawName = decodeURIComponent(mKit[1]).trim();
+    } catch {
+      throw httpError(404, "脚本不存在");
+    }
+    const fileName = KIT_FILES.get(rawName);
+    if (!fileName) throw httpError(404, "脚本不存在");
+    const filePath = path.join(KIT_DIR, fileName);
+    if (!fs.existsSync(filePath)) throw httpError(404, `脚本文件缺失：${fileName}`);
+    const content = fs.readFileSync(filePath, "utf8");
+    res.writeHead(200, {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-store",
+      "Access-Control-Allow-Origin": "*",
+    });
+    res.end(content);
     return true;
   }
 
@@ -766,7 +907,45 @@ export async function handleAgentGatewayRequest({
       });
     }
 
-    sendJson(res, 200, { agents: Array.from(grouped.values()) });
+    // 有名片的节点（含离线）保留。只藏无名片且超过 30 分钟没活动的探针记录。
+    const agents = Array.from(grouped.values()).filter((agent) =>
+      rosterNodeVisible({ lastSeenAt: agent.last_seen_at }, agent.caps.length > 0));
+    sendJson(res, 200, { agents });
+    return true;
+  }
+
+  // 2.5) 轻量检查。只读：不认领、不补预审、不推进 Leader 水位。唯一副作用是刷新在线状态。
+  const checkMatch = pathname.match(/^\/api\/v1\/agents\/([^/]+)\/check$/);
+  if (method === "GET" && checkMatch) {
+    const node = validateNodeName(decodeURIComponent(checkMatch[1]));
+    const scope = checkScopeOf(principal, reqUrl.searchParams);
+    broker?.touchAgent?.(node, {
+      remoteAddr,
+      mode: "http-poll",
+      kind: "agent",
+      role: scope.role,
+    });
+    const payload = { work: false };
+    if (scope.worker) {
+      const mailbox = await collectAgentMailbox({
+        bus,
+        node,
+        verifyKey,
+        onWake,
+        includeUpdates: false,
+        touchPreflight: false,
+      });
+      payload.tasks = mailbox.actionable.map((item) => item.task_id);
+      payload.working = mailbox.working;
+      if (payload.tasks.length || payload.working.length) payload.work = true;
+    }
+    if (scope.leader) {
+      const watermark = await readUpdatesWatermark(bus, node);
+      const updates = await listSelectableLeaderUpdates(bus, node, { threshold: watermark });
+      payload.updates = updates.length;
+      if (payload.updates > 0) payload.work = true;
+    }
+    sendJson(res, 200, payload);
     return true;
   }
 
@@ -878,6 +1057,16 @@ export async function handleAgentGatewayRequest({
     const wantedStatuses = statusParam
       ? new Set(statusParam.split(",").map((s) => s.trim()).filter(Boolean))
       : LEADER_UPDATE_STATUSES;
+    const sinceParam = reqUrl.searchParams.get("since");
+    let since = null;
+    if (sinceParam != null && sinceParam.trim() !== "") {
+      since = Number(sinceParam);
+      if (!Number.isFinite(since)) throw httpError(400, "since 必须是数字序号");
+    }
+    // new=1 用本节点已持久化的水位；显式 since 优先，避免和水位互相覆盖过滤条件。
+    const useNew = reqUrl.searchParams.get("new") === "1";
+    const storedWatermark = await readUpdatesWatermark(bus, node);
+    const threshold = since != null ? since : (useNew ? storedWatermark : null);
 
     broker?.touchAgent?.(node, {
       remoteAddr,
@@ -886,26 +1075,7 @@ export async function handleAgentGatewayRequest({
       role: "leader",
     });
 
-    const queryUpdates = async () => {
-      const [tasks, messages, parts, artifacts] = await Promise.all([
-        bus.listRecords(bus.tables.tasks),
-        bus.listRecords(bus.tables.messages),
-        bus.listRecords(bus.tables.parts),
-        bus.tables.artifacts ? bus.listRecords(bus.tables.artifacts) : Promise.resolve([]),
-      ]);
-      const { msgByTask, partsByParent, artsByTask } = groupByTask(messages, parts, artifacts);
-      const out = [];
-      for (const task of tasks) {
-        const st = f1(task, "Status");
-        if (!wantedStatuses.has(st)) continue;
-        const taskMsgs = msgByTask.get(f1(task, "Task_ID")) ?? [];
-        const instr = instructionOfTask(taskMsgs, partsByParent);
-        const initiator = instr.fromNode || f1(task, "Source");
-        if (initiator !== node) continue;
-        out.push(buildTaskBrief(task, taskMsgs, partsByParent, artsByTask));
-      }
-      return out.reverse();
-    };
+    const queryUpdates = () => listSelectableLeaderUpdates(bus, node, { wantedStatuses, threshold });
 
     let list = await queryUpdates();
     let wake = list.length > 0;
@@ -928,7 +1098,28 @@ export async function handleAgentGatewayRequest({
     }
 
     if (!res.writableEnded) {
-      sendJson(res, 200, { node, seq: broker?.latestSeq ?? 0, cursor: nextCursor, wake, count: list.length, updates: list });
+      // 水位停在本次实际读到的最大 changed_seq，而不是 broker.latestSeq。
+      // 读表之后才落库的写入序号更大，下一轮仍能看见。status 切片不推进，免得把没返回的终态跳过。
+      let watermark = storedWatermark;
+      if (useNew && !statusParam) {
+        let peak = watermark;
+        for (const u of list) {
+          if (u.changed_seq > peak) peak = u.changed_seq;
+        }
+        if (peak > watermark) {
+          await writeUpdatesWatermark(bus, node, peak);
+          watermark = peak;
+        }
+      }
+      sendJson(res, 200, {
+        node,
+        seq: broker?.latestSeq ?? 0,
+        cursor: nextCursor,
+        wake,
+        count: list.length,
+        watermark,
+        updates: list,
+      });
     }
     return true;
   }
@@ -957,6 +1148,8 @@ export async function handleAgentGatewayRequest({
       const taskMsgs = msgByTask.get(f1(task, "Task_ID")) ?? [];
       const brief = buildTaskBrief(task, taskMsgs, partsByParent, artsByTask);
       if (from && brief.from_node !== from && brief.source !== from) continue;
+      // Agent 身份看不见与自己无关的任务；机主列表保持全量。
+      if (!agentCanSeeTask(principal, brief.from_node, brief.source, brief.target_node)) continue;
       out.push(brief);
       if (out.length >= limit) break;
     }

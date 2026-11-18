@@ -15,12 +15,13 @@
 - **常驻中枢（Mac mini / Linux / 云主机），免外部数据库**：`hub` 角色直接启动本地 SQLite WAL（Node >= 24 内置 `node:sqlite`）+ HTTP API 与静态控制台（默认监听 `0.0.0.0:8787`），无任何第三方 npm 运行时依赖（`dependencies: {}`）。
 - **两类终端统一走 HTTP，节点零入站端口**：
   - **宿主守护节点（`ah join`）**：远端电脑（办公 Mac、Linux 工作站、GPU 服务器等）运行轻量守护进程 `ah daemon`，通过 `GET /api/v1/poll` 维持纯出站长轮询，收到新任务、审批或追问答复时毫秒级唤醒并拉起本机 CLI/脚本。
-  - **纯 HTTP 外部 Agent（Muse / Grok Bot 等）**：云端或定时唤醒、无常驻守护进程的纯 Agent 无需任何本地壳，直接调 `GET /.well-known/agent.json` 自发现，经 `/api/v1/agents/register` 注册、`GET /api/v1/agents/{node}/poll`（支持短轮询与长轮询）取单、`GET /api/v1/agents/{node}/updates` 跟单（可做 **Leader 派单/跟单**），并走 `/api/v1/tasks/{id}/claim|heartbeat|ask|auth|complete|fail` 完成全生命周期闭环。
-- **内置 Web 控制台**：单文件零构建内嵌于中台（打开 `http://<hub>:8787` 即可使用）：
-  - **总览与实时拓扑**：同屏展示宿主长轮询节点与纯 HTTP Agent（Leader / Worker）在线状态、排队/运行/阻塞任务分布；
-  - **Agent Hub 名片矩阵**：按 `Node / Worker / Skill` 三层展示各节点能力、`Receive_Mode`、`Availability` 与外部 HTTP Agent 接入参考；
-  - **A2A 对话流、在线审批与追问**：查看任务全历史（Tasks / Messages / Parts / Runs / Artifacts），对 `auth-required` 一键 ed25519 签名批准/驳回，对 `input-required` 在线回复续跑；
-  - **LoopForge SOP 编排室**：可视化创建并追踪多阶段自动闭环（`plan → code → verify`），支持阶段失败重跑与回跳。
+  - **纯 HTTP 外部 Agent（Muse / Grok Bot 等）**：无常驻进程。机主在控制台签发分 Agent Token（不是机主自己的 `AH_API_TOKEN`）。`GET /.well-known/agent.json` 免鉴权；`/api/v1/skills*` 与其余接口要这把 Token。定时器跑检查脚本（worker / hybrid 每 2 分钟，leader 每 5 分钟）：`IDLE` 结束，`WORK` 再 `poll?timeout=0` 或 `updates?new=1`。跑不了脚本时回退为 worker 每 10 分钟、leader 每 15 分钟。每次唤醒都没有上一轮上下文。
+- **内置 Web 控制台**：单文件零构建内嵌于中台（打开 `http://<hub>:8787`，用机主 Token）：
+  - **待我处理**：首页集中待审批、待答复和需要看一眼的任务；
+  - **Agent**：按节点分组，接纳名片、改显示名、重新生成或吊销 Token；
+  - **派单**：大白话表单，不必先填协议字段；
+  - **添加 Agent**：三步向导（接入类型、名字与角色、密钥与接入指引）。云端 HTTP 会签发一把只显示一次的分 Agent Token；
+  - **任务与 SOP**：任务详情里在线 ed25519 审批、答复追问，以及 LoopForge 编排室。
 - **LoopForge 风格多阶段 SOP 闭环**：内置 `LoopService` 与 `ah loop` CLI，同一 `Context_ID` 下自动推进多阶段任务，借 `acceptance.mjs` 验收结果驱动 `retry` / `goto:<stage_id>` / `abort`，受 `Max_Iterations` 与 `HOP_LIMIT=8` 双重熔断保护。
 - **可选多通道提醒**：`node.json` 配置 `notifications` 后可向飞书群机器人 Webhook（可选通知渠道）、Bark、Telegram 或通用 Webhook 推送审批/问答/终态/陈旧告警。
 
@@ -106,32 +107,32 @@ node bin/ah.mjs join http://<AH_API_TOKEN>@<HUB_IP>:8787
 
 ### 方式 C：纯 HTTP 外部 Agent 接入（Muse / Grok Bot，无需守护进程）
 
-对于托管在外部云端、或靠自身定时轮询驱动的纯 Agent，直接通过标准 HTTP + Bearer Token 接入中台（免鉴权自发现地址 `GET http://<HUB_IP>:8787/.well-known/agent.json`）：
+云端或定时唤醒的纯 Agent 不装守护进程。先在 Web 控制台「添加 Agent」拿到该节点的分 Agent Token（明文只出现一次）。自发现地址 `GET http://<HUB_IP>:8787/.well-known/agent.json` 免鉴权；拉取 Skill（`GET /api/v1/skills/a2a-leader` 或 `a2a-worker`）和其他接口都要带这把 Token。下面用 `<AGENT_TOKEN>` 表示它，不要填机主的 `AH_API_TOKEN`。
 
 ```bash
-# 1) 注册为 Leader（如 Muse：仅派单与跟单）或 Worker（如 Grok Bot：认领并执行）
+# 1) 注册为 Leader（如 Muse：每 15 分钟跟单）或 Worker（如 Grok Bot：每 10 分钟取单）
 curl -X POST http://<HUB_IP>:8787/api/v1/agents/register \
-  -H "Authorization: Bearer <AH_API_TOKEN>" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <AGENT_TOKEN>" -H "Content-Type: application/json" \
   -d '{"node":"muse","role":"leader","kind":"agent","receive_mode":"http-poll"}'
 
 curl -X POST http://<HUB_IP>:8787/api/v1/agents/register \
-  -H "Authorization: Bearer <AH_API_TOKEN>" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <AGENT_TOKEN>" -H "Content-Type: application/json" \
   -d '{"node":"grok-bot","role":"worker","kind":"agent","receive_mode":"http-poll","caps":[{"skill_id":"research","skill_name":"Grok 搜索"}]}'
 
-# 2) Muse 派单并跟单（/updates 支持 ?timeout=25 长轮询，也支持短轮询）
+# 2) Muse 派单，并用 new=1 只拉新变化（终态增量 + 仍待处理的提问/审批）
 curl -X POST http://<HUB_IP>:8787/api/v1/tasks \
-  -H "Authorization: Bearer <AH_API_TOKEN>" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <AGENT_TOKEN>" -H "Content-Type: application/json" \
   -d '{"from":"muse","to":"grok-bot","cap":"research","text":"调研 A2A 网关最佳方案"}'
-curl -H "Authorization: Bearer <AH_API_TOKEN>" \
-  "http://<HUB_IP>:8787/api/v1/agents/muse/updates?timeout=25"
+curl -H "Authorization: Bearer <AGENT_TOKEN>" \
+  "http://<HUB_IP>:8787/api/v1/agents/muse/updates?new=1"
 
-# 3) Grok Bot 轮询取单 -> 认领 -> 提问/审批/交付
-curl -H "Authorization: Bearer <AH_API_TOKEN>" \
-  "http://<HUB_IP>:8787/api/v1/agents/grok-bot/poll?timeout=25"
+# 3) Grok Bot 短轮询取单 -> 同一次运行内认领并交付
+curl -H "Authorization: Bearer <AGENT_TOKEN>" \
+  "http://<HUB_IP>:8787/api/v1/agents/grok-bot/poll?timeout=0"
 curl -X POST "http://<HUB_IP>:8787/api/v1/tasks/<TASK_ID>/claim" \
-  -H "Authorization: Bearer <AH_API_TOKEN>" -H "Content-Type: application/json" -d '{"node":"grok-bot"}'
+  -H "Authorization: Bearer <AGENT_TOKEN>" -H "Content-Type: application/json" -d '{"node":"grok-bot"}'
 curl -X POST "http://<HUB_IP>:8787/api/v1/tasks/<TASK_ID>/complete" \
-  -H "Authorization: Bearer <AH_API_TOKEN>" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <AGENT_TOKEN>" -H "Content-Type: application/json" \
   -d '{"node":"grok-bot","text":"已完成调研","artifact":"https://example.com/report.md"}'
 ```
 
@@ -187,8 +188,8 @@ node bin/ah.mjs daemon
 
 | 角色 \ 运行形态 | 装有 `ah` CLI（本地安装） | 无 CLI 纯 HTTP（云端 / 独立 Agent） |
 |---|---|---|
-| **控制端 / Leader**（查名册、派单、SOP 编排、收结果） | [`skills/ah/SKILL.md`](skills/ah/SKILL.md) | [`skills/a2a-leader/SKILL.md`](skills/a2a-leader/SKILL.md)（`GET /api/v1/skills/a2a-leader`） |
-| **执行端 / Worker**（取单、提问、审批、回执） | [`skills/ah-inbox/SKILL.md`](skills/ah-inbox/SKILL.md)（仅 `kind=agent` 自动安装） | [`skills/a2a-worker/SKILL.md`](skills/a2a-worker/SKILL.md)（`GET /api/v1/skills/a2a-worker`） |
+| **控制端 / Leader**（查名册、派单、SOP 编排、收结果） | [`skills/ah/SKILL.md`](skills/ah/SKILL.md) | [`skills/a2a-leader/SKILL.md`](skills/a2a-leader/SKILL.md)（`GET /api/v1/skills/a2a-leader`，需鉴权） |
+| **执行端 / Worker**（取单、提问、审批、回执） | [`skills/ah-inbox/SKILL.md`](skills/ah-inbox/SKILL.md)（仅 `kind=agent` 自动安装） | [`skills/a2a-worker/SKILL.md`](skills/a2a-worker/SKILL.md)（`GET /api/v1/skills/a2a-worker`，需鉴权） |
 
 ---
 

@@ -4,6 +4,18 @@
 
 const DEFAULT_MAX_HISTORY = 1024;
 const DEFAULT_STALE_NODE_MS = 90_000;
+// 探针节点只碰一次 poll/register 就会留在内存里。超过一天仍无活动就删掉，避免名册无限增长。
+export const NODE_EXPIRE_MS = 24 * 60 * 60 * 1000;
+// 检查脚本大约 2～5 分钟碰一次；没有脚本时大约 10～15 分钟。无名片且超过 30 分钟没活动，视为幽灵，不进名册。
+export const ROSTER_IDLE_MS = 30 * 60 * 1000;
+
+// 有名片的节点离线也要留在名册里。没有名片时，只保留 30 分钟内活动过的在线记录。
+export function rosterNodeVisible(info, hasCard, now = Date.now()) {
+  if (hasCard) return true;
+  const seen = Number(info?.lastSeenAt ?? info?.last_seen_at ?? 0);
+  if (!Number.isFinite(seen) || seen <= 0) return false;
+  return now - seen <= ROSTER_IDLE_MS;
+}
 
 export class LongPollBroker {
   constructor({ initialSeq = 0, maxHistory = DEFAULT_MAX_HISTORY, staleNodeMs = DEFAULT_STALE_NODE_MS } = {}) {
@@ -85,7 +97,16 @@ export class LongPollBroker {
     return () => this._localListeners.delete(fn);
   }
 
+  // 惰性清理：只有再次触摸或读取名册时才扫，避免为过期单独跑定时器。
+  _purgeExpiredNodes(now = Date.now()) {
+    for (const [key, info] of this._nodes) {
+      const seen = Number(info?.lastSeenAt) || 0;
+      if (now - seen > NODE_EXPIRE_MS) this._nodes.delete(key);
+    }
+  }
+
   _touchNode(node, cursor, remoteAddr, deltaWaiter = 0, meta = null) {
+    this._purgeExpiredNodes();
     const key = String(node ?? "").trim();
     if (!key || key === "*" || key === "_web") return null;
     const prev = this._nodes.get(key) ?? {
@@ -116,8 +137,16 @@ export class LongPollBroker {
   }
 
   // 记录外部 HTTP Agent 或客户端心跳/轮询活跃态，方便控制台统一展示连接节点与接入模式。
-  touchAgent(node, { remoteAddr = "", mode = "http-poll", kind = "agent", role = "", cursor = undefined } = {}) {
-    return this._touchNode(node, cursor, remoteAddr, 0, { mode, kind, role });
+  // 省略 role 时保留原角色。poll / claim 没带角色，不能把 check 刚写上的角色清成空。
+  touchAgent(node, { remoteAddr = "", mode = "http-poll", kind = "agent", role, cursor = undefined } = {}) {
+    const meta = { mode, kind };
+    if (role) meta.role = role;
+    return this._touchNode(node, cursor, remoteAddr, 0, meta);
+  }
+
+  // 删除 Agent 后立刻从名册消失，不必等 24 小时过期。对方若仍在轮询会被重新记上，所以要先吊销 Token。
+  forgetNode(node) {
+    return this._nodes.delete(String(node ?? "").trim());
   }
 
   async wait({ node = "*", cursor = 0, timeoutMs = 25_000, signal = null, remoteAddr = "" } = {}) {
@@ -177,6 +206,7 @@ export class LongPollBroker {
   }
 
   connectedNodes(now = Date.now()) {
+    this._purgeExpiredNodes(now);
     const out = [];
     for (const info of this._nodes.values()) {
       const polling = info.activeWaiters > 0;

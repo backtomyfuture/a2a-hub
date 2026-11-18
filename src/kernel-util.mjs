@@ -3,6 +3,10 @@
 // 终态集合。骨架与 outbox 共用这一份，避免回指 kernel.mjs 形成环。
 export const TERMINAL_STATUSES = new Set(["completed", "failed", "canceled", "rejected"]);
 
+// Hub 常放在 Cloudflare 之后，其浏览器完整性检查会以 403 / 1010 拦下 node、curl、python 等默认 UA。
+// 出站请求和接入提示词统一用这串浏览器 UA。
+export const BROWSER_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
 // 坏 JSON 不能当成空对象写回去，否则会把别人写在 Metadata 里的键冲掉。
 export function readTaskMeta(raw) {
   if (raw && typeof raw === "object" && !Array.isArray(raw)) return { ok: true, meta: { ...raw } };

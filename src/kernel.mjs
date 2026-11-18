@@ -748,6 +748,8 @@ export class Kernel {
       if (!row) {
         const create = { ...fields };
         if (this.cfg.nodeDesc) create.Node_Desc = this.cfg.nodeDesc;
+        // 只有 Hub 进程自己的名片可以跳过待接纳。远端节点对账跑在 role=node 上，仍留给机主接纳。
+        if (this.cfg.role === "hub") create.Admission = "admitted";
         await this.bus.createRecord(this.T.agentCards, create);
         log("registered capability " + capId);
         continue;
@@ -775,6 +777,16 @@ export class Kernel {
         if (f1(row, "Dispatchable") === "No") continue;
         await this.bus.updateRecord(this.T.agentCards, row.record_id, { Dispatchable: "No" });
         log("capability removed from commands, Dispatchable=No " + capId);
+      }
+    }
+    if (this.cfg.role === "hub") {
+      // 存量 CLI 名片的 Admission 是空的，会被控制台当成待接纳。只补空白，
+      // 机主写成 pending / rejected 的不能在对账里盖掉。其它节点的名片不在这里动。
+      const owned = await this.bus.listRecords(this.T.agentCards);
+      for (const row of owned) {
+        if (f1(row, "Node") !== this.cfg.node) continue;
+        if (String(f1(row, "Admission") ?? "").trim()) continue;
+        await this.bus.updateRecord(this.T.agentCards, row.record_id, { Admission: "admitted" });
       }
     }
     const next = new Map();
