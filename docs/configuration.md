@@ -365,7 +365,7 @@ api backoff reason=http-429 kind=list retry=1/3 wait=2s
 - 手动非交互配置：
   - `ah setup --role hub --bus sqlite [--listen 0.0.0.0:8787] [--db-path ./hub.db] [--public-url http://...] [--api-token <token>] [--yes]`
   - `ah setup --role node --bus http --hub-url http://<HUB>:8787 --api-token <token> [--hub-key <pubkey>] [--yes]`
-- **纯 HTTP 外部 Agent（Muse Leader / Grok Bot 等无守护进程 Agent）**：在控制台添加并复制分 Agent Token，存进平台安全密钥空间 `A2A_HUB_TOKEN`。定时器跑 `a2a_check.py`（worker / hybrid 每 2 分钟，leader 每 5 分钟）；输出 `IDLE` 就结束，输出 `WORK` 再按【处理流程】执行 `poll?timeout=0` 或 `updates?new=1`。跑不了脚本时回退为 worker 每 10 分钟、leader 每 15 分钟。无需安装本地 `ah` 进程。完整接口见 [外部 HTTP Agent 手册](protocol-node-runbook.md)。
+- **纯 HTTP 外部 Agent（Muse Leader / Grok Bot 等无守护进程 Agent）**：在控制台添加并复制分 Agent Token，存进平台安全密钥空间 `A2A_HUB_TOKEN`。定时器跑 `a2a_check.py`（worker / hybrid 每 2 分钟，leader 每 5 分钟）；输出 `IDLE` 就结束，输出 `WORK` 再按【处理流程】执行 `poll?timeout=0` 或 `updates?new=1`。跑不了脚本时回退为 worker 每 10 分钟、leader 每 15 分钟。无需安装本地 `ah` 进程。控制台的在线判定按 Hub 观测到的唤醒周期放宽：距上次报到不超过周期的 2.5 倍算在线（下限 3 分钟，上限 30 分钟；Hub 刚重启、周期未知时按 16 分钟）。长轮询的宿主节点仍是 90 秒。完整接口见 [外部 HTTP Agent 手册](protocol-node-runbook.md)。
 
 ### 7.3 LoopForge SOP 多阶段闭环 CLI（`ah loop`）
 
