@@ -44,6 +44,9 @@ function routeAllowed(principal, method, pathname) {
   if (method === "GET" && pathname === "/api/v1/agents") return true;
   // 只读检查不区分角色。worker 看任务，leader 看任务和 updates。旧 hybrid 与 leader 相同。
   if (method === "GET" && /^\/api\/v1\/agents\/[^/]+\/check$/.test(pathname)) return true;
+  // 附件上传与下载对所有 agent 角色放行，具体文件可见性在路由内按 uploaded_by / 引用任务判定。
+  if (method === "POST" && pathname === "/api/v1/files") return true;
+  if (method === "GET" && /^\/api\/v1\/files\/[^/]+(?:\/meta)?$/.test(pathname)) return true;
 
   const role = principal.role;
   const leaderish = role === "leader" || role === "hybrid";

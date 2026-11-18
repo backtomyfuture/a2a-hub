@@ -13,6 +13,7 @@ import { PresentService } from "./present.mjs";
 import { StaleService } from "./stale.mjs";
 import { ScheduleService } from "./schedule.mjs";
 import { LoopService } from "./loop.mjs";
+import { FileRetentionService, FileStore } from "./files.mjs";
 import { ExternalNotifier } from "./notifier.mjs";
 import { WebhookDispatcher } from "./webhooks.mjs";
 import { readOwnerFromConfigDir } from "./owner.mjs";
@@ -238,25 +239,48 @@ export async function runHub(cfg, log = logLine, hooks = {}) {
 
   const runtime = new HubRuntime({ cfg, approval, present, stale, schedule, loop, log });
   let httpHandle = null;
+  let fileStore = null;
+  let fileRetention = null;
   if (isStandalone) {
+    if (cfg.configDir) {
+      try {
+        fileStore = new FileStore({
+          configDir: cfg.configDir,
+          ...(Number.isFinite(Number(cfg?.maxFileBytes)) && Number(cfg.maxFileBytes) > 0
+            ? { maxBytes: Number(cfg.maxFileBytes) }
+            : {}),
+        });
+        fileRetention = new FileRetentionService({
+          fileStore,
+          bus: cfg.bus,
+          log,
+        });
+        fileRetention.start();
+      } catch (e) {
+        log("初始化文件存储与清理服务失败（进程不退出）：" + (e?.message ?? e));
+      }
+    }
     try {
       httpHandle = await startHubHttpServer({
         cfg,
         bus: cfg.bus,
         broker,
         approval,
+        fileStore,
         log,
         onWake: () => runtime.wakeNow(),
         webhookDispatcher,
       });
-      runtime._onStop = async () => {
-        broker?.close();
-        await httpHandle?.close();
-        cfg.bus?.close?.();
-      };
     } catch (e) {
       log("启动 Hub HTTP 服务失败（将继续主循环）：" + (e?.message ?? e));
     }
+    runtime._onStop = async () => {
+      fileRetention?.stop();
+      broker?.close();
+      await httpHandle?.close();
+      fileStore?.close();
+      cfg.bus?.close?.();
+    };
   }
 
   if (typeof hooks.onRuntime === "function") hooks.onRuntime(runtime);
