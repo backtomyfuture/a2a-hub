@@ -955,6 +955,53 @@ export function renderWebConsoleHtml() {
   </div>
 </div>
 
+<!-- 切换节点接收方式。三选一，不能和 Webhook 并行叠加。 -->
+<div class="modal-backdrop" id="receiveModal">
+  <div class="modal" style="max-width:560px;">
+    <div class="modal-head">
+      <span id="rxTitle">切换接收方式</span>
+      <button class="btn sm" type="button" data-close-modal="receiveModal">关闭</button>
+    </div>
+    <div id="rxErrBox" class="err-banner" style="display:none;"></div>
+    <form id="receiveForm">
+      <input type="hidden" id="rxNode" />
+      <div class="choice-list" id="rxChoices" style="margin-bottom:12px;">
+        <label class="choice-card" data-receive="poll">
+          <input type="radio" name="rxReceive" value="poll" />
+          <div>
+            <div style="font-weight:600;">定时检查（poll）</div>
+            <div class="hint">按固定间隔运行检查脚本，有事再取单。</div>
+          </div>
+        </label>
+        <label class="choice-card" data-receive="longpoll">
+          <input type="radio" name="rxReceive" value="longpoll" />
+          <div>
+            <div style="font-weight:600;">常驻长连接（longpoll）</div>
+            <div class="hint">进程循环长轮询，不建定时任务。</div>
+          </div>
+        </label>
+        <label class="choice-card" data-receive="webhook">
+          <input type="radio" name="rxReceive" value="webhook" />
+          <div>
+            <div style="font-weight:600;">Webhook 推送（webhook）</div>
+            <div class="hint">中台向回调 URL 推门铃。需要填写 URL。</div>
+          </div>
+        </label>
+      </div>
+      <div class="form-row" id="rxUrlRow" style="display:none;">
+        <label>Webhook 回调 URL（必填）</label>
+        <input class="input mono" type="url" id="rxUrl" maxlength="2048" placeholder="https://example.com/a2a/webhook" />
+        <div class="hint">仅允许 http/https，长度 ≤ 2048，禁止带用户名密码。第一次开启时会给出只显示一次的 Secret。</div>
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;">
+        <button type="button" class="btn" data-close-modal="receiveModal">取消</button>
+        <button type="submit" class="btn primary">切换</button>
+      </div>
+    </form>
+    <div id="rxResult" style="display:none;"></div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -1006,6 +1053,7 @@ const state = {
   wizardStep: 1,
   wizardAccess: "http",
   wizardReceive: "poll",
+  switchReceive: "poll",
   addCapTarget: { node: "", isHttp: true },
 };
 
@@ -1139,6 +1187,16 @@ function isHttpNodeGroup(g) {
     return true;
   }
   return Boolean(g.conn && g.conn.kind === "agent" && httpModes.has(g.conn.mode));
+}
+
+// 以名片上的 Receive_Mode 为准。连接上的 mode 只是当前这条链路，不能当成节点的接收方式。
+function httpReceiveModeOf(g) {
+  const httpModes = new Set(["http-poll", "http-longpoll", "webhook"]);
+  for (const card of (g && g.cards) || []) {
+    if (httpModes.has(card.receive_mode)) return card.receive_mode;
+  }
+  if (g && httpModes.has(g.mode)) return g.mode;
+  return "";
 }
 
 function agentTypeSummary(kind, role, mode) {
@@ -2113,6 +2171,36 @@ async function doDeleteCard(capId) {
   }
 }
 
+function syncSwitchReceiveChoice() {
+  document.querySelectorAll("#rxChoices .choice-card").forEach((card) => {
+    const checked = card.dataset.receive === state.switchReceive;
+    card.classList.toggle("selected", checked);
+    const input = card.querySelector("input");
+    if (input) input.checked = checked;
+  });
+  const urlRow = document.getElementById("rxUrlRow");
+  if (urlRow) urlRow.style.display = state.switchReceive === "webhook" ? "block" : "none";
+}
+
+function openSwitchReceive(node) {
+  const g = buildNodeGroups(state.data).find((x) => x.node === node);
+  const mode = g ? httpReceiveModeOf(g) : "";
+  state.switchReceive = mode === "webhook" ? "webhook" : (mode === "http-longpoll" ? "longpoll" : "poll");
+  document.getElementById("rxTitle").textContent = "切换接收方式 · " + node;
+  document.getElementById("rxNode").value = node;
+  const existing = state.webhooksByNode.get(node);
+  document.getElementById("rxUrl").value = existing && existing.url ? existing.url : "";
+  const errBox = document.getElementById("rxErrBox");
+  errBox.style.display = "none";
+  errBox.textContent = "";
+  document.getElementById("receiveForm").style.display = "block";
+  const result = document.getElementById("rxResult");
+  result.style.display = "none";
+  result.innerHTML = "";
+  syncSwitchReceiveChoice();
+  openModal("receiveModal");
+}
+
 function openWebhookModal(node) {
   const existing = state.webhooksByNode.get(node) || null;
   document.getElementById("whTitle").textContent = (existing ? "修改 Webhook · " : "配置 Webhook · ") + node;
@@ -2410,44 +2498,47 @@ function renderTokenManageBox(node, kind) {
     + '</div></div>';
 }
 
+function renderReceiveBox(g) {
+  if (!isHttpNodeGroup(g)) {
+    return '<div class="token-box"><strong>接收方式：常驻长连接（ah daemon）</strong></div>';
+  }
+  const mode = httpReceiveModeOf(g) || "http-poll";
+  const label = receiveModeLabelZh(mode) || "定时检查";
+  return '<div class="token-box">'
+    + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">'
+    + '<div><strong>接收方式：' + esc(label) + '</strong></div>'
+    + '<button class="btn sm" data-action="switch-receive" data-node="' + esc(g.node) + '">切换接收方式</button>'
+    + '</div></div>';
+}
+
 function renderWebhookManageBox(g) {
-  const isHttp = isHttpNodeGroup(g);
-  const wh = state.webhooksByNode.get(g.node);
+  // 接收方式不是 webhook 时不渲染这块，避免看起来可以和轮询并行叠加。
+  if (httpReceiveModeOf(g) !== "webhook") return "";
   if (!state.webhooksApiAvailable) {
-    if (g.mode === "webhook") {
-      return '<div class="token-box"><span class="hint">Webhook 管理接口尚未启用（HTTP 404）</span></div>';
-    }
-    return "";
+    return '<div class="token-box"><span class="hint">Webhook 管理接口尚未启用（HTTP 404）</span></div>';
   }
-  if (!wh && !isHttp) return "";
-  if (!wh) {
-    return '<div class="token-box">'
-      + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">'
-      + '<div><strong>Webhook 推送</strong> <span class="badge">未配置</span></div>'
-      + '<button class="btn sm" data-action="edit-webhook" data-node="' + esc(g.node) + '">配置 Webhook</button>'
-      + '</div></div>';
-  }
+  const wh = state.webhooksByNode.get(g.node) || null;
   let statusBadge = '<span class="badge">待投递</span>';
-  if (wh.last_status != null && wh.last_status !== "") {
+  if (wh && wh.last_status != null && wh.last_status !== "") {
     const code = Number(wh.last_status);
     statusBadge = (code >= 200 && code < 300)
       ? '<span class="badge green">最近投递 HTTP ' + esc(code) + '</span>'
       : '<span class="badge red">投递失败 HTTP ' + esc(code) + '</span>';
-  } else if (wh.last_error) {
+  } else if (wh && wh.last_error) {
     statusBadge = '<span class="badge red">投递异常</span>';
   }
-  const deliveredText = wh.last_delivered_at ? formatRelativeTime(wh.last_delivered_at) : "暂无投递";
+  const deliveredText = wh && wh.last_delivered_at ? formatRelativeTime(wh.last_delivered_at) : "暂无投递";
   return '<div class="token-box">'
     + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">'
     + '<div><strong>Webhook 推送</strong> ' + statusBadge + '</div>'
     + '<span class="muted">最近投递：' + esc(deliveredText) + '</span>'
     + '</div>'
-    + '<div class="mono muted" style="word-break:break-all;">' + esc(wh.url || "") + '</div>'
-    + (wh.last_error ? '<div class="hint" style="color:var(--red-text);">最近错误：' + esc(wh.last_error) + '</div>' : '')
+    + '<div class="mono muted" style="word-break:break-all;">' + esc((wh && wh.url) || "") + '</div>'
+    + (wh && wh.last_error ? '<div class="hint" style="color:var(--red-text);">最近错误：' + esc(wh.last_error) + '</div>' : '')
+    + '<div class="hint">Agent 每 30 分钟用检查脚本兜底一次，防止漏推，这不是第二种接收方式。</div>'
     + '<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">'
     + '<button class="btn sm" data-action="edit-webhook" data-node="' + esc(g.node) + '">修改</button>'
     + '<button class="btn sm" data-action="test-webhook" data-node="' + esc(g.node) + '">测试</button>'
-    + '<button class="btn sm danger" data-action="delete-webhook" data-node="' + esc(g.node) + '">删除</button>'
     + '</div></div>';
 }
 
@@ -2587,10 +2678,8 @@ function renderAgents(d) {
       for (const g of admittedGroups) {
         const expanded = state.expandedNodes.has(g.node);
         const dispatchable = g.admittedCards.find((c) => c.dispatchable === "Yes");
-        const isHttp = isHttpNodeGroup(g);
         const agentCnt = g.admittedCards.filter((c) => c.skill_id === "agent").length;
         const skillCnt = g.admittedCards.filter((c) => c.skill_id !== "agent").length;
-        const modeTag = isHttp && g.mode ? (' · ' + receiveModeLabelZh(g.mode)) : '';
 
         html += '<div class="node-card">'
           + '<div class="node-head">'
@@ -2598,7 +2687,7 @@ function renderAgents(d) {
           + '<div class="node-name"><span class="dot ' + (g.online ? "on" : "") + '"></span>' + esc(g.displayName)
           + (g.displayName !== g.node ? ' <span class="mono muted" style="font-size:12px;font-weight:400;">(' + esc(g.node) + ')</span>' : '')
           + '</div>'
-          + '<div class="hint" style="margin-top:4px;">' + esc(agentTypeSummary(g.kind, g.role, g.mode) + modeTag) + ' · 最近活动：' + esc(formatRelativeTime(g.lastSeenAt)) + '</div>'
+          + '<div class="hint" style="margin-top:4px;">' + esc(agentTypeSummary(g.kind, g.role, g.mode)) + ' · 最近活动：' + esc(formatRelativeTime(g.lastSeenAt)) + '</div>'
           + '</div>'
           + '<span class="badge ' + (g.online ? "green" : "") + '">' + (g.online ? "在线" : "离线") + '</span>'
           + '</div>';
@@ -2616,6 +2705,7 @@ function renderAgents(d) {
         }
 
         html += renderTokenManageBox(g.node, g.kind);
+        html += renderReceiveBox(g);
         html += renderWebhookManageBox(g);
 
         html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:auto;">';
@@ -3089,6 +3179,9 @@ document.addEventListener("click", (e) => {
   else if (act === "open-add-cap") openAddCapModal(actEl.dataset.node);
   else if (act === "delete-card") openDeleteCardConfirm(actEl.dataset.capId);
   else if (act === "do-delete-card") doDeleteCard(actEl.dataset.capId);
+  else if (act === "switch-receive") openSwitchReceive(actEl.dataset.node);
+  else if (act === "copy-rx-prompt") copyText((document.getElementById("rxPrompt") || {}).value || "", "已复制提示词");
+  else if (act === "copy-rx-secret") copyText((document.getElementById("rxSecret") || {}).value || "", "已复制 Webhook Secret");
   else if (act === "edit-webhook") openWebhookModal(actEl.dataset.node);
   else if (act === "test-webhook") testWebhookAction(actEl.dataset.node);
   else if (act === "delete-webhook") openDeleteWebhookConfirm(actEl.dataset.node);
@@ -3379,6 +3472,67 @@ document.getElementById("addCapForm").addEventListener("submit", async (e) => {
       document.getElementById("acSnippetText").value = JSON.stringify(err.data.snippet, null, 2);
       document.getElementById("acSnippetBox").style.display = "block";
     }
+    showToast(err.message);
+  }
+});
+
+document.getElementById("rxChoices").addEventListener("click", (e) => {
+  const card = e.target.closest(".choice-card");
+  if (!card || !card.dataset.receive) return;
+  state.switchReceive = card.dataset.receive;
+  syncSwitchReceiveChoice();
+});
+
+document.getElementById("receiveForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const errBox = document.getElementById("rxErrBox");
+  errBox.style.display = "none";
+  errBox.textContent = "";
+  const node = document.getElementById("rxNode").value.trim();
+  const receive = state.switchReceive || "poll";
+  const url = document.getElementById("rxUrl").value.trim();
+  if (!node) return showToast("缺少节点");
+  if (receive === "webhook" && !url) {
+    errBox.textContent = "选择 Webhook 时必须填写回调 URL";
+    errBox.style.display = "block";
+    return;
+  }
+  try {
+    const body = { receive };
+    if (receive === "webhook") body.webhook_url = url;
+    const res = await api("/api/v1/admin/nodes/" + encodeURIComponent(node) + "/receive", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    let html = '<div class="hint" style="margin-bottom:10px;">把这段提示词发给对方 Agent，让它改用新方式。</div>';
+    const secret = res && res.webhook && res.webhook.secret;
+    if (secret) {
+      html += '<div class="token-reveal">'
+        + '<div class="token-reveal-title">Webhook 签名密钥已生成（Webhook Secret 只显示这一次）</div>'
+        + '<div class="hint" style="color:var(--text);">请立即保存为 <span class="mono">A2A_HUB_WEBHOOK_SECRET</span>，关闭窗口后无法再次查看。</div>'
+        + '<div style="display:flex;gap:8px;align-items:center;">'
+        + '<input class="input mono" id="rxSecret" readonly value="' + esc(secret) + '" />'
+        + '<button type="button" class="btn sm primary" data-action="copy-rx-secret">复制 Secret</button>'
+        + '</div></div>';
+    }
+    const prompt = res && res.onboarding && res.onboarding.prompt;
+    if (prompt) {
+      html += '<div class="form-row"><div style="display:flex;justify-content:space-between;align-items:center;">'
+        + '<label>新的接入提示词</label>'
+        + '<button type="button" class="btn sm primary" data-action="copy-rx-prompt">复制提示词</button>'
+        + '</div>'
+        + '<textarea class="input mono" id="rxPrompt" readonly style="min-height:120px;">' + esc(prompt) + '</textarea>'
+        + '</div>';
+    }
+    document.getElementById("receiveForm").style.display = "none";
+    const result = document.getElementById("rxResult");
+    result.innerHTML = html;
+    result.style.display = "block";
+    showToast("已切换 " + node + " 的接收方式");
+    await refreshState();
+  } catch (err) {
+    errBox.textContent = err.message || "切换接收方式失败";
+    errBox.style.display = "block";
     showToast(err.message);
   }
 });

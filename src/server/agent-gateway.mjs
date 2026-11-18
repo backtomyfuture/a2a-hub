@@ -13,7 +13,7 @@ import { f1 } from "../bus/tables.mjs";
 import { capIdOf } from "../config.mjs";
 import { agentCanSeeTask, assertAgentRoute } from "../hub/agent-access.mjs";
 import { admissionOf, httpError, validateNodeName } from "../hub/admission.mjs";
-import { removeHttpAgentSchedule, saveHttpAgentSchedule } from "../hub/capabilities.mjs";
+import { alignNodeReceiveMode, removeHttpAgentSchedule, saveHttpAgentSchedule } from "../hub/capabilities.mjs";
 import { rosterNodeVisible } from "./longpoll-broker.mjs";
 import { submitAgentReceipt } from "../inbox.mjs";
 import { DAEMON_VERSION } from "../kernel.mjs";
@@ -41,6 +41,27 @@ function changedSeqOf(task, taskMsgs) {
     if (s > max) max = s;
   }
   return max;
+}
+
+const REGISTER_RECEIVE_MODES = new Set([
+  "http-poll",
+  "http-longpoll",
+  "webhook",
+  "longpoll",
+  "poll",
+  "event",
+]);
+
+// 缺省仍是定时检查。poll / longpoll 收成名片上的 http-* ，避免写成宿主用的裸值后被误判成宿主节点。
+function normalizeRegisterReceive(body) {
+  const raw = String(body?.receive_mode ?? body?.mode ?? "").trim();
+  const value = raw || "http-poll";
+  if (!REGISTER_RECEIVE_MODES.has(value)) {
+    throw httpError(400, "receive_mode 只能是 http-poll、http-longpoll、webhook、longpoll、poll 或 event");
+  }
+  if (value === "poll") return "http-poll";
+  if (value === "longpoll") return "http-longpoll";
+  return value;
 }
 
 function keepOwnerFlags(rawMeta, next) {
@@ -673,6 +694,7 @@ export async function handleAgentGatewayRequest({
   sendJson,
   discoverOnly = false,
   principal = null,
+  webhookStore = null,
 } = {}) {
   const remoteAddr = req.socket?.remoteAddress || "";
   const verifyKey = approvalVerifyKey(cfg, approval);
@@ -790,7 +812,15 @@ export async function handleAgentGatewayRequest({
     const role = String(body.role ?? "worker").trim().toLowerCase() || "worker";
     const kind = String(body.kind ?? "agent").trim() || "agent";
     const zone = String(body.zone ?? "cloud").trim() || "cloud";
-    const receiveMode = String(body.receive_mode ?? body.mode ?? "http-poll").trim() || "http-poll";
+    let receiveMode = normalizeRegisterReceive(body);
+    let receiveWarning = "";
+    // 机主已经配了 Webhook 时，Agent 再报到不能把名片改回轮询。没有机主配置时，自报 webhook 落不了地。
+    if (webhookStore?.get?.(node)) {
+      receiveMode = "webhook";
+    } else if (receiveMode === "webhook") {
+      receiveMode = "http-poll";
+      receiveWarning = "Webhook 需机主在控制台开启";
+    }
     const nodeDesc = String(body.node_desc ?? body.desc ?? "").trim();
     const version = String(body.version ?? "http-agent").trim();
     const capPrefix = String(body.cap_prefix ?? node).trim() || node;
@@ -860,9 +890,11 @@ export async function handleAgentGatewayRequest({
     }
 
     const pending = Object.values(admissionMap).some((v) => v !== "admitted");
+    // 这次没报上来的旧名片也要改成同一个接收方式，否则一个节点会同时写着两种模式。
+    await alignNodeReceiveMode(bus, node, receiveMode);
     broker?.touchAgent?.(node, { remoteAddr, mode: receiveMode, kind, role });
     onWake();
-    sendJson(res, 200, {
+    const payload = {
       ok: true,
       node,
       hub_node: cfg?.node || "hub",
@@ -871,7 +903,9 @@ export async function handleAgentGatewayRequest({
       cards: saved,
       admission: admissionMap,
       pending,
-    });
+    };
+    if (receiveWarning) payload.warning = receiveWarning;
+    sendJson(res, 200, payload);
     return true;
   }
 

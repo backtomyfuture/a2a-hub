@@ -4,6 +4,7 @@
 
 ## 未发布
 
+- **接收方式三选一**：HTTP 节点的接收方式只能是定时检查、常驻长连接或 Webhook 之一，由机主 `POST /api/v1/admin/nodes/:node/receive` 切换，并同步该节点全部名片。切到 Webhook 时登记 URL，新建才返回一次性 secret；切走则删除 Webhook。非 Webhook 节点 `PUT /api/v1/admin/webhooks/:node` 返回 409。`DELETE` 该 Webhook 时名片回到 `http-poll`。`register` 不再用自报模式覆盖机主已开启的 Webhook；自报 webhook 但机主未配置时写成 `http-poll` 并警告。宿主节点不能切换。控制台只在当前模式为 Webhook 时显示 Webhook 管理，并说明 30 分钟检查脚本只是兜底。
 - **Webhook 门铃**：HTTP Agent 增加接收方式 `http-longpoll` 与 `webhook`（默认定时检查仍是 `http-poll`）。配置目录 `agent_webhooks.json`（0600）保存机主填写的 URL 与 HMAC 密钥；密钥明文只在新建或轮换时返回一次，列表与日志不含密钥。推送只有门铃（`task.assigned` / `task.updated` / `ping`），不含指令正文。签名为 `HMAC-SHA256(secret, timestamp.rawBody)`，不跟随重定向，超时 10 秒，失败按 0/1/3/8 秒重试。管理接口为 `GET|PUT|DELETE /api/v1/admin/webhooks*` 与 `POST .../test`，仅机主可用。
 - **添加能力**：`POST /api/v1/admin/cards` 给 http 节点加已接纳名片（带 `admin` scope 的 leader 也可）；宿主节点改为 `POST /api/v1/admin/commands-snippet` 生成 `commands.json` 片段，中台不下发。`DELETE /api/v1/admin/cards/:capId` 仅机主，且只删手动或预置的 http 名片。
 - **定时任务只读**：`GET /api/v1/schedules` 仅机主，按节点汇总 cron、下次触发、上次任务与异常（离线 / 失败 / 漏触发）。HTTP Agent 用 `PUT|DELETE /api/v1/agents/:node/schedules/:id` 自报计划，只能改自己的节点，中台不据此触发。
