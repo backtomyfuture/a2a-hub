@@ -2196,13 +2196,8 @@ function fillWebhookStatus(node) {
   const delivered = existing.last_delivered_at ? formatRelativeTime(existing.last_delivered_at) : "暂无成功投递";
   const attempted = existing.last_attempt_at ? formatRelativeTime(existing.last_attempt_at) : "暂无";
   const code = webhookDeliveryCode(existing);
-  const statusText = existing.legacy
-    ? "需补填密钥"
-    : (code != null && code >= 200 && code < 300
-      ? "最近投递成功"
-      : ((existing.last_status || existing.last_error) ? "投递失败" : "待投递"));
   status.innerHTML = '<div style="display:flex;flex-direction:column;gap:4px;">'
-    + '<div>' + webhookRowBadge(existing) + ' <span class="hint">' + esc(statusText) + '</span></div>'
+    + '<div>' + webhookRowBadge(existing) + (code != null ? ' <span class="hint">HTTP ' + esc(code) + '</span>' : '') + '</div>'
     + '<div class="mono" style="word-break:break-all;">' + esc(existing.url || "") + '</div>'
     + '<div class="hint">请求头 ' + esc(headerName)
     + (existing.secret_mask ? ' · 密钥掩码 ' + esc(existing.secret_mask) : '') + '</div>'
