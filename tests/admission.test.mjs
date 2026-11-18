@@ -11,6 +11,7 @@ import {
   ADMISSION_VALUES,
   admissionOf,
   buildOnboarding,
+  formatAgentCard,
   isAdmitted,
 } from "../src/hub/admission.mjs";
 import { createTask } from "../src/hub/create.mjs";
@@ -765,4 +766,13 @@ test("inventory 输出每张名片包含 Admission=<值>", async () => {
     assert.match(output, /CAP-inv-1.*Admission=pending/);
     assert.match(output, /CAP-inv-2.*Admission=admitted/);
   });
+});
+
+test("formatAgentCard 透出 manual / preset，供控制台判断能否删除", () => {
+  const manual = formatAgentCard({ record_id: "r1", fields: { Cap_ID: "CAP-a-x", Node: "a", Metadata: JSON.stringify({ kind: "agent", manual: true }) } });
+  assert.equal(manual.manual, true);
+  assert.equal(manual.preset, false);
+  const plain = formatAgentCard({ record_id: "r2", fields: { Cap_ID: "CAP-b-x", Node: "b", Metadata: "not-json" } });
+  assert.equal(plain.manual, false);
+  assert.equal(plain.preset, false);
 });

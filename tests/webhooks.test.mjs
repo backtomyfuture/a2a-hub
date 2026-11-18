@@ -127,6 +127,7 @@ test("签名、门铃不含正文、失败重试、成功去重、working 不推
     assert.equal(raw.includes("SECRET-INSTRUCTION"), false);
     assert.equal(raw.includes("do not leak"), false);
     assert.equal(calls[0].headers["Content-Type"], "application/json");
+    assert.equal(calls[0].redirect, "manual");
     assert.equal(calls[0].headers["User-Agent"], BROWSER_USER_AGENT);
     assert.equal(calls[0].headers["X-A2A-Event"], "task.assigned");
     assert.match(calls[0].headers["X-A2A-Delivery"], /^[0-9a-f-]{36}$/);

@@ -11,6 +11,7 @@ import { agentCanSeeTask, assertAgentRoute, bindAgentBody } from "../hub/agent-a
 import { AgentTokenStore } from "../hub/agent-tokens.mjs";
 import {
   buildOnboarding,
+  admissionOf,
   formatAgentCard,
   httpError,
   receiveModeFor,
@@ -859,7 +860,7 @@ export async function startHubHttpServer({
             return;
           }
           if (tokenStore.get(node)) {
-            sendJson(res, 409, { error: `节点 ${node} 已有 Token，请使用 POST /api/v1/admin/tokens/${node}/rotate 轮换` });
+            sendJson(res, 409, { error: `节点 ${node} 已存在（已有 Token）。如需重新接入，请在「节点」页重新生成 Token（即轮换：POST /api/v1/admin/tokens/${node}/rotate），或先删除该节点再添加` });
             return;
           }
         }
@@ -869,7 +870,11 @@ export async function startHubHttpServer({
           const capId = capIdOf("agent", {}, node);
           const existing = await bus.listRecords(bus.tables.agentCards);
           if (existing.some((r) => f1(r, "Cap_ID") === capId)) {
-            sendJson(res, 409, { error: `名片已存在：${capId}` });
+            const prev = existing.find((r) => f1(r, "Cap_ID") === capId);
+            const adm = admissionOf(prev);
+            // 被拒绝的名片仍占着 Cap_ID，直接报「已存在」会让人以为节点凭空消失了。
+            const where = adm === "rejected" ? "它在「节点 → 已拒绝」里，可以恢复为待接纳" : (adm === "pending" ? "它在「节点 → 待接纳」里" : "它已经接入");
+            sendJson(res, 409, { error: `节点 ${node} 已存在：${where}；也可先删除该节点再添加` });
             return;
           }
           const created = await bus.createRecord(bus.tables.agentCards, {

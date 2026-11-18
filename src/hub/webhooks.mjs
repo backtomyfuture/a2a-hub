@@ -280,6 +280,8 @@ export class WebhookDispatcher {
             "X-A2A-Signature": `sha256=${webhookSignature(hook.secret, timestamp, rawBody)}`,
           },
           body: rawBody,
+          // 不跟随重定向：机主核过的是这个地址，3xx 不能把带签名的请求带去别处。
+          redirect: "manual",
           signal: AbortSignal.timeout(this.timeoutMs),
         });
         lastStatus = Number(res?.status) || 0;

@@ -1754,8 +1754,12 @@ async function setCardAdmission(capId, admission) {
       showToast("更新状态失败: 服务端响应不完整");
       return;
     }
-    const labels = { admitted: "已接纳", pending: "已移回待接纳", rejected: "已拒绝" };
-    showToast((labels[admission] || "已更新") + "该能力");
+    const labels = {
+      admitted: "已接纳该能力",
+      pending: "已移回待接纳",
+      rejected: "已拒绝该能力，可在「已拒绝」筛选中查看或恢复",
+    };
+    showToast(labels[admission] || "已更新该能力");
     await refreshState();
   } catch (e) {
     showToast("操作失败: " + e.message);

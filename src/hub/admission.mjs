@@ -110,21 +110,24 @@ export function validateProfileFields(body) {
 
 export function parseCardMetadata(card) {
   const rawMeta = card?.fields !== undefined ? f1(card, "Metadata") : card?.Metadata;
-  if (!rawMeta) return { kind: "", role: "" };
+  const empty = { kind: "", role: "", manual: false, preset: false };
+  if (!rawMeta) return empty;
   try {
     const meta = typeof rawMeta === "object" ? rawMeta : JSON.parse(String(rawMeta));
-    if (!meta || typeof meta !== "object" || Array.isArray(meta)) return { kind: "", role: "" };
+    if (!meta || typeof meta !== "object" || Array.isArray(meta)) return empty;
     return {
       kind: meta.kind == null ? "" : String(meta.kind),
       role: meta.role == null ? "" : String(meta.role),
+      manual: meta.manual === true,
+      preset: meta.preset === true,
     };
   } catch {
-    return { kind: "", role: "" };
+    return empty;
   }
 }
 
 export function formatAgentCard(c) {
-  const { kind, role } = parseCardMetadata(c);
+  const { kind, role, manual, preset } = parseCardMetadata(c);
   return {
     record_id: c.record_id,
     cap_id: f1(c, "Cap_ID"),
@@ -145,6 +148,9 @@ export function formatAgentCard(c) {
     admin_note: String(f1(c, "Admin_Note") ?? ""),
     kind,
     role,
+    // 控制台据此只对机主手动添加或向导预置的名片显示「删除」，其余名片由节点对账维护。
+    manual,
+    preset,
   };
 }
 
