@@ -1,7 +1,7 @@
 // 机主配置的 Webhook 门铃：中台在任务状态变化时 POST 一条不含指令正文的通知。
 // secret 明文落盘是因为出站 HMAC 每次都要用；列表和日志不能带出它。
 
-import { createHmac, randomBytes, randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { BROWSER_USER_AGENT } from "../kernel-util.mjs";
@@ -18,6 +18,32 @@ const LEADER_STATUSES = new Set([
   "input-required",
   "auth-required",
 ]);
+// RFC 7230 token，避免把换行或冒号写进请求头名。
+const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+const DOORBELL_TEXT = "a2a-hub 有新任务/更新，请运行检查流程拉取";
+
+export function validateWebhookKey(raw, { required = false } = {}) {
+  const key = String(raw ?? "").trim();
+  if (!key) {
+    if (required) throw httpError(400, "请填写对方提供的密钥");
+    return "";
+  }
+  if (key.length > 512) throw httpError(400, "密钥长度不能超过 512");
+  return key;
+}
+
+export function validateWebhookHeader(raw) {
+  const name = String(raw ?? "").trim();
+  if (!name) return "Authorization";
+  if (name.length > 64 || !HEADER_NAME.test(name)) throw httpError(400, "请求头名不合法");
+  return name;
+}
+
+export function maskWebhookSecret(secret) {
+  const value = String(secret ?? "");
+  if (!value) return "";
+  return `${value.slice(0, 6)}…`;
+}
 
 function fieldOf(fields, key) {
   const v = fields?.[key];
@@ -54,16 +80,29 @@ export function webhookSignature(secret, timestamp, rawBody) {
   return createHmac("sha256", String(secret)).update(`${timestamp}.${rawBody}`).digest("hex");
 }
 
+function isLegacyHook(hook) {
+  return !Object.hasOwn(hook, "header");
+}
+
 function publicHook(hook) {
+  const legacy = isLegacyHook(hook);
   return {
     node: hook.node,
     url: hook.url,
+    // 旧记录只有 HMAC 用的 secret，没有接收端请求头。列表用 legacy 提示机主补密钥，不把明文交出去。
+    header: legacy ? "" : (hook.header || "Authorization"),
+    secret_mask: maskWebhookSecret(hook.secret),
+    legacy,
     created_at: hook.created_at,
     updated_at: hook.updated_at,
     last_status: hook.last_status ?? "",
     last_error: hook.last_error ?? "",
     last_delivered_at: hook.last_delivered_at ?? "",
   };
+}
+
+export function publicWebhook(hook) {
+  return hook ? publicHook(hook) : null;
 }
 
 export class AgentWebhookStore {
@@ -110,10 +149,6 @@ export class AgentWebhookStore {
     this.#mtimeMs = fs.statSync(this.path).mtimeMs;
   }
 
-  #mint() {
-    return `whsec_${randomBytes(32).toString("base64url")}`;
-  }
-
   get(node) {
     const name = String(node ?? "").trim();
     return this.#load().hooks.find((h) => h.node === name) ?? null;
@@ -123,18 +158,21 @@ export class AgentWebhookStore {
     return this.#load().hooks.map((h) => publicHook(h));
   }
 
-  // secret 只在新建或 rotate 时返回；改 URL 不把已发出的密钥再交出来。
-  put({ node, url, rotate = false } = {}) {
+  // 密钥由接收端提供。新建必须带 key；更新时留空表示沿用旧密钥。没有 header 字段的是旧记录，只做 HMAC，不拿中台曾经生成的 secret 去填 Authorization。
+  put({ node, url, key, header } = {}) {
     const name = String(node ?? "").trim();
     const data = this.#load();
     const nowIso = this.#now().toISOString();
     const idx = data.hooks.findIndex((h) => h.node === name);
+    const providedKey = validateWebhookKey(key);
+    const headerGiven = header != null && String(header).trim() !== "";
     if (idx < 0) {
-      const secret = this.#mint();
+      const secret = validateWebhookKey(key, { required: true });
       const hook = {
         node: name,
         url,
         secret,
+        header: validateWebhookHeader(header),
         created_at: nowIso,
         updated_at: nowIso,
         last_status: "",
@@ -143,17 +181,21 @@ export class AgentWebhookStore {
       };
       data.hooks.push(hook);
       this.#save(data.hooks);
-      return { created: true, secret, hook };
+      return { created: true, hook };
     }
-    const next = { ...data.hooks[idx], url, updated_at: nowIso };
-    let secret = null;
-    if (rotate) {
-      secret = this.#mint();
-      next.secret = secret;
+    const prev = data.hooks[idx];
+    const next = { ...prev, url, updated_at: nowIso };
+    if (providedKey) {
+      next.secret = providedKey;
+      next.header = headerGiven
+        ? validateWebhookHeader(header)
+        : (Object.hasOwn(prev, "header") ? (prev.header || "Authorization") : "Authorization");
+    } else if (headerGiven && Object.hasOwn(prev, "header")) {
+      next.header = validateWebhookHeader(header);
     }
     data.hooks[idx] = next;
     this.#save(data.hooks);
-    return { created: false, secret, hook: next };
+    return { created: false, hook: next };
   }
 
   remove(node) {
@@ -257,7 +299,25 @@ export class WebhookDispatcher {
       seq,
       hub: this.hubNode,
       at: new Date(this.now()).toISOString(),
+      // 接收端（如 Cursor Automations）把正文当触发上下文。只给一句提醒，不放指令。
+      text: event === "ping" ? "a2a-hub Webhook 测试，请返回 2xx" : DOORBELL_TEXT,
     };
+  }
+
+  #headers(hook, payload, timestamp, rawBody) {
+    const headers = {
+      "Content-Type": "application/json",
+      "User-Agent": BROWSER_USER_AGENT,
+      "X-A2A-Event": payload.event,
+      "X-A2A-Delivery": randomUUID(),
+      "X-A2A-Timestamp": timestamp,
+      "X-A2A-Signature": `sha256=${webhookSignature(hook.secret, timestamp, rawBody)}`,
+    };
+    if (Object.hasOwn(hook, "header") && hook.header) {
+      const name = String(hook.header);
+      headers[name] = name.toLowerCase() === "authorization" ? `Bearer ${hook.secret}` : String(hook.secret);
+    }
+    return headers;
   }
 
   async deliver(hook, payload) {
@@ -271,14 +331,7 @@ export class WebhookDispatcher {
       try {
         const res = await this.fetch(hook.url, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "User-Agent": BROWSER_USER_AGENT,
-            "X-A2A-Event": payload.event,
-            "X-A2A-Delivery": randomUUID(),
-            "X-A2A-Timestamp": timestamp,
-            "X-A2A-Signature": `sha256=${webhookSignature(hook.secret, timestamp, rawBody)}`,
-          },
+          headers: this.#headers(hook, payload, timestamp, rawBody),
           body: rawBody,
           // 不跟随重定向：机主核过的是这个地址，3xx 不能把带签名的请求带去别处。
           redirect: "manual",

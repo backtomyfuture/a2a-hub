@@ -32,7 +32,7 @@ a2a-hub 会在你的机器上按任务拉起命令和 Agent，并在 Hub 节点�
 - **节点没配 `hubPublicKey` 时，审批决定只按自报字段校验。** 这时任何能写总线的身份都能冒写批准。`ah doctor` 会提示。配置方法：在 hub 上跑 `ah doctor` 拿到公钥，在节点上 `ah setup --hub-key <公钥>`（或通过 `ah join` 自动同步）。公钥应带外核对，不从普通任务行读取。
 - **任务行的 `Approval_Class` 能被改松。** 它在总线上，是发起方的请求，不是安全边界。改不动的边界是执行节点本机 `commands.json` 里的 `approval_class` 下限（Worker 与 Skill 取严）。高风险的 Worker 和技能要在本机声明 `approve`。
 - **hub 那台机器上的 Agent 读得到签名私钥。** hub 也是执行节点，它拉起的 Agent 与它同一个系统用户。要隔离，就让 hub 不登记有工具权限的 Worker，或者把 hub 放在专用机器或专用系统用户下。
-- **持有机主 `AH_API_TOKEN` 或 Leader 类 Agent Token 的接入方都能派单。** 拿到机主 Token 的节点，或角色为 leader / hybrid 的外部 HTTP Agent，可以给任意已接纳节点建任务（Agent Token 只能以自己的节点名发起）。任务能做的事仍受目标节点本机 `commands.json` 和审批下限约束，但 `approval_class` 为 `auto` 的能力会直接执行。
+- **持有机主 `AH_API_TOKEN` 或 Leader 类 Agent Token 的接入方都能派单。** 拿到机主 Token 的节点，或角色为 leader 的外部 HTTP Agent，可以给任意已接纳节点建任务（Agent Token 只能以自己的节点名发起）。`leader` 同时可以接单。账本里的旧值 `hybrid` 鉴权上等同 leader，新签发写成 `leader`。任务能做的事仍受目标节点本机 `commands.json` 和审批下限约束，但 `approval_class` 为 `auto` 的能力会直接执行。
 - **明文 HTTP 链路窃听。** Hub 内置 HTTP 服务默认监听明文 HTTP；若暴露到公网或不可信网络，必须在前端配置 TLS/HTTPS 反向代理或置于内网加密通道（如 WireGuard / Tailscale）内。
 - **Agent 自身的权限。** 多数无头 Agent CLI 的模板带「跳过权限确认」一类的开关（见 [能力模板库](docs/agent-templates.md)），否则无人值守跑不起来。被拉起的 Agent 能做该系统用户能做的任何事。本项目不提供沙箱。
 - **在途账本的进程号复用。** 取不到进程启动时间戳时无法区分复用的进程号，超时信号存在误伤可能（标准 §4 的局限一节）。

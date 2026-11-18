@@ -4,7 +4,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { httpError, validateRole } from "./admission.mjs";
+import { httpError, issuedRole, validateRole } from "./admission.mjs";
 
 const FILE_NAME = "agent_tokens.json";
 
@@ -115,7 +115,7 @@ export class AgentTokenStore {
 
   issue({ node, role, scopes = [] } = {}) {
     const name = String(node ?? "").trim();
-    const normalizedRole = validateRole(role);
+    const normalizedRole = issuedRole(role);
     const normalizedScopes = normalizeScopes(scopes) ?? [];
     const data = this.#load();
     if (data.tokens.some((t) => t.node === name)) {
@@ -131,9 +131,10 @@ export class AgentTokenStore {
     const data = this.#load();
     const idx = data.tokens.findIndex((t) => t.node === name);
     const existing = idx >= 0 ? data.tokens[idx] : null;
+    // 不传 role 时保留旧记录（含历史 hybrid）。显式传入 hybrid 时收成 leader，避免新轮换再写出 hybrid。
     const normalizedRole = role == null || role === ""
       ? existing?.role
-      : validateRole(role);
+      : issuedRole(role);
     if (!normalizedRole) throw httpError(400, "新建 Token 需要 role");
     const normalizedScopes = scopes === undefined
       ? (Array.isArray(existing?.scopes) ? existing.scopes : [])

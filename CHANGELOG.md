@@ -2,6 +2,13 @@
 
 本项目的主要变更记录如下。节点与中台版本号见 `package.json` / `ah --version`；中台规范见 [docs/standard.md](docs/standard.md)。
 
+## 未发布
+
+- **角色收成两种**：对外 HTTP Agent 只有 `worker`（只接单）和 `leader`（派单并接单）。`leader` 拥有原先 `hybrid` 的全部路由（poll、inbox、任务生命周期，以及派单、updates、loops）。旧 Token、`register` 与名片里的 `hybrid` 仍接受，一律按 `leader` 处理；新签发与显式轮换不再写出 `hybrid`。Leader 的身份名片可派单：`CAP-<node>-agent`、`Skill_ID=agent`、`Dispatchable=Yes`、`Admission=admitted`、`role=leader`。控制台添加 leader、leader 不报能力的 `register`，以及 Hub 启动时给 `agent_tokens.json` 里还没有名片的 leader / hybrid 补建，都走这张名片。补建只在该节点一张名片都没有时发生，不覆盖已有 `Admission`。接入提示词与 `a2a-leader` 同时包含接单和跟单。
+- **检查间隔统一为 5 分钟**：worker 与 leader 的检查脚本，以及跑不了脚本时的回退，都是每 5 分钟。未知唤醒周期的在线窗口改为 6 分钟。Webhook 的 30 分钟兜底、宿主 `ah daemon` 的长轮询与 15 分钟对账不变。
+- **Webhook 密钥改由接收端提供**：机主登记 URL，并填写对方给出的密钥和可选请求头（默认 `Authorization: Bearer <密钥>`，自定义头名则值为密钥原文）。中台不再签发 `whsec_`，响应也不再返回一次性明文；列表只给掩码和头名。出站同时带这枚请求头和原来的 `X-A2A-Signature`（同一把密钥）。只有旧版 HMAC、没有 `header` 字段的记录保持只签名、不附加 `Authorization`；只改头名不会拿旧密钥去填请求头。门铃正文增加一句 `text`，不含指令。`rotate_secret` 忽略。
+- **去掉切换接收方式**：删除 `POST /api/v1/admin/nodes/:node/receive`。接收方式只在添加 Agent 时选定；选 Webhook 时向导同时收集 URL、密钥和可选请求头。非 Webhook 节点登记推送返回 409「该节点的接收方式不是 Webhook，不能登记推送」。`DELETE` Webhook 仍把名片改回 `http-poll`。
+
 ## [1.1.0] - 2026-11-18
 
 - **接收方式三选一**：HTTP 节点的接收方式只能是定时检查、常驻长连接或 Webhook 之一，由机主 `POST /api/v1/admin/nodes/:node/receive` 切换，并同步该节点全部名片。切到 Webhook 时登记 URL，新建才返回一次性 secret；切走则删除 Webhook。非 Webhook 节点 `PUT /api/v1/admin/webhooks/:node` 返回 409。`DELETE` 该 Webhook 时名片回到 `http-poll`。`register` 不再用自报模式覆盖机主已开启的 Webhook；自报 webhook 但机主未配置时写成 `http-poll` 并警告。宿主节点不能切换。控制台只在当前模式为 Webhook 时显示 Webhook 管理，并说明 30 分钟检查脚本只是兜底。

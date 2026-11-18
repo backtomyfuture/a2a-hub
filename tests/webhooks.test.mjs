@@ -46,25 +46,55 @@ test("存储：0600、列表不含 secret、轮换才换密钥", async () => {
   await withTemp(async (dir) => {
     const now = new Date("2026-04-01T00:00:00.000Z");
     const store = new AgentWebhookStore(dir, { now: () => now });
-    const created = store.put({ node: "grok-bot", url: "https://hooks.example/in" });
-    assert.match(created.secret, /^whsec_/);
+    const created = store.put({ node: "grok-bot", url: "https://hooks.example/in", key: "receiver-key-aaa" });
+    assert.equal(created.hook.secret, "receiver-key-aaa");
+    assert.equal(created.hook.header, "Authorization");
+    assert.equal(created.secret, undefined);
     const file = path.join(dir, "agent_webhooks.json");
     assert.equal(fs.statSync(file).mode & 0o777, 0o600);
     const raw = fs.readFileSync(file, "utf8");
-    assert.equal(raw.includes(created.secret), true);
-    assert.equal(JSON.stringify(store.listPublic()).includes(created.secret), false);
+    assert.equal(raw.includes("receiver-key-aaa"), true);
+    assert.equal(JSON.stringify(store.listPublic()).includes("receiver-key-aaa"), false);
     assert.equal(store.listPublic()[0].url, "https://hooks.example/in");
+    assert.equal(store.listPublic()[0].secret_mask, "receiv…");
+    assert.equal(store.listPublic()[0].legacy, false);
     assert.equal(store.listPublic()[0].last_status, "");
 
     const renamed = store.put({ node: "grok-bot", url: "https://hooks.example/new" });
-    assert.equal(renamed.secret, null);
-    assert.equal(store.get("grok-bot").secret, created.secret);
+    assert.equal(store.get("grok-bot").secret, "receiver-key-aaa");
     assert.equal(store.get("grok-bot").created_at, created.hook.created_at);
 
-    const rotated = store.put({ node: "grok-bot", url: "https://hooks.example/new", rotate: true });
-    assert.match(rotated.secret, /^whsec_/);
-    assert.notEqual(rotated.secret, created.secret);
-    assert.equal(store.get("grok-bot").secret, rotated.secret);
+    const changed = store.put({ node: "grok-bot", url: "https://hooks.example/new", key: "receiver-key-bbb", header: "X-Api-Key" });
+    assert.equal(changed.hook.secret, "receiver-key-bbb");
+    assert.equal(store.get("grok-bot").header, "X-Api-Key");
+    assert.throws(() => store.put({ node: "fresh", url: "https://hooks.example/x" }), /请填写对方提供的密钥/);
+    const legacyFile = JSON.parse(fs.readFileSync(file, "utf8"));
+    legacyFile.hooks.push({
+      node: "legacy",
+      url: "https://hooks.example/old",
+      secret: "old-hub-secret",
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    });
+    fs.writeFileSync(file, `${JSON.stringify(legacyFile, null, 2)}\n`);
+    const legacyStore = new AgentWebhookStore(dir);
+    assert.equal(legacyStore.listPublic().find((hook) => hook.node === "legacy").legacy, true);
+    const headerOnly = legacyStore.put({ node: "legacy", url: "https://hooks.example/old", header: "X-Api-Key" });
+    assert.equal(Object.hasOwn(headerOnly.hook, "header"), false);
+    assert.equal(legacyStore.get("legacy").secret, "old-hub-secret");
+    let legacyHeaders = null;
+    const legacyDispatcher = new WebhookDispatcher({
+      store: legacyStore,
+      fetchImpl: async (_url, opts) => {
+        legacyHeaders = opts.headers;
+        return { status: 204 };
+      },
+      sleep: async () => {},
+    });
+    await legacyDispatcher.ping("legacy");
+    assert.equal(legacyHeaders.Authorization, undefined);
+    assert.match(legacyHeaders["X-A2A-Signature"], /^sha256=/);
+
     assert.equal(store.remove("grok-bot"), true);
     assert.equal(store.remove("grok-bot"), false);
     assert.equal(store.get("grok-bot"), null);
@@ -74,8 +104,8 @@ test("存储：0600、列表不含 secret、轮换才换密钥", async () => {
 test("签名、门铃不含正文、失败重试、成功去重、working 不推", async () => {
   await withTemp(async (dir) => {
     const store = new AgentWebhookStore(dir, { now: () => new Date(FIXED_NOW) });
-    const worker = store.put({ node: "worker-1", url: "https://worker.example/hook" });
-    const leader = store.put({ node: "leader-1", url: "https://leader.example/hook" });
+    const worker = store.put({ node: "worker-1", url: "https://worker.example/hook", key: "receiver-key-worker" }).hook;
+    const leader = store.put({ node: "leader-1", url: "https://leader.example/hook", key: "receiver-key-leader", header: "X-Api-Key" }).hook;
     const calls = [];
     const sleeps = [];
     const logs = [];
@@ -117,7 +147,8 @@ test("签名、门铃不含正文、失败重试、成功去重、working 不推
 
     const raw = calls[0].body;
     const payload = JSON.parse(raw);
-    assert.deepEqual(Object.keys(payload).sort(), ["at", "event", "hub", "node", "seq", "status", "task_id"]);
+    assert.deepEqual(Object.keys(payload).sort(), ["at", "event", "hub", "node", "seq", "status", "task_id", "text"]);
+    assert.equal(payload.text, "a2a-hub 有新任务/更新，请运行检查流程拉取");
     assert.equal(payload.event, "task.assigned");
     assert.equal(payload.node, "worker-1");
     assert.equal(payload.task_id, "T-1");
@@ -132,6 +163,7 @@ test("签名、门铃不含正文、失败重试、成功去重、working 不推
     assert.equal(calls[0].headers["X-A2A-Event"], "task.assigned");
     assert.match(calls[0].headers["X-A2A-Delivery"], /^[0-9a-f-]{36}$/);
     const ts = calls[0].headers["X-A2A-Timestamp"];
+    assert.equal(calls[0].headers.Authorization, `Bearer ${worker.secret}`);
     assert.equal(calls[0].headers["X-A2A-Signature"], `sha256=${signOf(worker.secret, ts, raw)}`);
     assert.equal(webhookSignature(worker.secret, ts, raw), signOf(worker.secret, ts, raw));
     assert.notEqual(signOf("wrong-secret", ts, raw), webhookSignature(worker.secret, ts, raw));
@@ -168,6 +200,8 @@ test("签名、门铃不含正文、失败重试、成功去重、working 不推
     assert.equal(leaderBody.status, "completed");
     assert.equal(leaderBody.task_id, "T-1");
     assert.equal(calls.at(-1).body.includes("SECRET-INSTRUCTION"), false);
+    assert.equal(calls.at(-1).headers["X-Api-Key"], leader.secret);
+    assert.equal(calls.at(-1).headers.Authorization, undefined);
     assert.equal(calls.at(-1).headers["X-A2A-Signature"], `sha256=${signOf(leader.secret, calls.at(-1).headers["X-A2A-Timestamp"], calls.at(-1).body)}`);
 
     const pub = store.listPublic().find((h) => h.node === "worker-1");
@@ -180,7 +214,7 @@ test("签名、门铃不含正文、失败重试、成功去重、working 不推
 test("四次失败后放弃，last_status 与 last_error 留下，不再投递同一状态", async () => {
   await withTemp(async (dir) => {
     const store = new AgentWebhookStore(dir);
-    store.put({ node: "worker-1", url: "https://worker.example/hook" });
+    store.put({ node: "worker-1", url: "https://worker.example/hook", key: "receiver-key-worker" });
     const sleeps = [];
     let n = 0;
     const dispatcher = new WebhookDispatcher({
@@ -215,7 +249,7 @@ test("四次失败后放弃，last_status 与 last_error 留下，不再投递�
 test("单次超时按失败重试", async () => {
   await withTemp(async (dir) => {
     const store = new AgentWebhookStore(dir);
-    store.put({ node: "worker-1", url: "https://worker.example/hook" });
+    store.put({ node: "worker-1", url: "https://worker.example/hook", key: "receiver-key-worker" });
     let n = 0;
     const dispatcher = new WebhookDispatcher({
       store,
@@ -290,7 +324,7 @@ test("SqliteBus：attachNotifier 仍是替换，addListener 追加，一边抛�
 test("总线上的 submitted 会打到已挂上的 Dispatcher，同一条门铃不含正文", async () => {
   await withTemp(async (dir) => {
     const store = new AgentWebhookStore(dir);
-    const saved = store.put({ node: "worker-1", url: "https://worker.example/hook" });
+    const saved = store.put({ node: "worker-1", url: "https://worker.example/hook", key: "receiver-key-worker" }).hook;
     let captured = null;
     let release;
     const gate = new Promise((resolve) => { release = resolve; });
@@ -390,13 +424,18 @@ test("管理 API：登记、列表无密钥、测试、轮换、删除 Agent 顺
           role: "worker",
           receive: "webhook",
           webhook_url: "https://hooks.example/grok",
+          webhook_key: "receiver-key-grok",
+          webhook_header: "X-Api-Key",
         },
       });
       assert.equal(added.status, 200);
       assert.equal(added.data.card.receive_mode, "webhook");
-      assert.match(added.data.webhook.secret, /^whsec_/);
+      assert.equal(added.data.webhook.secret, undefined);
+      assert.equal(added.data.webhook.secret_mask, "receiv…");
+      assert.equal(added.data.webhook.header, "X-Api-Key");
+      assert.equal(added.data.webhook.legacy, false);
       assert.equal(added.data.webhook.url, "https://hooks.example/grok");
-      assert.equal(added.data.onboarding.prompt.split(added.data.webhook.secret).length - 1, 1);
+      assert.equal(added.data.onboarding.prompt.includes("receiver-key-grok"), false);
       assert.match(added.data.onboarding.prompt, /"receive_mode":"webhook"/);
       const cards = await bus.listRecords(DEFAULT_TABLES.agentCards);
       const meta = JSON.parse(f1(cards.find((c) => f1(c, "Node") === "grok-bot"), "Metadata"));
@@ -405,7 +444,7 @@ test("管理 API：登记、列表无密钥、测试、轮换、删除 Agent 顺
       const listed = await apiJson(base, "/api/v1/admin/webhooks", { token: "owner-token" });
       assert.equal(listed.status, 200);
       assert.equal(listed.data.webhooks.length, 1);
-      assert.equal(JSON.stringify(listed.data).includes(added.data.webhook.secret), false);
+      assert.equal(JSON.stringify(listed.data).includes("receiver-key-grok"), false);
 
       const asAgent = await apiJson(base, "/api/v1/admin/webhooks", { token: added.data.token });
       assert.equal(asAgent.status, 403);
@@ -421,7 +460,9 @@ test("管理 API：登记、列表无密钥、测试、轮换、删除 Agent 顺
       assert.equal(ping.node, "grok-bot");
       assert.equal(ping.task_id, "");
       assert.equal(ping.hub, "mac-mini-hub");
-      assert.equal(calls[0].body.includes(added.data.webhook.secret), false);
+      assert.equal(calls[0].headers["X-Api-Key"], "receiver-key-grok");
+      assert.equal(calls[0].body.includes("receiver-key-grok"), false);
+      assert.match(JSON.parse(calls[0].body).text, /测试/);
 
       const afterTest = await apiJson(base, "/api/v1/admin/webhooks", { token: "owner-token" });
       assert.equal(afterTest.data.webhooks[0].last_status, "202");
@@ -434,22 +475,18 @@ test("管理 API：登记、列表无密钥、测试、轮换、删除 Agent 顺
       assert.equal(keep.status, 200);
       assert.equal(keep.data.webhook.secret, undefined);
       assert.equal(keep.data.webhook.url, "https://hooks.example/grok-2");
-      assert.equal(store.get("grok-bot").secret, added.data.webhook.secret);
+      assert.equal(store.get("grok-bot").secret, "receiver-key-grok");
 
-      const rotated = await apiJson(base, "/api/v1/admin/webhooks/grok-bot", {
+      const changedKey = await apiJson(base, "/api/v1/admin/webhooks/grok-bot", {
         method: "PUT",
         token: "owner-token",
-        body: { url: "https://hooks.example/grok-2", rotate_secret: true },
+        body: { url: "https://hooks.example/grok-2", key: "receiver-key-next" },
       });
-      assert.match(rotated.data.webhook.secret, /^whsec_/);
-      assert.notEqual(rotated.data.webhook.secret, added.data.webhook.secret);
-
-      const badRotate = await apiJson(base, "/api/v1/admin/webhooks/grok-bot", {
-        method: "PUT",
-        token: "owner-token",
-        body: { url: "https://hooks.example/grok-2", rotate_secret: "yes" },
-      });
-      assert.equal(badRotate.status, 400);
+      assert.equal(changedKey.status, 200);
+      assert.equal(changedKey.data.webhook.secret, undefined);
+      assert.equal(changedKey.data.webhook.secret_mask, "receiv…");
+      assert.equal(store.get("grok-bot").secret, "receiver-key-next");
+      assert.equal(JSON.stringify(changedKey.data).includes("receiver-key-next"), false);
 
       const longpoll = await apiJson(base, "/api/v1/admin/agents", {
         method: "POST",
@@ -503,7 +540,7 @@ test("管理 API：登记、列表无密钥、测试、轮换、删除 Agent 顺
         body: { url: "https://hooks.example/solo" },
       });
       assert.equal(onlyHook.status, 409);
-      assert.match(onlyHook.data.error, /先把接收方式切换成 Webhook/);
+      assert.match(onlyHook.data.error, /该节点的接收方式不是 Webhook/);
       const delSolo = await apiJson(base, "/api/v1/admin/webhooks/solo", {
         method: "DELETE",
         token: "owner-token",

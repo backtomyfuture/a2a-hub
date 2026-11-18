@@ -6,14 +6,17 @@ import http from "node:http";
 import path from "node:path";
 import { f1 } from "../bus/tables.mjs";
 import { resolveTableName } from "../bus/tables.mjs";
-import { capIdOf, resolveListenAddr } from "../config.mjs";
+import { resolveListenAddr } from "../config.mjs";
 import { agentCanSeeTask, assertAgentRoute, bindAgentBody } from "../hub/agent-access.mjs";
 import { AgentTokenStore } from "../hub/agent-tokens.mjs";
 import {
   buildOnboarding,
   admissionOf,
+  ensureLeaderIdentityCards,
   formatAgentCard,
   httpError,
+  issuedRole,
+  presetHttpCardFields,
   receiveModeFor,
   validateAccess,
   validateAdmission,
@@ -22,7 +25,7 @@ import {
   validateReceive,
   validateRole,
 } from "../hub/admission.mjs";
-import { validateWebhookUrl, WebhookDispatcher } from "../hub/webhooks.mjs";
+import { publicWebhook, validateWebhookHeader, validateWebhookKey, validateWebhookUrl, WebhookDispatcher } from "../hub/webhooks.mjs";
 import {
   alignNodeReceiveMode,
   buildCommandsSnippet,
@@ -30,7 +33,6 @@ import {
   deleteManualCard,
   listSchedules,
   nodeStoredReceiveMode,
-  switchNodeReceive,
 } from "../hub/capabilities.mjs";
 import { cancelTask } from "../hub/cancel.mjs";
 import { createTask } from "../hub/create.mjs";
@@ -190,6 +192,19 @@ export async function startHubHttpServer({
         log,
       })
       : null);
+  if (tokenStore && bus) {
+    try {
+      const created = await ensureLeaderIdentityCards({
+        bus,
+        tokenStore,
+        webhookStore: webhooks?.store ?? null,
+      });
+      if (created) log(`已为 ${created} 个 leader 补建身份名片`);
+    } catch (err) {
+      // 补建失败不能挡住 Hub 起来；下一轮启动会再试，已有名片不会被覆盖。
+      log(`补建 leader 身份名片失败：${err?.message ?? err}`);
+    }
+  }
   const runtimePath = cfg?.configDir ? path.join(cfg.configDir, "hub_runtime.json") : "";
   const connectHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
   let activePort = port;
@@ -764,22 +779,6 @@ export async function startHubHttpServer({
         return;
       }
 
-      const nodeReceiveMatch = pathname.match(/^\/api\/v1\/admin\/nodes\/([^/]+)\/receive$/);
-      if (method === "POST" && nodeReceiveMatch) {
-        const result = await switchNodeReceive({
-          bus,
-          tokenStore,
-          webhookStore: webhooks?.store ?? null,
-          node: decodeParam(nodeReceiveMatch[1]),
-          body: await readJsonBodyBound(),
-          hubUrl: requestHubUrl(req),
-          authRequired: Boolean(apiToken) || Boolean(tokenStore?.hasAny()),
-        });
-        if (result.cards_updated) onWake();
-        sendJson(res, 200, result);
-        return;
-      }
-
       const cardProfileMatch = pathname.match(/^\/api\/v1\/admin\/cards\/([^/]+)\/profile$/);
       if ((method === "PATCH" || method === "POST") && cardProfileMatch) {
         const capId = decodeParam(cardProfileMatch[1]);
@@ -856,7 +855,7 @@ export async function startHubHttpServer({
         const body = await readJsonBodyBound();
         const node = validateNodeName(body?.node);
         const access = validateAccess(body?.access);
-        const role = validateRole(body?.role);
+        const role = issuedRole(validateRole(body?.role));
         const profile = validateProfileFields(body);
         const displayName = profile.Display_Name ?? "";
         const adminNote = profile.Admin_Note ?? "";
@@ -864,9 +863,15 @@ export async function startHubHttpServer({
         // receive 只对 HTTP Agent 有意义；host / inbox 的唤醒方式由本机 ah daemon 决定。
         let receive = "poll";
         let webhookUrl = "";
+        let webhookKey = "";
+        let webhookHeader = "Authorization";
         if (access === "http") {
           receive = validateReceive(body?.receive);
-          if (receive === "webhook") webhookUrl = validateWebhookUrl(body?.webhook_url);
+          if (receive === "webhook") {
+            webhookUrl = validateWebhookUrl(body?.webhook_url);
+            webhookKey = validateWebhookKey(body?.webhook_key ?? body?.key, { required: true });
+            webhookHeader = validateWebhookHeader(body?.webhook_header ?? body?.header);
+          }
         }
 
         if (access === "http") {
@@ -886,37 +891,27 @@ export async function startHubHttpServer({
         }
 
         let card = null;
-        if (access === "http" && (role === "worker" || role === "hybrid")) {
-          const capId = capIdOf("agent", {}, node);
+        if (access === "http") {
+          const fields = presetHttpCardFields({
+            node,
+            role,
+            receiveMode: receiveModeFor(receive),
+            displayName,
+            description,
+            adminNote,
+            availability: "offline",
+            updatedAt: nowMinute(),
+          });
           const existing = await bus.listRecords(bus.tables.agentCards);
-          if (existing.some((r) => f1(r, "Cap_ID") === capId)) {
-            const prev = existing.find((r) => f1(r, "Cap_ID") === capId);
+          if (existing.some((r) => f1(r, "Cap_ID") === fields.Cap_ID)) {
+            const prev = existing.find((r) => f1(r, "Cap_ID") === fields.Cap_ID);
             const adm = admissionOf(prev);
             // 被拒绝的名片仍占着 Cap_ID，直接报「已存在」会让人以为节点凭空消失了。
             const where = adm === "rejected" ? "它在「节点 → 已拒绝」里，可以恢复为待接纳" : (adm === "pending" ? "它在「节点 → 待接纳」里" : "它已经接入");
             sendJson(res, 409, { error: `节点 ${node} 已存在：${where}；也可先删除该节点再添加` });
             return;
           }
-          const created = await bus.createRecord(bus.tables.agentCards, {
-            Cap_ID: capId,
-            Node: node,
-            Worker: "",
-            Skill_ID: "agent",
-            Skill_Name: displayName || `${node} Agent`,
-            Description: description,
-            Side_Effect: "write",
-            Approval_Class: "auto",
-            Availability: "offline",
-            Dispatchable: "Yes",
-            Receive_Mode: receiveModeFor(receive),
-            Zone: "cloud",
-            Daemon_Version: "http-agent",
-            Admission: "admitted",
-            Display_Name: displayName,
-            Admin_Note: adminNote,
-            Updated_At: nowMinute(),
-            Metadata: JSON.stringify({ kind: "agent", role, mode: receiveModeFor(receive), preset: true }),
-          });
+          const created = await bus.createRecord(bus.tables.agentCards, fields);
           onWake();
           card = formatAgentCard(created?.record);
         }
@@ -926,16 +921,15 @@ export async function startHubHttpServer({
           issued = tokenStore.issue({ node, role, scopes: [] });
         }
         let webhookPayload = null;
-        let webhookSecret = "";
         if (access === "http" && receive === "webhook") {
           if (!webhooks) throw httpError(500, "未配置 configDir，无法保存 Webhook");
-          const saved = webhooks.store.put({ node, url: webhookUrl });
-          webhookPayload = { url: saved.hook.url };
-          // 密钥只在本次新建时出现。节点上已经有 Webhook 时不再把旧密钥交出来。
-          if (saved.secret) {
-            webhookPayload.secret = saved.secret;
-            webhookSecret = saved.secret;
-          }
+          const saved = webhooks.store.put({
+            node,
+            url: webhookUrl,
+            key: webhookKey,
+            header: webhookHeader,
+          });
+          webhookPayload = publicWebhook(saved.hook);
         }
         const onboarding = buildOnboarding({
           hubUrl: requestHubUrl(req),
@@ -945,7 +939,6 @@ export async function startHubHttpServer({
           authRequired: Boolean(apiToken) || Boolean(issued),
           token: issued?.token || "",
           receive,
-          webhookSecret,
         });
         const payload = { ok: true, node, card, onboarding };
         if (issued) payload.token = issued.token;
@@ -1076,22 +1069,20 @@ export async function startHubHttpServer({
           const node = validateNodeName(decodeParam(webhookNodeMatch[1]));
           const cards = await bus.listRecords(bus.tables.agentCards);
           if (nodeStoredReceiveMode(cards, node) !== "webhook") {
-            throw httpError(409, "先把接收方式切换成 Webhook");
+            throw httpError(409, "该节点的接收方式不是 Webhook，不能登记推送");
           }
           const body = await readJsonBodyBound();
           if (!body || typeof body !== "object" || Array.isArray(body)) {
             throw httpError(400, "请求体必须是 JSON 对象");
           }
           const url = validateWebhookUrl(body.url);
-          let rotate = false;
-          if (Object.hasOwn(body, "rotate_secret") && body.rotate_secret != null && body.rotate_secret !== false) {
-            if (body.rotate_secret !== true) throw httpError(400, "rotate_secret 必须是布尔值");
-            rotate = true;
-          }
-          const saved = webhooks.store.put({ node, url, rotate });
-          const webhook = { node, url: saved.hook.url };
-          if (saved.secret) webhook.secret = saved.secret;
-          sendJson(res, 200, { ok: true, webhook });
+          const saved = webhooks.store.put({
+            node,
+            url,
+            key: body.key ?? body.webhook_key,
+            header: body.header ?? body.webhook_header,
+          });
+          sendJson(res, 200, { ok: true, webhook: publicWebhook(saved.hook) });
           return;
         }
       }

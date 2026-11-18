@@ -22,13 +22,9 @@ function foreverDeny(pathname, method) {
   if (pathname === "/api/v1/admin/tokens" || pathname.startsWith("/api/v1/admin/tokens/")) {
     return "Agent 身份不能管理 Token（/api/v1/admin/tokens）";
   }
-  // Webhook URL 与 HMAC 密钥只能由机主配置，Agent 不能自报接收地址。
+  // Webhook URL 与接收端密钥只能由机主配置，Agent 不能自报接收地址。
   if (pathname === "/api/v1/admin/webhooks" || pathname.startsWith("/api/v1/admin/webhooks/")) {
     return "Agent 身份不能管理 Webhook（/api/v1/admin/webhooks）";
-  }
-  // 接收方式是节点级单一属性，只能由机主切换。admin scope 的 Leader 可以接纳名片，但不能改这条。
-  if (/^\/api\/v1\/admin\/nodes\/[^/]+\/receive$/.test(pathname)) {
-    return "Agent 身份不能切换接收方式（/api/v1/admin/nodes/:node/receive）";
   }
   if (pathname === "/api/v1/state") return "Agent 身份不能访问 /api/v1/state";
   if (pathname.startsWith("/api/v1/tables/")) return "Agent 身份不能访问总线表 /api/v1/tables/*";
@@ -46,12 +42,13 @@ function routeAllowed(principal, method, pathname) {
   if (method === "GET" && /^\/api\/v1\/kit\/a2a_check\.(py|sh)$/.test(pathname)) return true;
   if (method === "POST" && pathname === "/api/v1/agents/register") return true;
   if (method === "GET" && pathname === "/api/v1/agents") return true;
-  // 只读检查不区分角色：worker 看任务，leader 看 updates 条数，hybrid 两边都看。具体算哪些由网关按 role 决定。
+  // 只读检查不区分角色。worker 看任务，leader 看任务和 updates。旧 hybrid 与 leader 相同。
   if (method === "GET" && /^\/api\/v1\/agents\/[^/]+\/check$/.test(pathname)) return true;
 
   const role = principal.role;
-  const workerish = role === "worker" || role === "hybrid";
   const leaderish = role === "leader" || role === "hybrid";
+  // leader 同时接单。worker 仍不能派单。
+  const workerish = role === "worker" || leaderish;
 
   if (workerish) {
     if (/^\/api\/v1\/agents\/[^/]+\/poll$/.test(pathname) && (method === "GET" || method === "POST")) return true;

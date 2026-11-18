@@ -733,9 +733,8 @@ export function renderWebConsoleHtml() {
       <div class="form-row">
         <label>它的角色</label>
         <select class="input" id="afRole">
-          <option value="worker">执行任务的 Worker（接收并完成派单）</option>
-          <option value="leader">负责派单的 Leader（如 Muse，只派单与跟进）</option>
-          <option value="hybrid">两者都做（既能派单，也能接活执行）</option>
+          <option value="worker">执行任务的 Worker（只接单）</option>
+          <option value="leader">派单并接单 (Leader)</option>
         </select>
       </div>
       <div class="form-row" id="afReceiveGroup">
@@ -767,7 +766,16 @@ export function renderWebConsoleHtml() {
       <div class="form-row" id="afWebhookUrlRow" style="display:none;">
         <label>Webhook 回调 URL（必填）</label>
         <input class="input mono" type="url" id="afWebhookUrl" maxlength="2048" placeholder="https://example.com/a2a/webhook" />
-        <div class="hint">仅允许 http/https，长度 ≤ 2048，禁止带用户名密码；创建后将生成只显示一次的 Webhook Secret。</div>
+        <div class="hint">仅允许 http/https，长度 ≤ 2048，禁止带用户名密码。密钥由接收端提供，中台不会再生成一把只显示一次的 Secret。</div>
+      </div>
+      <div class="form-row" id="afWebhookKeyRow" style="display:none;">
+        <label>接收端提供的密钥（必填）</label>
+        <input class="input mono" type="password" id="afWebhookKey" maxlength="512" autocomplete="off" />
+        <div class="hint">默认放在 Authorization: Bearer。自定义请求头名时，头的值就是密钥原文。</div>
+      </div>
+      <div class="form-row" id="afWebhookHeaderRow" style="display:none;">
+        <label>请求头名（可选，默认 Authorization）</label>
+        <input class="input mono" id="afWebhookHeader" maxlength="64" placeholder="Authorization" />
       </div>
       <div class="form-row" id="afDescRow">
         <label>它擅长做什么（能力说明，可选）</label>
@@ -775,7 +783,7 @@ export function renderWebConsoleHtml() {
       </div>
       <div class="form-row">
         <label>备注（只给您自己看，可选）</label>
-        <textarea class="input" id="afNote" maxlength="500" style="min-height:60px;" placeholder="例如：每 15 分钟唤醒一次"></textarea>
+        <textarea class="input" id="afNote" maxlength="500" style="min-height:60px;" placeholder="例如：每 5 分钟检查一次"></textarea>
       </div>
       <div style="display:flex;justify-content:space-between;gap:8px;">
         <button type="button" class="btn" id="agentPrevBtn">上一步</button>
@@ -937,68 +945,20 @@ export function renderWebConsoleHtml() {
         <input class="input mono" type="url" id="whUrl" maxlength="2048" placeholder="https://example.com/a2a/webhook" required />
         <div class="hint">仅允许 http/https，长度 ≤ 2048，禁止带用户名密码。</div>
       </div>
-      <div class="form-row" id="whRotateRow" style="display:none;">
-        <label class="checkbox-row">
-          <input type="checkbox" id="whRotateSecret" />
-          <span>
-            <strong style="display:block;font-size:13px;">同时轮换签名密钥（rotate_secret）</strong>
-            <span class="hint">勾选后旧的 Webhook Secret 将立即失效，并生成新的只显示一次的密钥。</span>
-          </span>
-        </label>
+      <div class="form-row">
+        <label>接收端提供的密钥</label>
+        <input class="input mono" type="password" id="whKey" maxlength="512" autocomplete="off" placeholder="留空表示不改密钥" />
+        <div class="hint" id="whKeyHint">留空则沿用已保存的密钥。列表里只显示掩码。</div>
+      </div>
+      <div class="form-row">
+        <label>请求头名（可选，默认 Authorization）</label>
+        <input class="input mono" id="whHeader" maxlength="64" placeholder="Authorization" />
       </div>
       <div style="display:flex;justify-content:flex-end;gap:8px;">
         <button type="button" class="btn" data-close-modal="webhookModal">取消</button>
         <button type="submit" class="btn primary">保存 Webhook</button>
       </div>
     </form>
-    <div id="whSecretRevealBox" style="margin-top:12px;"></div>
-  </div>
-</div>
-
-<!-- 切换节点接收方式。三选一，不能和 Webhook 并行叠加。 -->
-<div class="modal-backdrop" id="receiveModal">
-  <div class="modal" style="max-width:560px;">
-    <div class="modal-head">
-      <span id="rxTitle">切换接收方式</span>
-      <button class="btn sm" type="button" data-close-modal="receiveModal">关闭</button>
-    </div>
-    <div id="rxErrBox" class="err-banner" style="display:none;"></div>
-    <form id="receiveForm">
-      <input type="hidden" id="rxNode" />
-      <div class="choice-list" id="rxChoices" style="margin-bottom:12px;">
-        <label class="choice-card" data-receive="poll">
-          <input type="radio" name="rxReceive" value="poll" />
-          <div>
-            <div style="font-weight:600;">定时检查（poll）</div>
-            <div class="hint">按固定间隔运行检查脚本，有事再取单。</div>
-          </div>
-        </label>
-        <label class="choice-card" data-receive="longpoll">
-          <input type="radio" name="rxReceive" value="longpoll" />
-          <div>
-            <div style="font-weight:600;">常驻长连接（longpoll）</div>
-            <div class="hint">进程循环长轮询，不建定时任务。</div>
-          </div>
-        </label>
-        <label class="choice-card" data-receive="webhook">
-          <input type="radio" name="rxReceive" value="webhook" />
-          <div>
-            <div style="font-weight:600;">Webhook 推送（webhook）</div>
-            <div class="hint">中台向回调 URL 推门铃。需要填写 URL。</div>
-          </div>
-        </label>
-      </div>
-      <div class="form-row" id="rxUrlRow" style="display:none;">
-        <label>Webhook 回调 URL（必填）</label>
-        <input class="input mono" type="url" id="rxUrl" maxlength="2048" placeholder="https://example.com/a2a/webhook" />
-        <div class="hint">仅允许 http/https，长度 ≤ 2048，禁止带用户名密码。第一次开启时会给出只显示一次的 Secret。</div>
-      </div>
-      <div style="display:flex;justify-content:flex-end;gap:8px;">
-        <button type="button" class="btn" data-close-modal="receiveModal">取消</button>
-        <button type="submit" class="btn primary">切换</button>
-      </div>
-    </form>
-    <div id="rxResult" style="display:none;"></div>
   </div>
 </div>
 
@@ -1053,7 +1013,6 @@ const state = {
   wizardStep: 1,
   wizardAccess: "http",
   wizardReceive: "poll",
-  switchReceive: "poll",
   addCapTarget: { node: "", isHttp: true },
 };
 
@@ -1159,8 +1118,7 @@ function statusPill(status, isLoop = false) {
 }
 
 function roleLabelZh(role) {
-  if (role === "leader") return "派单方 (Leader)";
-  if (role === "hybrid") return "派单 + 执行";
+  if (role === "leader" || role === "hybrid") return "派单并接单 (Leader)";
   if (role === "worker") return "执行方 (Worker)";
   return "";
 }
@@ -1879,9 +1837,10 @@ function syncReceiveChoiceCards() {
     const radio = card.querySelector("input[type=radio]");
     if (radio) radio.checked = checked;
   });
-  const urlRow = document.getElementById("afWebhookUrlRow");
-  if (urlRow) {
-    urlRow.style.display = (state.wizardAccess === "http" && state.wizardReceive === "webhook") ? "flex" : "none";
+  const showWebhook = state.wizardAccess === "http" && state.wizardReceive === "webhook";
+  for (const id of ["afWebhookUrlRow", "afWebhookKeyRow", "afWebhookHeaderRow"]) {
+    const row = document.getElementById(id);
+    if (row) row.style.display = showWebhook ? "flex" : "none";
   }
 }
 
@@ -1918,23 +1877,19 @@ function renderOnboardingResult(res) {
       + '</div></div>';
   }
 
-  if (webhook && webhook.secret) {
-    html += '<div class="token-reveal">'
-      + '<div class="token-reveal-title">Webhook 签名密钥已生成（Webhook Secret 只显示这一次）</div>'
-      + '<div class="hint" style="color:var(--text);">请立即保存到您的服务环境变量（例如 <span class="mono">A2A_HUB_WEBHOOK_SECRET</span>），关闭窗口后无法再次查看明文。</div>'
-      + (webhook.url ? '<div class="hint mono" style="color:var(--text-2);">回调地址：' + esc(webhook.url) + '</div>' : '')
-      + '<div style="display:flex;gap:8px;align-items:center;">'
-      + '<input class="input mono" id="newWebhookSecret" readonly value="' + esc(webhook.secret) + '" />'
-      + '<button type="button" class="btn sm primary" id="copyWebhookSecretBtn">复制 Secret</button>'
-      + '</div></div>';
+  if (webhook && webhook.url) {
+    html += '<div class="card" style="padding:12px;margin-bottom:12px;">'
+      + '<strong>Webhook 已登记</strong>'
+      + '<div class="hint mono" style="color:var(--text-2);margin-top:4px;">' + esc(webhook.url) + '</div>'
+      + '<div class="hint">密钥留在接收端。列表只显示掩码'
+      + (webhook.secret_mask ? ' ' + esc(webhook.secret_mask) : '')
+      + (webhook.header ? '，请求头 ' + esc(webhook.header) : '')
+      + '。</div></div>';
   }
 
   if (card && card.cap_id) {
     html += '<div class="card" style="padding:12px;margin-bottom:12px;background:var(--green-soft);border-color:rgba(16,185,129,0.3);">'
       + '<strong>已准备就绪</strong>：已为它预建并自动接纳能力，上线后即可直接派单。</div>';
-  } else if (ob.access === "http" && ob.role === "leader") {
-    html += '<div class="card" style="padding:12px;margin-bottom:12px;">'
-      + '<strong>已登记为派单方 (Leader)</strong>：它只负责派单与跟单，连接后将出现在在线概览中。</div>';
   } else {
     html += '<div class="card" style="padding:12px;margin-bottom:12px;">'
       + '<strong>已生成接入命令</strong>：目标电脑或独立 Agent 上线后，请到「节点 → 待接纳」点一次接纳即可派单。</div>';
@@ -2171,47 +2126,22 @@ async function doDeleteCard(capId) {
   }
 }
 
-function syncSwitchReceiveChoice() {
-  document.querySelectorAll("#rxChoices .choice-card").forEach((card) => {
-    const checked = card.dataset.receive === state.switchReceive;
-    card.classList.toggle("selected", checked);
-    const input = card.querySelector("input");
-    if (input) input.checked = checked;
-  });
-  const urlRow = document.getElementById("rxUrlRow");
-  if (urlRow) urlRow.style.display = state.switchReceive === "webhook" ? "block" : "none";
-}
-
-function openSwitchReceive(node) {
-  const g = buildNodeGroups(state.data).find((x) => x.node === node);
-  const mode = g ? httpReceiveModeOf(g) : "";
-  state.switchReceive = mode === "webhook" ? "webhook" : (mode === "http-longpoll" ? "longpoll" : "poll");
-  document.getElementById("rxTitle").textContent = "切换接收方式 · " + node;
-  document.getElementById("rxNode").value = node;
-  const existing = state.webhooksByNode.get(node);
-  document.getElementById("rxUrl").value = existing && existing.url ? existing.url : "";
-  const errBox = document.getElementById("rxErrBox");
-  errBox.style.display = "none";
-  errBox.textContent = "";
-  document.getElementById("receiveForm").style.display = "block";
-  const result = document.getElementById("rxResult");
-  result.style.display = "none";
-  result.innerHTML = "";
-  syncSwitchReceiveChoice();
-  openModal("receiveModal");
-}
-
 function openWebhookModal(node) {
   const existing = state.webhooksByNode.get(node) || null;
   document.getElementById("whTitle").textContent = (existing ? "修改 Webhook · " : "配置 Webhook · ") + node;
   document.getElementById("whNode").value = node;
   document.getElementById("whUrl").value = existing ? (existing.url || "") : "";
-  document.getElementById("whRotateSecret").checked = false;
-  document.getElementById("whRotateRow").style.display = existing ? "block" : "none";
+  document.getElementById("whKey").value = "";
+  document.getElementById("whHeader").value = existing && existing.header ? existing.header : "Authorization";
+  const hint = document.getElementById("whKeyHint");
+  if (hint) {
+    if (existing && existing.legacy) hint.textContent = "请填写对方提供的密钥。旧记录还只有签名密钥，补上之后才会按请求头发送。";
+    else if (existing && existing.secret_mask) hint.textContent = "当前掩码 " + existing.secret_mask + "。留空表示不改密钥。";
+    else hint.textContent = "填写接收端提供的密钥。留空表示不改已保存的密钥。";
+  }
   const errBox = document.getElementById("whErrBox");
   errBox.style.display = "none";
   errBox.textContent = "";
-  document.getElementById("whSecretRevealBox").innerHTML = "";
   openModal("webhookModal");
 }
 
@@ -2504,11 +2434,7 @@ function renderReceiveBox(g) {
   }
   const mode = httpReceiveModeOf(g) || "http-poll";
   const label = receiveModeLabelZh(mode) || "定时检查";
-  return '<div class="token-box">'
-    + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">'
-    + '<div><strong>接收方式：' + esc(label) + '</strong></div>'
-    + '<button class="btn sm" data-action="switch-receive" data-node="' + esc(g.node) + '">切换接收方式</button>'
-    + '</div></div>';
+  return '<div class="token-box"><strong>接收方式：' + esc(label) + '</strong></div>';
 }
 
 function renderWebhookManageBox(g) {
@@ -2534,6 +2460,8 @@ function renderWebhookManageBox(g) {
     + '<span class="muted">最近投递：' + esc(deliveredText) + '</span>'
     + '</div>'
     + '<div class="mono muted" style="word-break:break-all;">' + esc((wh && wh.url) || "") + '</div>'
+    + (wh && wh.legacy ? '<div class="hint">请填写对方提供的密钥。当前只做签名，不会带 Authorization。</div>' : '')
+    + (wh && wh.secret_mask ? '<div class="hint">密钥掩码 ' + esc(wh.secret_mask) + (wh.header ? ' · 请求头 ' + esc(wh.header) : '') + '</div>' : '')
     + (wh && wh.last_error ? '<div class="hint" style="color:var(--red-text);">最近错误：' + esc(wh.last_error) + '</div>' : '')
     + '<div class="hint">Agent 每 30 分钟用检查脚本兜底一次，防止漏推，这不是第二种接收方式。</div>'
     + '<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">'
@@ -2697,9 +2625,7 @@ function renderAgents(d) {
         }
 
         if (!g.admittedCards.length) {
-          html += '<div class="hint">' + (g.role === "leader"
-            ? '纯协调者 / 外部 HTTP Agent（Leader）：仅负责派单与跟进任务，不接收外部派单。'
-            : '已连接（尚未启用可执行能力）。') + '</div>';
+          html += '<div class="hint">已连接（尚未启用可执行能力）。</div>';
         } else {
           html += '<div class="hint">已接纳 <strong>' + agentCnt + '</strong> 个 Agent · <strong>' + skillCnt + '</strong> 项能力</div>';
         }
@@ -3179,9 +3105,6 @@ document.addEventListener("click", (e) => {
   else if (act === "open-add-cap") openAddCapModal(actEl.dataset.node);
   else if (act === "delete-card") openDeleteCardConfirm(actEl.dataset.capId);
   else if (act === "do-delete-card") doDeleteCard(actEl.dataset.capId);
-  else if (act === "switch-receive") openSwitchReceive(actEl.dataset.node);
-  else if (act === "copy-rx-prompt") copyText((document.getElementById("rxPrompt") || {}).value || "", "已复制提示词");
-  else if (act === "copy-rx-secret") copyText((document.getElementById("rxSecret") || {}).value || "", "已复制 Webhook Secret");
   else if (act === "edit-webhook") openWebhookModal(actEl.dataset.node);
   else if (act === "test-webhook") testWebhookAction(actEl.dataset.node);
   else if (act === "delete-webhook") openDeleteWebhookConfirm(actEl.dataset.node);
@@ -3233,10 +3156,6 @@ document.addEventListener("click", (e) => {
   else if (act === "copy-rotated-prompt") {
     const box = document.getElementById("rotatedPromptBox");
     copyText(box ? box.value : "", "已复制接入提示词");
-  }
-  else if (act === "copy-wh-secret") {
-    const box = document.getElementById("whNewSecretBox");
-    copyText(box ? box.value : "", "已复制 Webhook Secret");
   }
 });
 
@@ -3313,14 +3232,13 @@ document.getElementById("receiveChoices").addEventListener("click", (e) => {
 });
 document.getElementById("agentNextBtn").addEventListener("click", () => {
   setWizardStep(2);
-  const roleVal = document.getElementById("afRole").value;
   const isHttp = state.wizardAccess === "http";
   document.getElementById("afReceiveGroup").style.display = isHttp ? "flex" : "none";
-  document.getElementById("afDescRow").style.display = (isHttp && roleVal !== "leader") ? "flex" : "none";
+  document.getElementById("afDescRow").style.display = isHttp ? "flex" : "none";
   syncReceiveChoiceCards();
 });
-document.getElementById("afRole").addEventListener("change", (e) => {
-  document.getElementById("afDescRow").style.display = (state.wizardAccess === "http" && e.target.value !== "leader") ? "flex" : "none";
+document.getElementById("afRole").addEventListener("change", () => {
+  document.getElementById("afDescRow").style.display = state.wizardAccess === "http" ? "flex" : "none";
 });
 document.getElementById("agentPrevBtn").addEventListener("click", () => setWizardStep(1));
 document.getElementById("agentAddAnotherBtn").addEventListener("click", openAgentModal);
@@ -3331,9 +3249,6 @@ document.getElementById("agentModal").addEventListener("click", (e) => {
   } else if (e.target && e.target.id === "copyIssuedTokenBtn") {
     const el = document.getElementById("newIssuedToken");
     copyText(el ? el.value : "", "已复制 Token");
-  } else if (e.target && e.target.id === "copyWebhookSecretBtn") {
-    const el = document.getElementById("newWebhookSecret");
-    copyText(el ? el.value : "", "已复制 Webhook Secret");
   }
 });
 
@@ -3361,12 +3276,16 @@ document.getElementById("agentStep2").addEventListener("submit", async (e) => {
     body.receive = receive;
     if (receive === "webhook") {
       const webhookUrl = document.getElementById("afWebhookUrl").value.trim();
-      if (!webhookUrl) {
-        errBox.textContent = "选择 Webhook 推送时，必须填写回调 URL";
+      const webhookKey = document.getElementById("afWebhookKey").value.trim();
+      const webhookHeader = document.getElementById("afWebhookHeader").value.trim();
+      if (!webhookUrl || !webhookKey) {
+        errBox.textContent = "选择 Webhook 推送时，必须填写回调 URL 和接收端提供的密钥";
         errBox.style.display = "block";
-        return showToast("请填写 Webhook 回调 URL");
+        return showToast("请填写 Webhook 回调 URL 和密钥");
       }
       body.webhook_url = webhookUrl;
+      body.webhook_key = webhookKey;
+      if (webhookHeader) body.webhook_header = webhookHeader;
     }
   }
 
@@ -3476,67 +3395,6 @@ document.getElementById("addCapForm").addEventListener("submit", async (e) => {
   }
 });
 
-document.getElementById("rxChoices").addEventListener("click", (e) => {
-  const card = e.target.closest(".choice-card");
-  if (!card || !card.dataset.receive) return;
-  state.switchReceive = card.dataset.receive;
-  syncSwitchReceiveChoice();
-});
-
-document.getElementById("receiveForm").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const errBox = document.getElementById("rxErrBox");
-  errBox.style.display = "none";
-  errBox.textContent = "";
-  const node = document.getElementById("rxNode").value.trim();
-  const receive = state.switchReceive || "poll";
-  const url = document.getElementById("rxUrl").value.trim();
-  if (!node) return showToast("缺少节点");
-  if (receive === "webhook" && !url) {
-    errBox.textContent = "选择 Webhook 时必须填写回调 URL";
-    errBox.style.display = "block";
-    return;
-  }
-  try {
-    const body = { receive };
-    if (receive === "webhook") body.webhook_url = url;
-    const res = await api("/api/v1/admin/nodes/" + encodeURIComponent(node) + "/receive", {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
-    let html = '<div class="hint" style="margin-bottom:10px;">把这段提示词发给对方 Agent，让它改用新方式。</div>';
-    const secret = res && res.webhook && res.webhook.secret;
-    if (secret) {
-      html += '<div class="token-reveal">'
-        + '<div class="token-reveal-title">Webhook 签名密钥已生成（Webhook Secret 只显示这一次）</div>'
-        + '<div class="hint" style="color:var(--text);">请立即保存为 <span class="mono">A2A_HUB_WEBHOOK_SECRET</span>，关闭窗口后无法再次查看。</div>'
-        + '<div style="display:flex;gap:8px;align-items:center;">'
-        + '<input class="input mono" id="rxSecret" readonly value="' + esc(secret) + '" />'
-        + '<button type="button" class="btn sm primary" data-action="copy-rx-secret">复制 Secret</button>'
-        + '</div></div>';
-    }
-    const prompt = res && res.onboarding && res.onboarding.prompt;
-    if (prompt) {
-      html += '<div class="form-row"><div style="display:flex;justify-content:space-between;align-items:center;">'
-        + '<label>新的接入提示词</label>'
-        + '<button type="button" class="btn sm primary" data-action="copy-rx-prompt">复制提示词</button>'
-        + '</div>'
-        + '<textarea class="input mono" id="rxPrompt" readonly style="min-height:120px;">' + esc(prompt) + '</textarea>'
-        + '</div>';
-    }
-    document.getElementById("receiveForm").style.display = "none";
-    const result = document.getElementById("rxResult");
-    result.innerHTML = html;
-    result.style.display = "block";
-    showToast("已切换 " + node + " 的接收方式");
-    await refreshState();
-  } catch (err) {
-    errBox.textContent = err.message || "切换接收方式失败";
-    errBox.style.display = "block";
-    showToast(err.message);
-  }
-});
-
 document.getElementById("webhookForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const errBox = document.getElementById("whErrBox");
@@ -3544,29 +3402,19 @@ document.getElementById("webhookForm").addEventListener("submit", async (e) => {
   errBox.textContent = "";
   const node = document.getElementById("whNode").value.trim();
   const url = document.getElementById("whUrl").value.trim();
-  const rotateSecret = document.getElementById("whRotateSecret").checked;
+  const key = document.getElementById("whKey").value.trim();
+  const header = document.getElementById("whHeader").value.trim();
   if (!node || !url) return showToast("请填写 Webhook 回调 URL");
   try {
     const body = { url };
-    if (rotateSecret) body.rotate_secret = true;
-    const res = await api("/api/v1/admin/webhooks/" + encodeURIComponent(node), {
+    if (key) body.key = key;
+    if (header) body.header = header;
+    await api("/api/v1/admin/webhooks/" + encodeURIComponent(node), {
       method: "PUT",
       body: JSON.stringify(body),
     });
-    const secret = res && res.webhook && res.webhook.secret;
-    if (secret) {
-      document.getElementById("whSecretRevealBox").innerHTML = '<div class="token-reveal">'
-        + '<div class="token-reveal-title">新的 Webhook Secret（只显示这一次）</div>'
-        + '<div class="hint" style="color:var(--text);">请立即保存为 <span class="mono">A2A_HUB_WEBHOOK_SECRET</span>，关闭窗口后无法再次查看。</div>'
-        + '<div style="display:flex;gap:8px;align-items:center;">'
-        + '<input class="input mono" id="whNewSecretBox" readonly value="' + esc(secret) + '" />'
-        + '<button type="button" class="btn sm primary" data-action="copy-wh-secret">复制 Secret</button>'
-        + '</div></div>';
-      showToast("Webhook 已保存，请及时复制新密钥");
-    } else {
-      closeModal("webhookModal");
-      showToast("Webhook 配置已更新");
-    }
+    closeModal("webhookModal");
+    showToast("Webhook 配置已更新");
     await refreshWebhooks();
     render();
   } catch (err) {

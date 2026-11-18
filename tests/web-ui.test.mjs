@@ -65,20 +65,21 @@ test("控制台包含新术语结构、接收方式、添加能力、闭环分�
   assert.match(html, /常驻长连接（longpoll）/);
   assert.match(html, /Webhook 推送（webhook）/);
   assert.match(html, /webhook_url/);
+  assert.match(html, /webhook_key/);
   assert.match(html, /Token 只显示这一次/);
-  assert.match(html, /Webhook Secret 只显示这一次/);
+  assert.match(html, /派单并接单 \(Leader\)/);
+  assert.equal(html.includes("两者都做"), false);
+  assert.equal(html.includes("id=\"receiveModal\""), false);
+  assert.equal(html.includes("切换接收方式"), false);
   assert.match(html, /节点 → 待接纳/);
   assert.match(html, /ah daemon/);
   assert.match(html, /\/api\/v1\/admin\/tokens/);
   assert.match(html, /\/api\/v1\/admin\/webhooks/);
   assert.match(html, /重新生成/);
   assert.match(html, /吊销/);
-  assert.match(html, /id="receiveModal"/);
-  assert.match(html, /切换接收方式/);
   assert.match(html, /接收方式：常驻长连接（ah daemon）/);
   assert.match(html, /Agent 每 30 分钟用检查脚本兜底一次，防止漏推，这不是第二种接收方式/);
-  assert.match(html, /把这段提示词发给对方 Agent，让它改用新方式/);
-  assert.match(html, /\/api\/v1\/admin\/nodes\//);
+  assert.match(html, /请填写对方提供的密钥/);
 
   // 新建闭环：顶部说明、全部阶段用同一个、stageBindings 提交
   assert.match(html, /什么是闭环/);
@@ -359,21 +360,10 @@ test("控制台内嵌脚本：节点分层渲染、stageBindings 闭环提交、
     if (url === "/api/v1/admin/commands-snippet" && method === "POST") {
       return jsonRes(200, { snippet: { lint: { command: "npm run lint", mode: "json" } }, text: '{"lint":{"command":"npm run lint"}}', hint: "去该节点改 commands.json，守护进程自动热重载" });
     }
-    if (method === "POST" && /^\/api\/v1\/admin\/nodes\/[^/]+\/receive$/.test(url)) {
-      return jsonRes(200, {
-        ok: true,
-        node: "poll-bot",
-        receive: body.receive,
-        receive_mode: body.receive === "webhook" ? "webhook" : "http-longpoll",
-        cards_updated: 1,
-        webhook: body.receive === "webhook" ? { url: body.webhook_url, secret: "whsec_switch_once" } : undefined,
-        onboarding: { prompt: "改用 " + body.receive },
-      });
-    }
     if (url === "/api/v1/admin/agents" && method === "POST") {
       return jsonRes(200, {
         ok: true, node: body.node, token: "tok_once_123",
-        webhook: { url: body.webhook_url, secret: "whsec_once_456" },
+        webhook: { url: body.webhook_url, header: "Authorization", secret_mask: "receiv…", legacy: false },
         card: { cap_id: "CAP-x" },
         onboarding: { access: "http", role: "worker", prompt: "test prompt", steps: [], skills: [] },
       });
@@ -402,11 +392,11 @@ test("控制台内嵌脚本：节点分层渲染、stageBindings 闭环提交、
   assert.equal(macCard.includes("切换接收方式"), false);
   assert.equal(macCard.includes("data-action=\"edit-webhook\""), false);
   assert.match(cloudCard, /接收方式：Webhook 推送/);
-  assert.match(cloudCard, /切换接收方式/);
+  assert.equal(cloudCard.includes("切换接收方式"), false);
   assert.match(cloudCard, /这不是第二种接收方式/);
   assert.equal(cloudCard.includes("data-action=\"delete-webhook\""), false);
   assert.match(pollCard, /接收方式：定时检查/);
-  assert.match(pollCard, /切换接收方式/);
+  assert.equal(pollCard.includes("切换接收方式"), false);
   assert.equal(pollCard.includes("data-action=\"edit-webhook\""), false);
   assert.equal(pollCard.includes("data-action=\"test-webhook\""), false);
   assert.equal(pollCard.includes("https://bot.example/hook"), false);
@@ -456,30 +446,22 @@ test("控制台内嵌脚本：节点分层渲染、stageBindings 闭环提交、
   assert.equal(snipPost.body.skill_id, "lint");
   assert.match(getEl("acSnippetText").value, /npm run lint/);
 
-  // 5) 添加 Agent 向导：选择 webhook 并提交，验证请求体带 receive/webhook_url 且结果页展示 Secret
+  // 5) 添加 Agent 向导：选择 webhook 并提交，请求体带 URL 与接收端密钥，结果页不展示明文
   await vm.runInContext('openAgentModal(); state.wizardAccess = "http"; state.wizardReceive = "webhook";', sandbox);
   getEl("afNode").value = "wh-bot";
   getEl("afWebhookUrl").value = "https://wh.example/cb";
+  await getEl("agentStep2").dispatch("submit");
+  assert.equal(requests.some((r) => r.url === "/api/v1/admin/agents" && r.method === "POST"), false);
+  getEl("afWebhookKey").value = "receiver-key-ui";
   await getEl("agentStep2").dispatch("submit");
   const agentPost = requests.find((r) => r.url === "/api/v1/admin/agents" && r.method === "POST");
   assert.ok(agentPost);
   assert.equal(agentPost.body.receive, "webhook");
   assert.equal(agentPost.body.webhook_url, "https://wh.example/cb");
+  assert.equal(agentPost.body.webhook_key, "receiver-key-ui");
   assert.match(getEl("onboardBox").innerHTML, /tok_once_123/);
-  assert.match(getEl("onboardBox").innerHTML, /whsec_once_456/);
-
-  // 6) 切换接收方式弹窗存在，提交走新接口，结果页带一次性 secret 与提示词
-  assert.ok(getEl("receiveModal"));
-  await vm.runInContext('openSwitchReceive("poll-bot"); state.switchReceive = "webhook";', sandbox);
-  getEl("rxUrl").value = "https://wh.example/switch";
-  await getEl("receiveForm").dispatch("submit");
-  const receivePost = requests.find((r) => r.method === "POST" && r.url === "/api/v1/admin/nodes/poll-bot/receive");
-  assert.ok(receivePost);
-  assert.equal(receivePost.body.receive, "webhook");
-  assert.equal(receivePost.body.webhook_url, "https://wh.example/switch");
-  assert.match(getEl("rxResult").innerHTML, /whsec_switch_once/);
-  assert.match(getEl("rxResult").innerHTML, /把这段提示词发给对方 Agent，让它改用新方式/);
-  assert.match(getEl("rxResult").innerHTML, /改用 webhook/);
+  assert.equal(getEl("onboardBox").innerHTML.includes("receiver-key-ui"), false);
+  assert.equal(renderWebConsoleHtml().includes("receiveModal"), false);
 });
 
 test("控制台对尚未合入的后端接口（404）给出友好降级提示而非报错白屏", async () => {

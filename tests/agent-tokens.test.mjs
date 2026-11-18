@@ -223,7 +223,9 @@ test("HTTP：机主不受影响，Agent 按角色隔离，冒充与撤单受绑�
       body: { node: "muse", access: "http", role: "leader" },
     });
     assert.equal(leaderAdd.status, 200);
-    assert.equal(leaderAdd.data.card, null);
+    assert.equal(leaderAdd.data.card.cap_id, "CAP-muse-agent");
+    assert.equal(leaderAdd.data.card.dispatchable, "Yes");
+    assert.equal(leaderAdd.data.card.role, "leader");
     const leaderToken = leaderAdd.data.token;
     assert.equal(leaderAdd.data.onboarding.prompt.includes(leaderToken), true);
 

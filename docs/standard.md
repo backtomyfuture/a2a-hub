@@ -335,15 +335,15 @@ Cap_ID 推导口径（守护进程登记时）：节点本尊的能力为条目�
 |---|---|---|---|
 | `longpoll` | 远端宿主节点向 Hub 发起出站长轮询 `GET /api/v1/poll?node=<node>&cursor=<seq>&timeout=25`；Hub 进程内直接订阅 `LongPollBroker` 本地事件；每次写后毫秒级唤醒 | **默认推荐**：Hub 节点与远端宿主守护节点（`ah join`） | `event` |
 | `poll` | 宿主守护进程按 `pollSec`（默认 45 秒）定时扫表（`events: false` 时启用） | 无法维持长连接或显式降级轮询的守护节点 | `poll` |
-| `http-poll` | 纯 HTTP 外部 Agent 定时跑检查脚本，有事再短轮询 `GET /api/v1/agents/:node/poll?timeout=0` 或 `updates?new=1` | 无常驻进程、由外部定时器唤醒的 Agent（默认） | `http-poll` |
-| `http-longpoll` | 同一网关的常驻进程循环 `GET /api/v1/agents/:node/poll?timeout=25`（Leader 循环 `updates?new=1`） | 能挂住出站连接、不开监听端口的 HTTP Agent | `http-longpoll` |
+| `http-poll` | 纯 HTTP 外部 Agent 每 5 分钟跑检查脚本，有事再短轮询 `GET /api/v1/agents/:node/poll?timeout=0` 或 `updates?new=1`。跑不了脚本时也是每 5 分钟 | 无常驻进程、由外部定时器唤醒的 Agent（默认） | `http-poll` |
+| `http-longpoll` | 同一网关的常驻进程循环 `GET /api/v1/agents/:node/poll?timeout=25`（Leader 每轮再拉 `updates?new=1`） | 能挂住出站连接、不开监听端口的 HTTP Agent | `http-longpoll` |
 | `webhook` | Hub 向机主登记的 URL 出站 POST 门铃；接收方再用自己的 Agent Token 回网关拉正文 | 能提供一个 HTTP 端点、希望少做空轮询的 HTTP Agent | `webhook` |
 
-`receive`（仅 `access=http` 的添加 Agent / 接入提示词）与名片 `Receive_Mode` 的对应：`poll` → `http-poll`，`longpoll` → `http-longpoll`，`webhook` → `webhook`。`access` 不是 `http` 时忽略 `receive`。接收方式是节点级三选一，由机主切换（`POST /api/v1/admin/nodes/:node/receive`），该节点全部门片的 `Receive_Mode` 与 `Metadata.mode` 一起改。宿主节点（`ah daemon` / inbox）固定常驻长连接，不能切换。`register` 只接受 `http-poll`、`http-longpoll`、`webhook`、`longpoll`、`poll`、`event`，其它值 `400`；缺省 `http-poll`。节点已有机主 Webhook 配置时强制写成 `webhook`。自报 `webhook` 但机主未配置时写成 `http-poll`，响应带 `warning`「Webhook 需机主在控制台开启」。
+`receive`（仅 `access=http` 的添加 Agent / 接入提示词）与名片 `Receive_Mode` 的对应：`poll` → `http-poll`，`longpoll` → `http-longpoll`，`webhook` → `webhook`。`access` 不是 `http` 时忽略 `receive`。接收方式在添加该 HTTP Agent 时选定一次，写入该节点名片的 `Receive_Mode` 与 `Metadata.mode`。之后不再提供切换接口。宿主节点（`ah daemon` / inbox）固定常驻长连接。`register` 只接受 `http-poll`、`http-longpoll`、`webhook`、`longpoll`、`poll`、`event`，其它值 `400`；缺省 `http-poll`。节点已有机主 Webhook 配置时强制写成 `webhook`。自报 `webhook` 但机主未配置时写成 `http-poll`，响应带 `warning`「Webhook 需机主在控制台开启」。不报能力的 `leader`（含旧值 `hybrid`）会补一张可派单身份名片 `CAP-<node>-agent`（`Skill_ID=agent`，`Dispatchable=Yes`，新建时 `Admission=admitted`，Metadata `role=leader`）；更新这张名片不改 `Admission`。显式 `caps` 不另造这张名片。
 
 #### Webhook 门铃
 
-存储是配置目录 `agent_webhooks.json`（0600），形如 `{version:1, hooks:[{node, url, secret, created_at, updated_at, last_status, last_error, last_delivered_at}]}`。`secret` 明文落盘，因为每次出站 HMAC 都要用它；GET 列表、日志和门铃正文都不含 `secret`。明文只在新建或 `rotate_secret=true` 的响应里出现一次，形如 `whsec_` 加随机串。URL 只由机主填写：仅 `http` / `https`，长度 1–2048，禁止用户名或密码。有 Webhook 配置当且仅当该节点 `Receive_Mode` 为 `webhook`。`PUT /api/v1/admin/webhooks/:node` 在当前不是 `webhook` 时返回 `409`（先把接收方式切换成 Webhook）。`DELETE /api/v1/admin/webhooks/:node` 删掉配置，并把该节点名片改回 `http-poll`。Agent 身份不能调用 `/api/v1/admin/webhooks*`，也不能调用 `POST /api/v1/admin/nodes/:node/receive`。删除节点时一并删除该节点的 Webhook。
+存储是配置目录 `agent_webhooks.json`（0600），形如 `{version:1, hooks:[{node, url, secret, header, created_at, updated_at, last_status, last_error, last_delivered_at}]}`。`secret` 是接收端自己的密钥，由机主在添加或修改时填入，明文落盘是因为每次出站都要用它。中台不签发密钥，响应、列表、日志和门铃正文都不含明文。列表只返回 `secret_mask`（前 6 个字符加省略号）、`header` 和 `legacy`。`header` 缺省为 `Authorization`，出站值为 `Bearer <secret>`；自定义头名时值为密钥原文，并同时附带 `X-A2A-Signature`。没有 `header` 字段的旧记录只做 HMAC，不附加 `Authorization`；只改头名不会给这种记录补上请求头。更新时密钥留空表示沿用旧值。`rotate_secret` 忽略。URL 只由机主填写：仅 `http` / `https`，长度 1–2048，禁止用户名或密码。有 Webhook 配置当且仅当该节点 `Receive_Mode` 为 `webhook`。`PUT /api/v1/admin/webhooks/:node` 在当前不是 `webhook` 时返回 `409`（该节点的接收方式不是 Webhook，不能登记推送）。`DELETE /api/v1/admin/webhooks/:node` 删掉配置，并把该节点名片改回 `http-poll`。Agent 身份不能调用 `/api/v1/admin/webhooks*`。删除节点时一并删除该节点的 Webhook。
 
 推送只是门铃，不含指令正文和参数。Hub 使用 `redirect: manual`，不跟随 3xx。单次超时 10 秒；非 2xx 或网络错误按 0 / 1 / 3 / 8 秒重试后放弃，并写入 `last_status` / `last_error`。2xx 记成功和 `last_delivered_at`。每次尝试更换 `X-A2A-Delivery` 与时间戳，正文不变，签名随时间戳重算。
 
@@ -362,8 +362,10 @@ X-A2A-Signature: sha256=<hex>
 正文：
 
 ```json
-{"event":"task.assigned","node":"<接收节点>","task_id":"...","status":"submitted","seq":1,"hub":"<hub 节点名>","at":"<ISO>"}
+{"event":"task.assigned","node":"<接收节点>","task_id":"...","status":"submitted","seq":1,"hub":"<hub 节点名>","at":"<ISO>","text":"a2a-hub 有新任务/更新，请运行检查流程拉取"}
 ```
+
+`text` 只是一句提醒。`ping` 的 `text` 为「a2a-hub Webhook 测试，请返回 2xx」。不要把指令正文放进门铃。
 
 - `task.assigned`：`Target_Node` 为该节点且 `Status=submitted`。答复后回到 `working` 的续跑不是 `submitted`，不推。
 - `task.updated`：`From_Node` 为该节点，且状态进入 `completed` / `failed` / `canceled` / `rejected` / `input-required` / `auth-required`（给发起方 Leader）。

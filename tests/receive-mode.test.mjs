@@ -1,4 +1,4 @@
-// 接收方式是节点级三选一：切换接口、Webhook 门闩、register 不再覆盖机主配置。
+// 接收方式在添加时选定。非 webhook 节点不能登记推送，register 不覆盖机主已配的 Webhook。
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -34,7 +34,7 @@ function modesOf(cards, node) {
     }));
 }
 
-test("切换接收方式、Webhook 门闩、register 不覆盖、Agent 403", async () => {
+test("Webhook 门闩、register 不覆盖、删除配置回到定时检查", async () => {
   await withTemp(async (rootDir) => {
     const hubDir = path.join(rootDir, "hub");
     fs.mkdirSync(hubDir, { recursive: true });
@@ -68,29 +68,32 @@ test("切换接收方式、Webhook 门闩、register 不覆盖、Agent 403", asy
         Metadata: JSON.stringify({ kind: "host", role: "worker", mode: "event" }),
       });
 
-      const host = await apiJson(base, "/api/v1/admin/nodes/mac-host/receive", {
-        method: "POST",
+      const host = await apiJson(base, "/api/v1/admin/webhooks/mac-host", {
+        method: "PUT",
         token: "owner-token",
-        body: { receive: "webhook", webhook_url: "https://hooks.example/host" },
+        body: { url: "https://hooks.example/host", key: "receiver-key-host" },
       });
       assert.equal(host.status, 409);
-      assert.match(host.data.error, /宿主节点由 ah daemon 常驻长连接/);
+      assert.match(host.data.error, /该节点的接收方式不是 Webhook/);
       assert.equal(fs.existsSync(path.join(hubDir, "agent_webhooks.json")), false);
-
-      const missing = await apiJson(base, "/api/v1/admin/nodes/no-such/receive", {
-        method: "POST",
-        token: "owner-token",
-        body: { receive: "poll" },
-      });
-      assert.equal(missing.status, 409);
 
       const added = await apiJson(base, "/api/v1/admin/agents", {
         method: "POST",
         token: "owner-token",
-        body: { node: "bot", access: "http", role: "worker", receive: "poll" },
+        body: {
+          node: "bot",
+          access: "http",
+          role: "worker",
+          receive: "webhook",
+          webhook_url: "https://hooks.example/bot",
+          webhook_key: "receiver-key-bot",
+        },
       });
       assert.equal(added.status, 200);
-      assert.equal(added.data.card.receive_mode, "http-poll");
+      assert.equal(added.data.card.receive_mode, "webhook");
+      assert.equal(added.data.webhook.secret, undefined);
+      assert.equal(added.data.webhook.url, "https://hooks.example/bot");
+      assert.equal(added.data.onboarding.prompt.includes("receiver-key-bot"), false);
 
       const extra = await apiJson(base, "/api/v1/admin/cards", {
         method: "POST",
@@ -98,57 +101,17 @@ test("切换接收方式、Webhook 门闩、register 不覆盖、Agent 403", asy
         body: { node: "bot", skill_id: "translate", skill_name: "翻译" },
       });
       assert.equal(extra.status, 201);
-
-      const toLong = await apiJson(base, "/api/v1/admin/nodes/bot/receive", {
-        method: "POST",
-        token: "owner-token",
-        body: { receive: "longpoll" },
-      });
-      assert.equal(toLong.status, 200);
-      assert.equal(toLong.data.receive, "longpoll");
-      assert.equal(toLong.data.receive_mode, "http-longpoll");
-      assert.equal(toLong.data.cards_updated, 2);
-      assert.equal(toLong.data.webhook, undefined);
-      assert.match(toLong.data.onboarding.prompt, /"receive_mode":"http-longpoll"/);
-      assert.equal(toLong.data.onboarding.prompt.includes("http-poll"), false);
       let modes = modesOf(await bus.listRecords(DEFAULT_TABLES.agentCards), "bot");
       assert.equal(modes.length, 2);
-      assert.deepEqual(modes.map((row) => row.receive), ["http-longpoll", "http-longpoll"]);
-      assert.deepEqual(modes.map((row) => row.mode), ["http-longpoll", "http-longpoll"]);
+      assert.deepEqual([...new Set(modes.map((row) => row.receive))], ["webhook"]);
 
-      const noUrl = await apiJson(base, "/api/v1/admin/nodes/bot/receive", {
+      const noKey = await apiJson(base, "/api/v1/admin/agents", {
         method: "POST",
         token: "owner-token",
-        body: { receive: "webhook" },
+        body: { node: "nokey", access: "http", role: "worker", receive: "webhook", webhook_url: "https://hooks.example/nokey" },
       });
-      assert.equal(noUrl.status, 400);
-
-      const toHook = await apiJson(base, "/api/v1/admin/nodes/bot/receive", {
-        method: "POST",
-        token: "owner-token",
-        body: { receive: "webhook", webhook_url: "https://hooks.example/bot" },
-      });
-      assert.equal(toHook.status, 200);
-      assert.equal(toHook.data.receive_mode, "webhook");
-      assert.equal(toHook.data.cards_updated, 2);
-      assert.match(toHook.data.webhook.secret, /^whsec_/);
-      assert.equal(toHook.data.webhook.url, "https://hooks.example/bot");
-      assert.equal(toHook.data.onboarding.prompt.split(toHook.data.webhook.secret).length - 1, 1);
-      assert.match(toHook.data.onboarding.prompt, /"receive_mode":"webhook"/);
-      const secretOnce = toHook.data.webhook.secret;
-
-      const again = await apiJson(base, "/api/v1/admin/nodes/bot/receive", {
-        method: "POST",
-        token: "owner-token",
-        body: { receive: "webhook", webhook_url: "https://hooks.example/bot-2" },
-      });
-      assert.equal(again.status, 200);
-      assert.equal(again.data.webhook.secret, undefined);
-      assert.equal(again.data.webhook.url, "https://hooks.example/bot-2");
-      assert.equal(again.data.cards_updated, 0);
-      const stored = JSON.parse(fs.readFileSync(path.join(hubDir, "agent_webhooks.json"), "utf8"));
-      assert.equal(stored.hooks.find((hook) => hook.node === "bot").secret, secretOnce);
-      assert.equal(stored.hooks.find((hook) => hook.node === "bot").url, "https://hooks.example/bot-2");
+      assert.equal(noKey.status, 400);
+      assert.match(noKey.data.error, /请填写对方提供的密钥/);
 
       const renamed = await apiJson(base, "/api/v1/admin/webhooks/bot", {
         method: "PUT",
@@ -157,6 +120,7 @@ test("切换接收方式、Webhook 门闩、register 不覆盖、Agent 403", asy
       });
       assert.equal(renamed.status, 200);
       assert.equal(renamed.data.webhook.secret, undefined);
+      assert.equal(JSON.parse(fs.readFileSync(path.join(hubDir, "agent_webhooks.json"), "utf8")).hooks.find((hook) => hook.node === "bot").secret, "receiver-key-bot");
 
       const timer = await apiJson(base, "/api/v1/admin/agents", {
         method: "POST",
@@ -164,13 +128,15 @@ test("切换接收方式、Webhook 门闩、register 不覆盖、Agent 403", asy
         body: { node: "timer", access: "http", role: "leader", receive: "poll" },
       });
       assert.equal(timer.status, 200);
+      assert.equal(timer.data.card.dispatchable, "Yes");
+      assert.equal(timer.data.card.role, "leader");
       const blocked = await apiJson(base, "/api/v1/admin/webhooks/timer", {
         method: "PUT",
         token: "owner-token",
-        body: { url: "https://hooks.example/timer" },
+        body: { url: "https://hooks.example/timer", key: "receiver-key-timer" },
       });
       assert.equal(blocked.status, 409);
-      assert.match(blocked.data.error, /先把接收方式切换成 Webhook/);
+      assert.match(blocked.data.error, /该节点的接收方式不是 Webhook/);
 
       const kept = await apiJson(base, "/api/v1/agents/register", {
         method: "POST",
@@ -182,14 +148,6 @@ test("切换接收方式、Webhook 门闩、register 不覆盖、Agent 403", asy
       assert.equal(kept.data.warning, undefined);
       modes = modesOf(await bus.listRecords(DEFAULT_TABLES.agentCards), "bot");
       assert.deepEqual([...new Set(modes.map((row) => row.receive))], ["webhook"]);
-      assert.deepEqual([...new Set(modes.map((row) => row.mode))], ["webhook"]);
-
-      const badMode = await apiJson(base, "/api/v1/agents/register", {
-        method: "POST",
-        token: "owner-token",
-        body: { node: "bot", role: "worker", receive_mode: "push" },
-      });
-      assert.equal(badMode.status, 400);
 
       const warned = await apiJson(base, "/api/v1/agents/register", {
         method: "POST",
@@ -199,22 +157,18 @@ test("切换接收方式、Webhook 门闩、register 不覆盖、Agent 403", asy
       assert.equal(warned.status, 200);
       assert.equal(warned.data.receive_mode, "http-poll");
       assert.equal(warned.data.warning, "Webhook 需机主在控制台开启");
-      const lonely = modesOf(await bus.listRecords(DEFAULT_TABLES.agentCards), "lonely");
-      assert.deepEqual(lonely.map((row) => row.receive), ["http-poll"]);
-      const afterWarn = JSON.parse(fs.readFileSync(path.join(hubDir, "agent_webhooks.json"), "utf8"));
-      assert.equal(afterWarn.hooks.some((hook) => hook.node === "lonely"), false);
 
       assert.throws(
         () => assertAgentRoute(
-          { kind: "agent", node: "bot", role: "leader", scopes: ["admin"] },
+          { kind: "agent", node: "bot", role: "worker", scopes: [] },
           { method: "POST", pathname: "/api/v1/admin/nodes/bot/receive", searchParams: new URLSearchParams(), headers: {} },
         ),
-        (err) => err.status === 403 && /接收方式/.test(err.message),
+        (err) => err.status === 403,
       );
-      const asAgent = await apiJson(base, "/api/v1/admin/nodes/bot/receive", {
-        method: "POST",
+      const asAgent = await apiJson(base, "/api/v1/admin/webhooks/bot", {
+        method: "PUT",
         token: added.data.token,
-        body: { receive: "poll" },
+        body: { url: "https://hooks.example/stolen", key: "nope" },
       });
       assert.equal(asAgent.status, 403);
 
@@ -225,18 +179,8 @@ test("切换接收方式、Webhook 门闩、register 不覆盖、Agent 403", asy
       assert.deepEqual(removed.data, { ok: true });
       modes = modesOf(await bus.listRecords(DEFAULT_TABLES.agentCards), "bot");
       assert.deepEqual([...new Set(modes.map((row) => row.receive))], ["http-poll"]);
-      assert.deepEqual([...new Set(modes.map((row) => row.mode))], ["http-poll"]);
       const afterDelete = JSON.parse(fs.readFileSync(path.join(hubDir, "agent_webhooks.json"), "utf8"));
       assert.equal(afterDelete.hooks.some((hook) => hook.node === "bot"), false);
-
-      const toPoll = await apiJson(base, "/api/v1/admin/nodes/bot/receive", {
-        method: "POST",
-        token: "owner-token",
-        body: { receive: "poll" },
-      });
-      assert.equal(toPoll.status, 200);
-      assert.match(toPoll.data.onboarding.prompt, /"receive_mode":"http-poll"/);
-      assert.equal(toPoll.data.onboarding.prompt.includes('"receive_mode":"webhook"'), false);
     } finally {
       await httpHandle.close();
       bus.close();
