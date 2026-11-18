@@ -258,12 +258,12 @@ const USAGE_LINES = [
   "  ah service [--config <dir>] [--role node|hub]  注册开机自启（--remove 卸载）",
   "  ah update  [--check] [--skip-skill] [--config <dir>]  自更新程序本体（git pull + 依赖重装 + 软链/Skill 补齐）",
   "  ah inbox   [--pop] [--json]    读取专属 Agent 收件箱（--pop 提取并标为 acked）",
-  "  ah inbox done --task <Task_ID> --text <处理结果> [--artifact <路径>] [--check <id>=<pass|fail|blocked>[:<证据>]]",
-  "  ah inbox ask  --task <Task_ID> --text <补充提问>",
+  "  ah inbox done --task <Task_ID> --text <处理结果> [--artifact <路径或URL>]... [--check <id>=<pass|fail|blocked>[:<证据>]]",
+  "  ah inbox ask  --task <Task_ID> --text <补充提问> [--file <路径>]...",
   "  ah inbox fail --task <Task_ID> --text <失败原因>",
-  "  ah inbox auth --task <Task_ID> --text <具体动作、对象与风险>",
-  "  ah task create --to <node> [--cap/--skill <cap_id>] [--text <指令>] [--from <node>] [--params <json 或 @文件>] [--criteria <json 数组或 @文件>] [--idempotency-key <键>]",
-  "  ah task reply  --task <Task_ID> --text <答复内容>",
+  "  ah inbox auth --task <Task_ID> --text <具体动作、对象与风险> [--file <路径>]...",
+  "  ah task create --to <node> [--cap/--skill <cap_id>] [--text <指令>] [--from <node>] [--params <json 或 @文件>] [--criteria <json 数组或 @文件>] [--idempotency-key <键>] [--file <路径>]...",
+  "  ah task reply  --task <Task_ID> [--text <答复内容>] [--file <路径>]...",
   "  ah task show   <Task_ID>",
   "  ah task why    <Task_ID> [--config <dir>] [--json]",
   "  ah task cancel --task <Task_ID> [--text <说明>] [--config <dir>]",
@@ -425,6 +425,14 @@ if (wantsHelp) {
         if (!check.ok) throw new Error("拒绝建单：" + check.error);
       }
       const cfg = loadConfig(args.configDir || configDirFrom(rest), { forCli: true });
+      // --file 先经文件客户端上传，再把 hub:// 放进 attachments；上传失败在建单前就停。
+      let attachments;
+      if (args.files.length) {
+        const { createFileClient } = await import("../src/files-client.mjs");
+        const { uploadLocalFiles } = await import("../src/attachments.mjs");
+        const client = createFileClient(cfg);
+        try { attachments = await uploadLocalFiles(args.files, client); } finally { client.close?.(); }
+      }
       const taskId = await createTask({
         bus: cfg.bus,
         from: args.from || cfg.node,
@@ -440,6 +448,7 @@ if (wantsHelp) {
         approval: args.approval,
         idempotencyKey: args.idempotencyKey,
         validateTarget: true,
+        attachments,
       });
       console.log(taskId);
     } catch (e) {
@@ -451,18 +460,20 @@ if (wantsHelp) {
     let taskId = "";
     let text = "";
     let configDir = "";
+    const replyFiles = [];
     for (let i = 0; i < argv.length; i++) {
       const flag = argv[i];
       if (flag === "--task") taskId = argv[++i] ?? "";
       else if (flag === "--text") text = argv[++i] ?? "";
+      else if (flag === "--file") replyFiles.push(argv[++i] ?? "");
       else if (flag === "--config") configDir = argv[++i] ?? "";
       else if (!flag.startsWith("--") && !taskId) taskId = flag;
     }
     if (!taskId) {
-      console.error("用法：ah task reply --task <Task_ID> --text <答复内容>");
+      console.error("用法：ah task reply --task <Task_ID> [--text <答复内容>] [--file <路径>]...");
       process.exitCode = 1;
-    } else if (!text) {
-      console.error("ah task reply 需要 --text <答复内容>");
+    } else if (!text && !replyFiles.length) {
+      console.error("ah task reply 需要 --text <答复内容> 或 --file <路径>");
       process.exitCode = 1;
     } else {
       try {
@@ -493,14 +504,28 @@ if (wantsHelp) {
         const p = (n) => String(n).padStart(2, "0");
         const nowMinute = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 
-        await cfg.bus.createRecord(cfg.bus.tables.parts, {
-          Part_ID: `${msgId}-P1`,
-          Parent_ID: msgId,
-          Parent_Type: "message",
-          Seq: 1,
-          Kind: "text",
-          Text: text.slice(0, 4000),
-        });
+        // 先上传、校验，任何失败都发生在第一笔写之前。
+        let attachments = [];
+        if (replyFiles.length) {
+          const { createFileClient } = await import("../src/files-client.mjs");
+          const { uploadLocalFiles, normalizeAttachments } = await import("../src/attachments.mjs");
+          const client = createFileClient(cfg);
+          try { attachments = normalizeAttachments(await uploadLocalFiles(replyFiles, client)); } finally { client.close?.(); }
+        }
+        let nextSeq = 1;
+        if (text) {
+          await cfg.bus.createRecord(cfg.bus.tables.parts, {
+            Part_ID: `${msgId}-P1`,
+            Parent_ID: msgId,
+            Parent_Type: "message",
+            Seq: 1,
+            Kind: "text",
+            Text: text.slice(0, 4000),
+          });
+          nextSeq = 2;
+        }
+        const { appendFileParts } = await import("../src/attachments.mjs");
+        await appendFileParts(cfg.bus, msgId, nextSeq, attachments);
         await cfg.bus.createRecord(cfg.bus.tables.messages, {
           Msg_ID: msgId,
           Task_ID: taskId,
@@ -658,14 +683,14 @@ if (wantsHelp) {
     const argv = rest.slice(1);
     let taskId = "";
     let text = "";
-    let artifact = "";
+    const artifacts = [];
     let cfgDir = "";
     const rawChecks = [];
     for (let i = 0; i < argv.length; i++) {
       const flag = argv[i];
       if (flag === "--task") taskId = argv[++i] ?? "";
       else if (flag === "--text") text = argv[++i] ?? "";
-      else if (flag === "--artifact") artifact = argv[++i] ?? "";
+      else if (flag === "--artifact") artifacts.push(argv[++i] ?? "");
       else if (flag === "--config") cfgDir = argv[++i] ?? "";
       else if (flag === "--check") rawChecks.push(argv[++i] ?? "");
       else if (!flag.startsWith("--") && !taskId) taskId = flag;
@@ -678,8 +703,17 @@ if (wantsHelp) {
         const { parseCheckFlag } = await import("../src/acceptance.mjs");
         const checks = rawChecks.map((raw) => parseCheckFlag(raw));
         const { handleInboxDone } = await import("../src/inbox.mjs");
+        const { createFileClient } = await import("../src/files-client.mjs");
         const cfg = loadConfig(cfgDir || configDir, { forCli: true });
-        await handleInboxDone({ configDir: cfgDir || configDir, bus: cfg.bus, node: cfg.node, taskId, text, artifact, checks });
+        // 本地存在的产物在提交阶段上传成 hub://；文件客户端懒创建，没有本地文件时不碰 FileStore。
+        let client = null;
+        try {
+          await handleInboxDone({
+            configDir: cfgDir || configDir, bus: cfg.bus, node: cfg.node, taskId, text,
+            artifacts: artifacts.filter(Boolean), checks,
+            getFileClient: () => (client ??= createFileClient(cfg)),
+          });
+        } finally { client?.close?.(); }
         console.log(`✓ 任务 ${taskId} 已完成并上报总线`);
       } catch (e) {
         console.error(e?.message ?? e);
@@ -691,21 +725,30 @@ if (wantsHelp) {
     let taskId = "";
     let text = "";
     let cfgDir = "";
+    const askFiles = [];
     for (let i = 0; i < argv.length; i++) {
       const flag = argv[i];
       if (flag === "--task") taskId = argv[++i] ?? "";
       else if (flag === "--text") text = argv[++i] ?? "";
+      else if (flag === "--file") askFiles.push(argv[++i] ?? "");
       else if (flag === "--config") cfgDir = argv[++i] ?? "";
       else if (!flag.startsWith("--") && !taskId) taskId = flag;
     }
     if (!taskId || !text) {
-      console.error("用法：ah inbox ask --task <Task_ID> --text <需要用户/发起方补充的信息>");
+      console.error("用法：ah inbox ask --task <Task_ID> --text <需要用户/发起方补充的信息> [--file <路径>]...");
       process.exitCode = 1;
     } else {
       try {
         const { handleInboxAsk } = await import("../src/inbox.mjs");
+        const { createFileClient } = await import("../src/files-client.mjs");
         const cfg = loadConfig(cfgDir || configDir, { forCli: true });
-        await handleInboxAsk({ configDir: cfgDir || configDir, bus: cfg.bus, node: cfg.node, taskId, text });
+        let client = null;
+        try {
+          await handleInboxAsk({
+            configDir: cfgDir || configDir, bus: cfg.bus, node: cfg.node, taskId, text,
+            files: askFiles.filter(Boolean), getFileClient: () => (client ??= createFileClient(cfg)),
+          });
+        } finally { client?.close?.(); }
         console.log(`✓ 任务 ${taskId} 已转入 input-required 并向发起方提问`);
       } catch (e) {
         console.error(e?.message ?? e);
@@ -717,21 +760,30 @@ if (wantsHelp) {
     let taskId = "";
     let text = "";
     let cfgDir = "";
+    const authFiles = [];
     for (let i = 0; i < argv.length; i++) {
       const flag = argv[i];
       if (flag === "--task") taskId = argv[++i] ?? "";
       else if (flag === "--text") text = argv[++i] ?? "";
+      else if (flag === "--file") authFiles.push(argv[++i] ?? "");
       else if (flag === "--config") cfgDir = argv[++i] ?? "";
       else if (!flag.startsWith("--") && !taskId) taskId = flag;
     }
     if (!taskId || !text.trim()) {
-      console.error("用法：ah inbox auth --task <Task_ID> --text <具体动作、对象与风险>");
+      console.error("用法：ah inbox auth --task <Task_ID> --text <具体动作、对象与风险> [--file <路径>]...");
       process.exitCode = 1;
     } else {
       try {
         const { handleInboxAuth } = await import("../src/inbox.mjs");
+        const { createFileClient } = await import("../src/files-client.mjs");
         const cfg = loadConfig(cfgDir || configDir, { forCli: true });
-        await handleInboxAuth({ configDir: cfgDir || configDir, bus: cfg.bus, node: cfg.node, taskId, text });
+        let client = null;
+        try {
+          await handleInboxAuth({
+            configDir: cfgDir || configDir, bus: cfg.bus, node: cfg.node, taskId, text,
+            files: authFiles.filter(Boolean), getFileClient: () => (client ??= createFileClient(cfg)),
+          });
+        } finally { client?.close?.(); }
         console.log(`✓ 任务 ${taskId} 已请求机主批准`);
       } catch (e) {
         console.error(e?.message ?? e);

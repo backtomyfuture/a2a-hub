@@ -59,7 +59,7 @@ HTTP 客户端用全局 `fetch`，上传用流（`duplex: "half"`），沿用 Ht
 
 | 路径 | 改动 |
 |---|---|
-| `POST /api/v1/tasks`、`createTask()`、`ah task create --file <路径>`（可重复） | instruction 消息追加文件块 |
+| `POST /api/v1/tasks`、`createTask()`、`ah task create --file <路径>`（可重复） | instruction 消息追加文件块；有附件时 `text` 也可为空（与 reply 一致），但 `text` 与 `attachments` 不能同时为空 |
 | `POST /api/v1/tasks/:id/reply`、`ah task reply --file` | answer 消息追加文件块；有附件时 `text` 可为空 |
 | 网关 `ask` / `auth`、`ah inbox ask --file`、内核 `agent-ask` 围栏 | question / auth_request 消息追加文件块 |
 | 网关 `complete` / `fail` 的 `artifacts: [{uri,name,mime}]`（旧 `artifact` 字符串继续兼容）、`ah inbox done --artifact` 可重复、执行器多行 `ARTIFACT:`、JSON 回执 `artifacts` 数组 | 每个文件一条 Artifact + 一个 file Part，`Mime_Type` 填写；本地路径先经文件客户端上传，上传失败留在 outbox 下轮重试 |
@@ -67,7 +67,7 @@ HTTP 客户端用全局 `fetch`，上传用流（`duplex: "half"`），沿用 Ht
 ## 7. 读取路径（阶段 2）
 
 - 内核 `collectDialogue`：收 instruction / question / answer 的文件块；`hub://` 下载到 `runs/<Task_ID>/files/<序号>-<文件名>`（0600），`input.json.files[]` 每项 `{ uri, name, mime, from_kind, local_path? , error? }`；过期写 `error: "expired"`，不判任务失败。
-- 网关任务视图（poll / inbox / updates / `GET /api/v1/tasks/:id`）：新增 `instruction_attachments`、`question_attachments`、`answer_attachments`（最近一条），`artifacts[].files[]` 与上述各项统一为 `{ file_uri, file_name, mime_type, download_url }`；`hub://` 的 `download_url` = `<hubUrl>/api/v1/files/<id>`（hubUrl 取 `publicUrl` 或请求 Host），外部 URL 原样。
+- 网关任务视图（poll / inbox / updates / `GET /api/v1/tasks/:id`）：新增 `instruction_attachments`、`question_attachments`、`answer_attachments`（最近一条），`artifacts[].files[]` 与上述各项统一为 `{ file_uri, file_name, mime_type, download_url, size, deleted }`；`hub://` 的 `download_url` = `<hubUrl>/api/v1/files/<id>`（hubUrl 取 `publicUrl` 或请求 Host），外部 URL 原样；`hub://` 的 `size` 取 FileStore `meta.size`、`deleted` 为 `meta.deleted_at` 非空（布尔），外部 URL 的 `size` 为 `null`、`deleted` 为 `false`，拿不到 fileStore 时（远端场景）同样 `size=null`、`deleted=false`。
 
 ## 8. 控制台（阶段 3，`src/server/web-ui.mjs`）
 

@@ -3,7 +3,10 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { acceptanceLine } from "./acceptance.mjs";
+import { planArtifactItem, uploadPendingItems } from "./attachments.mjs";
 import { f1 } from "./bus/tables.mjs";
+import { guessMime } from "./files-client.mjs";
+import { parseHubFileUri } from "./hub/files.mjs";
 import { TERMINAL_STATUSES, annotateElapsed, log, nowStr } from "./kernel-util.mjs";
 
 function verifyFailedNoticeText(box) {
@@ -22,7 +25,66 @@ function verifyFailedNoticeText(box) {
   return [head, summaryBlock, tailBlock].filter(Boolean).join("\n\n").slice(0, 4000);
 }
 
+// 回执里的交付文件列表：优先 res.artifacts；只有旧的 res.artifact 字符串时等价于一个元素。
+function receiptArtifactEntries(res) {
+  if (Array.isArray(res?.artifacts) && res.artifacts.length) return res.artifacts;
+  const one = String(res?.artifact ?? "").trim();
+  return one ? [{ uri: one, ...(res?.artifact_name ? { name: String(res.artifact_name) } : {}) }] : [];
+}
+
+function noteSuffix(box) {
+  return (box.artifacts ?? []).map((a) => a.note).filter(Boolean).map((n) => `\n（${n}）`).join("");
+}
+
 export const outboxMethods = {
+
+  // 执行方写相对路径时，相对它的工作目录（commands.json 的 cwd，缺省配置目录），其次 runs/<Task_ID>。
+  artifactBaseDirs(task) {
+    const entry = this.commands?.[this.capKeyOf(task)] ?? {};
+    const taskId = String(f1(task, "Task_ID") ?? "");
+    const dirs = [entry.cwd || this.cfg.configDir];
+    if (/^[\w-]+$/.test(taskId)) dirs.push(path.join(this.cfg.configDir, "runs", taskId));
+    return dirs;
+  },
+
+  // 提交前先把本地存在的交付文件标成待上传（outbox 里记原路径与 upload_pending），不存在的保留原字符串。
+  planBoxArtifacts(task, res) {
+    const baseDirs = this.artifactBaseDirs(task);
+    const items = receiptArtifactEntries(res).map((entry) => planArtifactItem(entry, baseDirs, true));
+    for (const item of items) {
+      if (!item.local_path && !/^[a-z][a-z0-9+.-]*:\/\//i.test(item.src)) {
+        log(`交付文件不存在，保留原字符串：${item.src}`);
+      }
+    }
+    return items;
+  },
+
+  // 缺 uri 的先上传，成功一项就把结果写回 outbox 文件；失败抛错，下一轮只补缺的。
+  // 413 不重试：保留原字符串，说明追加到结果正文末尾，不能让任务永远卡住。
+  async uploadBoxFiles(box) {
+    const items = box.artifacts ?? [];
+    if (!items.some((item) => item.upload_pending)) return;
+    await uploadPendingItems(items, {
+      getClient: () => this.getFileClient(),
+      save: () => this.saveOutbox(box),
+      log,
+      tooLarge: "keep",
+    });
+  },
+
+  artifactMime(item, name) {
+    if (item.mime) return item.mime;
+    const id = parseHubFileUri(item.uri);
+    if (id) {
+      try {
+        const meta = this._fileClient?.store?.get(id);
+        if (meta?.mime) return meta.mime;
+      } catch { /* 取不到就按文件名猜 */ }
+      return guessMime(name);
+    }
+    if (/^https?:\/\//i.test(item.uri)) return "application/octet-stream";
+    return guessMime(name || item.uri);
+  },
 
   outboxPath(taskId) {
     const id = String(taskId ?? "");
@@ -78,6 +140,7 @@ export const outboxMethods = {
       started: info.started,
       planned: false,
       artId: "",
+      artifacts: info.res ? this.planBoxArtifacts(task, info.res) : [],
       runId: info.runId || "",
       msgId: "",
       usage: Object.prototype.hasOwnProperty.call(info, "usage") ? (info.usage ?? null) : (info.res?.usage ?? null),
@@ -114,6 +177,16 @@ export const outboxMethods = {
     return rows.find((r) => f1(r, field) === value) ?? null;
   },
 
+  // 升级前落盘的 outbox 只有 res.artifact，补成单元素数组（不探测本地文件，保持旧行为）。
+  legacyBoxArtifacts(box) {
+    const items = receiptArtifactEntries(box.res).map((entry) => planArtifactItem(entry, [], false));
+    if (items[0] && box.artId) {
+      items[0].artId = box.artId;
+      items[0].tokens = { artifact: box.tokens?.artifact, artifactPart: box.tokens?.artifactPart };
+    }
+    return items;
+  },
+
   async ensurePlan(task, box) {
     box.tokens ??= {};
     let dirty = false;
@@ -123,6 +196,10 @@ export const outboxMethods = {
         dirty = true;
       }
     }
+    if (!Array.isArray(box.artifacts)) {
+      box.artifacts = this.legacyBoxArtifacts(box);
+      dirty = true;
+    }
     if (box.planned && box.runId && box.msgId) {
       if (dirty) this.saveOutbox(box);
       return box;
@@ -131,10 +208,18 @@ export const outboxMethods = {
     const msgs = await this.listMessages(taskId);
     const runs = await this.runsOf(taskId);
     const arts = (await this.bus.listRecords(this.T.artifacts)).filter((a) => f1(a, "Task_ID") === taskId);
-    const pointer = String(box.res?.artifact ?? "").trim();
-    if (!pointer) box.artId = "";
-    else if (!box.artId) {
-      box.artId = `${taskId}-A${this.nextSuffix(arts.map((a) => f1(a, "Artifact_ID")), /-A(\d+)$/)}`;
+    if (!box.artifacts?.length) box.artId = "";
+    else {
+      // 每个文件一条 Artifact（<Task_ID>-A<n> 递增）；编号与 token 随 outbox 固化，补齐重试时不重复建。
+      let n = this.nextSuffix(arts.map((a) => f1(a, "Artifact_ID")), /-A(\d+)$/);
+      box.artifacts.forEach((item, idx) => {
+        if (item.artId) return;
+        item.artId = idx === 0 && box.artId ? box.artId : `${taskId}-A${n++}`;
+        item.tokens = idx === 0
+          ? { artifact: box.tokens.artifact, artifactPart: box.tokens.artifactPart }
+          : { artifact: randomUUID(), artifactPart: randomUUID() };
+      });
+      box.artId = box.artifacts[0].artId;
     }
     // 认领时已经开过 Run 的，沿用那个 Run_ID，收尾改为更新而不是再编号。
     if (!box.runId) {
@@ -150,18 +235,25 @@ export const outboxMethods = {
   },
 
   async ensureArtifact(task, box) {
-    if (!box.artId) return;
-    const name = String(box.res?.artifact_name || f1(task, "Skill_ID") || "result");
-    if (!(await this.findBy(this.T.artifacts, "Artifact_ID", box.artId))) {
-      await this.bus.createRecord(this.T.artifacts, {
-        Artifact_ID: box.artId, Task_ID: box.taskId, Context_ID: f1(task, "Context_ID"),
-        Name: name, Description: String(box.res?.summary ?? "").slice(0, 500),
-        Is_Final: box.outcome === "succeeded" ? "Yes" : "No", Created_By: this.cfg.node, Created_At: nowStr(),
-      }, box.tokens.artifact);
+    const items = box.artifacts ?? [];
+    for (const item of items) {
+      if (!item.artId) continue;
+      // 单个未上传的产物沿用旧命名（技能名）；上传过的文件或多文件用真实文件名。
+      const fallback = items.length === 1 && !item.local_path
+        ? (f1(task, "Skill_ID") || "result")
+        : path.basename(item.src || item.uri);
+      const name = String(item.name || fallback);
+      if (!(await this.findBy(this.T.artifacts, "Artifact_ID", item.artId))) {
+        await this.bus.createRecord(this.T.artifacts, {
+          Artifact_ID: item.artId, Task_ID: box.taskId, Context_ID: f1(task, "Context_ID"),
+          Name: name, Description: String(box.res?.summary ?? "").slice(0, 500),
+          Is_Final: box.outcome === "succeeded" ? "Yes" : "No", Created_By: this.cfg.node, Created_At: nowStr(),
+        }, item.tokens.artifact);
+      }
+      await this.createPart(item.artId, "artifact", 1, "file", {
+        fileUri: String(item.uri ?? ""), fileName: name, mime: this.artifactMime(item, name),
+      }, item.tokens.artifactPart);
     }
-    await this.createPart(box.artId, "artifact", 1, "file", {
-      fileUri: String(box.res?.artifact ?? ""), fileName: name,
-    }, box.tokens.artifactPart);
   },
 
   async ensureRun(task, box) {
@@ -204,7 +296,10 @@ export const outboxMethods = {
       ? verifyFailedNoticeText(box)
       : failed
         ? `回执无法解析，任务终止且不重试。原因：${box.error || "未知"}${box.raw ? "\n原始输出：" + box.raw : ""}`.slice(0, 4000)
-        : String(box.res?.summary ?? "").slice(0, 4000);
+        : (() => {
+          const note = noteSuffix(box);
+          return String(box.res?.summary ?? "").slice(0, 4000 - note.length) + note;
+        })();
     if (!(await this.findBy(this.T.messages, "Msg_ID", box.msgId))) {
       const fields = {
         Msg_ID: box.msgId, Task_ID: box.taskId, Context_ID: f1(task, "Context_ID"),
@@ -237,6 +332,8 @@ export const outboxMethods = {
       await this.closeSettledOutbox(current, box, { dropped: true });
       return;
     }
+    // 终态冲突已处理完才上传，免得替一张已被取消的单白传一遍。
+    await this.uploadBoxFiles(box);
     await this.ensureArtifact(current, box);
     await this.ensureRun(current, box);
     await this.ensureResultMessage(current, box);

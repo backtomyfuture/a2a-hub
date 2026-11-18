@@ -18,7 +18,9 @@ import {
   parseCheckFlag,
   parseCriteria,
 } from "./acceptance.mjs";
+import { appendFileParts, planArtifactItem, uploadPendingItems } from "./attachments.mjs";
 import { f1 } from "./bus/tables.mjs";
+import { guessMime } from "./files-client.mjs";
 import { log, readTaskMeta } from "./kernel-util.mjs";
 
 export function inboxFilePath(configDir) {
@@ -191,25 +193,6 @@ function runIsOpen(row) {
   return true;
 }
 
-function mimeOf(name) {
-  const ext = path.extname(String(name ?? "")).toLowerCase();
-  const known = {
-    ".md": "text/markdown",
-    ".txt": "text/plain",
-    ".json": "application/json",
-    ".html": "text/html",
-    ".htm": "text/html",
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".pdf": "application/pdf",
-    ".csv": "text/csv",
-    ".xml": "application/xml",
-  };
-  return known[ext] || "application/octet-stream";
-}
-
 // 摘要留在 result 的 TextPart。Outcome 是单选，fail 的原因进 Error_Log，ask 与内核 NeedInput 一样记一笔暂停原因。
 function errorLogFor(op, text) {
   if (op === "fail") return String(text ?? "").slice(0, 800);
@@ -289,7 +272,27 @@ async function instructionCriteria(bus, taskMsgs, logFn = log) {
   return { criteriaRef, criteria: parsed.criteria };
 }
 
-async function buildPlan({ bus, node, task, text, artifact, op, reportedChecks = {}, hasCheckFlags = false, logFn = log }) {
+// 旧版计划（升级前落盘、只有单个产物）读回来时补成数组，补齐路径只认这一种形状。
+function planArtifactsOf(plan) {
+  if (Array.isArray(plan.artifacts)) return plan.artifacts;
+  if (!plan.artId) return [];
+  return [{
+    src: plan.fileUri,
+    uri: plan.fileUri,
+    name: plan.artName,
+    mime: plan.mime,
+    description: plan.description,
+    metadata: plan.metadata,
+    artId: plan.artId,
+    partId: plan.artPartId || `${plan.artId}-P1`,
+    tokens: { artifact: plan.tokens?.artifact, artifactPart: plan.tokens?.artifactPart },
+  }];
+}
+
+async function buildPlan({
+  bus, node, task, text, artifact, artifacts = [], attachments = [], localFiles = [], op,
+  reportedChecks = {}, hasCheckFlags = false, baseDirs = [], detectLocal = true, logFn = log,
+}) {
   const spec = OP_SPEC[op];
   const taskId = f1(task, "Task_ID");
   const messages = await bus.listRecords(bus.tables.messages);
@@ -311,22 +314,45 @@ async function buildPlan({ bus, node, task, text, artifact, op, reportedChecks =
     }
   }
 
-  let artId = "";
-  let artName = "";
-  let fileUri = "";
-  let mime = "";
-  let description = "";
-  let metadata = "";
-  if (artifact && bus.tables.artifacts) {
+  // 每个交付文件一条 Artifact（<Task_ID>-A<n> 递增）+ 一个 file Part。
+  // 编号、Part_ID 与 client token 都在这里固化进计划，补齐重试时不会重复插入。
+  const entries = [artifact, ...(artifacts ?? [])].filter((e) => (typeof e === "string" ? e.trim() : e?.uri));
+  const artItems = [];
+  if (entries.length && bus.tables.artifacts) {
     const arts = (await bus.listRecords(bus.tables.artifacts)).filter((a) => f1(a, "Task_ID") === taskId);
-    artId = `${taskId}-A${nextSuffix(arts.map((a) => f1(a, "Artifact_ID")), /-A(\d+)$/)}`;
-    artName = path.basename(String(artifact));
-    fileUri = String(artifact);
-    mime = mimeOf(artName);
-    description = (body.trim() || `Artifact for task ${taskId}: ${artName}`).slice(0, 500);
-    // Metadata.path 只是附注。内容以 Parent_Type=artifact 的 file Part 为准（标准 §5）。
-    metadata = JSON.stringify({ path: fileUri });
+    let nextArt = nextSuffix(arts.map((a) => f1(a, "Artifact_ID")), /-A(\d+)$/);
+    for (const entry of entries) {
+      const item = planArtifactItem(entry, baseDirs, detectLocal);
+      item.artId = `${taskId}-A${nextArt}`;
+      item.partId = `${item.artId}-P1`;
+      nextArt += 1;
+      const label = item.name || path.basename(item.src || item.uri);
+      item.description = (artItems.length === 0 && body.trim()
+        ? body.trim()
+        : `Artifact for task ${taskId}: ${label}`).slice(0, 500);
+      // Metadata.path 只是附注。内容以 Parent_Type=artifact 的 file Part 为准（标准 §5）。
+      item.metadata = JSON.stringify({ path: item.src });
+      item.tokens = { artifact: randomUUID(), artifactPart: randomUUID() };
+      artItems.push(item);
+    }
   }
+  const first = artItems[0] ?? null;
+
+  // 消息上的附件：已是 hub:// / 外部 URL 的直接用，本地 --file 记待上传。
+  const msgFiles = [
+    ...(attachments ?? []).map((a) => ({ uri: a.uri, name: a.name, mime: a.mime })),
+    ...(localFiles ?? []).map((p) => {
+      const item = planArtifactItem(String(p), baseDirs, true);
+      if (!item.upload_pending) throw new Error(`文件不存在：${p}`);
+      return item;
+    }),
+  ];
+  const hasDataPart = op === "auth" || (op === "done" && Boolean(acceptance));
+  const fileSeqStart = hasDataPart ? 3 : 2;
+  msgFiles.forEach((f, i) => {
+    f.partId = `${msgId}-P${fileSeqStart + i}`;
+    f.token = randomUUID();
+  });
 
   // 认领时内核已经开过 Run。没关账就更新那一行；已 paused 说明这是续跑后的新执行段，另开一行。
   // inbox 的 resumeCheck 只把任务放回 working 并重新入队，不开 Run；新段只能在本文件的下一次回执里开。
@@ -359,16 +385,13 @@ async function buildPlan({ bus, node, task, text, artifact, op, reportedChecks =
     createdAt,
     msgId,
     msgPartId: `${msgId}-P1`,
-    msgDataPartId: (op === "auth" || (op === "done" && acceptance)) ? `${msgId}-P2` : "",
+    msgDataPartId: hasDataPart ? `${msgId}-P2` : "",
     msgKind: spec.msgKind,
+    msgFiles,
     acceptance,
-    artId,
-    artPartId: artId ? `${artId}-P1` : "",
-    artName,
-    fileUri,
-    mime,
-    description,
-    metadata,
+    // result 消息的 Artifact_Ref 指向第一条。
+    artId: first?.artId ?? "",
+    artifacts: artItems,
     runId,
     runMode,
     worker: String(f1(task, "Worker_Hint") || "daemon"),
@@ -380,14 +403,26 @@ async function buildPlan({ bus, node, task, text, artifact, op, reportedChecks =
     },
     taskStatus: spec.taskStatus,
     tokens: {
-      artifact: randomUUID(),
-      artifactPart: randomUUID(),
+      artifact: first?.tokens.artifact ?? randomUUID(),
+      artifactPart: first?.tokens.artifactPart ?? randomUUID(),
       run: randomUUID(),
       message: randomUUID(),
       partText: randomUUID(),
       partData: randomUUID(),
     },
   };
+}
+
+// 提交前先把缺 uri 的本地文件上传掉，并把结果写回计划（落盘），失败抛错、下轮只补缺。
+// 交付产物超限降级保留原路径并给结果正文加一句说明；用户显式 --file 超限直接报错。
+async function resolvePlanUploads(plan, { getFileClient, persist, logFn = log }) {
+  const save = () => { try { persist?.(plan); } catch (e) { logFn("outbox 回写失败：" + (e?.message ?? e)); } };
+  await uploadPendingItems(plan.msgFiles ?? [], { getClient: getFileClient, save, log: logFn, tooLarge: "throw" });
+  await uploadPendingItems(planArtifactsOf(plan), { getClient: getFileClient, save, log: logFn, tooLarge: "keep" });
+}
+
+function planNoteText(plan) {
+  return planArtifactsOf(plan).map((a) => a.note).filter(Boolean).map((n) => `\n（${n}）`).join("");
 }
 
 async function findRow(bus, table, field, value) {
@@ -403,29 +438,32 @@ async function ensureCreate(bus, table, idField, id, fields, token) {
 }
 
 async function ensureArtifact(bus, plan, node) {
-  if (!plan.artId || !bus.tables.artifacts) return;
-  await ensureCreate(bus, bus.tables.artifacts, "Artifact_ID", plan.artId, {
-    Artifact_ID: plan.artId,
-    Task_ID: plan.taskId,
-    Context_ID: plan.contextId,
-    Name: plan.artName,
-    Description: plan.description,
-    Is_Final: "Yes",
-    Created_By: node,
-    Created_At: plan.createdAt,
-    Metadata: plan.metadata,
-  }, plan.tokens.artifact);
-  // 产物正文不在 Artifacts 表。补齐时按 Part_ID 跳过，避免再插一块。
-  await ensureCreate(bus, bus.tables.parts, "Part_ID", plan.artPartId, {
-    Part_ID: plan.artPartId,
-    Parent_ID: plan.artId,
-    Parent_Type: "artifact",
-    Seq: 1,
-    Kind: "file",
-    File_URI: plan.fileUri,
-    File_Name: plan.artName,
-    Mime_Type: plan.mime,
-  }, plan.tokens.artifactPart);
+  if (!bus.tables.artifacts) return;
+  for (const item of planArtifactsOf(plan)) {
+    const name = item.name || path.basename(item.src || item.uri);
+    await ensureCreate(bus, bus.tables.artifacts, "Artifact_ID", item.artId, {
+      Artifact_ID: item.artId,
+      Task_ID: plan.taskId,
+      Context_ID: plan.contextId,
+      Name: name,
+      Description: item.description,
+      Is_Final: "Yes",
+      Created_By: node,
+      Created_At: plan.createdAt,
+      Metadata: item.metadata,
+    }, item.tokens.artifact);
+    // 产物正文不在 Artifacts 表。补齐时按 Part_ID 跳过，避免再插一块。
+    await ensureCreate(bus, bus.tables.parts, "Part_ID", item.partId, {
+      Part_ID: item.partId,
+      Parent_ID: item.artId,
+      Parent_Type: "artifact",
+      Seq: 1,
+      Kind: "file",
+      File_URI: item.uri,
+      File_Name: name,
+      Mime_Type: item.mime || guessMime(name),
+    }, item.tokens.artifactPart);
+  }
 }
 
 async function ensureRun(bus, plan, node) {
@@ -474,7 +512,7 @@ async function ensureMessage(bus, plan, node) {
     Parent_Type: "message",
     Seq: 1,
     Kind: "text",
-    Text: String(plan.text ?? "").slice(0, 4000),
+    Text: String(plan.text ?? "").slice(0, 4000 - planNoteText(plan).length) + planNoteText(plan),
   }, plan.tokens.partText);
   if (plan.op === "auth" && plan.msgDataPartId) {
     await ensureCreate(bus, bus.tables.parts, "Part_ID", plan.msgDataPartId, {
@@ -494,6 +532,13 @@ async function ensureMessage(bus, plan, node) {
       Kind: "data",
       Data: JSON.stringify({ acceptance: plan.acceptance }),
     }, plan.tokens.partData);
+  }
+  // 文件块排在 text、data 之后；Part_ID 与 token 已固化，补齐时按 Part_ID 跳过。
+  if (plan.msgFiles?.length) {
+    const first = Number(String(plan.msgFiles[0].partId).match(/-P(\d+)$/)?.[1]) || 2;
+    await appendFileParts(bus, plan.msgId, first, plan.msgFiles.map((f) => ({
+      uri: f.uri, name: f.name || path.basename(f.src || f.uri), mime: f.mime || guessMime(f.name || f.src || f.uri),
+    })), plan.msgFiles.map((f) => f.token), { skipExisting: true });
   }
 }
 
@@ -566,10 +611,15 @@ function rememberLocal(configDir, plan) {
 
 function receiptOf(plan) {
   const base = { taskId: plan.taskId, msgId: plan.msgId, recipient: plan.recipient };
+  if (plan.op === "fail") {
+    // fail 也可以带产物（例如失败现场的日志），回执里同样给出编号。
+    return { ...base, artifactId: plan.artId || "", artifactIds: planArtifactsOf(plan).map((a) => a.artId) };
+  }
   if (plan.op === "done") {
     return {
       ...base,
       artifactId: plan.artId || "",
+      artifactIds: planArtifactsOf(plan).map((a) => a.artId),
       ...(plan.acceptance ? { acceptance: plan.acceptance } : {}),
     };
   }
@@ -577,7 +627,10 @@ function receiptOf(plan) {
 }
 
 // 顺序对齐内核：Artifacts → Runs → Messages/Parts → Tasks。任一步失败都留着计划，下次只补缺。
-async function commitInboxReceipt({ bus, configDir, node, taskId, text, artifact, op, reportedChecks = {}, hasCheckFlags = false, logFn = log }) {
+async function commitInboxReceipt({
+  bus, configDir, node, taskId, text, artifact, artifacts, attachments, localFiles, op,
+  reportedChecks = {}, hasCheckFlags = false, getFileClient = null, baseDirs = [], logFn = log,
+}) {
   const existing = readInboxOutbox(configDir, taskId);
   if (existing && existing.op !== op) {
     throw new Error(`任务 ${taskId} 有未完成的 inbox ${existing.op} 提交，请重试同一命令补齐`);
@@ -601,9 +654,14 @@ async function commitInboxReceipt({ bus, configDir, node, taskId, text, artifact
   }
 
   // 第一笔总线写之前先落盘。重试复用这份计划，不再按当前行数重新编号。
-  const plan = existing ?? await buildPlan({ bus, node, task, text, artifact, op, reportedChecks, hasCheckFlags, logFn });
+  const plan = existing ?? await buildPlan({
+    bus, node, task, text, artifact, artifacts, attachments, localFiles, op,
+    reportedChecks, hasCheckFlags, baseDirs, logFn,
+  });
   if (!existing) saveInboxOutbox(configDir, plan);
 
+  // 上传结果每成功一项就写回计划文件，失败时下一轮只补缺的，不重复上传已完成的。
+  await resolvePlanUploads(plan, { getFileClient, persist: (p) => saveInboxOutbox(configDir, p), logFn });
   await ensureArtifact(bus, plan, node);
   await ensureRun(bus, plan, node);
   await ensureMessage(bus, plan, node);
@@ -618,7 +676,10 @@ async function commitInboxReceipt({ bus, configDir, node, taskId, text, artifact
 }
 
 // 供 Hub HTTP Agent 网关直接替纯 Agent 提交回执（不落本地 inbox-outbox 文件）。
-export async function submitAgentReceipt({ bus, node, taskId, text, artifact = "", op, checks = null, log: logFn = log }) {
+// artifacts / attachments 由网关先经 normalizeAttachments 校验；旧 artifact 字符串原样保留。
+export async function submitAgentReceipt({
+  bus, node, taskId, text, artifact = "", artifacts = [], attachments = [], op, checks = null, log: logFn = log,
+}) {
   const { reported, hasCheckFlags } = normalizeFlagChecks(checks);
   const task = await loadTask(bus, taskId);
   assertOwner(task, node);
@@ -628,7 +689,10 @@ export async function submitAgentReceipt({ bus, node, taskId, text, artifact = "
     err.status = 409;
     throw err;
   }
-  const plan = await buildPlan({ bus, node, task, text, artifact, op, reportedChecks: reported, hasCheckFlags, logFn });
+  const plan = await buildPlan({
+    bus, node, task, text, artifact, artifacts, attachments, op,
+    reportedChecks: reported, hasCheckFlags, detectLocal: false, logFn,
+  });
   await ensureArtifact(bus, plan, node);
   await ensureRun(bus, plan, node);
   await ensureMessage(bus, plan, node);
@@ -643,16 +707,25 @@ export async function submitAgentReceipt({ bus, node, taskId, text, artifact = "
   };
 }
 
-export async function handleInboxDone({ bus, configDir, node, taskId, text, artifact, checks, log: logFn = log }) {
+// getFileClient：返回文件客户端的函数（懒创建，没有本地文件要传时不会打开 FileStore）。
+// 没传时本地文件保持旧行为：原路径字符串写进 File_URI。
+export async function handleInboxDone({
+  bus, configDir, node, taskId, text, artifact, artifacts, checks, getFileClient = null, baseDirs = [process.cwd()], log: logFn = log,
+}) {
   const { reported, hasCheckFlags } = normalizeFlagChecks(checks);
   return commitInboxReceipt({
-    bus, configDir, node, taskId, text, artifact, op: "done",
-    reportedChecks: reported, hasCheckFlags, logFn,
+    bus, configDir, node, taskId, text, artifact, artifacts, op: "done",
+    reportedChecks: reported, hasCheckFlags, getFileClient, baseDirs, logFn,
   });
 }
 
-export async function handleInboxAsk({ bus, configDir, node, taskId, text }) {
-  return commitInboxReceipt({ bus, configDir, node, taskId, text, op: "ask" });
+// files：本地路径，提交前上传成 hub://；attachments：已经是 hub:// 或 http(s) 的 { uri, name, mime }。
+export async function handleInboxAsk({
+  bus, configDir, node, taskId, text, files = [], attachments = [], getFileClient = null, baseDirs = [process.cwd()],
+}) {
+  return commitInboxReceipt({
+    bus, configDir, node, taskId, text, op: "ask", localFiles: files, attachments, getFileClient, baseDirs,
+  });
 }
 
 export async function handleInboxFail({ bus, configDir, node, taskId, text }) {
@@ -660,12 +733,16 @@ export async function handleInboxFail({ bus, configDir, node, taskId, text }) {
   return commitInboxReceipt({ bus, configDir, node, taskId, text, op: "fail" });
 }
 
-export async function handleInboxAuth({ bus, configDir, node, taskId, text }) {
+export async function handleInboxAuth({
+  bus, configDir, node, taskId, text, files = [], attachments = [], getFileClient = null, baseDirs = [process.cwd()],
+}) {
   const body = String(text ?? "").trim();
   if (!body) throw new Error("审批说明不能为空");
   // 先标 waiting-auth，写总线期间 ah inbox --pop 不能再把这条 pending 取走。
   if (!markInboxStatus(configDir, taskId, "waiting-auth")) {
     throw new Error(`收件箱没有任务 ${taskId}`);
   }
-  return commitInboxReceipt({ bus, configDir, node, taskId, text: body, op: "auth" });
+  return commitInboxReceipt({
+    bus, configDir, node, taskId, text: body, op: "auth", localFiles: files, attachments, getFileClient, baseDirs,
+  });
 }
