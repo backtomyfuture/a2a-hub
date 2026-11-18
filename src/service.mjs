@@ -454,7 +454,17 @@ export async function service(configDir, { remove = false, role: explicitRole } 
     fs.mkdirSync(path.dirname(plistPath), { recursive: true });
     fs.writeFileSync(plistPath, plist);
     run("launchctl", ["bootout", `gui/${uid}/${label}`], { ignore: true });
-    run("launchctl", ["bootstrap", `gui/${uid}`, plistPath]);
+    // bootout 是异步卸载：旧进程还在退出时立刻 bootstrap 会报 5: Input/output error，
+    // 服务就停在已卸载状态。等几秒重试，最后一次仍失败才抛出。
+    for (let attempt = 1; ; attempt++) {
+      try {
+        run("launchctl", ["bootstrap", `gui/${uid}`, plistPath]);
+        break;
+      } catch (e) {
+        if (attempt >= 5) throw e;
+        await new Promise((res) => setTimeout(res, 1000));
+      }
+    }
     console.log(`自启已安装并启动：${label}（role: ${role}）`);
     console.log(`  plist：${plistPath}`);
     console.log(`  日志：${logPath}`);
