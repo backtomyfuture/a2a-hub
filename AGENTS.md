@@ -1,18 +1,18 @@
 # AGENTS.md — a2a-hub
 
 a2a-hub：自托管独立多 Agent 编排中台（基于 A2A 八态数据模型，统一采用 SQLite WAL + HTTP 网关架构：内置 HTTP 长轮询总线、`agent-gateway` 纯 HTTP Agent 接入协议、Web 控制台与 LoopForge 多阶段 SOP 闭环引擎）。
-本仓库只有 Node >= 24 ESM 实现且**零外部 npm 运行时依赖**（`dependencies: {}`）：`ah`（主入口）、`a2a-hub`、`ahub` 与 `lah` / `hub-node`（兼容别名）同时承载 `node` 与 `hub` 两个逻辑角色。
+本仓库只有 Node >= 24 ESM 实现且**零外部 npm 运行时依赖**（`dependencies: {}`）：`ah`（主入口）、`a2a-hub` 与 `ahub` 同时承载 `node` 与 `hub` 两个逻辑角色。
 方向（标准 §10）：`hub` 角色是 `node` 角色的单进程超集；由 `ah daemon --role node|hub` 承载。省略 `--role` 时读配置目录 `node.json` 的 `role`，缺省 `node`。独立中台模式下，`role=hub` 单进程同时运行本地工作内核（按 `commands.json` 接单）、`SqliteBus`（`node:sqlite`）、`startHubHttpServer`（REST API + `LongPollBroker` + `agent-gateway` + Web 控制台）、`ApprovalService`（ed25519 签名）、`PresentService`、`StaleService`、`ScheduleService`、`LoopService` 与 `ExternalNotifier`。
 
 ## 目录与职责
 
-- `bin/ah.mjs`（`bin/lah.mjs` 与 `bin/hub-node.mjs` 为兼容转发壳）：CLI 分发 `setup | up | join | daemon | reconcile | doctor | inventory | service | task (create|reply|show|why|cancel|begin) | schedule (ls|add|rm|enable|disable|register) | loop (create|ls|show|cancel|templates) | present | inbox | update`（支持 `--role node|hub`；省略时 daemon / doctor / service 读 `node.json` 的 role，缺省 node）；配置目录取 `--config <dir>` > `HUB_NODE_HOME` > `~/.hub-node`（内含 `node.json` 与 `commands.json`）。
+- `bin/ah.mjs`：CLI 分发 `setup | up | join | daemon | reconcile | doctor | inventory | service | task (create|reply|show|why|cancel|begin) | schedule (ls|add|rm|enable|disable|register) | loop (create|ls|show|cancel|templates) | present | inbox | update`（支持 `--role node|hub`；省略时 daemon / doctor / service 读 `node.json` 的 role，缺省 node）；配置目录取 `--config <dir>` > `AH_HOME` > `~/.a2a-hub`（内含 `node.json` 与 `commands.json`）。
 - `src/bus/tables.mjs`：统一逻辑表名映射 `DEFAULT_TABLES`（`tasks`, `messages`, `parts`, `runs`, `artifacts`, `agentCards`, `rules`, `loops`）与字段读取辅助 `f1`，供 SQLite / HTTP / Mock 总线共享。
 - `src/bus/sqlite-bus.mjs`：`SqliteBus`（Node 内置 `node:sqlite` `DatabaseSync` + WAL 模式），支撑独立中台持久化存储、`client_token` 幂等去重、卡片记录管理与变更序号通知 `LongPollBroker`。
 - `src/bus/http-bus.mjs`：`HttpBus`（基于原生 `fetch` 的远端总线客户端），远端宿主节点通过 Bearer Token + HTTP REST 读写中台表，并经 `/api/v1/poll` 长轮询接收唤醒。
 - `src/server/longpoll-broker.mjs`：`LongPollBroker`，维护全网单调递增 `seq`、挂起 HTTP 长轮询连接（`GET /api/v1/poll` / `GET /api/v1/agents/:node/poll`）与各节点/外部 Agent 在线状态。
 - `src/server/agent-gateway.mjs`：`handleAgentGatewayRequest`，面向纯 HTTP Agent（如云端 Muse Leader、Grok Bot Worker 等无守护进程节点）的 A2A REST 网关：免鉴权 `GET /.well-known/agent.json`、`GET /api/v1/skills[/:name]`、`POST /api/v1/agents/register`、`GET /api/v1/agents`、`GET|POST /api/v1/agents/:node/poll`、`GET /api/v1/agents/:node/inbox`、`GET /api/v1/agents/:node/updates`、`GET /api/v1/tasks` 与 `POST /api/v1/tasks/:id/{claim,heartbeat,complete,fail,ask,auth}`。
-- `src/server/http-server.mjs`：`startHubHttpServer`，暴露统一 Hub HTTP 网关：`/`（Web 控制台）、`/api/v1/health`（免鉴权健康探针）、`/.well-known/agent.json`、`/api/v1/state`、`/api/v1/poll`、`/api/v1/tables/*`、`/api/v1/agents*`、`/api/v1/tasks*`、`/api/v1/approvals/:taskId/decide`、`/api/v1/loops*`；监听地址由 `cfg.listen`（默认 `0.0.0.0:8787`）控制并支持 Bearer Token 鉴权（`AH_API_TOKEN` / `LAH_API_TOKEN` / `cfg.apiToken`）。
+- `src/server/http-server.mjs`：`startHubHttpServer`，暴露统一 Hub HTTP 网关：`/`（Web 控制台）、`/api/v1/health`（免鉴权健康探针）、`/.well-known/agent.json`、`/api/v1/state`、`/api/v1/poll`、`/api/v1/tables/*`、`/api/v1/agents*`、`/api/v1/tasks*`、`/api/v1/approvals/:taskId/decide`、`/api/v1/loops*`；监听地址由 `cfg.listen`（默认 `0.0.0.0:8787`）控制并支持 Bearer Token 鉴权（`AH_API_TOKEN` / `cfg.apiToken`）。
 - `src/server/web-ui.mjs`：`renderWebConsoleHtml()`，零构建依赖内嵌 Web 控制台（总览拓扑含宿主节点与 HTTP Agent 状态、Agent Hub 名片与接入参考、A2A 任务详情与在线签名审批/答复、SOP Loop 编排室）。
 - `src/hub/loop.mjs`：`LoopService`、`BUILTIN_LOOP_TEMPLATES`（含 `plan-code-verify`）、`createLoop`、`cancelLoop`；LoopForge 风格多阶段闭环状态机，在同一个 `Context_ID` 下推进阶段任务并结合 `acceptance.mjs` 验收结论触发 `retry` / `goto:<stage_id>` / `abort`，受 `Max_Iterations` 与 `HOP_LIMIT=8` 限制。
 - `src/loop-cli.mjs`：`ah loop (create|ls|show|cancel|templates)` CLI 实现。
@@ -57,7 +57,7 @@ node bin/ah.mjs loop create --config <dir> --title "..." --goal "..." --to <node
 
 ## 禁止事项
 
-- 不要提交 `app.env`、`.hub-node/`、`hub.db`、`hub.db-wal`、`hub.db-shm`、`hub_runtime.json`、`approval_key.pem`、`*_state.json`、`schedules.json`、`retry_state.json`、`runs/`，以及任何真实 API Token、Webhook 地址、Base token 或 open_id。
+- 不要提交 `app.env`、`.a2a-hub/`、`hub.db`、`hub.db-wal`、`hub.db-shm`、`hub_runtime.json`、`approval_key.pem`、`*_state.json`、`schedules.json`、`retry_state.json`、`runs/`，以及任何真实 API Token 或 Webhook 地址。
 - 不要修改或删除 `Messages` / `Parts` 行，不要重开终态任务，不要给 `Tasks` 加参数列。
 - 不要让守护进程因启动期或单轮错误退出，不要吞掉错误后假装成功。
 - 未经要求不要提交、推送或发版。

@@ -5,14 +5,14 @@
 
 ## 1. 配置目录
 
-配置目录取 `--config <dir>` > 环境变量 `HUB_NODE_HOME` > `~/.hub-node`（Windows 为 `%USERPROFILE%\.hub-node`）。已安装旧版 lark-a2a-hub 时，请把新 Hub 放到独立目录（例如 `HUB_NODE_HOME="$HOME/.a2a-hub"`），不要覆盖仍在运行的 `~/.hub-node`。里面有：
+配置目录取 `--config <dir>` > 环境变量 `AH_HOME` > `~/.a2a-hub`（Windows 为 `%USERPROFILE%\.a2a-hub`），程序本体默认安装于 `~/.a2a-hub/app/`。里面有：
 
 | 文件 | 作用 | 能否提交仓库 |
 |---|---|---|
 | `node.json` | 节点身份、总线参数（`sqlite` / `http`）、长轮询与对账周期、角色 | 否 |
 | `commands.json` | 能力表：本机能干什么、怎么干 | 否 |
 | `schedules.json` | 定时调度表：本机定时任务计划（`id`, `cron`, `cap`, `text` 等） | 否 |
-| `app.env` | HTTP Bearer 访问口令 `LAH_API_TOKEN`，权限 600 | 绝不 |
+| `app.env` | HTTP Bearer 访问口令 `AH_API_TOKEN`，权限 600 | 绝不 |
 | `approval_key.pem` | `role=hub` 的 ed25519 审批签名私钥，权限 600 | 绝不 |
 | `hub.db` / `hub.db-wal` / `hub.db-shm` | `role=hub` SQLite WAL 主数据库文件 | 绝不 |
 | `runs/<Task_ID>/` | 每次执行的输入、输出与在途账本（`entry.json`） | 否 |
@@ -24,7 +24,7 @@
 
 ## 2. node.json
 
-节点身份（`node` / `zone`）、总线模式（`busType`: `sqlite` 或 `http`）、访问口令来源（`appEnv` 指向 `0600` 的 `LAH_API_TOKEN`）、长轮询与对账周期。
+节点身份（`node` / `zone`）、总线模式（`busType`: `sqlite` 或 `http`）、访问口令来源（`appEnv` 指向 `0600` 的 `AH_API_TOKEN`）、长轮询与对账周期。
 
 - `role`：`node` 或 `hub`，缺省 `node`。`ah daemon`、`doctor`、`service` 省略 `--role` 时读它。
 - `busType`：`sqlite`（Hub 主中枢）或 `http`（远端长轮询节点）。
@@ -100,9 +100,9 @@ Worker 条目与节点本尊的技能条目可用的字段：
 |---|---|
 | `command` | 命令模板。agent 模式含 `{prompt}` |
 | `mode` | `agent`（默认）纯文本输出＋结构化回执；`json` 脚本类，stdin 收信封、stdout 最后一行出结果；`inbox` 交给本尊收件箱 |
-| `context` | 只有 `direct`（默认，可省略，守护进程直接拉起）。取值非法时任务直接 `rejected`，不静默降级。旧配置写了 `carrier` 的能力已移除，需改为 `direct` 或删除 |
+| `context` | 只有 `direct`（默认，可省略，守护进程直接拉起）。取值非法时任务直接 `rejected`，不静默降级 |
 | `timeout_sec` | 单次执行上限，默认 600 |
-| `verify` | 可选。一条本机 shell 命令，与 `command` 同一可信等级，原样执行，不做 `{prompt}` / `{session}` 替换。只支持 `context=direct` 的 `json` / `agent`。Skill 条目优先，Skill 未写时用其 Worker 条目的值。`mode=inbox` 写了是配置错误：认领预检 `rejected` + notice，`ah doctor` 报问题，不静默忽略。命令必须只读、可重复。执行者的数据不拼进命令，只经两条通道：stdin 一行 JSON `{"task_id","summary","artifact","artifact_name","checks"}`，以及环境变量 `LAH_TASK_ID`、`LAH_ARTIFACT`、`LAH_RUN_DIR`、`LAH_MAIN_STDOUT` |
+| `verify` | 可选。一条本机 shell 命令，与 `command` 同一可信等级，原样执行，不做 `{prompt}` / `{session}` 替换。只支持 `context=direct` 的 `json` / `agent`。Skill 条目优先，Skill 未写时用其 Worker 条目的值。`mode=inbox` 写了是配置错误：认领预检 `rejected` + notice，`ah doctor` 报问题，不静默忽略。命令必须只读、可重复。执行者的数据不拼进命令，只经两条通道：stdin 一行 JSON `{"task_id","summary","artifact","artifact_name","checks"}`，以及环境变量 `AH_TASK_ID`、`AH_ARTIFACT`、`AH_RUN_DIR`、`AH_MAIN_STDOUT` |
 | `verify_timeout_sec` | 可选正数，缺省 120，夹紧到 1–1800。继承规则同 `verify` |
 | `cwd` | 工作目录，默认配置目录 |
 | `side_effect` | 副作用等级，写进名片，如 `read` / `write` |
@@ -156,7 +156,7 @@ L2 是建单时冻在首条 instruction DataPart 的 `acceptance.criteria`（`ah
 **步骤**：
 
 1. **升级本机守护进程**：`ah update`，按平时的方式重启守护进程。跑 `ah doctor --config <dir>`，能看到「N 个 Worker、M 项技能」这样的分组输出和针对旧条目的迁移提示，说明已是新代码。更直接的判断是版本号：`ah -v` 应打印 `node-0.8.0` 或更高；守护进程重启后，名册（AgentCards）里本节点名片的 `Daemon_Version` 也会是这个值。
-2. **清空在途任务**：`ah inventory --config <dir>` 确认本节点没有 `submitted`、`working`、`input-required`、`auth-required` 的任务，有就等它们结束、答复或撤掉。不清空的后果：以旧 Skill_ID 寻址的任务迁移后会被拒收并带 notice（不会静默跑错），但会白丢一次执行或一轮问答。另外到 Base 的 Tasks 表看一下有没有目标是本节点、已 `completed`、`Metadata` 里有 `later` 但还没有 `later_fired` 的任务，有就等它触发后再迁，否则 hub 会因为找不到旧 Skill_ID 而一直建单失败。
+2. **清空在途任务**：`ah inventory --config <dir>` 确认本节点没有 `submitted`、`working`、`input-required`、`auth-required` 的任务，有就等它们结束、答复或撤掉。不清空的后果：以旧 Skill_ID 寻址的任务迁移后会被拒收并带 notice（不会静默跑错），但会白丢一次执行或一轮问答。另外通过 Web 控制台或接口看一下有没有目标是本节点、已 `completed`、`Metadata` 里有 `later` 但还没有 `later_fired` 的任务，有就等它触发后再迁，否则 hub 会因为找不到旧 Skill_ID 而一直建单失败。
 3. **备份**：`cp <dir>/commands.json <dir>/commands.json.bak`。
 4. **改写 `commands.json`**，改前改后如下（只用占位命令）。
 
@@ -282,15 +282,15 @@ ah task begin --schedule <id> [--period <期次键>] [--cap <cap_id>] [--text <�
 
 ## 6. CLI 速查
 
-`ah` 是主入口（兼容别名 `a2a-hub`、`ahub`、`lah` 与 `hub-node`）。以下 `--config <dir>` 均可省略（见第 1 节）。
+`ah` 是主入口（别名 `a2a-hub`、`ahub`）。以下 `--config <dir>` 均可省略（见第 1 节）。
 
 | 命令 | 作用 |
 |---|---|
 | `ah up` / `ah join <url>` | 一键初始化 SQLite Hub 或接入远端 HTTP 节点，自动配置 Token、公钥与自启 |
-| `ah setup [--role node\|hub] [--bus sqlite\|http] [--kind host\|agent] [--wake longpoll\|poll] [--skip-skill]` | 交互/非交互初始化：写 `app.env` 与 `node.json`、生成 `commands.json`、自检、可选注册自启 |
+| `ah setup [--role node\|hub] [--bus sqlite\|http] [--kind host\|agent] [--wake longpoll\|poll] [--skip-skill]` | 交互/非交互初始化：写 `app.env` 与 `node.json`、生成 `commands.json`、自检、可选注册自启（也可用 `AH_SKIP_SKILL=1` 跳过 Skill 安装） |
 | `ah daemon [--role node\|hub]` | 常驻守护进程 |
 | `ah doctor [--role node\|hub]` | 只读自检：配置合法性、连通性、能力登记、本地计划 |
-| `ah service [--role node\|hub] [--remove]` | 注册（或卸载）开机自启：macOS LaunchAgent / Linux systemd 用户服务 / Windows 当前用户的任务计划程序（登录时启动，无需管理员）。日志在配置目录 `daemon.log` |
+| `ah service [--role node\|hub] [--remove]` | 注册（或卸载）开机自启：macOS launchd `ah-<role>.<node>` / Linux systemd `ah-<role>-<node>.service` / Windows 任务计划 `ah-<role>-<node>`（非默认配置目录追加配置路径 SHA-256 前 8 位摘要；登录时启动，无需管理员）。日志在配置目录 `daemon.log` |
 | `ah update [--check] [--skip-skill]` | 自更新程序本体：git pull、依赖重装、入口与 Skill 补齐；不碰配置目录。`--check` 只看远端有没有新版本。tarball 安装请重跑 install.sh（Windows 为 install.ps1） |
 | `ah reconcile` | 单次回表认领与对账后退出 |
 | `ah inventory` | 只读盘点本节点名片与任务 |
@@ -336,7 +336,7 @@ api backoff reason=http-429 kind=list retry=1/3 wait=2s
 
 `scan` 的名字是 `approval`、`present`、`stale`、`schedule` 之一。上面的数字只说明格式，不是空闲一轮的固定次数。
 
-口径：一行里的 `list` / `get` / `write` / `other` / `backoff` 是自上一次这样的行以来的增量。把一天里的 `sweep end` 和 `scan` 行相加，就是该进程当天发出的记录请求，包含扫表间隙里 60 秒定时心跳，不含 `ah task create` 这类一次性进程，也不含进程启动到第一行之间的请求。四个分类是实际发出的 HTTP 请求数（含重试的那几次），`backoff` 是其中因退避而重发的次数。换票用的 tenant token 请求不进这些数。日志不写凭据、Base token、table_id、record_id 和请求路径。
+口径：一行里的 `list` / `get` / `write` / `other` / `backoff` 是自上一次这样的行以来的增量。把一天里的 `sweep end` 和 `scan` 行相加，就是该进程当天发出的总线请求，包含扫表间隙里 60 秒定时心跳，不含 `ah task create` 这类一次性进程，也不含进程启动到第一行之间的请求。四个分类是实际发出的请求数（含重试的那几次），`backoff` 是其中因退避而重发的次数。日志不写凭据、Token、record_id 和请求路径。
 
 `api backoff` 通常用于请求退避与重发定位，一般日志不写凭据、Token 与隐私字段。
 
@@ -352,10 +352,10 @@ api backoff reason=http-429 kind=list retry=1/3 wait=2s
 | `dbPath` | Hub (`sqlite`) | SQLite WAL 数据库文件路径，支持相对配置目录路径，默认 `hub.db` |
 | `listen` | Hub (`sqlite`) | HTTP API 与 Web 控制台绑定地址，格式 `<host>:<port>`，默认 `0.0.0.0:8787` |
 | `publicUrl` | Hub (`sqlite`) | 可选外部访问地址（如 `http://192.168.1.10:8787` 或 Tailscale 地址），用于生成外部通知跳转链接 |
-| `apiToken` | Hub / 远端 `http` 节点 | 接口鉴权 Bearer Token。建议放在 0600 权限的 `app.env` 环境变量 `LAH_API_TOKEN` 中，不直接提交到代码库 |
+| `apiToken` | Hub / 远端 `http` 节点 | 接口鉴权 Bearer Token。建议放在 0600 权限的 `app.env` 环境变量 `AH_API_TOKEN` 中，不直接提交到代码库 |
 | `hubUrl` | 远端节点 (`http`) | 中台 HTTP 根地址，如 `http://192.168.1.10:8787` |
 | `longPollSec` | 全部模式 | 长轮询单次挂起秒数，默认 `25`（服务端安全夹紧在 5–60 秒） |
-| `notifications` | Hub (`sqlite`) | 可选外部提醒配置对象：`feishuWebhookUrl`（群自定义机器人）、`barkUrl`、`telegramBotToken`、`telegramChatId`、`webhookUrl`、`events`（默认 `auth-required`、`input-required`、`completed`、`failed`、`rejected`，另可加 `stale`） |
+| `notifications` | Hub (`sqlite`) | 可选外部提醒配置对象：`feishuWebhookUrl`（飞书群机器人 Webhook，可选通知渠道）、`barkUrl`、`telegramBotToken`、`telegramChatId`、`webhookUrl`、`events`（默认 `auth-required`、`input-required`、`completed`、`failed`、`rejected`，另可加 `stale`） |
 
 ### 7.2 快速启动与接入方式
 

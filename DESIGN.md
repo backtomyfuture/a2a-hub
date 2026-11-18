@@ -1,189 +1,152 @@
-# 通用节点适配器（开源项目）设计 v1
+# a2a-hub 系统设计
 
-- 日期：2026-11-04（持续修订）
-- 状态：现行。本文件只写节点适配器本身的设计；系统级文档见 `docs/`
-  （[架构](docs/architecture.md)、[中台标准](docs/standard.md)）。
-- 来源：自有多 Agent 中台（飞书多维表格总线）生产实测收敛；内核借鉴
-  Agent-Autoloop 的三项设计——跳数熔断、指令与数据分离、回执协议。
+- 状态：现行（v1.0.0）。系统级规范见 [docs/standard.md](docs/standard.md)，架构决策见 [docs/architecture.md](docs/architecture.md)，配置与 CLI 参考见 [docs/configuration.md](docs/configuration.md)。
 
 ## 1. 定位
 
-- 一个装在任何终端上的**节点适配器**：把这台机器变成多 Agent 中台的一个执行节点。
-- 它只解决一件事：让一台普通机器以最低门槛接入中台、接活、干活、回执。
-- 不含中台本身：总线与枢纽不在本项目范围内，本项目是「节点侧」的通用实现。
+`a2a-hub` 是一个**自托管、零外部运行时依赖的独立多 Agent 编排中台**（Node >= 24 ESM）。一台常驻主机（如 Mac mini 或 Linux 服务器）作为中台 Hub，集中托管 SQLite WAL 总线、HTTP 网关、长轮询事件代理、内置 Web 控制台与 LoopForge SOP 闭环引擎，将本机 CLI Agent、远端电脑节点以及无常驻守护进程的纯 HTTP 云端 Agent 组织为统一的可审计协作网络。
 
-## 2. 设计原则（读者优先）
+## 2. 设计原则
 
-- **零系统设置**：不要求读者改任何系统偏好，不要求开通远程登录（sshd）——那既不安全，也不是一个正经产品该提的要求。
-- **最多一次系统授权点击**：确需系统授权时，只允许出现操作系统原生的那一次弹窗。
-- **内核薄**：内核只有协议状态机，不含任何具体能力、任何具体 Agent 的代码；能力全是配置。
-- **胶水上游化**：某个工具的接口差异（如异步调用）由项目官方插件一次性适配，全网共用；读者只写配置，不各写各的胶水。
-- **失败要响**：达不到执行条件时明确报错、能力标离线，绝不静默换路径硬跑。
+- **零依赖**：`package.json` 的 `dependencies` 为空，全部能力基于 Node >= 24 内置模块实现（`node:sqlite`、`node:http`、全局 `fetch`、`node:crypto`、`node:test`），安装即跑、无第三方构建链路。
+- **薄内核**：`src/kernel.mjs` 只承载 A2A 协议状态机与调度循环（认领、心跳、派发、收回执、重试退避、熔断、对账），不内嵌任何具体 Agent 或业务执行器；能力完全由节点本地 `commands.json` 声明。
+- **失败要响**：能力未登记、点名 Worker 不存在、配置语法或字段取值非法、参数夹带执行控制键、L1 验收失败或审批验签未通过，一律明确拒收或报错并留痕，绝不静默降级或伪装成功。
+- **节点只出不进**：边缘执行节点与纯 HTTP Agent 只向 Hub 发起出站 HTTP 请求，不开设任何入站监听端口、不做端口映射或反向隧道；仅 Hub 进程按 `listen` 配置对外提供 HTTP 服务，并对除健康探针、静态首页与自发现名片外的 `/api/*` 端点执行 Bearer Token（`AH_API_TOKEN`）鉴权。
+- **指令与数据分离**：可执行命令、`cwd`、`verify` 与 `approval_class` 下限只来自执行节点本地可信的 `commands.json`；来自总线的指令正文、参数与问答上下文只作为数据写入 `0600` 权限的 `runs/<Task_ID>/input.json`（或经 `json` 模式标准输入传入），请求参数中携带执行控制键的任务直接拒收。
 
 ## 3. 总体形态
 
-- **Node 命令行工具**：零或极少运行时依赖，`curl` 一行安装（形态参照 Agent-Autoloop 的分发方式）。
-- **单进程守护**：安装时自动注册开机自启（macOS 用 LaunchAgent、Linux 用 systemd 用户服务、Windows 用当前用户的任务计划程序），常驻后台。
-- 核心循环只有一句：**认领任务 → 拉起 Agent → 收回执 → 落日志**。
+- **单进程 `hub` 超集 `node`（标准 §10.1）**：中台只有 `node` 与 `hub` 两个逻辑角色，`hub` 是 `node` 的单进程超集，均由 `ah daemon --role node|hub` 承载；省略 `--role` 时读取配置目录 `node.json` 的 `role`（缺省 `node`）。
+- **`role=hub` 单进程运行态**：同一进程与同一配置目录（默认 `~/.a2a-hub`）内同时运行：
+  1. **本地工作内核（`Kernel`）**：按 `commands.json` 登记能力名片并认领执行指向本节点的任务；
+  2. **SQLite WAL 总线（`SqliteBus`）**：持久化存储全部 8 张逻辑表与卡片/幂等元数据；
+  3. **统一 HTTP 网关（`startHubHttpServer`）**：暴露 REST API、`LongPollBroker`、面向外部 Agent 的 `agent-gateway` 以及零构建内嵌 Web 控制台（`src/server/web-ui.mjs`）；
+  4. **Hub 治理服务**：`ApprovalService`（ed25519 审批签名）、`PresentService`（结果呈递队列）、`StaleService`（陈旧告警与回收）、`ScheduleService`（`later` 预约复查）、`LoopService`（多阶段 SOP 闭环）与可选 `ExternalNotifier`。
+- **一键部署与用户级自启**：提供 `install.sh` / `install.ps1`、`ah up` / `ah join` 与 `ah service`，自动注册用户级守护服务（macOS LaunchAgent `ah-<role>.<node>`、Linux systemd `ah-<role>-<node>.service`、Windows 任务计划 `ah-<role>-<node>`；非默认配置目录追加配置路径 SHA-256 前 8 位摘要）。
 
-## 4. 内核职责（协议状态机）
+## 4. SQLite WAL 总线与 HTTP 网关 / 长轮询门铃
 
-- 认领：只认领指向本节点、且能力已登记并可派发的任务；认领即置工作态、写心跳与执行台账。
-- 拉起：按能力配置拼 prompt，以命令模板启动本机执行者；超时与熔断（派生深度 > 8 只记录不派活）由内核强制。
-- 提问与审批：执行者中途提问 → 任务置「待输入」并落问题消息；枢纽答复后在**原任务**续跑，不新开任务。需审批的动作置「待审批」，决定以结构化消息为准。
-- 回执：执行者输出按统一回执约定解析（见 §7）；成果先落本体、再登记产物、最后写结果消息并置完成态。
-- 对账：事件断线不补发是总线的已知特性，内核以低频扫表对账兜底（见 §6）。
-- 幂等：同幂等键的任务不得重复执行；对总线的写操作串行，避免同表并发写冲突。
-- 建单顺序（枢纽侧纪律，M1 实测发现）：先写 instruction 消息与 Parts，最后写 Tasks 行——任务行是触发信号；先写任务行会与节点认领竞速，节点可能在参数落齐前开跑（ECHO-001 首测即因此拿到空参数）。
-- 常驻韧性（M2 实测发现）：守护进程启动期任何一步失败（网络超时、令牌失败）都不许退出进程，进主循环重试；能力登记未成功前不处理任务（避免把任务误拒收）。
+- **SQLite WAL 总线（`src/bus/sqlite-bus.mjs`）**：基于 `node:sqlite` `DatabaseSync`（开启 `PRAGMA journal_mode = WAL` 与 `busy_timeout = 5000`），承载 `tasks`、`messages`、`parts`、`runs`、`artifacts`、`agentCards`、`rules`、`loops` 八张逻辑表及 `idempotency_tokens`、`cards`、`meta` 内部表。每次写入提交后推进单调递增 `seq` 游标并通知 `LongPollBroker` 与 `ExternalNotifier`。
+- **HTTP 客户端总线（`src/bus/http-bus.mjs`）**：远端宿主节点配置 `busType: "http"` 与 `hubUrl`，通过 Bearer Token + REST API（`/api/v1/tables/:table/records`）读写中台数据，在 HTTP 429/5xx 或瞬时网络异常时指数退避重试（`0/1/3/8` 秒）。
+- **长轮询门铃（`src/server/longpoll-broker.mjs` + `src/transport/`）**：
+  - 每次写入只传递变更通知与 `seq` 游标，具体数据一律回表或经网关拉取，断线与重启不丢状态；
+  - 远端宿主节点经出站 `GET /api/v1/poll?node=<node>&cursor=<seq>&timeout=25` 挂起等待，写入提交后毫秒级唤醒；Hub 进程内通过 `subscribeLocal` 零网络开销直连唤醒；无法长轮询时降级为 `poll` 定时扫表（默认 `pollSec=45`）；
+  - 客户端游标落出环形缓冲时返回 `resync` 触发全量对账；所有守护进程保留低频对账扫表兜底（默认 `sweepSec=900`）以及面向 `input-required` / `auth-required` 的挂起短复查（`PENDING_RECHECK`：前 10 分钟不超 60 秒，60 分钟内不超 180 秒）。
+- **外部 Agent 网关（`src/server/agent-gateway.mjs`）**：为无守护进程、无 `ah` CLI 的纯 HTTP Agent 提供自发现（`GET /.well-known/agent.json`）、Skill 拉取（`GET /api/v1/skills/:name`）、注册（`POST /api/v1/agents/register`）、短/长轮询取单（`GET|POST /api/v1/agents/:node/poll`）、Leader 状态追踪（`GET /api/v1/agents/:node/updates`）及生命周期操作（`POST /api/v1/tasks/:id/{claim,heartbeat,ask,auth,complete,fail}`）。
 
-## 5. 两大抽象：executor × context
+## 5. 三种接入形态
 
-机器差异全部收敛为两个正交配置：
+| 接入形态 | 适用场景 | 唤醒与执行方式 | 纪律约束 |
+|---|---|---|---|
+| **宿主守护进程型**（`kind: host`） | 办公电脑、Mac mini、Linux 工作站、GPU 服务器 | `ah daemon` 出站长轮询（`/api/v1/poll`），按 `commands.json` 拉起本机 CLI/脚本 | 守护内核强制租约、心跳、单并发账本、退避与验收 |
+| **本地独立 Agent 型**（`kind: agent`） | 同机常驻但自主消费任务的独立 Agent | `ah daemon` 认领后写入 `0600` `agent_inbox.jsonl` 并持续续心跳；本尊调 `ah inbox` 取单/交付 | 内核维护租约与 `inbox_timeout_sec`，`inbox` 出站计划保证防重与终态守卫 |
+| **纯 HTTP 外部 Agent** | 云端或由外部 cron/tick 驱动的 Leader / Worker | 直接调 `agent-gateway`（`/agents/:node/poll` 或 `/updates`，支持短轮询 `timeout=0` 与长轮询） | `agent-gateway` 在网关侧执行目标匹配、静态/动态审批门与状态守卫 |
 
-- **executor（干活的）**：命令模板 `{prompt}`。
-  - 一问一答型 Agent（如 `agy --print {prompt}`、各类 CLI 的无头模式）直接是一行模板；
-  - 脚本本身也是一种模板（确定性技能不需要 Agent）；
-  - 异步型工具（调用返回 ID、结果另行读取）由官方插件适配，插件清单随项目维护。
-- **context（在哪干活）**：执行语境，决定进程树的权限与生命周期。
-  - `direct`（默认）：守护进程直接拉起。Linux 全功能；macOS 下不承诺局域网设备类任务；
-  - `carrier`：已移除（v0.9.0，2026-11-15），见 §9；
-  - `tmux` / `herdr`（高级备选）：借用户已常驻的终端复用器会话执行；
-  - 签名 App 宿主：产品化方向，不在 v1 范围。
+## 6. executor × context 抽象
 
-## 6. 总线后端
+本机执行能力收敛为两个配置维度（`src/config.mjs`、`src/kernel-direct.mjs`、`src/inbox.mjs`）：
 
-- 总线是可插拔后端接口；**飞书多维表格为一号后端**：零服务器、表即总线，读者不需要自建数据库与消息队列。
-- 数据模型沿用中台现行标准（A2A 形状）：任务八态（submitted / working / input-required / auth-required / completed / failed / canceled / rejected）、沟通与状态分离（消息只追加）、产物独立登记、能力以 AgentCard 形式自注册。
-- 唤醒（标准 §10.3）只有三种方式，都只是门铃，内容一律回表拉取：
-  - `ws`：飞书 SDK 长连接事件订阅（出站连接，现有实现，事件不解析内容）；
-  - `poll`：定时扫表（现有实现，默认 45 秒），用于无法订阅事件时；
-  - `webhook`：专指飞书多维表格自动化在 Tasks 行写入后向协议接入型节点的端点 POST，只带 ID 不带正文；发起 POST 的是飞书自动化，本项目进程绝不开监听端口、也不主动推送，守护进程自身只用 ws 或 poll。
-- 三种方式都保留低频对账扫表兜底（默认 15 分钟）。
-- 角色（标准 §10.1）：hub 是逻辑角色，且为 node 的单进程超集。以 `lah daemon --role node|hub`（CLI 简称 `lah`，向下兼容 `hub-node` 别名；省略 `--role` 时读 `node.json` 的 `role`，缺省 node）承载。单进程、单配置目录即可同时承载干活（读取 `commands.json` 登记能力并认领执行任务）与枢纽职责（全网审批发卡、结果呈递、陈旧告警），无需拆两个进程与配置目录。node 角色从不写 auth_decision 与 canceled，hub 角色是唯一写方。
+- **执行模式（`mode`，即 executor 的交互形态）**：
+  - `agent`（默认）：基于 `{prompt}` 模板拉起本机 Agent CLI，任务原文与参数写入 `runs/<Task_ID>/input.json`，通过结构化围栏（`` ```agent-ask ```` / ```` ```agent-auth ````）与围栏外整行指令解析回执；
+  - `json`：确定性脚本或结构化工具，从 `stdin` 读取任务信封 JSON，从 `stdout` 最后一个非空行读取 JSON 回执；
+  - `inbox`：仅用于独立 Agent 节点（`kind: agent`），守护进程认领后写入 `agent_inbox.jsonl` 并保持心跳，不起子进程，由 Agent 本尊通过 `ah inbox (done|ask|fail|auth)` 完成交付与续跑。
+- **执行语境（`context`）**：
+  - 现行唯一合法值为 `direct`（默认值，可省略）：守护进程直接以独立进程组（`src/proc.mjs` / `src/direct-ledger.mjs`）拉起命令，并将 `pid`、进程启动时间戳、`run_id`、stdout/stderr/exit 文件路径原子写入 `runs/<Task_ID>/entry.json`（0600）。
+  - 同一节点同一时刻只允许一条 `direct` 在途命令，守护进程重启后依据账本判断进程组存活与退出码实现断点续接（不二次重跑副作用命令），超时向进程组先发 `SIGTERM` 再 `SIGKILL`。配置中出现非法 `context` 取值时认领预检直接 `rejected`。
 
 ## 7. 能力模型与回执约定
 
-- 能力分三层，统一以配置登记、启动时自注册到总线：
-  - L1 确定性技能：脚本直接执行，不经过 Agent；
-  - L2 专长技能：指定本地 Agent 执行指定 Skill，中台只凭名字/说明/标签路由；
-  - L3 通用能力：Agent ＋工具面（终端/浏览器/computer-use），凭自然语言指令现场发挥。
-- 能力声明包含：所需资产（是否需要局域网等）、副作用等级、可用状态。**加能力 = 写一条模板配置，不改内核。**
-- 回执约定两种模式：
-  - json 模式（脚本类）：标准输入收任务信封，标准输出最后一行为结果 JSON（含结论与可选产物指针，或「需要输入」标记）；
-  - agent 模式（Agent 类）：纯文本输出，末尾结构化代码块表达提问（只认最后一个完整的 `agent-ask` 围栏），围栏外整行表达产物、用量、会话与预约复查（`ARTIFACT:` / `USAGE:` / `SESSION:` / `LATER:`），内核只认结构、不猜自然语言；围栏内的同形文字一律不生效。完整语法以标准 §9 为准。
+详细语法与判定口径以 [docs/standard.md](docs/standard.md) §6、§9、§11 为准：
+
+- **三层寻址（`Node → Worker → Skill`）**：`commands.json` 保留键 `workers` 定义本机 Agent 启动模板；每个 Worker 自动在 `AgentCards` 登记一张 `Skill_ID=agent` 的 Worker 名片（`CAP-<capPrefix>-<worker>-agent`）；专长技能通过 `workers: [...]` 绑定至指定 Worker（`CAP-<capPrefix>-<worker>-<skill>`）；自带 `command` 的条目由节点本尊直接执行（`Worker` 列为空）。
+- **能力热重载**：守护进程按文件 `mtime` 与内容哈希检测 `commands.json` 变更并串行对账 `AgentCards`；文件解析损坏时保留上一版能力表并暂停认领新单，修复后自动恢复。
+- **结构化回执与两层验收（标准 §11）**：
+  - 除正文与产物指针（`Artifacts` + `FilePart`）外，回执可附带 `USAGE:`（累计至 `Tasks.Metadata.usage`）、`SESSION:`（仅存本机 `runs/<Task_ID>/session.json` 用于问答/审批续跑 `resume_command`）与 `LATER:`（写入 `Tasks.Metadata.later`，由 Hub `ScheduleService` 到点派生复查任务）；
+  - **L1 执行式验收（`verify`）**：针对 `context=direct` 的 `json` / `agent` 任务，主命令成功且解析为完成回执后，在 `entry.json` 的 `state=verifying` 阶段执行只读 `verify` 命令（通过 stdin JSON 与 `AH_TASK_ID` / `AH_ARTIFACT` / `AH_RUN_DIR` / `AH_MAIN_STDOUT` 传入上下文），失败、超时或错误一律置 `failed` 且不计重试；
+  - **L2 声明式验收（`acceptance.criteria`）**：建单时冻结在首条 `instruction` 的 `DataPart`，执行方自检输出 `CHECK:` 行 / `checks` 对象 / `ah inbox done --check`，统一汇总写入回执消息 Seq 2 的 `DataPart` 并索引至 `Tasks.Metadata.acceptance`。
 
 ## 8. 安全纪律
 
-- **指令与数据分离**：外部文本只作为数据喂给执行者，绝不拼进指令；试图自带执行参数（目录/Agent/权限字段）的输入直接拒收——防提示注入夺权。
-- **凭据不入总线**：密钥只存节点本地（600 权限文件），总线里只放任务与指针。
-- **熔断**：派生深度累加不清零（问人也不清），超限只记录不派活。
-- **只出不进**：节点只发起出站连接，不开任何监听端口、不做隧道映射。
+- **控制键拦截**：`EXEC_CONTROL_KEYS`（`command`、`cmd`、`cwd`、`context`、`agent`、`worker`、`mode`、`side_effect`、`approval_class`、`permissions`、`shell`、`env`、`executable`、`argv`、`bin`、`max_timeout_sec`、`verify`、`verify_timeout_sec`）出现在任务参数中时，建单端与执行节点一律拒收；唯一可由任务参数覆盖的执行控制键为 `timeout_sec`（且受节点本地 `max_timeout_sec` 夹紧）。
+- **审批下限与 ed25519 签名**：认领前静态审批下限取「任务行 `Approval_Class`、本地 Worker 下限、本地 Skill 下限」中最严者；执行中可由 `agent-auth` / `need_auth` / `ah inbox auth` / 网关 `/auth` 触发动态审批。Hub 使用配置目录 `0600` 私钥 `approval_key.pem` 为 `auth_decision` 签名，配了 `hubPublicKey` 的节点与网关严格验签。
+- **熔断与防重跑**：派生任务 `Hop_Count` 累加不清零，超过 `HOP_LIMIT = 8` 熔断；执行失败与心跳超时（`STALE_MIN = 20`）共享 `MAX_RETRIES = 2` 预算，退避水位记在 `retry_state.json`（60 秒起翻倍至 10 分钟）；节点写表先落 `outbox/`（或 `inbox-outbox/`），失败只补缺不重跑命令；Hub 宽限 30 分钟仍无心跳则由 `StaleService` 置 `failed` 回收。
 
-## 9. macOS 局域网一章（本项目的差异点）
+## 9. LoopForge SOP 闭环引擎
 
-状态：carrier 已于 2026-11-15 移除，原因：生产未使用、本机实测长驻进程局域网访问不可靠（见下方注记④），以下保留作历史记录。
+`src/hub/loop.mjs` 在 A2A 原生会话（`Context_ID`）与任务派生链（`Ref_Task_IDs`）之上实现了多阶段闭环编排：
 
-- 实测事实：由 launchd 拉起的守护进程，其进程树访问局域网会被 macOS 本地网络隐私机制静默拦截（表现为 No route to host）；同一命令在用户终端、或有实体的应用进程树里则正常。裸 CLI 在系统隐私设置里没有可授权的条目，无从点授权。
-- 因此「macOS ＋ 开机自启 ＋ 局域网能力」三者同时成立时，直跑必然被拦。这是操作系统按进程祖先算账，换语言、换运行时都不改变。
-- 解法（不增加读者负担的分工）：
-  - 能力按「是否需要局域网」分流（能力声明里现成有此字段）；
-  - 不需要的，守护进程直跑——这是绝大多数读者的全部场景；
-  - 需要的，交给 `carrier` context：同一个命令的子进程，由用户在自己日常的终端里启动并常驻，经本地 unix socket 与守护进程通信，在有权语境里代跑这一类任务。
-- 铁律：carrier 不在线时，对应能力在名片上标离线、任务不派发，**绝不静默改走直跑**（静默降级会产生「任务跑了但什么都没采到」的假成功）。
-- 【M4 实测注记（2026-11-04）】机制已实现并验收：commands.json 条目加 `"context": "carrier"` 即分流；守护经 unix socket（NDJSON）把命令交给 carrier 代跑，执行语义与直跑一致；Availability 随 carrier 探活自动同步；carrier 离线时任务明确拒收（实测 LANPROBE-005）。实测对拦截模型的修正有三：①苹果自带 /usr/bin/ssh 在 launchd 语境下可直达局域网（平台二进制豁免）；②第三方二进制（如 Homebrew Python 裸 TCP）直跑呈「守护重启后首击必败、之后又能通」的不稳定态——直跑成功不等于健康，这正是不能静默直跑的实证；③carrier 的出生语境决定成败：由 SSH 会话拉起的 tmux 服务器会 daemon 化到 PID 1 名下，其进程树实测 6/6 被拦，与 SSH 会话内直跑（可达）形成对照——tmux 只有当服务器本身诞生于用户 GUI 终端（如日常 Ghostty）时才是有效载体，与本文「由用户在自己日常的终端里启动」的定位一致。④终验补充（同日晚）：机主在 Ghostty 里启动的 carrier（父链 Ghostty→zsh→node 已核实）与一条前台 sshd 会话里的 carrier，跑同一探针仍全部 No route to host，连经 carrier 的 /usr/bin/ssh 也被拦；而同机同分钟内一次性 SSH 命令直跑（python/node 均可）却成功。至此本机实测的可用面只剩「一次性短命 SSH 命令」与「守护内的 ssh」两类；长驻进程（守护首击、三种出生的 carrier）做裸 TCP 局域网访问均不可靠。机制未能完全定位，疑与本机 Clash TUN/NECP 按进程归属的策略叠加有关（非 stock macOS 环境）。结论：carrier 机制与离线纪律成立且已验收，§9 的「终端语境即有权」在本机不成立——局域网工作在本机继续走已 proven 的 ssh 通道（直跑或经 Paseo），carrier 保留为面向一般环境的语境抽象，本机不作为生产依赖。
-- 自检：安装后提供一条自检命令，探测本机执行者能否触达局域网，并直接给出该用哪个 context。
-- Linux 无此问题，本章不适用。
+- **数据面**：`loops` 表记录阶段定义（`Stages`）、当前阶段索引（`Stage_Index`）、当前迭代计数（`Iteration` / `Max_Iterations`）、活跃子任务（`Active_Task_ID`）与阶段流转历史（`History`）。
+- **内置模板与自定义编排**：内置 `plan-code-verify`、`write-review-refine`、`audit-fix-verify` 三套模板，并支持通过 `ah loop create` 或 Web 控制台传入自定义 `stages` 与逐阶段 `stageBindings`（`to` / `worker` / `cap`）。
+- **验收驱动回跳**：每阶段子任务进入终态后，`LoopService` 结合任务状态与 `acceptanceForTask` 判定结果决定推进下一阶段或按阶段的 `on_fail` 策略执行 `retry`、`goto:<stage_id>` 或 `abort`，将失败原因与验收证据注入下一跳 `{{failure_feedback_block}}`；全链路受 `Max_Iterations` 与 `HOP_LIMIT = 8` 双重熔断约束。
 
-## 10. 与 Agent-Autoloop 的异同
+## 10. 仓库结构
 
-- 同：薄内核＋命令模板接入 Agent＋结构化回执＋跳数熔断＋指令数据分离＋curl 一行安装。
-- 异一（总线）：它自带内核数据库、聊天工具只做决策面；我们以现成 SaaS 表格为总线，读者零自建，且数据模型按 A2A 形状组织。
-- 异二（常驻）：它活在用户会话里（无守护进程化，也因此没遇到局域网拦截）；我们要求无人值守自启常驻，由此多出 §9 一整章与 context 抽象。
-- 异三（能力分层）：我们显式区分脚本技能 / Agent+Skill / 通用能力三层，路由凭能力名片而非人工规则表。
-
-## 11. 仓库结构
-
-现状（Rules 自动路由仍为计划，不在本树里单列）：
-
+```text
+a2a-hub/
+  bin/
+    ah.mjs                      # CLI 主入口（支持 setup / up / join / daemon / reconcile / doctor /
+                                #   inventory / service / task / schedule / loop / present / inbox / update）
+  src/
+    kernel.mjs                  # 状态机骨架（Sweep 主循环、能力对账、认领与状态迁移）
+    kernel-direct.mjs           # direct 在途命令与 L1 verify 编排（原型混入）
+    kernel-approval.mjs         # 认领前静态门与动态审批续跑（原型混入）
+    kernel-outbox.mjs           # 回执 outbox 幂等提交（原型混入）
+    kernel-metadata.mjs         # usage / later / acceptance Metadata 合并写（原型混入）
+    kernel-util.mjs             # 日志、时间格式、脱敏与终态常量
+    config.mjs                  # 配置加载（sqlite / http）、控制键校验、能力表归一（Node/Worker/Skill）
+    acceptance.mjs              # 验收层纯函数（标准 §11：清单校验、自检归一、overall 判定）
+    approval-sign.mjs           # ed25519 审批决策签名与验签
+    direct-ledger.mjs           # direct 在途执行账本（runs/<Task_ID>/entry.json）
+    proc.mjs                    # 独立进程组拉起、超时 SIGTERM/SIGKILL、输出头尾截断
+    receipt.mjs                 # agent / json 回执解析、later 时区校验与命令占位替换
+    retry-state.mjs             # retry_state.json 指数退避水位
+    session-store.mjs           # runs/<Task_ID>/session.json 读写
+    inbox.mjs                   # kind=agent 收件箱（agent_inbox.jsonl）与 ah inbox CLI
+    present-queue.mjs           # present_queue.jsonl 锁互斥读写
+    local-schedule.mjs          # 节点本地定时调度（schedules.json）
+    schedule-cron.mjs           # cron 表达式与时区期次键纯函数
+    schedule-mirror.mjs         # 本机计划向 Rules 表的只读观察镜像
+    schedule-cli.mjs            # ah schedule 与 ah task begin CLI
+    loop-cli.mjs                # ah loop CLI
+    setup.mjs                   # 交互/非交互初始化向导（up / join / setup）与本地 Skill 安装
+    doctor.mjs                  # 只读自检
+    service.mjs                 # launchd / systemd / Windows 任务计划用户级自启托管
+    inventory.mjs               # 只读名片与任务盘点
+    update.mjs                  # git 检出自更新
+    why.mjs                     # ah task why 只读时间线与排障诊断
+    bus/
+      tables.mjs                # 8 张逻辑表名映射与字段读取工具
+      sqlite-bus.mjs            # Node 内置 node:sqlite WAL 总线
+      http-bus.mjs              # 远端节点 HTTP REST 总线客户端
+    server/
+      http-server.mjs           # Hub HTTP 网关主服务（REST API、鉴权、hub_runtime.json）
+      longpoll-broker.mjs       # 单调 seq 事件代理与长轮询连接管理
+      agent-gateway.mjs         # 纯 HTTP 外部 Agent A2A 网关
+      web-ui.mjs                # 零构建内嵌 Web 控制台
+    hub/
+      index.mjs                 # hub 角色主运行时与 hubDoctor
+      approval.mjs              # ApprovalService（审批登记、ed25519 签名写入与状态流转）
+      present.mjs               # PresentService（原路结果呈递与基线水位）
+      stale.mjs                 # StaleService（陈旧告警与宽限回收）
+      schedule.mjs              # ScheduleService（later 预约复查时钟）
+      loop.mjs                  # LoopService（LoopForge 多阶段 SOP 闭环引擎）
+      notifier.mjs              # ExternalNotifier（可选外部 Webhook / Bark / Telegram 通知）
+      create.mjs                # 建单（参数校验、名册校验、先消息后任务行）
+      cancel.mjs                # 任务取消（发起方 / hub）
+      cards.mjs                 # 消息正文提取与审批交互载荷构建
+      owner.mjs                 # 机主标识解析
+    transport/
+      index.mjs                 # 唤醒工厂 createWaker（longpoll / poll）
+      longpoll.mjs              # HTTP 长轮询与本地 Broker 唤醒器
+      poll.mjs                  # 定时轮询唤醒器
+    executors/
+      echo.mjs                  # 示例 json 模式执行器
+  skills/                       # 2×2 四类 Skill（ah / ah-inbox / a2a-leader / a2a-worker）
+  config/                       # 占位符配置样例
+  docs/                         # 中台标准、架构、配置、外部 HTTP Agent 手册与 SVG 图
+  schema/                       # 表结构快照与生成脚本
+  tests/                        # node:test 测试套件与内存 Mock 总线
+  install.sh / install.ps1      # 一行安装脚本
+  DESIGN.md
+  README.md / README.en.md
 ```
-lark-a2a-hub/
-  bin/lah.mjs           # CLI 主入口（bin/hub-node.mjs 为兼容别名）：setup / daemon / doctor / service / task
-                        #   支持 --role node|hub；task create 建单
-                        #   省略 --role 时读 node.json 的 role，缺省 node
-  src/kernel.mjs          # 状态机骨架（认领/心跳/熔断/对账主循环）
-  src/kernel-util.mjs     # 日志、时间、脱敏与终态集合
-  src/receipt.mjs         # 回执解析与命令模板占位符
-  src/retry-state.mjs     # retry_state.json 退避水位
-  src/session-store.mjs   # session.json 读写
-  src/config.mjs          # 节点配置、控制键拒收、超时夹紧
-  src/kernel-direct.mjs   # direct 在途命令编排（原型混入）
-  src/kernel-approval.mjs # 审批请求与决定（原型混入）
-  src/kernel-outbox.mjs   # 回执 outbox（原型混入）
-  src/kernel-metadata.mjs # usage/later 的 Metadata 合并写（原型混入）
-  src/bus/              # feishu.mjs（Bitable REST）、feishu-events.mjs（ws 长连接门铃）
-  src/proc.mjs          # 进程组拉起、超时 TERM/KILL、输出头尾截断（direct 路径复用）
-  src/setup.mjs         # 装机向导（支持 --role node|hub，hub 配置机主 open_id）
-  src/doctor.mjs        # 只读自检（按角色检查，打印角色与唤醒方式）
-  src/service.mjs       # launchd / systemd 用户级自启（带 --role，hub/node 独立服务名）
-  src/executors/        # 示例执行器（echo.mjs）
-  src/hub/              # hub 角色（建单、审批发卡、卡片回调与机主校验、
-                        #   auth_decision、canceled、结果呈递、陈旧告警、later 复查）
-  src/schedule-cron.mjs # cron 解析与期次键纯函数（节点本地调度共用）
-  src/local-schedule.mjs # 节点本地定时调度（schedules.json、基线、建 submitted 任务）
-  src/schedule-mirror.mjs # 计划摘要单向镜像到 Rules（只写自己的行，只供观察）
-  src/schedule-cli.mjs  # lah schedule (ls|add|rm|enable|disable|register) 与 lah task begin
-  src/transport/        # ws / poll 门铃与对账定时（webhook 通知由飞书自动化发出）
-  src/direct-ledger.mjs # direct 命令的在途执行账本（崩溃后续接，不二次执行）
-  src/why.mjs           # lah task why：只读时间线
-  tests/                # node:test 测试与内存总线（不连真实 Base）
-  config/               # 配置样例（只放占位符）
-  docs/                 # 中台标准、架构、hub 对接、协议节点手册、Base 结构（生成物）
-  schema/               # base-schema.json（生成物）与 generate_schema.mjs
-  install.sh            # curl 一行安装
-  DESIGN.md             # 本文档
-  README.md
-```
-
-配置示例（能力声明）：
-
-```json
-{
-  "capabilities": [
-    {
-      "skill": "ops-agent",
-      "executor": { "type": "command", "command": "agy --dangerously-skip-permissions --print {prompt}" },
-      "context": "direct",
-      "needs_lan": true,
-      "side_effect": "write"
-    },
-    {
-      "skill": "daily-briefing",
-      "executor": { "type": "command", "command": "node scripts/briefing.js" },
-      "context": "direct",
-      "needs_lan": false,
-      "side_effect": "read"
-    }
-  ]
-}
-```
-
-## 12. 里程碑
-
-- M1 内核移植：以 Python worker-4.1 为参考实现/规格，Node 版跑通认领→执行→回执全链（echo 能力验收）。【2026-11-04 已完成：Node 版在 mini 以独立 node-dev 身份试运行，ECHO-001/002 两单全链通过、参数完整回显；agent 模式仅做本地回执解析单测，未做端到端实测，留待后续。】
-- M2 飞书后端：事件订阅＋对账、能力自注册、提问/审批续跑。【2026-11-04 进展：事件订阅已落地并验收——官方 Node SDK 长连接接收器集成进守护进程（单进程）、事件即唤醒，对账退为 15 分钟安全网；沙盒实测建单后数秒认领（对账周期 900 秒下只能由事件触发）；与同机 Python 节点共存方案＝共享门铃文件（任一接收端收到事件都追加落盘、互相叫醒，飞书多连接分发不丢唤醒），生产节点门铃实测被同步唤醒。剩余：能力名片细化。】
-- M3 安装与自启：curl 安装脚本、launchd/systemd 注册、自检命令。【2026-11-04 已完成：v0.2.0，install.sh / doctor / service 均实测，见仓库提交 329a18c。】
-- M4 carrier context：子进程＋本地 socket、能力分流与离线标注，在真实局域网任务上验收。【2026-11-04 已验收（带本机限定）：机制全量落地（v0.3.0）——分流执行、探活同步 Availability、离线拒收均实测通过；终验发现本机（mini＋Clash TUN 环境）长驻进程裸 TCP 局域网访问均不可靠、终端语境在本机不构成有权语境，见 §9 注记④。本机局域网工作继续走 ssh 通道；carrier 作为语境抽象与离线纪律保留，stock 环境下的有效性待其他机器验证。】已移除（v0.9.0，2026-11-15）。
-- M5 文档与发布：README（重点讲清 §9 的现象与解法）、配置规范、首个公开版本。
-
-## 13. 已定事项
-
-- 项目名 lark-a2a-hub；License MIT；Node 版本下限 24（跟随 LTS）。
-- 开源范围（2026-11-05 扩大，2026-11-06 起仓库只保留 Node）：节点适配器＋
-  中台标准与全部设计文档＋ hub 角色（`src/hub/`），一并公开。
-
-## 实施注记（生产切换时新增）
-
-- 首个生产节点已切换为 Node 版，Python 守护进程退役；其 executors
-  脚本作为能力实现保留（由命令模板调用）。
-- 事件竞态（实测 ECHO-004）：一波「消息→Parts→Tasks 行」三连写，飞书可能只投递一个合并事件且其到达可早于 Tasks 行可读；若在 waitWake 入口清唤醒标志，扫表期间到达的唤醒会被丢弃，任务最长等 sweepSec（900s）对账才被认领。规范修订：唤醒标志必须在主循环扫表前消费，扫表期间的唤醒保留至下一轮立即再扫。修复后 ECHO-006 建单 11 秒认领、21 秒关单。
