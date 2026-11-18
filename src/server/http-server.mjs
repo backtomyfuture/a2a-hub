@@ -164,7 +164,10 @@ export async function startHubHttpServer({
   const runtimePath = cfg?.configDir ? path.join(cfg.configDir, "hub_runtime.json") : "";
   const connectHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
   let activePort = port;
+  const publicUrl = String(cfg?.publicUrl ?? "").trim().replace(/\/+$/, "");
+  // 接入提示词要发给其他机器：优先用配置的对外地址，避免机主在 Hub 本机用 127.0.0.1 打开控制台时生成远端不可达的地址。
   const requestHubUrl = (req) => {
+    if (publicUrl) return publicUrl;
     const hostHdr = String(req.headers.host ?? "").trim();
     return hostHdr ? `http://${hostHdr}` : `http://${connectHost}:${activePort}`;
   };

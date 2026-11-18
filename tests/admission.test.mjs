@@ -35,7 +35,7 @@ async function apiJson(baseUrl, pathname, { method = "GET", token = "", body } =
   return { status: res.status, data };
 }
 
-async function withHubServer(fn) {
+async function withHubServer(fn, cfgExtra = {}) {
   await withTemp(async (rootDir) => {
     const hubDir = path.join(rootDir, "hub");
     fs.mkdirSync(hubDir, { recursive: true });
@@ -52,6 +52,7 @@ async function withHubServer(fn) {
         configDir: hubDir,
         listen: "127.0.0.1:0",
         apiToken,
+        ...cfgExtra,
       },
       bus,
       broker,
@@ -492,6 +493,15 @@ test("HTTP 管理端点：register 不覆盖 Admission、预建槽位命中同�
       token: apiToken,
     })).status, 400);
   });
+});
+
+test("onboarding：配置了 publicUrl 时提示词用对外地址而不是请求 Host", async () => {
+  await withHubServer(async ({ baseUrl, apiToken }) => {
+    const res = await apiJson(baseUrl, "/api/v1/admin/onboarding?node=n1&access=http&role=worker", { token: apiToken });
+    assert.equal(res.status, 200);
+    assert.equal(res.data.onboarding.skills[0].url, "https://hub.example.com/api/v1/skills/a2a-worker");
+    assert.equal(res.data.onboarding.prompt.includes("127.0.0.1"), false);
+  }, { publicUrl: "https://hub.example.com/" });
 });
 
 test("inventory 输出每张名片包含 Admission=<值>", async () => {
