@@ -22,6 +22,7 @@
   $bootstrapMode = ""
   $joinUrl = if (-not [string]::IsNullOrWhiteSpace($env:AH_JOIN)) { $env:AH_JOIN } else { $env:LAH_JOIN }
   $useService = $true
+  $installForce = $false
   if (-not [string]::IsNullOrWhiteSpace($joinUrl)) {
     $bootstrapMode = "join"
   }
@@ -34,6 +35,7 @@
       "^(-h|--help|-Help)$" { $showHelp = $true }
       "^(--skip-skill|-SkipSkill)$" { $skipSkill = $true }
       "^(--no-service|-NoService)$" { $useService = $false }
+      "^(--force|-Force)$" { $installForce = $true }
       "^(--hub|-Hub)$" { $bootstrapMode = "hub" }
       "^(--join|-Join)$" {
         if ($idx + 1 -ge $args.Length) { throw "--join 需要 Hub URL 参数" }
@@ -48,12 +50,15 @@
   }
 
   if ($showHelp) {
-    Write-Host "用法: install.ps1 [-Hub | -Join <url>] [-NoService] [-SkipSkill]"
+    Write-Host "用法: install.ps1 [-Hub | -Join <url>] [-NoService] [-SkipSkill] [-Force]"
     Write-Host "      irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex"
     Write-Host "  -Hub, --hub               安装后立即配置独立 SQLite Hub 并注册开机任务"
     Write-Host "  -Join, --join <url>       安装后立即接入已有 Hub 并注册开机任务（也可用 `$env:AH_JOIN）"
     Write-Host "  -NoService, --no-service  仅配置与自检，不注册开机任务"
     Write-Host "  -SkipSkill, --skip-skill  跳过安装 %USERPROFILE%\.agents\skills\ah"
+    Write-Host "  -Force, --force           已有旧版飞书 node.json 时仍覆盖。默认拒绝，以免拆掉正在运行的 lark-a2a-hub"
+    Write-Host "已装旧版 lark-a2a-hub 时请用独立目录，例如："
+    Write-Host '  $env:HUB_NODE_HOME = "$env:USERPROFILE\.a2a-hub"; irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex'
     return
   }
 
@@ -79,6 +84,23 @@
       if ($p -and ($p -ieq $norm)) { return $true }
     }
     return $false
+  }
+
+  # 只认本仓库。大小写、https/ssh、有无 .git 后缀都算；不打印 origin，地址里可能嵌了凭据。
+  function Test-A2aHubOrigin {
+    param([string]$Origin)
+    if ([string]::IsNullOrWhiteSpace($Origin)) { return $false }
+    $raw = $Origin.Trim().TrimEnd("/")
+    return $raw -match '^(https?|ssh)://([^@/]+@)?github\.com/backtomyfuture/a2a-hub(\.git)?$|^git@github\.com:backtomyfuture/a2a-hub(\.git)?$'
+  }
+
+  # 与 src/setup.mjs 的 isLegacyFeishuNodeConfig 同一口径。退出码 10 是旧飞书配置，11 是无法解析。
+  function Get-LegacyConfigStatus {
+    param([string]$NodeJson, [string]$NodeExe)
+    $code = 'const fs=require("node:fs"); let raw; try { raw=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); } catch { process.exit(11); } if (!raw || typeof raw !== "object" || Array.isArray(raw)) process.exit(11); const bus=String(raw.busType??"").trim().toLowerCase(); const keys=["baseToken","appId","appSecret","verificationToken","encryptKey","appToken"]; const has=keys.some((k)=>Object.hasOwn(raw,k)&&raw[k]!=null&&String(raw[k]).trim()!==""); const inferred=Boolean(raw.hubUrl||raw.dbPath||raw.listen); if (bus==="feishu" || (!bus && !inferred) || has) process.exit(10); process.exit(0);'
+    & $NodeExe -e $code $NodeJson
+    if ($null -eq $LASTEXITCODE) { return 11 }
+    return $LASTEXITCODE
   }
 
   # 返回 added / present / manual。当前进程的 PATH 能补就补，让本次窗口立刻能跑 ah。
@@ -166,12 +188,27 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
   $binDir = Join-Path $configHome "bin"
 
   New-Item -ItemType Directory -Force -Path $configHome | Out-Null
+  $skipFetch = $env:AH_INSTALL_SKIP_FETCH -eq "1"
 
   if (Test-Path -LiteralPath (Join-Path $app ".git")) {
-    Write-Host "更新已有安装…"
-    Invoke-Native -File "git" -ArgumentList @("-C", $app, "pull", "--ff-only")
+    $originText = ""
+    try { $originText = [string](& git -C $app remote get-url origin) } catch { $originText = "" }
+    if (-not (Test-A2aHubOrigin $originText)) {
+      throw "检测到 $app 是旧版或其他项目的 git 检出（origin 不是 backtomyfuture/a2a-hub）。不会更新它，也不会修改配置或命令入口。请改用独立目录：`$env:HUB_NODE_HOME = `"`$env:USERPROFILE\.a2a-hub`""
+    }
+    if ($skipFetch) {
+      Write-Host "跳过 git pull（AH_INSTALL_SKIP_FETCH）。"
+    } else {
+      Write-Host "更新已有安装…"
+      Invoke-Native -File "git" -ArgumentList @("-C", $app, "pull", "--ff-only")
+    }
   } elseif (Test-Path -LiteralPath $app) {
-    throw "$app 已存在但不是 git 检出，请先移走它再重跑"
+    if (-not $skipFetch) {
+      throw "$app 已存在但不是 git 检出，请先移走它再重跑"
+    }
+    Write-Host "跳过获取代码（AH_INSTALL_SKIP_FETCH），使用已有目录。"
+  } elseif ($skipFetch) {
+    throw "AH_INSTALL_SKIP_FETCH=1 但 $app 不存在，无法跳过获取代码"
   } elseif (Get-Command git -CommandType Application -ErrorAction SilentlyContinue) {
     Invoke-Native -File "git" -ArgumentList @("clone", "--depth", "1", $repoGit, $app)
   } else {
@@ -199,20 +236,52 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
     }
   }
 
-  Push-Location -LiteralPath $app
-  try {
-    if ((Test-Path -LiteralPath (Join-Path $app "package-lock.json")) -and $npmExe) {
-      Invoke-Native -File $npmExe -ArgumentList @("ci", "--omit=dev", "--no-audit", "--no-fund")
+  if (-not $skipFetch) {
+    Push-Location -LiteralPath $app
+    try {
+      if ((Test-Path -LiteralPath (Join-Path $app "package-lock.json")) -and $npmExe) {
+        Invoke-Native -File $npmExe -ArgumentList @("ci", "--omit=dev", "--no-audit", "--no-fund")
+      }
+    } finally {
+      Pop-Location
     }
-  } finally {
-    Pop-Location
+  }
+
+  $entryMjs = Join-Path $app "bin\ah.mjs"
+  if (-not (Test-Path -LiteralPath $entryMjs)) {
+    throw "安装结果里没有 $entryMjs，已停止。这通常表示目录不是 a2a-hub（旧版 lark-a2a-hub 没有该文件）。未修改配置与命令入口。"
+  }
+
+  if (-not [string]::IsNullOrEmpty($bootstrapMode)) {
+    $nodeJson = Join-Path $configHome "node.json"
+    if (Test-Path -LiteralPath $nodeJson) {
+      $legacyStatus = Get-LegacyConfigStatus -NodeJson $nodeJson -NodeExe $nodeCmd.Source
+      if ($legacyStatus -eq 10 -and -not $installForce) {
+        throw "检测到旧版飞书总线配置（$nodeJson）。不会覆盖它。请改用独立目录：`$env:HUB_NODE_HOME = `"`$env:USERPROFILE\.a2a-hub`" 。确认可以废弃这份配置时再加 -Force。未打印配置内容。"
+      }
+      if ($legacyStatus -eq 10 -and $installForce) {
+        Write-Host "已指定 -Force，将允许覆盖现有 node.json。未打印配置内容。"
+      } elseif ($legacyStatus -ne 0) {
+        throw "无法解析 $nodeJson，已停止，避免误覆盖。未打印文件内容。"
+      }
+    }
   }
 
   # 五个入口都进 ah.mjs（保留 lah.cmd / hub-node.cmd 向下兼容）。
+  # lah / hub-node 若已指向别的程序则保留，避免把旧版 lark-a2a-hub 的命令劫持走。
   New-Item -ItemType Directory -Force -Path $binDir | Out-Null
   $shim = "@echo off`r`nnode `"%~dp0..\app\bin\ah.mjs`" %*`r`n"
   foreach ($name in @("ah.cmd", "a2a-hub.cmd", "ahub.cmd", "lah.cmd", "hub-node.cmd")) {
-    [System.IO.File]::WriteAllText((Join-Path $binDir $name), $shim, [System.Text.UTF8Encoding]::new($false))
+    $dest = Join-Path $binDir $name
+    $guarded = $name -eq "lah.cmd" -or $name -eq "hub-node.cmd"
+    if ($guarded -and (Test-Path -LiteralPath $dest)) {
+      $existingShim = [System.IO.File]::ReadAllText($dest)
+      if ($existingShim -notlike "*app\bin\ah.mjs*" -and $existingShim -notlike "*app/bin/ah.mjs*") {
+        Write-Host "警告：保留已有命令 $dest（它不是本次安装的入口，未覆盖）。"
+        continue
+      }
+    }
+    [System.IO.File]::WriteAllText($dest, $shim, [System.Text.UTF8Encoding]::new($false))
   }
 
   $pathState = Add-UserPathEntry $binDir
@@ -234,11 +303,11 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
     Write-Host "跳过安装 Skill（-SkipSkill）"
   }
 
-  $entryMjs = Join-Path $app "bin\ah.mjs"
   if ($bootstrapMode -eq "hub") {
     $setupArgs = @($entryMjs, "setup", "--role", "hub", "--bus", "sqlite", "--yes", "--auto-token")
     if ($useService) { $setupArgs += "--service" }
     if ($skipSkill) { $setupArgs += "--skip-skill" }
+    if ($installForce) { $setupArgs += "--force" }
     Invoke-Native -File $nodeCmd.Source -ArgumentList $setupArgs
     return
   }
@@ -257,6 +326,7 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
   Write-Host "  2) 接入已有 Hub：                 ah join http://[<token>@]<hub-ip>:8787 --service"
   Write-Host "  3) 自定义交互配置向导：           ah setup"
   Write-Host "命令入口：$binDir"
+  Write-Host "若本机已有旧版 lark-a2a-hub，请把配置放到独立目录再执行 ah up，例如：`$env:HUB_NODE_HOME = `"`$env:USERPROFILE\.a2a-hub`"; ah up --service"
   if ($pathState -eq "added") {
     Write-Host "已加入用户 PATH。用 iex 跑的当前窗口可以直接试 ah；单独开的窗口请新开一个终端。"
   } elseif ($pathState -eq "manual") {

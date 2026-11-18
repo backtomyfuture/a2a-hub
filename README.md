@@ -71,6 +71,12 @@ flowchart LR
 curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --hub
 ```
 
+若这台机器已经装着旧版 lark-a2a-hub（配置在 `~/.hub-node`，origin 往往是 `lark-a2a-hub`），不要直接覆盖。请用独立目录：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | HUB_NODE_HOME="$HOME/.a2a-hub" sh -s -- --hub
+```
+
 安装完成后终端会直接输出：
 - 带免密参数的 Web 控制台地址：`http://<你的IP>:8787/?token=...`（首次打开自动写入浏览器本地存储并清洗地址栏）
 - 供其他机器复制即连的一行接入命令（含 Token，默认 0.0.0.0:8787 监听；加 `--no-service` 可仅在前台运行）。

@@ -4,6 +4,7 @@
 //   Windows：写当前用户的任务计划程序任务（登录触发，无需管理员）
 // --remove 反向卸载。
 
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -16,6 +17,53 @@ function nodeNameOf(configDir) {
   } catch {
     return "default";
   }
+}
+
+// 自启名字历史上只有角色和节点名。两份配置如果节点名相同，
+// 后装的会把先装的 launchd / systemd / 计划任务直接覆盖掉。
+// 默认目录 ~/.hub-node 继续用旧名字，已经装好的 a2a-hub 重跑 service 仍更新同一项。
+// 其它目录改用 ah- 前缀加配置路径摘要，和 hub-node-node.<node> / hub-node-hub.<node> 错开。
+export function isDefaultHubConfigDir(configDir, homeDir = os.homedir()) {
+  return path.resolve(configDir) === path.resolve(homeDir, ".hub-node");
+}
+
+export function configDirTag(configDir) {
+  return crypto.createHash("sha256").update(path.resolve(configDir)).digest("hex").slice(0, 8);
+}
+
+export function launchdLabel(role, node) {
+  return `hub-node-${role}.${node}`;
+}
+
+export function systemdUnitName(role, node) {
+  return `hub-node-${role}-${node}.service`;
+}
+
+// plist / unit 正文里带有 --config 的目录时，说明这个历史名字已经属于本次安装。
+export function unitTextTargetsConfig(text, configDir) {
+  const raw = String(text ?? "");
+  if (!raw) return false;
+  const resolved = path.resolve(configDir);
+  return raw.includes(resolved) || raw.includes(configDir);
+}
+
+export function selectAutostartName({
+  role,
+  node,
+  configDir,
+  homeDir = os.homedir(),
+  legacyOwnedByThisConfig = false,
+  kind = "launchd",
+}) {
+  const useLegacy = legacyOwnedByThisConfig || isDefaultHubConfigDir(configDir, homeDir);
+  const tag = configDirTag(configDir);
+  if (kind === "systemd") {
+    return useLegacy ? systemdUnitName(role, node) : `ah-${role}-${node}-${tag}.service`;
+  }
+  if (kind === "task") {
+    return useLegacy ? `\\lah\\hub-node-${role}.${node}` : `\\lah\\ah-${role}.${node}.${tag}`;
+  }
+  return useLegacy ? launchdLabel(role, node) : `ah-${role}.${node}.${tag}`;
 }
 
 function roleOf(configDir, opts = {}) {
@@ -169,8 +217,9 @@ WantedBy=${isSystem ? "multi-user.target" : "default.target"}
 }
 
 // 任务名跟 LaunchAgent 标签对齐：同一配置目录可以各挂一个 node 与 hub。
-export function windowsTaskName(role, node) {
-  return `\\lah\\hub-node-${role}.${node}`;
+export function windowsTaskName(role, node, configDir, homeDir = os.homedir()) {
+  if (!configDir) return `\\lah\\hub-node-${role}.${node}`;
+  return selectAutostartName({ role, node, configDir, homeDir, kind: "task" });
 }
 
 export function windowsLegacyTaskName(node) {
@@ -337,8 +386,11 @@ function removeFile(file) {
 }
 
 async function registerWindowsService({ configDir, role, node, appBin, logPath, remove }) {
-  const taskName = windowsTaskName(role, node);
+  const taskName = windowsTaskName(role, node, configDir);
+  const roleLegacyName = `\\lah\\hub-node-${role}.${node}`;
   const legacyName = windowsLegacyTaskName(node);
+  // 自定义目录用 ah- 任务名。卸载或重装时不能顺手删掉另一份安装占用的 hub-node-* 任务。
+  const ownsHistoricalName = taskName === roleLegacyName;
   const launcher = windowsLauncherPath(configDir, role, node);
   const starter = windowsStarterPath(configDir, role, node);
   const legacyLauncher = path.join(configDir, "service", `hub-node.${node}.mjs`);
@@ -346,7 +398,7 @@ async function registerWindowsService({ configDir, role, node, appBin, logPath, 
 
   if (remove) {
     await stopWindowsTask(taskName);
-    if (legacyName !== taskName) await stopWindowsTask(legacyName);
+    if (ownsHistoricalName && legacyName !== taskName) await stopWindowsTask(legacyName);
     stopLockedDaemon(configDir);
     for (const file of [launcher, starter, legacyLauncher, legacyStarter]) removeFile(file);
     console.log(`已卸载自启：${taskName}`);
@@ -354,7 +406,7 @@ async function registerWindowsService({ configDir, role, node, appBin, logPath, 
   }
 
   await stopWindowsTask(taskName);
-  if (legacyName !== taskName) await stopWindowsTask(legacyName);
+  if (ownsHistoricalName && legacyName !== taskName) await stopWindowsTask(legacyName);
   stopLockedDaemon(configDir);
   removeFile(legacyLauncher);
   removeFile(legacyStarter);
@@ -407,17 +459,34 @@ export async function service(configDir, { remove = false, role: explicitRole } 
   const logPath = path.join(configDir, "daemon.log");
 
   if (process.platform === "darwin") {
-    const label = `hub-node-${role}.${node}`;
-    const legacyLabel = `hub-node.${node}`;
-    const plistPath = path.join(os.homedir(), "Library", "LaunchAgents", `${label}.plist`);
-    const legacyPlistPath = path.join(os.homedir(), "Library", "LaunchAgents", `${legacyLabel}.plist`);
+    const agentsDir = path.join(os.homedir(), "Library", "LaunchAgents");
+    const historicalLabel = launchdLabel(role, node);
+    const historicalPlistPath = path.join(agentsDir, `${historicalLabel}.plist`);
+    const preRoleLabel = `hub-node.${node}`;
+    const preRolePlistPath = path.join(agentsDir, `${preRoleLabel}.plist`);
+    let owned = false;
+    if (fs.existsSync(historicalPlistPath)) {
+      try { owned = unitTextTargetsConfig(fs.readFileSync(historicalPlistPath, "utf8"), configDir); }
+      catch { /* 读不到就不当作本配置的服务 */ }
+    }
+    const label = selectAutostartName({
+      role, node, configDir, legacyOwnedByThisConfig: owned, kind: "launchd",
+    });
+    const plistPath = path.join(agentsDir, `${label}.plist`);
     const uid = String(process.getuid());
+    const dropLabel = (lab, file) => {
+      run("launchctl", ["bootout", `gui/${uid}/${lab}`], { ignore: true });
+      if (file && fs.existsSync(file)) fs.unlinkSync(file);
+    };
     if (remove) {
-      run("launchctl", ["bootout", `gui/${uid}/${label}`], { ignore: true });
-      if (fs.existsSync(plistPath)) fs.unlinkSync(plistPath);
-      if (legacyPlistPath !== plistPath && fs.existsSync(legacyPlistPath)) {
-        run("launchctl", ["bootout", `gui/${uid}/${legacyLabel}`], { ignore: true });
-        fs.unlinkSync(legacyPlistPath);
+      dropLabel(label, plistPath);
+      // 本配置以前用过历史名字时一并卸掉。别人的 hub-node-* 即使节点名相同也不动。
+      if (label !== historicalLabel && owned) dropLabel(historicalLabel, historicalPlistPath);
+      if (preRoleLabel !== label && fs.existsSync(preRolePlistPath)) {
+        let preOwned = false;
+        try { preOwned = unitTextTargetsConfig(fs.readFileSync(preRolePlistPath, "utf8"), configDir); }
+        catch { /* 读失败就只在默认目录沿用旧的「无角色名也删」行为 */ }
+        if (preOwned || isDefaultHubConfigDir(configDir)) dropLabel(preRoleLabel, preRolePlistPath);
       }
       console.log(`已卸载自启：${label}`);
       return 0;
@@ -435,12 +504,23 @@ export async function service(configDir, { remove = false, role: explicitRole } 
   }
 
   if (process.platform === "linux") {
-    const unit = `hub-node-${role}-${node}.service`;
-    const legacyUnit = `hub-node-${node}.service`;
-    const unitPath = path.join(os.homedir(), ".config", "systemd", "user", unit);
-    const legacyUnitPath = path.join(os.homedir(), ".config", "systemd", "user", legacyUnit);
+    const userUnitDir = path.join(os.homedir(), ".config", "systemd", "user");
+    const historicalUnit = systemdUnitName(role, node);
+    const historicalUnitPath = path.join(userUnitDir, historicalUnit);
+    const preRoleUnit = `hub-node-${node}.service`;
+    const preRoleUnitPath = path.join(userUnitDir, preRoleUnit);
+    let owned = false;
+    if (fs.existsSync(historicalUnitPath)) {
+      try { owned = unitTextTargetsConfig(fs.readFileSync(historicalUnitPath, "utf8"), configDir); }
+      catch { /* 读不到就不当作本配置的服务 */ }
+    }
+    const unit = selectAutostartName({
+      role, node, configDir, legacyOwnedByThisConfig: owned, kind: "systemd",
+    });
+    const unitPath = path.join(userUnitDir, unit);
     const sysUnitPath = `/etc/systemd/system/${unit}`;
-    const legacySysUnitPath = `/etc/systemd/system/${legacyUnit}`;
+    const historicalSysUnitPath = `/etc/systemd/system/${historicalUnit}`;
+    const preRoleSysUnitPath = `/etc/systemd/system/${preRoleUnit}`;
     const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
     let hasSudo = false;
     if (!isRoot) {
@@ -451,24 +531,40 @@ export async function service(configDir, { remove = false, role: explicitRole } 
     }
 
     if (remove) {
-      run("systemctl", ["--user", "disable", "--now", unit], { ignore: true });
-      if (fs.existsSync(unitPath)) fs.unlinkSync(unitPath);
-      if (legacyUnitPath !== unitPath && fs.existsSync(legacyUnitPath)) {
-        run("systemctl", ["--user", "disable", "--now", legacyUnit], { ignore: true });
-        fs.unlinkSync(legacyUnitPath);
+      const dropUserUnit = (name, file) => {
+        run("systemctl", ["--user", "disable", "--now", name], { ignore: true });
+        if (fs.existsSync(file)) fs.unlinkSync(file);
+      };
+      dropUserUnit(unit, unitPath);
+      // 自定义目录只卸自己的单元。历史名字只有正文指向本配置时才动，避免拆掉旧节点。
+      if (unit !== historicalUnit && owned) dropUserUnit(historicalUnit, historicalUnitPath);
+      if (preRoleUnit !== unit && fs.existsSync(preRoleUnitPath)) {
+        let preOwned = false;
+        try { preOwned = unitTextTargetsConfig(fs.readFileSync(preRoleUnitPath, "utf8"), configDir); }
+        catch { /* 读失败则仅默认目录沿用旧卸载范围 */ }
+        if (preOwned || isDefaultHubConfigDir(configDir)) dropUserUnit(preRoleUnit, preRoleUnitPath);
       }
       run("systemctl", ["--user", "daemon-reload"], { ignore: true });
 
+      const sysExtras = [];
+      if (unit !== historicalUnit && owned) sysExtras.push(historicalSysUnitPath);
+      if (preRoleUnit !== unit && isDefaultHubConfigDir(configDir)) sysExtras.push(preRoleSysUnitPath);
       // 系统级卸载尝试
       if (isRoot) {
         run("systemctl", ["disable", "--now", unit], { ignore: true });
+        if (unit !== historicalUnit && owned) run("systemctl", ["disable", "--now", historicalUnit], { ignore: true });
         if (fs.existsSync(sysUnitPath)) fs.unlinkSync(sysUnitPath);
-        if (fs.existsSync(legacySysUnitPath)) fs.unlinkSync(legacySysUnitPath);
+        for (const extra of sysExtras) {
+          if (fs.existsSync(extra)) fs.unlinkSync(extra);
+        }
         run("systemctl", ["daemon-reload"], { ignore: true });
       } else if (hasSudo) {
         try {
           execFileSync("sudo", ["systemctl", "disable", "--now", unit], { stdio: "ignore" });
-          execFileSync("sudo", ["rm", "-f", sysUnitPath, legacySysUnitPath], { stdio: "ignore" });
+          if (unit !== historicalUnit && owned) {
+            execFileSync("sudo", ["systemctl", "disable", "--now", historicalUnit], { stdio: "ignore" });
+          }
+          execFileSync("sudo", ["rm", "-f", sysUnitPath, ...sysExtras], { stdio: "ignore" });
           execFileSync("sudo", ["systemctl", "daemon-reload"], { stdio: "ignore" });
         } catch {}
       }

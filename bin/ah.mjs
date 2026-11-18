@@ -279,13 +279,20 @@ if (cmd === "up") {
     process.exitCode = 1;
   } else {
     const configDir = path.resolve(configDirFrom(rest));
-    const { runSetup } = await import("../src/setup.mjs");
+    const { runSetup, isLegacyFeishuNodeConfig } = await import("../src/setup.mjs");
+    // join 以往总是带 --force，好让重复接入刷新地址。旧飞书配置不能走这条捷径，否则会覆盖生产 node.json。
+    let legacyFeishu = false;
+    try {
+      const raw = JSON.parse(fs.readFileSync(path.join(configDir, "node.json"), "utf8"));
+      legacyFeishu = isLegacyFeishuNodeConfig(raw);
+    } catch { /* 没有可读配置就按普通接入 */ }
+    const userForced = rest.includes("--force");
     const setupArgs = [
       "--role", "node",
       "--bus", "http",
       "--join", joinTarget,
       "--yes",
-      "--force",
+      ...(legacyFeishu && !userForced ? [] : ["--force"]),
       ...forwarded,
     ];
     const setupCode = await runSetup(configDir, setupArgs, APP_DIR);
