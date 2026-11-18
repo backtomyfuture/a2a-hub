@@ -277,10 +277,10 @@ export class LongPollBroker {
   onlineWindowMs(info) {
     const mode = info?.mode || "longpoll";
     if (mode !== "http-poll" && mode !== "webhook") return this.staleNodeMs;
-    const fallback = mode === "webhook" ? DEFAULT_WEBHOOK_WINDOW_MS : DEFAULT_AGENT_WINDOW_MS;
-    const base = info.intervalMs ? info.intervalMs * AGENT_WINDOW_FACTOR : fallback;
-    const cap = mode === "webhook" ? DEFAULT_WEBHOOK_WINDOW_MS : ROSTER_IDLE_MS;
-    return Math.min(cap, Math.max(this.staleNodeMs, MIN_AGENT_WINDOW_MS, base));
+    // Webhook 节点的请求是门铃触发的，间隔不规律；按观测周期估窗口会在两次门铃之间误判离线，所以固定 75 分钟。
+    if (mode === "webhook") return Math.max(this.staleNodeMs, DEFAULT_WEBHOOK_WINDOW_MS);
+    const base = info.intervalMs ? info.intervalMs * AGENT_WINDOW_FACTOR : DEFAULT_AGENT_WINDOW_MS;
+    return Math.min(ROSTER_IDLE_MS, Math.max(this.staleNodeMs, MIN_AGENT_WINDOW_MS, base));
   }
 
   connectedNodes(now = Date.now()) {

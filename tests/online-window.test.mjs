@@ -86,6 +86,17 @@ test("Webhook 节点重启后 70 分钟仍在线，80 分钟无活动离线；�
     broker.touchAgent("paced", { mode: "http-poll" });
     assert.equal(broker._nodes.get("paced").mode, "webhook");
     assert.equal(broker._nodes.get("paced").intervalMs, interval);
+
+    // 门铃触发的 poll 很密，估出的周期很短，也不能把窗口缩到几分钟。
+    broker.touchAgent("bell", { mode: "webhook", receiveFromCard: true });
+    advance(2 * MIN);
+    broker.touchAgent("bell", { mode: "http-poll" });
+    advance(2 * MIN);
+    broker.touchAgent("bell", { mode: "http-poll" });
+    assert.ok(broker._nodes.get("bell").intervalMs < 5 * MIN);
+    assert.equal(broker.onlineWindowMs(broker._nodes.get("bell")), 75 * MIN);
+    advance(60 * MIN);
+    assert.equal(onlineOf(broker, "bell", now()), true);
   });
 });
 
