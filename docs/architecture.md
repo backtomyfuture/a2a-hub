@@ -42,8 +42,8 @@ flowchart TB
 4. **能力按「可达资产」定义，不按所装软件。** 能力注册表
    （AgentCards）每个 Worker 一张名片，专长技能另起一行，本尊脚本技能
    单列。路由只查表；节点只接自己登记且可派发的能力，表外任务明确拒收
-   并说明缺口——能力即边界。纯 Leader Agent（如 Muse）可以 `role=leader` 注册，
-   仅参与在线状态追踪与 `POST /api/v1/tasks` / `GET /api/v1/agents/{node}/updates`。
+   并说明缺口——能力即边界。外部 Leader（如 Muse）以 `role=leader` 注册，
+   既派单、跟 `updates`，也通过 `poll` / `claim` 接派给自己的任务。
 5. **事件推送为主、低频对账为兜底。** 唤醒统一走 HTTP：`longpoll`（`LongPollBroker`
    写后毫秒级唤醒）或 `poll`（短轮询 / 定时扫表），均保留低频（默认 15 分钟）对账扫表作为安全网。
 6. **节点只出不进，Hub 显式鉴权。** 边缘宿主节点与外部 HTTP Agent 只发起出站请求，

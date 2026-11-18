@@ -31,8 +31,8 @@
 
 | 方式 | 机制 | 适用 |
 |---|---|---|
-| `longpoll` | 节点 / Agent 向 Hub 发起出站长轮询（`/api/v1/poll` 或 `/api/v1/agents/:node/poll?timeout=25`；HTTP Leader 循环 `updates?new=1`），写后毫秒级唤醒 | **默认推荐**：Hub、远端宿主节点与常驻 HTTP Agent（`Receive_Mode=event` 或 `http-longpoll`） |
-| `poll` | 定时轮询（宿主守护节点默认 45s；外部 Agent 先跑检查脚本，worker / hybrid 每 2 分钟、leader 每 5 分钟，`WORK` 才短轮询 `?timeout=0`；无脚本时回退 worker 10 分钟、leader 15 分钟） | 无法维持长连接的无状态云端 Agent（`http-poll`）或降级环境 |
+| `longpoll` | 节点 / Agent 向 Hub 发起出站长轮询（`/api/v1/poll` 或 `/api/v1/agents/:node/poll?timeout=25`；HTTP Leader 每轮再拉 `updates?new=1`），写后毫秒级唤醒 | **默认推荐**：Hub、远端宿主节点与常驻 HTTP Agent（`Receive_Mode=event` 或 `http-longpoll`） |
+| `poll` | 定时轮询（宿主守护节点默认 45s；外部 Agent 先每 5 分钟跑检查脚本，`WORK` 才短轮询 `?timeout=0`；无脚本时也是每 5 分钟） | 无法维持长连接的无状态云端 Agent（`http-poll`）或降级环境 |
 | `webhook` | Hub `POST` 门铃到机主登记的 URL（HMAC-SHA256，不跟随重定向，不含指令正文）。接收方验签后用 Agent Token 回网关拉详情；每 30 分钟检查脚本兜底 | 能提供 HTTP 端点的外部 Agent（`Receive_Mode=webhook`） |
 
 宿主守护节点保留低频对账扫表兜底（默认 15 分钟）及面向 `input-required`/`auth-required` 的 `PENDING_RECHECK` 短复查。Webhook 的格式、重试与验签以 [标准 §10.3](standard.md) 为准；Python / Node 标准库示例见 [外部 HTTP Agent 手册](protocol-node-runbook.md)。

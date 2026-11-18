@@ -8,8 +8,8 @@ HTTP Agent 三选一（控制台添加时的 `receive`，只对云端 HTTP 有�
 
 | 接收方式 | `receive` / `Receive_Mode` | 何时选用 |
 |---|---|---|
-| 定时检查 | `poll` / `http-poll` | 默认。平台只能定时叫醒，不能挂住连接，也不能收 HTTP。Worker / Hybrid 每 **2** 分钟、Leader 每 **5** 分钟跑检查脚本；`IDLE` 结束，`WORK` 再执行处理流程。跑不了脚本时回退为 Worker 每 **10** 分钟、Leader 每 **15** 分钟 |
-| 常驻长轮询 | `longpoll` / `http-longpoll` | 进程能一直在线，并且只做**出站**长连接。循环 `poll?timeout=25`（Leader 循环 `updates?new=1`）。不建定时任务，不下载检查脚本。断线按 1 / 3 / 8 / 30 秒退避 |
+| 定时检查 | `poll` / `http-poll` | 默认。平台只能定时叫醒，不能挂住连接，也不能收 HTTP。Worker 与 Leader 都是每 **5** 分钟跑检查脚本；`IDLE` 结束，`WORK` 再执行处理流程。跑不了脚本时也是每 **5** 分钟 |
+| 常驻长轮询 | `longpoll` / `http-longpoll` | 进程能一直在线，并且只做**出站**长连接。循环 `poll?timeout=25`（Leader 每轮再拉 `updates?new=1`）。不建定时任务，不下载检查脚本。断线按 1 / 3 / 8 / 30 秒退避 |
 | Webhook | `webhook` / `webhook` | 有一个机主登记的 HTTP 端点。中台只推门铃，不含指令正文。先验签，再按事件拉详情。另每 **30** 分钟跑一次检查脚本，防止漏推 |
 
 定时检查与 Webhook 兜底都是无上下文：Worker 必须在同一次运行内认领并做完；预计超过 10 分钟，就在这次运行里发 heartbeat。常驻进程可以跨轮心跳，但租约仍是 20 分钟。
@@ -27,15 +27,17 @@ Token 优先放进平台的安全密钥空间（Secrets / Vault / 加密环境�
   `Authorization: Bearer <AGENT_TOKEN>`
   未配置机主 Token 且尚未签发任何 Agent Token 时，接口保持免鉴权。未配置机主 Token 时，控制台拒绝签发 Agent Token。
 - **配套 Skill 模板**（要带上面的 Agent Token）：
-  - Leader：`GET /api/v1/skills/a2a-leader`（仓库 `skills/a2a-leader/SKILL.md`）
+  - Leader（派单并接单）：`GET /api/v1/skills/a2a-leader` 与 `GET /api/v1/skills/a2a-worker`（接单细节在 worker）
   - Worker：`GET /api/v1/skills/a2a-worker`（仓库 `skills/a2a-worker/SKILL.md`）
 - **检查脚本**（同样要带 Agent Token，正文不含 Token）：`GET /api/v1/kit/a2a_check.py`，没有 python3 时用 `GET /api/v1/kit/a2a_check.sh`。仓库文件在 `skills/a2a-check/`。
-- **轻量检查** `GET /api/v1/agents/{node}/check`：只读。worker 返回与 `poll` 相同口径的可认领任务 ID（`tasks`）以及本节点仍在 `working` 的任务（`working`）。leader 返回自持久水位以来 `updates?new=1` 会给出的条数（`updates`，含未处理的 `input-required` / `auth-required`）。**不推进水位**。空闲为 `{"work":false}`。脚本约定：空闲 stdout 一行 `IDLE`（`--silent-idle` 则不输出）且退出码 0；有事先一行 `WORK` 再一行 JSON；出错一行 `ERROR ...`（含 HTTP 状态；401/403 检查 Token，403 且非 JSON 或出现 1010 则检查 User-Agent / Cloudflare）且退出码 2。请求带浏览器 User-Agent，超时 25 秒。Token 读取顺序：`A2A_HUB_TOKEN`、`--token-file`、`--token`。
-- **不能越权**：路径、查询参数 `node`/`from`、请求头 `X-A2A-Node` 或 body 里的 `node`/`from` 必须是 Token 绑定的节点，否则 `403`。省略 body 里的 `node`/`from` 时，服务端补成绑定节点。Agent 身份不能调用 `/api/v1/approvals/*`、`/api/v1/admin/agents`、`/api/v1/admin/tokens*`、`/api/v1/admin/webhooks*`、`POST /api/v1/admin/nodes/:node/receive`、`/api/v1/admin/commands-snippet`、`DELETE /api/v1/admin/cards/:capId`、`/api/v1/schedules`、`/api/v1/state`、`/api/v1/tables/*`、`/api/v1/poll`。Webhook URL 只能由机主配置。`worker` 不能派单或看 updates；`leader` 不能 claim。`scopes` 含 `admin` 的 leader 可以代机主接纳名片、改显示名、`POST /api/v1/admin/cards` 添加能力，并为其他节点生成接入提示词。任何角色都可以 `PUT`/`DELETE` 自己的 `/api/v1/agents/{node}/schedules/{id}`（只登记展示，中台不据此触发）。
+- **轻量检查** `GET /api/v1/agents/{node}/check`：只读。worker 返回与 `poll` 相同口径的可认领任务 ID（`tasks`）以及本节点仍在 `working` 的任务（`working`）。leader 同时返回这两项，以及自持久水位以来 `updates?new=1` 会给出的条数（`updates`，含未处理的 `input-required` / `auth-required`）。**不推进水位**。空闲为 `{"work":false}`。脚本约定：空闲 stdout 一行 `IDLE`（`--silent-idle` 则不输出）且退出码 0；有事先一行 `WORK` 再一行 JSON；出错一行 `ERROR ...`（含 HTTP 状态；401/403 检查 Token，403 且非 JSON 或出现 1010 则检查 User-Agent / Cloudflare）且退出码 2。请求带浏览器 User-Agent，超时 25 秒。Token 读取顺序：`A2A_HUB_TOKEN`、`--token-file`、`--token`。频率是每 5 分钟。
+- **不能越权**：路径、查询参数 `node`/`from`、请求头 `X-A2A-Node` 或 body 里的 `node`/`from` 必须是 Token 绑定的节点，否则 `403`。省略 body 里的 `node`/`from` 时，服务端补成绑定节点。Agent 身份不能调用 `/api/v1/approvals/*`、`/api/v1/admin/agents`、`/api/v1/admin/tokens*`、`/api/v1/admin/webhooks*`、`/api/v1/admin/commands-snippet`、`DELETE /api/v1/admin/cards/:capId`、`/api/v1/schedules`、`/api/v1/state`、`/api/v1/tables/*`、`/api/v1/poll`。Webhook URL 与密钥只能由机主配置。`worker` 不能派单或看 updates。`leader` 可以派单，也可以 `poll` / `claim`。旧值 `hybrid` 按 leader 处理。`scopes` 含 `admin` 的 leader 可以代机主接纳名片、改显示名、`POST /api/v1/admin/cards` 添加能力，并为其他节点生成接入提示词。任何角色都可以 `PUT`/`DELETE` 自己的 `/api/v1/agents/{node}/schedules/{id}`（只登记展示，中台不据此触发）。
 
 ---
 
-## 二、注册 Agent（Leader / Worker / Hybrid）
+## 二、注册 Agent（Leader / Worker）
+
+角色只有两种：`worker` 只接单，`leader` 派单并接单。请求里的旧值 `hybrid` 仍接受，按 `leader` 处理。新签发的 Token 不再写 `hybrid`。
 
 ```http
 POST /api/v1/agents/register
@@ -61,10 +63,10 @@ Content-Type: application/json
   ]
 }
 ```
-- 注册后会在 `AgentCards` 写入 `Available=online` 名片。`register` 不写 `Admission`：新名片按待接纳，机主在控制台接纳后才收单。控制台「添加 Agent」预建的 worker/hybrid 名片已经是 `admitted`，之后再 `register` 也不会改掉接纳状态。
-- 若省略 `caps`（且 `role !== "leader"`），默认注册一张通用 `agent` 能力名片。
+- 注册后会在 `AgentCards` 写入 `Available=online` 名片。显式 `caps` 的 `register` 不写 `Admission`：新名片按待接纳，机主在控制台接纳后才收单。控制台「添加 Agent」预建的 worker / leader 名片已经是 `admitted`，之后再 `register` 也不会改掉接纳状态。
+- 若省略 `caps` 且角色是 `worker`，默认注册一张通用 `agent` 能力名片，新卡按待接纳。
 
-### 2. 注册纯 Leader（例如 Muse 只派单与跟单）
+### 2. 注册 Leader（例如 Muse：派单、跟单，并接派给自己的任务）
 ```json
 {
   "node": "muse",
@@ -74,17 +76,17 @@ Content-Type: application/json
   "node_desc": "Muse 主调度 Leader Agent"
 }
 ```
-- `role: "leader"` 默认不生成被动接单的能力名片（`cards: []`）。没有名片时，超过 30 分钟无活动就不进 `GET /api/v1/agents` 名册；每 15 分钟跑一次 updates 或 register 即可保持可见。内存里的在线记录超过 24 小时无活动会清除，已入库的名片不受影响。
-- 如希望别人也能给 Muse 派单，可将 `role` 设为 `"hybrid"` 或在 `caps` 中显式声明能力。
-- 常驻长轮询把 `receive_mode` 写成 `"http-longpoll"`。Webhook 写成 `"webhook"`。控制台按添加时的接收方式预写；自行 `register` 时请与机主选的方式一致。`register` 不校验枚举，原样写入 `Receive_Mode`。
+- 省略 `caps`（或给空数组）时，中台补一张可派单的身份名片：`CAP-<node>-agent`，`Skill_ID=agent`，`Dispatchable=Yes`，新建时 `Admission=admitted`，Metadata `role=leader`。别人因此可以把任务派给这个 Leader。再次注册不覆盖已有 `Admission`。显式 `caps` 按申报的能力登记，不另造这张名片。
+- 没有名片且超过 30 分钟无活动的在线记录不进 `GET /api/v1/agents` 名册。内存里的在线记录超过 24 小时无活动会清除，已入库的名片不受影响。未知唤醒周期时，距上次报到 12.5 分钟内算在线。
+- 常驻长轮询把 `receive_mode` 写成 `"http-longpoll"`。Webhook 写成 `"webhook"`。控制台按添加时的接收方式预写；自行 `register` 时请与机主选的方式一致。节点已有机主 Webhook 时强制为 `webhook`。自报 `webhook` 但机主未配置时写成 `http-poll`，并警告「Webhook 需机主在控制台开启」。
 
 查询全网在线节点与外部 Agent：`GET /api/v1/agents`
 
 ### 3. 收到 Webhook 门铃
 
-中台 `POST` 到机主登记的 URL。请求头与正文见 [标准 §10.3](standard.md)。`event=ping` 验签通过后直接返回 2xx。`task.assigned` 用下面的 `poll?timeout=0` 取单再 `claim`（Leader 忽略）。`task.updated` 用 `updates?new=1`（Worker 忽略）。验签失败或时间窗外返回非 2xx，中台会重试。
+中台 `POST` 到机主登记的 URL。请求头与正文见 [标准 §10.3](standard.md)。默认另带 `Authorization: Bearer <接收端密钥>`；机主填了自定义头名时，该头的值是密钥原文。`event=ping` 验签通过后直接返回 2xx。`task.assigned` 用 `poll?timeout=0` 取单再 `claim`（Leader 与 Worker 都要）。`task.updated` 用 `updates?new=1`（Worker 忽略）。验签失败或时间窗外返回非 2xx，中台会重试。
 
-密钥放在 `A2A_HUB_WEBHOOK_SECRET`。下面只用标准库，`raw_body` 必须是原始字节或原始字符串。
+密钥配在接收端，由机主登记到中台。不要再保存一份名为 `A2A_HUB_WEBHOOK_SECRET` 的中台密钥。自建接收端可以验签；只把正文当触发上下文的可以不验。下面只用标准库，`raw_body` 必须是原始字节或原始字符串，`secret` 用接收端自己的那把密钥。
 
 Python：
 

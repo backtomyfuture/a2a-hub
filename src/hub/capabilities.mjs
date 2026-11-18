@@ -12,14 +12,10 @@ import {
   resolveScheduleTz,
 } from "../schedule-cron.mjs";
 import {
-  buildOnboarding,
   httpError,
-  receiveModeFor,
   validateNodeName,
   validateProfileFields,
-  validateReceive,
 } from "./admission.mjs";
-import { validateWebhookUrl } from "./webhooks.mjs";
 
 const HTTP_RECEIVE_MODES = new Set(["http-poll", "http-longpoll", "webhook"]);
 const SIDE_EFFECTS = new Set(["read", "write"]);
@@ -69,16 +65,6 @@ export function nodeStoredReceiveMode(cards, node) {
   return modes.length === 1 ? modes[0] : "";
 }
 
-function roleFromCardsOrToken(cards, tokenStore, node) {
-  for (const card of cards) {
-    const role = cardMetadata(card).role;
-    if (role) return String(role);
-  }
-  const fromToken = tokenStore?.get?.(node)?.role;
-  if (fromToken) return String(fromToken);
-  return "worker";
-}
-
 // 只改接收方式两处，其余 Metadata 原样留下。已经一致的名片不写，避免无意义的序号跳动。
 async function writeReceiveMode(bus, cards, receiveMode) {
   let updated = 0;
@@ -98,70 +84,6 @@ async function writeReceiveMode(bus, cards, receiveMode) {
 export async function alignNodeReceiveMode(bus, node, receiveMode) {
   const cards = await bus.listRecords(bus.tables.agentCards);
   return writeReceiveMode(bus, nodeCards(cards, node), receiveMode);
-}
-
-const HOST_RECEIVE_ERROR = "宿主节点由 ah daemon 常驻长连接，不能切换接收方式";
-
-// 接收方式是节点级三选一。切到 webhook 才允许有推送配置，切走必须删掉，避免名片和门铃各说各话。
-export async function switchNodeReceive({
-  bus,
-  tokenStore,
-  webhookStore,
-  node: rawNode,
-  body,
-  hubUrl,
-  authRequired = false,
-} = {}) {
-  if (!body || typeof body !== "object" || Array.isArray(body)) {
-    throw httpError(400, "请求体必须是 JSON 对象");
-  }
-  const node = validateNodeName(rawNode);
-  const rawReceive = String(body.receive ?? "").trim();
-  if (!rawReceive) throw httpError(400, "receive 只能是 poll / longpoll / webhook");
-  const receive = validateReceive(rawReceive);
-  const cards = await bus.listRecords(bus.tables.agentCards);
-  if (classifyNode(node, cards, tokenStore) !== "http") {
-    throw httpError(409, HOST_RECEIVE_ERROR);
-  }
-  const receiveMode = receiveModeFor(receive);
-  const mine = nodeCards(cards, node);
-
-  let webhookPayload = null;
-  let webhookSecret = "";
-  if (receive === "webhook") {
-    if (!webhookStore) throw httpError(500, "未配置 configDir，无法保存 Webhook");
-    const url = validateWebhookUrl(body.webhook_url);
-    const saved = webhookStore.put({ node, url });
-    webhookPayload = { url: saved.hook.url };
-    // 密钥只在新建时交出来。节点上已经有 Webhook 时，换 URL 不轮换、也不再显示旧密钥。
-    if (saved.secret) {
-      webhookPayload.secret = saved.secret;
-      webhookSecret = saved.secret;
-    }
-  } else if (webhookStore) {
-    webhookStore.remove(node);
-  }
-
-  const cardsUpdated = await writeReceiveMode(bus, mine, receiveMode);
-  const onboarding = buildOnboarding({
-    hubUrl,
-    node,
-    access: "http",
-    role: roleFromCardsOrToken(mine, tokenStore, node),
-    authRequired,
-    receive,
-    webhookSecret,
-  });
-  const payload = {
-    ok: true,
-    node,
-    receive,
-    receive_mode: receiveMode,
-    cards_updated: cardsUpdated,
-    onboarding,
-  };
-  if (webhookPayload) payload.webhook = webhookPayload;
-  return payload;
 }
 
 export function validateSkillId(raw) {

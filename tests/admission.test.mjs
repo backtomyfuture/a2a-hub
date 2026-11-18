@@ -11,9 +11,11 @@ import {
   ADMISSION_VALUES,
   admissionOf,
   buildOnboarding,
+  ensureLeaderIdentityCards,
   formatAgentCard,
   isAdmitted,
 } from "../src/hub/admission.mjs";
+import { AgentTokenStore } from "../src/hub/agent-tokens.mjs";
 import { createTask } from "../src/hub/create.mjs";
 import { createLoop } from "../src/hub/loop.mjs";
 import { inventory } from "../src/inventory.mjs";
@@ -88,7 +90,7 @@ test("纯函数：buildOnboarding 协议 Skill 映射、真实 join 参数与 To
   const realToken = "real-secret-never-appear";
   const cases = [
     { access: "http", role: "worker", expectedSkills: ["a2a-worker"] },
-    { access: "http", role: "leader", expectedSkills: ["a2a-leader"] },
+    { access: "http", role: "leader", expectedSkills: ["a2a-worker", "a2a-leader"] },
     { access: "http", role: "hybrid", expectedSkills: ["a2a-worker", "a2a-leader"] },
     { access: "inbox", role: "worker", expectedSkills: ["ah-inbox"] },
     { access: "host", role: "worker", expectedSkills: [] },
@@ -157,14 +159,14 @@ test("http 接入提示词改为脚本门控，host/inbox 仍是原来的句子"
   assert.match(httpWorker.prompt, /安全密钥空间/);
   assert.match(httpWorker.prompt, /https:\/\/hub\.example\/api\/v1\/kit\/a2a_check\.py/);
   assert.match(httpWorker.prompt, /a2a_check\.sh/);
-  assert.match(httpWorker.prompt, /每 2 分钟/);
+  assert.match(httpWorker.prompt, /每 5 分钟/);
   assert.match(httpWorker.prompt, /IDLE 就立即结束/);
   assert.match(httpWorker.prompt, /--silent-idle/);
   assert.match(httpWorker.prompt, /【回退】/);
-  assert.match(httpWorker.prompt, /每 10 分钟直接执行上面的【处理流程】/);
+  assert.match(httpWorker.prompt, /每 5 分钟直接执行上面的【处理流程】/);
   assert.match(httpWorker.prompt, /\$A2A_HUB_TOKEN/);
   assert.equal(httpWorker.prompt.split(secret).length - 1, 1);
-  assert.match(httpWorker.steps.join("\n"), /每 2 分钟/);
+  assert.match(httpWorker.steps.join("\n"), /每 5 分钟/);
   assert.match(httpWorker.steps.join("\n"), /a2a_check\.py/);
 
   const leader = buildOnboarding({
@@ -176,7 +178,10 @@ test("http 接入提示词改为脚本门控，host/inbox 仍是原来的句子"
     token: secret,
   });
   assert.match(leader.prompt, /每 5 分钟/);
-  assert.match(leader.prompt, /每 15 分钟直接执行上面的【处理流程】/);
+  assert.match(leader.prompt, /每 5 分钟直接执行上面的【处理流程】/);
+  assert.match(leader.prompt, /poll\?timeout=0/);
+  assert.match(leader.prompt, /updates\?new=1/);
+  assert.equal(leader.prompt.includes("hybrid"), false);
   assert.equal(leader.prompt.split(secret).length - 1, 1);
 
   const hybrid = buildOnboarding({
@@ -186,12 +191,13 @@ test("http 接入提示词改为脚本门控，host/inbox 仍是原来的句子"
     role: "hybrid",
     authRequired: true,
   });
-  assert.match(hybrid.prompt, /每 2 分钟/);
+  assert.match(hybrid.prompt, /每 5 分钟/);
   assert.match(hybrid.prompt, /<AH_API_TOKEN>/);
-  assert.match(hybrid.prompt, /每 10 分钟执行【处理流程】的 Worker 段/);
-  assert.match(hybrid.prompt, /每 15 分钟执行 Leader 段/);
+  assert.match(hybrid.prompt, /每 5 分钟直接执行上面的【处理流程】/);
   assert.match(hybrid.prompt, /本段是取单与回执/);
   assert.match(hybrid.prompt, /本段是跟单与派单/);
+  assert.match(hybrid.prompt, /"role":"leader"/);
+  assert.equal(hybrid.prompt.includes("hybrid"), false);
   assert.match(hybrid.prompt, /a2a-hub-both-流程\.md/);
 
   const host = buildOnboarding({
@@ -232,7 +238,7 @@ test("接入提示词按接收方式区分，host/inbox 说明常驻长连接和
     receive: "poll",
   });
   assert.match(poll.prompt, /"receive_mode":"http-poll"/);
-  assert.match(poll.prompt, /每 2 分钟/);
+  assert.match(poll.prompt, /每 5 分钟/);
   assert.equal(poll.prompt.includes("http-longpoll"), false);
   assert.equal(poll.prompt.includes("A2A_HUB_WEBHOOK_SECRET"), false);
   assert.equal(poll.steps.join("\n").includes("名片墙"), false);
@@ -251,7 +257,7 @@ test("接入提示词按接收方式区分，host/inbox 说明常驻长连接和
   assert.match(longpoll.prompt, /1 秒、3 秒、8 秒、30 秒/);
   assert.match(longpoll.prompt, /不要下载或运行 a2a_check\.py/);
   assert.match(longpoll.prompt, /heartbeat/);
-  assert.equal(longpoll.prompt.includes("每 2 分钟"), false);
+  assert.equal(longpoll.prompt.includes("每 5 分钟"), false);
   assert.equal(longpoll.prompt.includes('"receive_mode":"http-poll"'), false);
   assert.equal(longpoll.prompt.split(secret).length - 1, 1);
 
@@ -264,7 +270,8 @@ test("接入提示词按接收方式区分，host/inbox 说明常驻长连接和
     receive: "longpoll",
   });
   assert.match(leaderLoop.prompt, /updates\?new=1/);
-  assert.match(leaderLoop.prompt, /不要调用 poll 或 claim/);
+  assert.match(leaderLoop.prompt, /poll\?timeout=25/);
+  assert.equal(leaderLoop.prompt.includes("不要调用 poll 或 claim"), false);
   assert.match(leaderLoop.prompt, /1 秒、3 秒、8 秒、30 秒/);
   assert.equal(leaderLoop.prompt.includes("a2a_check.py --hub"), false);
 
@@ -292,7 +299,7 @@ test("接入提示词按接收方式区分，host/inbox 说明常驻长连接和
   assert.match(webhook.prompt, /HMAC-SHA256/);
   assert.match(webhook.prompt, /5 分钟/);
   assert.match(webhook.prompt, /300 秒/);
-  assert.match(webhook.prompt, /A2A_HUB_WEBHOOK_SECRET/);
+  assert.match(webhook.prompt, /不要再保存一份名为 A2A_HUB_WEBHOOK_SECRET/);
   assert.match(webhook.prompt, /timestamp/);
   assert.match(webhook.prompt, /rawBody/);
   assert.match(webhook.prompt, /poll\?timeout=0/);
@@ -300,7 +307,7 @@ test("接入提示词按接收方式区分，host/inbox 说明常驻长连接和
   assert.match(webhook.prompt, /不含指令正文/);
   assert.match(webhook.prompt, /每 30 分钟/);
   assert.match(webhook.prompt, /a2a_check\.py/);
-  assert.equal(webhook.prompt.split(webhookSecret).length - 1, 1);
+  assert.equal(webhook.prompt.includes(webhookSecret), false);
   assert.equal(webhook.prompt.split(secret).length - 1, 1);
   assert.equal(webhook.steps.join("\n").includes(webhookSecret), false);
 
@@ -311,8 +318,8 @@ test("接入提示词按接收方式区分，host/inbox 说明常驻长连接和
     role: "worker",
     receive: "webhook",
   });
-  assert.match(webhookNoSecret.prompt, /A2A_HUB_WEBHOOK_SECRET/);
-  assert.match(webhookNoSecret.prompt, /向机主索取/);
+  assert.match(webhookNoSecret.prompt, /不要再保存一份名为 A2A_HUB_WEBHOOK_SECRET/);
+  assert.equal(webhookNoSecret.prompt.includes("向机主索取"), false);
   assert.equal(webhookNoSecret.prompt.includes("这一次的明文 Webhook 密钥"), false);
   assert.match(webhookNoSecret.prompt, /忽略 task\.updated/);
 
@@ -587,7 +594,8 @@ test("HTTP 管理端点：register 不覆盖 Admission、预建槽位命中同�
     assert.equal(addHttp.data.card.availability, "offline");
     assert.equal(addHttp.data.card.display_name, "云端缪斯");
     assert.equal(addHttp.data.card.admin_note, "预建槽位");
-    assert.equal(addHttp.data.card.role, "hybrid");
+    assert.equal(addHttp.data.card.role, "leader");
+    assert.equal(addHttp.data.card.dispatchable, "Yes");
     assert.deepEqual(addHttp.data.onboarding.skills.map((s) => s.name), ["a2a-worker", "a2a-leader"]);
     // onboarding 绝不含真实 token，且 host 来自请求 Host 头
     assert.equal(JSON.stringify(addHttp.data.onboarding).includes(apiToken), false);
@@ -617,9 +625,20 @@ test("HTTP 管理端点：register 不覆盖 Admission、预建槽位命中同�
     assert.equal(allCards.filter((c) => f1(c, "Node") === "muse-worker").length, 1);
     assert.equal(f1(allCards.find((c) => f1(c, "Node") === "muse-worker"), "Availability"), "online");
 
-    // 其他组合不建卡（http+leader / host / inbox）
+    const lead = await apiJson(baseUrl, "/api/v1/admin/agents", {
+      method: "POST",
+      token: apiToken,
+      body: { node: "lead-1", access: "http", role: "leader" },
+    });
+    assert.equal(lead.status, 200);
+    assert.equal(lead.data.card.cap_id, capIdOf("agent", {}, "lead-1"));
+    assert.equal(lead.data.card.skill_id, "agent");
+    assert.equal(lead.data.card.dispatchable, "Yes");
+    assert.equal(lead.data.card.admission, "admitted");
+    assert.equal(lead.data.card.role, "leader");
+    assert.equal(lead.data.onboarding.prompt.includes("hybrid"), false);
+
     for (const combo of [
-      { node: "lead-1", access: "http", role: "leader" },
       { node: "host-1", access: "host", role: "worker" },
       { node: "inbox-1", access: "inbox", role: "worker" },
     ]) {
@@ -765,6 +784,56 @@ test("inventory 输出每张名片包含 Admission=<值>", async () => {
     const output = lines.join("\n");
     assert.match(output, /CAP-inv-1.*Admission=pending/);
     assert.match(output, /CAP-inv-2.*Admission=admitted/);
+  });
+});
+
+test("启动迁移给没有名片的 leader/hybrid 补可派单身份名片，不覆盖已有 Admission", async () => {
+  await withTemp(async (dir) => {
+    fs.writeFileSync(path.join(dir, "agent_tokens.json"), `${JSON.stringify({
+      version: 1,
+      tokens: [
+        { node: "old-hybrid", role: "hybrid", scopes: [], hash: "h1", prefix: "aht_hybrid", created_at: "2026-01-01T00:00:00.000Z", last_used_at: null },
+        { node: "kept", role: "leader", scopes: [], hash: "h2", prefix: "aht_kept01", created_at: "2026-01-01T00:00:00.000Z", last_used_at: null },
+        { node: "plain", role: "worker", scopes: [], hash: "h3", prefix: "aht_worker", created_at: "2026-01-01T00:00:00.000Z", last_used_at: null },
+      ],
+    }, null, 2)}\n`, { mode: 0o600 });
+    const broker = new LongPollBroker();
+    const bus = new SqliteBus({ dbPath: path.join(dir, "hub.db"), tables: DEFAULT_TABLES, broker });
+    await bus.createRecord(DEFAULT_TABLES.agentCards, {
+      Cap_ID: capIdOf("agent", {}, "kept"),
+      Node: "kept",
+      Skill_ID: "agent",
+      Dispatchable: "No",
+      Admission: "rejected",
+      Receive_Mode: "http-poll",
+      Metadata: JSON.stringify({ kind: "agent", role: "leader" }),
+    });
+    const httpHandle = await startHubHttpServer({
+      cfg: { node: "hub", configDir: dir, listen: "127.0.0.1:0", apiToken: "owner-token" },
+      bus,
+      broker,
+      log: () => {},
+    });
+    try {
+      const cards = await bus.listRecords(DEFAULT_TABLES.agentCards);
+      const hybrid = cards.filter((card) => f1(card, "Node") === "old-hybrid");
+      assert.equal(hybrid.length, 1);
+      assert.equal(f1(hybrid[0], "Cap_ID"), capIdOf("agent", {}, "old-hybrid"));
+      assert.equal(f1(hybrid[0], "Skill_ID"), "agent");
+      assert.equal(f1(hybrid[0], "Dispatchable"), "Yes");
+      assert.equal(f1(hybrid[0], "Admission"), "admitted");
+      assert.equal(JSON.parse(f1(hybrid[0], "Metadata")).role, "leader");
+      const kept = cards.find((card) => f1(card, "Node") === "kept");
+      assert.equal(f1(kept, "Admission"), "rejected");
+      assert.equal(f1(kept, "Dispatchable"), "No");
+      assert.equal(cards.some((card) => f1(card, "Node") === "plain"), false);
+      const again = await ensureLeaderIdentityCards({ bus, tokenStore: new AgentTokenStore(dir) });
+      assert.equal(again, 0);
+      assert.equal((await bus.listRecords(DEFAULT_TABLES.agentCards)).filter((card) => f1(card, "Node") === "old-hybrid").length, 1);
+    } finally {
+      await httpHandle.close();
+      bus.close();
+    }
   });
 });
 

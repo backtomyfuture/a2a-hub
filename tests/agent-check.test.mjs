@@ -171,13 +171,15 @@ test("GET check 只读：worker 任务、working、leader 计数且不推进水�
     }));
 
     const rosterBefore = await apiJson(baseUrl, "/api/v1/agents", { token: apiToken });
-    assert.equal(rosterBefore.data.agents.some((agent) => agent.node === "muse"), false);
+    const museBefore = rosterBefore.data.agents.find((agent) => agent.node === "muse");
+    assert.ok(museBefore);
+    assert.equal(museBefore.online, false);
 
     const leaderCheck = await apiJson(baseUrl, "/api/v1/agents/muse/check", { token: leaderToken });
     assert.equal(leaderCheck.status, 200);
     assert.equal(leaderCheck.data.work, true);
     assert.equal(leaderCheck.data.updates, 2);
-    assert.equal(Object.hasOwn(leaderCheck.data, "tasks"), false);
+    assert.deepEqual(leaderCheck.data.tasks, []);
     assert.equal(await bus.getMeta("updates_watermark:muse"), beforeMeta);
 
     const rosterAfter = await apiJson(baseUrl, "/api/v1/agents", { token: apiToken });
@@ -209,7 +211,7 @@ test("GET check 只读：worker 任务、working、leader 计数且不推进水�
 
     const ownerLeaderOnly = await apiJson(baseUrl, "/api/v1/agents/muse/check?role=leader", { token: apiToken });
     assert.equal(ownerLeaderOnly.data.updates >= 1, true);
-    assert.equal(Object.hasOwn(ownerLeaderOnly.data, "tasks"), false);
+    assert.deepEqual(ownerLeaderOnly.data.tasks, []);
 
     const foreign = await apiJson(baseUrl, "/api/v1/agents/muse/check", { token: workerToken });
     assert.equal(foreign.status, 403);

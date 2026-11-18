@@ -12,7 +12,7 @@ import { pickSignedDecision, publicKeyOf } from "../approval-sign.mjs";
 import { f1 } from "../bus/tables.mjs";
 import { capIdOf } from "../config.mjs";
 import { agentCanSeeTask, assertAgentRoute } from "../hub/agent-access.mjs";
-import { admissionOf, httpError, validateNodeName } from "../hub/admission.mjs";
+import { admissionOf, actsAsLeader, httpError, presetHttpCardFields, validateNodeName } from "../hub/admission.mjs";
 import { alignNodeReceiveMode, removeHttpAgentSchedule, saveHttpAgentSchedule } from "../hub/capabilities.mjs";
 import { rosterNodeVisible } from "./longpoll-broker.mjs";
 import { submitAgentReceipt } from "../inbox.mjs";
@@ -110,23 +110,17 @@ function selectLeaderUpdates(updates, since) {
 // 机主用 query role，缺省 worker 与 leader 都算。Agent Token 只用绑定角色，避免用查询参数扩权。
 function checkScopeOf(principal, searchParams) {
   if (principal?.kind === "agent") {
-    const role = principal.role === "leader" || principal.role === "hybrid" ? principal.role : "worker";
-    return {
-      role,
-      worker: role === "worker" || role === "hybrid",
-      leader: role === "leader" || role === "hybrid",
-    };
+    const role = principal.role || "worker";
+    const leader = actsAsLeader(role);
+    return { role, worker: role === "worker" || leader, leader };
   }
   const raw = String(searchParams?.get("role") ?? "").trim().toLowerCase();
-  if (!raw) return { role: "hybrid", worker: true, leader: true };
+  if (!raw) return { role: "leader", worker: true, leader: true };
   if (raw !== "worker" && raw !== "leader" && raw !== "hybrid") {
     throw httpError(400, "role 只能是 worker / leader / hybrid");
   }
-  return {
-    role: raw,
-    worker: raw === "worker" || raw === "hybrid",
-    leader: raw === "leader" || raw === "hybrid",
-  };
+  const leader = actsAsLeader(raw);
+  return { role: raw, worker: raw === "worker" || leader, leader };
 }
 
 // 2×2 四类 Skill 目录：控制端/执行端 × 有 ah CLI / 纯 HTTP，避免向工作机或云端 Agent 下发无关指令
@@ -827,16 +821,24 @@ export async function handleAgentGatewayRequest({
     const worker = String(body.worker ?? "").trim();
 
     let capSpecs = Array.isArray(body.caps) ? body.caps : null;
-    if (!capSpecs) {
-      capSpecs = role === "leader"
-        ? []
-        : [{
-            skill_id: "agent",
-            skill_name: body.skill_name || `${node} Agent`,
-            description: nodeDesc || `外部 HTTP Agent (${node})`,
-            side_effect: body.side_effect || "write",
-            approval_class: body.approval_class || "auto",
-          }];
+    // 不报能力的 leader（含旧 hybrid）补一张可派单的身份名片。显式 caps 仍按对方申报的能力写，不另造这张。
+    const identityOnly = actsAsLeader(role) && (!capSpecs || capSpecs.length === 0);
+    if (identityOnly) {
+      capSpecs = [{
+        skill_id: "agent",
+        skill_name: body.skill_name || `${node} Agent`,
+        description: nodeDesc || `Leader 身份名片 (${node})`,
+        side_effect: body.side_effect || "write",
+        approval_class: body.approval_class || "auto",
+      }];
+    } else if (!capSpecs) {
+      capSpecs = [{
+        skill_id: "agent",
+        skill_name: body.skill_name || `${node} Agent`,
+        description: nodeDesc || `外部 HTTP Agent (${node})`,
+        side_effect: body.side_effect || "write",
+        approval_class: body.approval_class || "auto",
+      }];
     }
 
     const existingCards = await bus.listRecords(bus.tables.agentCards);
@@ -845,38 +847,68 @@ export async function handleAgentGatewayRequest({
     for (const spec of capSpecs) {
       const skillId = String(spec?.skill_id ?? spec?.skill ?? "").trim();
       if (!skillId) throw httpError(400, "caps 每项必须包含 skill_id");
-      const specWorker = String(spec?.worker ?? worker ?? "").trim();
+      const specWorker = identityOnly ? "" : String(spec?.worker ?? worker ?? "").trim();
       const capKey = specWorker ? `${specWorker}/${skillId}` : skillId;
-      const capId = String(spec?.cap_id ?? "").trim()
-        || capIdOf(capKey, { ...(specWorker ? { worker: specWorker, skill: skillId } : {}) }, capPrefix);
+      // 身份名片固定 CAP-<node>-agent，不跟调用方的 cap_prefix 走。
+      const capId = identityOnly
+        ? capIdOf("agent", {}, node)
+        : (String(spec?.cap_id ?? "").trim()
+          || capIdOf(capKey, { ...(specWorker ? { worker: specWorker, skill: skillId } : {}) }, capPrefix));
 
-      // 绝不从 register 写 Admission / Display_Name / Admin_Note，保持机主接纳权与备注不被 Agent 自报覆盖。
-      const fields = {
-        Cap_ID: capId,
-        Node: node,
-        Worker: specWorker,
-        Skill_ID: skillId,
-        Skill_Name: String(spec?.skill_name ?? spec?.name ?? skillId),
-        Description: String(spec?.description ?? spec?.desc ?? nodeDesc),
-        Side_Effect: String(spec?.side_effect ?? "write"),
-        Approval_Class: String(spec?.approval_class ?? "auto"),
-        Availability: "online",
-        Dispatchable: body.dispatchable === false || spec?.dispatchable === false ? "No" : "Yes",
-        Receive_Mode: receiveMode,
-        Daemon_Version: version,
-        Node_Desc: nodeDesc,
-        Zone: zone,
-        Updated_At: nowMinute(),
-        Metadata: JSON.stringify({ kind, role, mode: receiveMode, worker: specWorker }),
-      };
+      const storedRole = identityOnly ? "leader" : role;
+      // 身份名片新建时直接 admitted。更新不写 Admission / Display_Name / Admin_Note，避免盖掉机主决定。
+      const preset = identityOnly
+        ? presetHttpCardFields({
+          node,
+          role: "leader",
+          receiveMode,
+          description: String(spec?.description ?? spec?.desc ?? nodeDesc),
+          availability: "online",
+          updatedAt: nowMinute(),
+        })
+        : null;
+      const fields = preset
+        ? {
+          ...preset,
+          Skill_Name: String(spec?.skill_name ?? spec?.name ?? skillId),
+          Description: String(spec?.description ?? spec?.desc ?? (nodeDesc || preset.Description)),
+          Side_Effect: String(spec?.side_effect ?? "write"),
+          Approval_Class: String(spec?.approval_class ?? "auto"),
+          Daemon_Version: version,
+          Node_Desc: nodeDesc,
+          Zone: zone,
+          Dispatchable: "Yes",
+        }
+        : {
+          Cap_ID: capId,
+          Node: node,
+          Worker: specWorker,
+          Skill_ID: skillId,
+          Skill_Name: String(spec?.skill_name ?? spec?.name ?? skillId),
+          Description: String(spec?.description ?? spec?.desc ?? nodeDesc),
+          Side_Effect: String(spec?.side_effect ?? "write"),
+          Approval_Class: String(spec?.approval_class ?? "auto"),
+          Availability: "online",
+          Dispatchable: body.dispatchable === false || spec?.dispatchable === false ? "No" : "Yes",
+          Receive_Mode: receiveMode,
+          Daemon_Version: version,
+          Node_Desc: nodeDesc,
+          Zone: zone,
+          Updated_At: nowMinute(),
+          Metadata: JSON.stringify({ kind, role: storedRole, mode: receiveMode, worker: specWorker }),
+        };
 
       const match = existingCards.find((r) => f1(r, "Node") === node && f1(r, "Cap_ID") === capId);
       if (match) {
-        // 重新注册只刷新在线字段。机主写过的接纳/显示名不在 fields 里；
+        // 重新注册只刷新在线字段。机主写过的接纳/显示名不在更新字段里；
         // manual/preset 留在 Metadata，否则控制台添加的能力再注册后就删不掉。
-        fields.Metadata = JSON.stringify(keepOwnerFlags(f1(match, "Metadata"), {
-          kind, role, mode: receiveMode, worker: specWorker,
-        }));
+        delete fields.Admission;
+        delete fields.Display_Name;
+        delete fields.Admin_Note;
+        const meta = preset
+          ? { kind: "agent", role: "leader", mode: receiveMode, preset: true }
+          : { kind, role: storedRole, mode: receiveMode, worker: specWorker };
+        fields.Metadata = JSON.stringify(keepOwnerFlags(f1(match, "Metadata"), meta));
         const resUpd = await bus.updateRecord(bus.tables.agentCards, match.record_id, fields);
         const current = resUpd?.record ?? match;
         admissionMap[capId] = admissionOf(current);

@@ -122,7 +122,11 @@ test("HTTP Agent 网关：发现 / 注册 / 问答闭环 / 长轮询 / ed25519 �
       });
       assert.equal(regMuse.status, 200);
       assert.equal(regMuse.data.role, "leader");
-      assert.equal(regMuse.data.cards.length, 0);
+      assert.equal(regMuse.data.pending, false);
+      assert.equal(regMuse.data.cards.length, 1);
+      assert.equal(regMuse.data.cards[0].Cap_ID, "CAP-muse-agent");
+      assert.equal(regMuse.data.cards[0].Dispatchable, "Yes");
+      assert.equal(regMuse.data.admission["CAP-muse-agent"], "admitted");
 
       const regGrok = await apiJson(baseUrl, "/api/v1/agents/register", {
         method: "POST",

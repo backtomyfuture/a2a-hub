@@ -1,6 +1,7 @@
 // 名片接纳与新 Agent 接入引导纯函数：归一化 Admission、校验管理请求参数、构造 onboarding 指引。
 
 import { f1 } from "../bus/tables.mjs";
+import { capIdOf } from "../config.mjs";
 import { BROWSER_USER_AGENT } from "../kernel-util.mjs";
 
 export const ADMISSION_VALUES = Object.freeze(["admitted", "pending", "rejected"]);
@@ -63,6 +64,79 @@ export function validateRole(raw) {
     throw httpError(400, `role 只能是 ${ROLE_VALUES.join(" / ")}`);
   }
   return val;
+}
+
+// hybrid 是旧值。鉴权与提示词按 leader 处理；新签发的 Token 与新名片不再写 hybrid。
+export function actsAsLeader(role) {
+  return role === "leader" || role === "hybrid";
+}
+
+export function issuedRole(role) {
+  const value = validateRole(role);
+  return value === "hybrid" ? "leader" : value;
+}
+
+function minuteStamp(date = new Date()) {
+  const p = (n) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())} ${p(date.getHours())}:${p(date.getMinutes())}`;
+}
+
+// HTTP Agent 的默认可派单名片。Leader 与 Worker 同一张形状，差别只在 Metadata.role。
+export function presetHttpCardFields({
+  node,
+  role,
+  receiveMode,
+  displayName = "",
+  description = "",
+  adminNote = "",
+  availability = "offline",
+  updatedAt,
+} = {}) {
+  const storedRole = role === "hybrid" ? "leader" : role;
+  return {
+    Cap_ID: capIdOf("agent", {}, node),
+    Node: node,
+    Worker: "",
+    Skill_ID: "agent",
+    Skill_Name: displayName || `${node} Agent`,
+    Description: description,
+    Side_Effect: "write",
+    Approval_Class: "auto",
+    Availability: availability,
+    Dispatchable: "Yes",
+    Receive_Mode: receiveMode,
+    Zone: "cloud",
+    Daemon_Version: "http-agent",
+    Admission: "admitted",
+    Display_Name: displayName,
+    Admin_Note: adminNote,
+    Updated_At: updatedAt || minuteStamp(),
+    Metadata: JSON.stringify({ kind: "agent", role: storedRole, mode: receiveMode, preset: true }),
+  };
+}
+
+// 启动时给已签发、但还没有任何名片的 leader / hybrid 补一张身份名片。已有名片不改 Admission。
+export async function ensureLeaderIdentityCards({ bus, tokenStore, webhookStore, now = () => new Date() } = {}) {
+  if (!tokenStore || !bus?.tables?.agentCards || typeof bus.listRecords !== "function" || typeof bus.createRecord !== "function") {
+    return 0;
+  }
+  const tokens = tokenStore.listPublic();
+  const cards = await bus.listRecords(bus.tables.agentCards);
+  let created = 0;
+  for (const token of tokens) {
+    if (!actsAsLeader(token.role)) continue;
+    const mine = cards.filter((card) => f1(card, "Node") === token.node);
+    if (mine.length) continue;
+    const receiveMode = webhookStore?.get?.(token.node) ? "webhook" : "http-poll";
+    await bus.createRecord(bus.tables.agentCards, presetHttpCardFields({
+      node: token.node,
+      role: "leader",
+      receiveMode,
+      updatedAt: minuteStamp(now()),
+    }));
+    created += 1;
+  }
+  return created;
 }
 
 export function validateReceive(raw) {
@@ -154,17 +228,20 @@ export function formatAgentCard(c) {
   };
 }
 
+function promptRole(role) {
+  return actsAsLeader(role) ? "leader" : "worker";
+}
+
 function skillNamesFor(access, role) {
   if (access === "host") return [];
   if (access === "inbox") return ["ah-inbox"];
-  if (role === "leader") return ["a2a-leader"];
-  if (role === "hybrid") return ["a2a-worker", "a2a-leader"];
+  // leader 同时接单和派单，两份协议都要。旧 hybrid 与 leader 同一套。
+  if (actsAsLeader(role)) return ["a2a-worker", "a2a-leader"];
   return ["a2a-worker"];
 }
 
 function roleSummary(role) {
-  if (role === "leader") return "作为调度控制端（leader），负责向其他节点派发任务并跟踪结果更新。";
-  if (role === "hybrid") return "作为混合角色（hybrid），既可认领分配给本节点的任务并回执结果，也可向其他节点派发协同任务。";
+  if (actsAsLeader(role)) return "作为调度控制端（leader），既可认领分配给本节点的任务并回执结果，也可向其他节点派发协同任务并跟踪结果。";
   return "作为执行端（worker），负责轮询认领分配给本节点的任务、按要求回执进度与结果。";
 }
 
@@ -262,11 +339,10 @@ function tokenSaveLines(cred) {
   ];
 }
 
-function gateLines(base, node, role) {
-  const minutes = role === "leader" ? "5" : "2";
+function gateLines(base, node) {
   return [
     "【定时任务】",
-    `创建定时任务，每 ${minutes} 分钟运行一次。每次唤醒都没有上一轮上下文。【定时指令】只有下面这几行：`,
+    "创建定时任务，每 5 分钟运行一次。每次唤醒都没有上一轮上下文。【定时指令】只有下面这几行：",
     `运行 python3 <保存路径>/a2a_check.py --hub ${base} --node ${node}。没有 python3 时改为 sh <保存路径>/a2a_check.sh --hub ${base} --node ${node}。`,
     "Token 从环境变量 A2A_HUB_TOKEN 或平台安全空间引用读取，不要写进这几行。免鉴权 Hub 不要传 --token。",
     "输出 IDLE 就立即结束，不回复、不做任何其它调用。",
@@ -276,14 +352,8 @@ function gateLines(base, node, role) {
   ];
 }
 
-function fallbackLines(role) {
-  if (role === "leader") {
-    return ["【回退】", "若无法运行任何脚本，按旧方式：每 15 分钟直接执行上面的【处理流程】。"];
-  }
-  if (role === "hybrid") {
-    return ["【回退】", "若无法运行任何脚本，按旧方式：每 10 分钟执行【处理流程】的 Worker 段，每 15 分钟执行 Leader 段。"];
-  }
-  return ["【回退】", "若无法运行任何脚本，按旧方式：每 10 分钟直接执行上面的【处理流程】。"];
+function fallbackLines() {
+  return ["【回退】", "若无法运行任何脚本，每 5 分钟直接执行上面的【处理流程】。"];
 }
 
 function longpollBackoffLine() {
@@ -309,7 +379,6 @@ function longpollLeaderLoop(base, node, cred) {
   return [
     "【主循环】（常驻进程；不要创建定时任务，也不要下载或运行 a2a_check.py）",
     `你是节点 ${node} 的调度端。Hub：${base}。${scheduleHeaders(cred)}`,
-    "leader 不能认领任务，所以不要调用 poll 或 claim。",
     `1. GET ${base}/api/v1/agents/${node}/updates?new=1`,
     "2. 对 completed / failed / canceled / rejected：向机主或上游汇报终态结果（无事则静默）。",
     `3. 对 input-required：POST ${base}/api/v1/tasks/<task_id>/reply ，body {"from":"${node}","text":"你的答复"}。`,
@@ -321,20 +390,20 @@ function longpollLeaderLoop(base, node, cred) {
 }
 
 function longpollPrompt({ base, node, role, cred, skills }) {
+  const shown = promptRole(role);
   const skillLines = skills.map((s) => `GET ${s.url}`);
   const once = [
     "【一次性接入】（只做一次）",
-    `Hub：${base}。节点名：${node}。角色：${role}。`,
+    `Hub：${base}。节点名：${node}。角色：${shown}。`,
     ...tokenSaveLines(cred),
     authBullet(cred),
     `读取并遵守协议 Skill：${skillLines.join(" ；")}`,
-    `然后注册：POST ${base}/api/v1/agents/register ，body {"node":"${node}","role":"${role}","kind":"agent","receive_mode":"http-longpoll"}`,
+    `然后注册：POST ${base}/api/v1/agents/register ，body {"node":"${node}","role":"${shown}","kind":"agent","receive_mode":"http-longpoll"}`,
     "不要创建定时任务，不要下载 a2a_check.py 或 a2a_check.sh。",
   ];
-  let loops;
-  if (role === "leader") loops = longpollLeaderLoop(base, node, cred);
-  else if (role === "hybrid") loops = [...longpollWorkerLoop(base, node, cred), "", ...longpollLeaderLoop(base, node, cred)];
-  else loops = longpollWorkerLoop(base, node, cred);
+  const loops = actsAsLeader(role)
+    ? [...longpollWorkerLoop(base, node, cred), "", ...longpollLeaderLoop(base, node, cred)]
+    : longpollWorkerLoop(base, node, cred);
   return [
     "你是常驻运行的 HTTP Agent。进程保持在线，向 Hub 发起出站长轮询，不开监听端口。请接入 a2a-hub。",
     ...once,
@@ -343,20 +412,8 @@ function longpollPrompt({ base, node, role, cred, skills }) {
   ].join("\n");
 }
 
-function webhookSecretLines(secret) {
-  const how = "首选存进你所在平台的安全密钥空间，名称 A2A_HUB_WEBHOOK_SECRET，之后以环境变量或引用方式取用，不要把明文写进日志、定时指令或回复。只有平台没有任何安全存储机制时，才把明文写进本地配置文件（尽量 0600）。";
-  const value = String(secret ?? "").trim();
-  if (value) {
-    return [
-      `Webhook 密钥保存：${how}`,
-      `这一次的明文 Webhook 密钥（只为存起来，不要再抄进别处）：${value}`,
-    ];
-  }
-  return [`Webhook 密钥保存：向机主索取后，${how}`];
-}
-
 function webhookVerifyLine() {
-  return "验签：读取未经改写的原始请求体 rawBody（不要先 JSON.parse 再 stringify）。用 HMAC-SHA256，密钥是 A2A_HUB_WEBHOOK_SECRET，消息是 ${timestamp}.${rawBody}（timestamp 取请求头 X-A2A-Timestamp 的原文）。把摘要转成十六进制小写，与请求头 X-A2A-Signature 去掉 sha256= 前缀后的值做时序安全比较。X-A2A-Timestamp 是 unix 秒，与当前时间相差超过 300 秒（5 分钟）则拒绝。验签失败或过期时返回非 2xx，中台会按 0/1/3/8 秒重试后放弃。";
+  return "自建接收端可以验签：读取未经改写的原始请求体 rawBody（不要先 JSON.parse 再 stringify）。用 HMAC-SHA256，密钥就是接收端自己配置、机主登记到中台的那一把，消息是 ${timestamp}.${rawBody}（timestamp 取请求头 X-A2A-Timestamp 的原文）。把摘要转成十六进制小写，与请求头 X-A2A-Signature 去掉 sha256= 前缀后的值做时序安全比较。X-A2A-Timestamp 是 unix 秒，与当前时间相差超过 300 秒（5 分钟）则拒绝。验签失败或过期时返回非 2xx，中台会按 0/1/3/8 秒重试后放弃。只把正文当触发上下文的接收端可以不验签。不要再保存一份名为 A2A_HUB_WEBHOOK_SECRET 的中台密钥。";
 }
 
 function webhookWorkerFlow(base, node) {
@@ -381,36 +438,35 @@ function webhookLeaderFlow(base, node) {
   ];
 }
 
-function webhookPrompt({ base, node, role, cred, skills, webhookSecret }) {
+function webhookPrompt({ base, node, role, cred, skills }) {
+  const shown = promptRole(role);
   const skillLines = skills.map((s) => `GET ${s.url}`);
   const handle = [
     "【收到推送后的处理】",
-    "中台 POST 到你登记的 URL，只推门铃。JSON 只有 event、node、task_id、status、seq、hub、at，没有指令正文，也没有参数。收到后用自己的 Agent Token 走现有 poll、claim 或 updates 拉详情。",
+    "中台会用接收端已经配置的密钥调用这个 URL，只推门铃。默认请求头是 Authorization: Bearer <密钥>；若机主登记了自定义请求头名，则该头的值就是密钥原文，不加 Bearer。同一把密钥同时用来计算 X-A2A-Signature。",
+    "JSON 有 event、node、task_id、status、seq、hub、at、text。text 只是一句提醒，没有指令正文，也没有参数。收到后用自己的 Agent Token 走现有 poll、claim 或 updates 拉详情。",
     `请求头还有 Content-Type: application/json、${UA_HEADER}、X-A2A-Event、X-A2A-Delivery、X-A2A-Timestamp、X-A2A-Signature。`,
     webhookVerifyLine(),
-    "event=ping：验签通过后直接返回 2xx，不必访问 Hub。",
+    "event=ping：直接返回 2xx，不必访问 Hub。",
     scheduleHeaders(cred),
   ];
-  if (role === "leader") handle.push("event=task.updated：按【处理流程】拉 updates?new=1。leader 忽略 task.assigned。");
-  else if (role === "hybrid") {
+  if (actsAsLeader(role)) {
     handle.push("event=task.assigned：按【处理流程】GET poll?timeout=0 后 claim。");
     handle.push("event=task.updated：按【处理流程】GET updates?new=1。");
   } else {
     handle.push("event=task.assigned：按【处理流程】GET poll?timeout=0 后 claim。worker 忽略 task.updated。");
   }
-  let flows;
-  if (role === "leader") flows = webhookLeaderFlow(base, node);
-  else if (role === "hybrid") flows = [...webhookWorkerFlow(base, node), "", ...webhookLeaderFlow(base, node)];
-  else flows = webhookWorkerFlow(base, node);
+  const flows = actsAsLeader(role)
+    ? [...webhookWorkerFlow(base, node), "", ...webhookLeaderFlow(base, node)]
+    : webhookWorkerFlow(base, node);
   return [
     "你是由中台 Webhook 门铃唤醒的 HTTP Agent。推送不含指令正文。请接入 a2a-hub。",
     "【一次性接入】（只做一次）",
-    `Hub：${base}。节点名：${node}。角色：${role}。`,
+    `Hub：${base}。节点名：${node}。角色：${shown}。`,
     ...tokenSaveLines(cred),
-    ...webhookSecretLines(webhookSecret),
     authBullet(cred),
     `读取并遵守协议 Skill：${skillLines.join(" ；")}`,
-    `然后注册：POST ${base}/api/v1/agents/register ，body {"node":"${node}","role":"${role}","kind":"agent","receive_mode":"webhook"}`,
+    `然后注册：POST ${base}/api/v1/agents/register ，body {"node":"${node}","role":"${shown}","kind":"agent","receive_mode":"webhook"}`,
     `下载检查脚本：GET ${base}/api/v1/kit/a2a_check.py （带与其它接口相同的鉴权头和浏览器 UA），保存到自己的空间，例如 <保存路径>/a2a_check.py。没有 python3 就改下载 GET ${base}/api/v1/kit/a2a_check.sh ，保存为 <保存路径>/a2a_check.sh。`,
     `把下面的【处理流程】原文保存为自己空间里的文件（如 a2a-hub-${node}-流程.md）。`,
     "",
@@ -425,38 +481,34 @@ function webhookPrompt({ base, node, role, cred, skills, webhookSecret }) {
 }
 
 function scheduledPrompt({ base, node, role, cred, skills }) {
+  const shown = promptRole(role);
   const skillLines = skills.map((s) => `GET ${s.url}`);
   const once = [
     "【一次性接入】（只做一次）",
-    `Hub：${base}。节点名：${node}。角色：${role}。`,
+    `Hub：${base}。节点名：${node}。角色：${shown}。`,
     ...tokenSaveLines(cred),
     authBullet(cred),
     `读取并遵守协议 Skill：${skillLines.join(" ；")}`,
-    `然后注册：POST ${base}/api/v1/agents/register ，body {"node":"${node}","role":"${role}","kind":"agent","receive_mode":"http-poll"}`,
+    `然后注册：POST ${base}/api/v1/agents/register ，body {"node":"${node}","role":"${shown}","kind":"agent","receive_mode":"http-poll"}`,
     `下载检查脚本：GET ${base}/api/v1/kit/a2a_check.py （带与其它接口相同的鉴权头和浏览器 UA），保存到自己的空间，例如 <保存路径>/a2a_check.py。没有 python3 就改下载 GET ${base}/api/v1/kit/a2a_check.sh ，保存为 <保存路径>/a2a_check.sh。`,
     `把下面的【处理流程】原文保存为自己空间里的文件（如 a2a-hub-${node}-流程.md）。`,
   ];
-  let blocks;
-  if (role === "leader") {
-    blocks = leaderSchedule(base, node, cred, "leader");
-  } else if (role === "hybrid") {
-    blocks = [
-      ...workerSchedule(base, node, cred, "hybrid"),
+  const blocks = actsAsLeader(role)
+    ? [
+      ...workerSchedule(base, node, cred, "leader"),
       "",
-      ...leaderSchedule(base, node, cred, "hybrid"),
-    ];
-  } else {
-    blocks = workerSchedule(base, node, cred, "worker");
-  }
+      ...leaderSchedule(base, node, cred, "leader"),
+    ]
+    : workerSchedule(base, node, cred, "worker");
   return [
     "你是被定时唤醒的 HTTP Agent，每次运行都没有上一轮上下文。请接入 a2a-hub。能跑脚本时只执行【定时指令】；输出 WORK 才读取已保存的【处理流程】。",
     ...once,
     "",
-    ...gateLines(base, node, role),
+    ...gateLines(base, node),
     "",
     ...blocks,
     "",
-    ...fallbackLines(role),
+    ...fallbackLines(),
   ].join("\n");
 }
 
@@ -468,7 +520,6 @@ export function buildOnboarding({
   authRequired = false,
   token = "",
   receive = "poll",
-  webhookSecret = "",
 }) {
   const base = String(hubUrl ?? "").trim().replace(/\/+$/, "") || "http://127.0.0.1:8787";
   const skills = skillNamesFor(access, role).map((name) => ({
@@ -521,17 +572,16 @@ export function buildOnboarding({
       `- 职责说明：${roleSummary(role)}`,
     ].join("\n");
   } else if (receiveMode === "poll") {
-    const scheduleHint = role === "leader"
-      ? `每 5 分钟运行 a2a_check.py --hub ${base} --node ${node}。输出 IDLE 立即结束；输出 WORK 再按【处理流程】跟单（updates?new=1、汇报终态、reply 答复 input-required、auth-required 只提醒机主）。无法跑脚本时回退为每 15 分钟直接执行【处理流程】。`
-      : role === "hybrid"
-        ? `每 2 分钟运行 a2a_check.py --hub ${base} --node ${node}。输出 IDLE 立即结束；输出 WORK 时 Worker 与 Leader 两段【处理流程】都做。无法跑脚本时 Worker 段每 10 分钟、Leader 段每 15 分钟。`
-        : `每 2 分钟运行 a2a_check.py --hub ${base} --node ${node}。输出 IDLE 立即结束；输出 WORK 再按【处理流程】取单收尾（register → poll?timeout=0 → claim → 本次运行内完成，超过 10 分钟发 heartbeat → complete/fail）。无法跑脚本时回退为每 10 分钟直接执行【处理流程】。`;
+    const shown = promptRole(role);
+    const scheduleHint = actsAsLeader(role)
+      ? `每 5 分钟运行 a2a_check.py --hub ${base} --node ${node}。输出 IDLE 立即结束；输出 WORK 时取单与跟单两段【处理流程】都做。无法跑脚本时每 5 分钟直接执行【处理流程】。`
+      : `每 5 分钟运行 a2a_check.py --hub ${base} --node ${node}。输出 IDLE 立即结束；输出 WORK 再按【处理流程】取单收尾（register → poll?timeout=0 → claim → 本次运行内完成，超过 10 分钟发 heartbeat → complete/fail）。无法跑脚本时回退为每 5 分钟直接执行【处理流程】。`;
     const authNoteHttp = cred.mode === "token"
       ? "携带请求头 Authorization: Bearer $A2A_HUB_TOKEN（明文只在 prompt 的一次性接入里出现一次，请存进名为 A2A_HUB_TOKEN 的安全空间）"
       : authNote;
     steps = [
       `一次性接入：把 Token 存进平台安全密钥空间，名称 A2A_HUB_TOKEN（没有任何安全存储时才写明文）。拉取协议 Skill（${authNoteHttp}；${UA_HEADER}）：${skills.map((s) => `GET ${s.url}`).join("、")}。下载 GET ${base}/api/v1/kit/a2a_check.py（无 python3 则 GET ${base}/api/v1/kit/a2a_check.sh）。把【处理流程】原文保存为 a2a-hub-${node}-流程.md。/api/v1/skills/* 与 /api/v1/kit/* 需要鉴权，只有 /.well-known/agent.json 与 /api/v1/health 免鉴权。`,
-      `一次性注册：POST ${base}/api/v1/agents/register ，body {"node":"${node}","role":"${role}","kind":"agent","receive_mode":"http-poll"}`,
+      `一次性注册：POST ${base}/api/v1/agents/register ，body {"node":"${node}","role":"${shown}","kind":"agent","receive_mode":"http-poll"}`,
       `为自己创建定时任务。${scheduleHint}【定时指令】只有运行检查脚本那几行；完整处理步骤在 prompt 的【处理流程】中。`,
     ];
     prompt = scheduledPrompt({ base, node, role, cred, skills });
@@ -540,14 +590,13 @@ export function buildOnboarding({
     const authNoteHttp = cred.mode === "token"
       ? "携带请求头 Authorization: Bearer $A2A_HUB_TOKEN（明文只在 prompt 的一次性接入里出现一次，请存进名为 A2A_HUB_TOKEN 的安全空间）"
       : authNote;
-    const loopHint = role === "leader"
-      ? `常驻进程循环 GET ${base}/api/v1/agents/${node}/updates?new=1（leader 不调用 poll 或 claim）。`
-      : role === "hybrid"
-        ? `常驻进程循环 GET ${base}/api/v1/agents/${node}/poll?timeout=25 ，claim 后执行并 complete/fail；每轮再 GET updates?new=1。`
-        : `常驻进程循环 GET ${base}/api/v1/agents/${node}/poll?timeout=25 ，claim 后执行，必要时 heartbeat，然后 complete 或 fail。`;
+    const shown = promptRole(role);
+    const loopHint = actsAsLeader(role)
+      ? `常驻进程循环 GET ${base}/api/v1/agents/${node}/poll?timeout=25 ，claim 后执行并 complete/fail；每轮再 GET updates?new=1。`
+      : `常驻进程循环 GET ${base}/api/v1/agents/${node}/poll?timeout=25 ，claim 后执行，必要时 heartbeat，然后 complete 或 fail。`;
     steps = [
       `一次性接入：把 Token 存进平台安全密钥空间，名称 A2A_HUB_TOKEN（没有任何安全存储时才写明文）。拉取协议 Skill（${authNoteHttp}；${UA_HEADER}）：${skills.map((s) => `GET ${s.url}`).join("、")}。不要创建定时任务，不要下载 a2a_check.py。`,
-      `一次性注册：POST ${base}/api/v1/agents/register ，body {"node":"${node}","role":"${role}","kind":"agent","receive_mode":"http-longpoll"}`,
+      `一次性注册：POST ${base}/api/v1/agents/register ，body {"node":"${node}","role":"${shown}","kind":"agent","receive_mode":"http-longpoll"}`,
       `${loopHint}断线按 1 秒、3 秒、8 秒、30 秒退避后重连。`,
     ];
     prompt = longpollPrompt({ base, node, role, cred, skills });
@@ -555,13 +604,17 @@ export function buildOnboarding({
     const authNoteHttp = cred.mode === "token"
       ? "携带请求头 Authorization: Bearer $A2A_HUB_TOKEN（明文只在 prompt 的一次性接入里出现一次，请存进名为 A2A_HUB_TOKEN 的安全空间）"
       : authNote;
+    const shown = promptRole(role);
+    const webhookStep = actsAsLeader(role)
+      ? "中台用接收端配置的密钥调用 URL（默认 Authorization: Bearer，自定义头名则值为密钥原文），并附带 HMAC-SHA256 签名。task.assigned 用 poll?timeout=0 取单再 claim；task.updated 用 updates?new=1。门铃不含指令正文。不要保存 A2A_HUB_WEBHOOK_SECRET。"
+      : "中台用接收端配置的密钥调用 URL（默认 Authorization: Bearer，自定义头名则值为密钥原文），并附带 HMAC-SHA256 签名。task.assigned 用 poll?timeout=0 取单再 claim。门铃不含指令正文。不要保存 A2A_HUB_WEBHOOK_SECRET。";
     steps = [
-      `一次性接入：把 Token 存进 A2A_HUB_TOKEN，把 Webhook 密钥存进 A2A_HUB_WEBHOOK_SECRET（明文只在 prompt 里出现一次）。拉取协议 Skill（${authNoteHttp}；${UA_HEADER}）：${skills.map((s) => `GET ${s.url}`).join("、")}。下载 GET ${base}/api/v1/kit/a2a_check.py（无 python3 则 a2a_check.sh）。`,
-      `一次性注册：POST ${base}/api/v1/agents/register ，body {"node":"${node}","role":"${role}","kind":"agent","receive_mode":"webhook"}`,
-      "收到推送后先验签（HMAC-SHA256，消息是 timestamp.rawBody）并核对 5 分钟时间窗。task.assigned 用 poll?timeout=0 取单再 claim；task.updated 用 updates?new=1。门铃不含指令正文。",
+      `一次性接入：把 Token 存进 A2A_HUB_TOKEN。密钥只配在接收端，不要让 Agent 再存一份。拉取协议 Skill（${authNoteHttp}；${UA_HEADER}）：${skills.map((s) => `GET ${s.url}`).join("、")}。下载 GET ${base}/api/v1/kit/a2a_check.py（无 python3 则 a2a_check.sh）。`,
+      `一次性注册：POST ${base}/api/v1/agents/register ，body {"node":"${node}","role":"${shown}","kind":"agent","receive_mode":"webhook"}`,
+      webhookStep,
       `兜底：每 30 分钟运行一次 a2a_check.py --hub ${base} --node ${node}，防止漏推。`,
     ];
-    prompt = webhookPrompt({ base, node, role, cred, skills, webhookSecret });
+    prompt = webhookPrompt({ base, node, role, cred, skills });
   }
 
   return {

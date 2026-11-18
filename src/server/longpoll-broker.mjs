@@ -6,13 +6,14 @@ const DEFAULT_MAX_HISTORY = 1024;
 const DEFAULT_STALE_NODE_MS = 90_000;
 // 探针节点只碰一次 poll/register 就会留在内存里。超过一天仍无活动就删掉，避免名册无限增长。
 export const NODE_EXPIRE_MS = 24 * 60 * 60 * 1000;
-// 检查脚本大约 2～5 分钟碰一次；没有脚本时大约 10～15 分钟。无名片且超过 30 分钟没活动，视为幽灵，不进名册。
+// 检查脚本和跑不了脚本时的回退都是 5 分钟。无名片且超过 30 分钟没活动，视为幽灵，不进名册。
 export const ROSTER_IDLE_MS = 30 * 60 * 1000;
 // 定时唤醒的 HTTP Agent 两次报到之间本来就隔几分钟，不能套用长轮询守护进程的 90 秒判离线。
 // 一次运行里会连发 check / poll / claim 等请求，间隔短于这个值的视为同一轮，不计入唤醒周期。
 const RUN_BURST_MS = 30_000;
-// 还没观测到周期时（如 Hub 刚重启），按最慢的回退频率 15 分钟留余量。
-const DEFAULT_AGENT_WINDOW_MS = 16 * 60 * 1000;
+// 还没观测到周期时（如 Hub 刚重启），按 5 分钟一轮套同一个 2.5 倍系数。
+// 只留 1 分钟余量的话，外部定时器稍有抖动就会在重启后误判离线。
+const DEFAULT_AGENT_WINDOW_MS = 12.5 * 60 * 1000;
 const MIN_AGENT_WINDOW_MS = 3 * 60 * 1000;
 // 错过两次左右唤醒才算离线。
 const AGENT_WINDOW_FACTOR = 2.5;
