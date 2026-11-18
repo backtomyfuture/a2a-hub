@@ -24,10 +24,13 @@ import {
 } from "../hub/admission.mjs";
 import { validateWebhookUrl, WebhookDispatcher } from "../hub/webhooks.mjs";
 import {
+  alignNodeReceiveMode,
   buildCommandsSnippet,
   createManualCard,
   deleteManualCard,
   listSchedules,
+  nodeStoredReceiveMode,
+  switchNodeReceive,
 } from "../hub/capabilities.mjs";
 import { cancelTask } from "../hub/cancel.mjs";
 import { createTask } from "../hub/create.mjs";
@@ -280,6 +283,7 @@ export async function startHubHttpServer({
         readJsonBody: readJsonBodyBound,
         sendJson,
         principal,
+        webhookStore: webhooks?.store ?? null,
       })) {
         return;
       }
@@ -760,6 +764,22 @@ export async function startHubHttpServer({
         return;
       }
 
+      const nodeReceiveMatch = pathname.match(/^\/api\/v1\/admin\/nodes\/([^/]+)\/receive$/);
+      if (method === "POST" && nodeReceiveMatch) {
+        const result = await switchNodeReceive({
+          bus,
+          tokenStore,
+          webhookStore: webhooks?.store ?? null,
+          node: decodeParam(nodeReceiveMatch[1]),
+          body: await readJsonBodyBound(),
+          hubUrl: requestHubUrl(req),
+          authRequired: Boolean(apiToken) || Boolean(tokenStore?.hasAny()),
+        });
+        if (result.cards_updated) onWake();
+        sendJson(res, 200, result);
+        return;
+      }
+
       const cardProfileMatch = pathname.match(/^\/api\/v1\/admin\/cards\/([^/]+)\/profile$/);
       if ((method === "PATCH" || method === "POST") && cardProfileMatch) {
         const capId = decodeParam(cardProfileMatch[1]);
@@ -1046,11 +1066,18 @@ export async function startHubHttpServer({
             sendJson(res, 404, { error: `节点 ${node} 没有 Webhook` });
             return;
           }
+          // 配置没了就不能再声称是 webhook，否则控制台和投递会各说各话。回到默认定时检查。
+          const cardsUpdated = await alignNodeReceiveMode(bus, node, "http-poll");
+          if (cardsUpdated) onWake();
           sendJson(res, 200, { ok: true });
           return;
         }
         if (webhookNodeMatch && method === "PUT") {
           const node = validateNodeName(decodeParam(webhookNodeMatch[1]));
+          const cards = await bus.listRecords(bus.tables.agentCards);
+          if (nodeStoredReceiveMode(cards, node) !== "webhook") {
+            throw httpError(409, "先把接收方式切换成 Webhook");
+          }
           const body = await readJsonBodyBound();
           if (!body || typeof body !== "object" || Array.isArray(body)) {
             throw httpError(400, "请求体必须是 JSON 对象");

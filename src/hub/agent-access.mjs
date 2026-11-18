@@ -26,6 +26,10 @@ function foreverDeny(pathname, method) {
   if (pathname === "/api/v1/admin/webhooks" || pathname.startsWith("/api/v1/admin/webhooks/")) {
     return "Agent 身份不能管理 Webhook（/api/v1/admin/webhooks）";
   }
+  // 接收方式是节点级单一属性，只能由机主切换。admin scope 的 Leader 可以接纳名片，但不能改这条。
+  if (/^\/api\/v1\/admin\/nodes\/[^/]+\/receive$/.test(pathname)) {
+    return "Agent 身份不能切换接收方式（/api/v1/admin/nodes/:node/receive）";
+  }
   if (pathname === "/api/v1/state") return "Agent 身份不能访问 /api/v1/state";
   if (pathname.startsWith("/api/v1/tables/")) return "Agent 身份不能访问总线表 /api/v1/tables/*";
   if (pathname === "/api/v1/poll") return "Agent 身份不能使用 Hub 长轮询 /api/v1/poll";

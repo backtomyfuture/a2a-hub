@@ -502,17 +502,13 @@ test("管理 API：登记、列表无密钥、测试、轮换、删除 Agent 顺
         token: "owner-token",
         body: { url: "https://hooks.example/solo" },
       });
-      assert.match(onlyHook.data.webhook.secret, /^whsec_/);
+      assert.equal(onlyHook.status, 409);
+      assert.match(onlyHook.data.error, /先把接收方式切换成 Webhook/);
       const delSolo = await apiJson(base, "/api/v1/admin/webhooks/solo", {
         method: "DELETE",
         token: "owner-token",
       });
-      assert.deepEqual(delSolo.data, { ok: true });
-      const delAgain = await apiJson(base, "/api/v1/admin/webhooks/solo", {
-        method: "DELETE",
-        token: "owner-token",
-      });
-      assert.equal(delAgain.status, 404);
+      assert.equal(delSolo.status, 404);
     } finally {
       await httpHandle.close();
       bus.close();
