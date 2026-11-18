@@ -117,6 +117,9 @@ AgentCard 规范化展开：一行一项能力
 | Output_Modes | text |  |
 | Metadata | text | A2A 原生自由字段（JSON）；内核登记写入 {kind, mode}，可为空 |
 | Worker | text | 该能力由哪个 Worker 执行，留空＝节点本尊 |
+| Admission | select | 机主接纳状态；缺省、空或其他值按 pending。只由 Hub 管理 API 写（选项：admitted / pending / rejected） |
+| Display_Name | text | 机主显示名，可空，不超过 64 字符。只由 Hub 管理 API 写 |
+| Admin_Note | text | 机主备注，可空，不超过 500 字符。只由 Hub 管理 API 写 |
 
 ## rules
 

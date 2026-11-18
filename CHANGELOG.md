@@ -4,6 +4,7 @@
 
 ## [Unreleased]
 
+- **名片接纳**：AgentCards 增加本地扩展字段 `Admission`（`admitted` / `pending` / `rejected`，缺省 `pending`）、`Display_Name`、`Admin_Note`。守护进程对账与 `/agents/register` 不写这三列，因此新名片和升级前的老名片都回到待接纳，需在 Web 控制台接纳后才能派单。管理接口为 `/api/v1/admin/cards/:capId/admission`、`/api/v1/admin/nodes/:node/admission`、`/api/v1/admin/cards/:capId/profile`、`/api/v1/admin/agents` 与 `/api/v1/admin/onboarding`（逻辑在 `src/hub/admission.mjs`）。
 - **命名独立化与目录/环境变量迁移（破坏性变更）**：
   - 默认配置目录改为 `~/.a2a-hub`（程序本体位于 `~/.a2a-hub/app/`），不再使用旧版默认配置目录；
   - 配置目录环境变量改为 `AH_HOME`（优先级：`--config <dir>` > `AH_HOME` > `~/.a2a-hub`），不再读取旧配置目录环境变量；

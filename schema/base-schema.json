@@ -460,6 +460,26 @@
      "name": "Worker",
      "type": "text",
      "primary": false
+    },
+    {
+     "name": "Admission",
+     "type": "select",
+     "primary": false,
+     "options": [
+      "admitted",
+      "pending",
+      "rejected"
+     ]
+    },
+    {
+     "name": "Display_Name",
+     "type": "text",
+     "primary": false
+    },
+    {
+     "name": "Admin_Note",
+     "type": "text",
+     "primary": false
     }
    ]
   },

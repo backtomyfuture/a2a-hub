@@ -149,11 +149,13 @@
 - Metadata：A2A 原生自由字段（文本，JSON 字符串）。内核登记名片时写入 `kind` 与 `mode`（节点类型与执行模式，见 §10.4 与 §9），供建单侧识别该能力；协议节点手工登记的名片，以及尚未填写的旧名片，可以留空。
 - **v3.5 收拢方向**：Tags / Examples / Required_Assets 已删（无消费者）；Input_Modes / Output_Modes / Default_Input_Modes / Default_Output_Modes / Cap_Streaming / Cap_Push / Cap_State_History 与本地扩展 Zone、Skill_Name 将收拢进 Metadata 的 `a2a` 子对象（一份 A2A 名片本就是一个 JSON 文档，Modes 与 capabilities 是它的原生组成部分，不另占列）；代码先行改写为写 JSON，列在观察一个登记周期后删除。Side_Effect 与审批下限相关，保留独立列与选项约束。
 
-本地扩展字段：Cap_ID（行主键）、Worker（文本；该能力由哪个 Worker 执行，留空＝节点本尊。它与 Node、Skill_ID 同为路由键，所以单独占列而不进 Metadata）、Zone、Side_Effect、Availability、Dispatchable、Receive_Mode（唤醒方式，与 §10.3 传输方式对应：守护进程节点取 `event`（长轮询）或 `poll`（定时轮询）；纯 HTTP 外部 Agent 经 `agent-gateway` 注册时取 `http-poll`）。
+本地扩展字段：Cap_ID（行主键）、Worker（文本；该能力由哪个 Worker 执行，留空＝节点本尊。它与 Node、Skill_ID 同为路由键，所以单独占列而不进 Metadata）、Zone、Side_Effect、Availability、Dispatchable、Receive_Mode（唤醒方式，与 §10.3 传输方式对应：守护进程节点取 `event`（长轮询）或 `poll`（定时轮询）；纯 HTTP 外部 Agent 经 `agent-gateway` 注册时取 `http-poll`）、Admission、Display_Name、Admin_Note。
+
+`Admission` 取 `admitted` / `pending` / `rejected`；缺省、空或其他值一律按 `pending`（因此没有该字段的老名片都在待接纳池）。`Display_Name` 是机主起的显示名，可空，不超过 64 字符。`Admin_Note` 是机主备注，可空，不超过 500 字符。这三个字段只有 Hub 管理 API（`/api/v1/admin/*`，见 `src/hub/admission.mjs`）可写；守护进程对账（`desiredCard` / `reconcileCards`）与 `POST /api/v1/agents/register` 不写，新建行因此缺省为 `pending`。
 
 Cap_ID 推导口径（守护进程登记时）：节点本尊的能力为条目显式 `cap_id`，否则 `CAP-<capPrefix>-<Skill_ID>`；Worker 的能力固定为 `CAP-<capPrefix>-<Worker>-<Skill_ID>`，不接受显式 `cap_id`。同一节点内 Cap_ID 不得重复，重复时后一项不登记并记日志，`ah doctor` 同时报出。
 
-路由规则不变：只接自己登记且 Dispatchable=Yes 的能力（v3.7 起按 Worker × Skill 匹配）；表外任务置 rejected＋notice 说明缺口。
+路由规则不变：只接自己登记且 Dispatchable=Yes 且 Admission=admitted 的能力（v3.7 起按 Worker × Skill 匹配）；表外任务置 rejected＋notice 说明缺口。
 
 ### Worker 名片与名册口径（v3.8）
 
@@ -305,7 +307,7 @@ Cap_ID 推导口径（守护进程登记时）：节点本尊的能力为条目�
 - hub 角色的职责：
   1. 节点能力与任务执行：像普通 node 一样读取 `commands.json`、自动登记 `AgentCards`、认领并执行 `Target_Node === 本节点` 的任务（含定时任务）；
   2. 总线与统一 HTTP 网关：在单进程内托管 `SqliteBus`（SQLite WAL）、`startHubHttpServer`（REST API、`LongPollBroker`、`agent-gateway` 与内嵌 Web 控制台）及可选 `ExternalNotifier`；
-  3. 建单与路由：按 Rules 与 AgentCards 选目标；建单严格按「instruction 消息 → Parts → Tasks 行」顺序写，Tasks 行最后写、即触发信号（入口为 `ah task create`、Web 控制台 `POST /api/v1/tasks` 与 `agent-gateway`），可用 `--worker` 指定 Worker。建单在写任何行之前先按 AgentCards 名册校验目标存在性与 `Dispatchable=Yes`（不校验 Availability，目标离线仍可建单入队）；节点守护可按同一写序给自己建计划任务（From_Node=To_Node=本节点、Source=cron），仍不写 auth_decision 与 canceled；
+  3. 建单与路由：按 Rules 与 AgentCards 选目标；建单严格按「instruction 消息 → Parts → Tasks 行」顺序写，Tasks 行最后写、即触发信号（入口为 `ah task create`、Web 控制台 `POST /api/v1/tasks` 与 `agent-gateway`），可用 `--worker` 指定 Worker。建单在写任何行之前先按 AgentCards 名册校验目标存在性与 `Dispatchable=Yes` 且 `Admission=admitted`（不校验 Availability，目标离线仍可建单入队）；节点守护可按同一写序给自己建计划任务（From_Node=To_Node=本节点、Source=cron），仍不写 auth_decision 与 canceled；
   4. 审批中继：只给已经是 auth-required 的任务受理审批，不在 submitted 阶段代写 auth_request；审批操作受 Hub Bearer Token 鉴权保护并由 `ApprovalService` 串行校验状态与 `Status_Msg` 后写入签名 `auth_decision`（From_Node=hub、Role=user、In_Reply_To=任务当前 Status_Msg）。`Claimed_By` 为空则批准后置回 submitted，非空则保持 auth-required；驳回置 canceled（§8.3）；
   5. 取消：审批驳回时写 canceled；hub 角色也可执行 `ah task cancel`（或经控制台/网关）取消任意任务。发起方只能在本机显式执行 `ah task cancel`（或 HTTP Leader 调 `/cancel`）取消自己发起的任务；
   6. 结果呈递：将本节点或主节点归属的任务结果（终态、input-required、rejected）落入本地 `present_queue.jsonl`，去重按 §8.5；

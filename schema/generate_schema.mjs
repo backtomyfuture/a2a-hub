@@ -128,6 +128,9 @@ const TABLES = [
       field("Output_Modes", "text"),
       field("Metadata", "text", { note: "A2A 原生自由字段（JSON）；内核登记写入 {kind, mode}，可为空" }),
       field("Worker", "text", { note: "该能力由哪个 Worker 执行，留空＝节点本尊" }),
+      field("Admission", "select", { options: ["admitted", "pending", "rejected"], note: "机主接纳状态；缺省、空或其他值按 pending。只由 Hub 管理 API 写" }),
+      field("Display_Name", "text", { note: "机主显示名，可空，不超过 64 字符。只由 Hub 管理 API 写" }),
+      field("Admin_Note", "text", { note: "机主备注，可空，不超过 500 字符。只由 Hub 管理 API 写" }),
     ],
   },
   {

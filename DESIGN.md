@@ -32,7 +32,7 @@
   - 每次写入只传递变更通知与 `seq` 游标，具体数据一律回表或经网关拉取，断线与重启不丢状态；
   - 远端宿主节点经出站 `GET /api/v1/poll?node=<node>&cursor=<seq>&timeout=25` 挂起等待，写入提交后毫秒级唤醒；Hub 进程内通过 `subscribeLocal` 零网络开销直连唤醒；无法长轮询时降级为 `poll` 定时扫表（默认 `pollSec=45`）；
   - 客户端游标落出环形缓冲时返回 `resync` 触发全量对账；所有守护进程保留低频对账扫表兜底（默认 `sweepSec=900`）以及面向 `input-required` / `auth-required` 的挂起短复查（`PENDING_RECHECK`：前 10 分钟不超 60 秒，60 分钟内不超 180 秒）。
-- **外部 Agent 网关（`src/server/agent-gateway.mjs`）**：为无守护进程、无 `ah` CLI 的纯 HTTP Agent 提供自发现（`GET /.well-known/agent.json`）、Skill 拉取（`GET /api/v1/skills/:name`）、注册（`POST /api/v1/agents/register`）、短/长轮询取单（`GET|POST /api/v1/agents/:node/poll`）、Leader 状态追踪（`GET /api/v1/agents/:node/updates`）及生命周期操作（`POST /api/v1/tasks/:id/{claim,heartbeat,ask,auth,complete,fail}`）。
+- **外部 Agent 网关（`src/server/agent-gateway.mjs`）**：为无守护进程、无 `ah` CLI 的纯 HTTP Agent 提供自发现（`GET /.well-known/agent.json`）、Skill 拉取（`GET /api/v1/skills/:name`）、注册（`POST /api/v1/agents/register`）、短/长轮询取单（`GET|POST /api/v1/agents/:node/poll`）、Leader 状态追踪（`GET /api/v1/agents/:node/updates`）及生命周期操作（`POST /api/v1/tasks/:id/{claim,heartbeat,ask,auth,complete,fail}`）。名片接纳与添加 Agent 不在该网关，而在 `startHubHttpServer` 的 `/api/v1/admin/*`，状态归一与接入提示词在 `src/hub/admission.mjs`。
 
 ## 5. 三种接入形态
 
@@ -119,7 +119,7 @@ a2a-hub/
       sqlite-bus.mjs            # Node 内置 node:sqlite WAL 总线
       http-bus.mjs              # 远端节点 HTTP REST 总线客户端
     server/
-      http-server.mjs           # Hub HTTP 网关主服务（REST API、鉴权、hub_runtime.json）
+      http-server.mjs           # Hub HTTP 网关主服务（REST API、鉴权、hub_runtime.json、/api/v1/admin/*）
       longpoll-broker.mjs       # 单调 seq 事件代理与长轮询连接管理
       agent-gateway.mjs         # 纯 HTTP 外部 Agent A2A 网关
       web-ui.mjs                # 零构建内嵌 Web 控制台
@@ -131,6 +131,7 @@ a2a-hub/
       schedule.mjs              # ScheduleService（later 预约复查时钟）
       loop.mjs                  # LoopService（LoopForge 多阶段 SOP 闭环引擎）
       notifier.mjs              # ExternalNotifier（可选外部 Webhook / Bark / Telegram 通知）
+      admission.mjs             # 名片接纳归一化、管理参数校验与接入提示词（/api/v1/admin/*）
       create.mjs                # 建单（参数校验、名册校验、先消息后任务行）
       cancel.mjs                # 任务取消（发起方 / hub）
       cards.mjs                 # 消息正文提取与审批交互载荷构建
