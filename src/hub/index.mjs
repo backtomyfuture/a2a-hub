@@ -14,6 +14,7 @@ import { StaleService } from "./stale.mjs";
 import { ScheduleService } from "./schedule.mjs";
 import { LoopService } from "./loop.mjs";
 import { ExternalNotifier } from "./notifier.mjs";
+import { WebhookDispatcher } from "./webhooks.mjs";
 import { readOwnerFromConfigDir } from "./owner.mjs";
 import { loadOrCreateHubKey } from "../approval-sign.mjs";
 import { LongPollBroker } from "../server/longpoll-broker.mjs";
@@ -172,6 +173,7 @@ export async function runHub(cfg, log = logLine, hooks = {}) {
 
   let broker = null;
   let notifier = null;
+  let webhookDispatcher = null;
   if (isStandalone) {
     broker = new LongPollBroker({ initialSeq: cfg.bus?.currentSeq?.() ?? 0 });
     cfg.bus?.attachBroker?.(broker);
@@ -182,6 +184,20 @@ export async function runHub(cfg, log = logLine, hooks = {}) {
         log,
       });
       cfg.bus?.attachNotifier?.(notifier);
+    }
+    // 门铃与外部通知器同时挂在总线上。attachNotifier 只保留一个，Webhook 走 addListener。
+    if (cfg.configDir) {
+      try {
+        webhookDispatcher = new WebhookDispatcher({
+          configDir: cfg.configDir,
+          hubNode: cfg.node || "hub",
+          taskTable: cfg.bus?.tables?.tasks || "tasks",
+          log,
+        });
+        cfg.bus?.addListener?.(webhookDispatcher);
+      } catch (e) {
+        log("Webhook 门铃不可用（进程不退出）：" + (e?.message ?? e));
+      }
     }
   }
 
@@ -230,6 +246,7 @@ export async function runHub(cfg, log = logLine, hooks = {}) {
         approval,
         log,
         onWake: () => runtime.wakeNow(),
+        webhookDispatcher,
       });
       runtime._onStop = async () => {
         broker?.close();
