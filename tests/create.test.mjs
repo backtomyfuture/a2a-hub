@@ -24,6 +24,7 @@ async function card(mock, fields) {
     Skill_ID: "echo",
     Dispatchable: "Yes",
     Availability: "online",
+    Admission: "admitted",
     ...fields,
   });
 }

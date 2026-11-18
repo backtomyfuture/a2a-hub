@@ -55,6 +55,7 @@ async function card(mock, node, extra = {}) {
     Skill_ID: "echo",
     Dispatchable: "Yes",
     Availability: "online",
+    Admission: "admitted",
     ...extra,
   });
   return created.record;
@@ -619,6 +620,7 @@ test("sweepOnce 里 tick 建出的任务在同一轮被认领，tick 抛错不�
     fs.writeFileSync(path.join(dir, "schedule_local_state.json"), JSON.stringify({
       schedules: { DAILY: { cron: "0 9 * * *", last_fired: KEY_NINE } },
     }), { mode: 0o600 });
+    await card(mock, "node-a");
     kernel.localSchedule.now = () => NEXT_NINE;
     await kernel.sweepOnce();
     const scheduled = await tasksOf(mock);

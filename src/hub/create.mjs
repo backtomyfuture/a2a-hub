@@ -8,6 +8,7 @@ import fs from "node:fs";
 import { parseCriteria } from "../acceptance.mjs";
 import { controlKeysIn } from "../config.mjs";
 import { f1 } from "../bus/tables.mjs";
+import { admissionOf } from "./admission.mjs";
 
 const APPROVALS = new Set(["auto", "notify", "approve"]);
 // 与 src/kernel.mjs 的 HOP_LIMIT 对齐。超过 8 的单节点会直接熔断，这里不落表。
@@ -165,6 +166,10 @@ function undispatchableReason(card) {
       ? "已停派（Dispatchable=No）"
       : `不可派（Dispatchable=${dispatchable || "未设置"}，需要 Yes）`);
   }
+  const admission = admissionOf(card);
+  if (admission !== "admitted") {
+    reasons.push(`未接纳（Admission=${admission}），请在 Web 控制台「Agent 名片墙 → 待接纳」中接纳`);
+  }
   return reasons;
 }
 
@@ -296,6 +301,9 @@ export async function createTask({
       if (!node) node = cardText(chosen, "Node");
     };
 
+    // 只点了 Worker 没点技能：先归到通用执行 agent，再统一走下面的名片与接纳门禁校验。
+    if (!skill && rawWorker) skill = "agent";
+
     // 1. 若提供了 cap：尝试在 AgentCards 中精确查找 Cap_ID 或 Skill_ID
     if (skill) {
       const requested = skill;
@@ -329,9 +337,6 @@ export async function createTask({
         }
       }
     }
-
-    // 只点了 Worker 没点技能：取该 Worker 的名片（通用执行 agent）。
-    if (!skill && rawWorker) skill = "agent";
 
     // 2. 若未提供 cap 但提供了 to（目标节点）：自动挑选该节点的首选技能。
     // 先滤掉不可派的名片再打分，否则停派的 agent 会以 200 分压过可用技能。

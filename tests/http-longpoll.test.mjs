@@ -140,8 +140,17 @@ test("端到端：HttpBus + 长轮询毫秒级唤醒 + Web ed25519 审批 + 问�
       const unauthResp = await fetch(`${httpHandle.localUrl}/api/v1/state`);
       assert.strictEqual(unauthResp.status, 401);
 
-      // 2) 远程节点启动长轮询 + 注册 AgentCards
+      // 2) 远程节点启动长轮询 + 注册 AgentCards，并由管理员在管理端接纳
       await remoteKernel.reconcileCards();
+      const admitResp = await fetch(`${httpHandle.localUrl}/api/v1/admin/nodes/worker-1/admission`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ admission: "admitted" }),
+      });
+      assert.strictEqual(admitResp.status, 200);
       waker.start();
       await waitFor(() => broker.connectedNodes().some((n) => n.node === "worker-1" && n.activeWaiters > 0));
 

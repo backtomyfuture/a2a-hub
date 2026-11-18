@@ -210,7 +210,7 @@ test("buildPrompt 只在专长技能时带技能行", async () => {
 });
 
 async function card(mock, fields) {
-  await mock.createRecord(TABLES.agentCards, { Node: "node-a", Dispatchable: "Yes", Availability: "online", ...fields });
+  await mock.createRecord(TABLES.agentCards, { Node: "node-a", Dispatchable: "Yes", Availability: "online", Admission: "admitted", ...fields });
 }
 
 async function roster() {
