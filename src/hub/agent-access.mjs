@@ -22,6 +22,10 @@ function foreverDeny(pathname) {
   if (pathname === "/api/v1/admin/tokens" || pathname.startsWith("/api/v1/admin/tokens/")) {
     return "Agent 身份不能管理 Token（/api/v1/admin/tokens）";
   }
+  // Webhook URL 与 HMAC 密钥只能由机主配置，Agent 不能自报接收地址。
+  if (pathname === "/api/v1/admin/webhooks" || pathname.startsWith("/api/v1/admin/webhooks/")) {
+    return "Agent 身份不能管理 Webhook（/api/v1/admin/webhooks）";
+  }
   if (pathname === "/api/v1/state") return "Agent 身份不能访问 /api/v1/state";
   if (pathname.startsWith("/api/v1/tables/")) return "Agent 身份不能访问总线表 /api/v1/tables/*";
   if (pathname === "/api/v1/poll") return "Agent 身份不能使用 Hub 长轮询 /api/v1/poll";
