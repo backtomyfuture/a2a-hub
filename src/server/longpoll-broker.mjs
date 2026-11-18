@@ -137,8 +137,11 @@ export class LongPollBroker {
   }
 
   // 记录外部 HTTP Agent 或客户端心跳/轮询活跃态，方便控制台统一展示连接节点与接入模式。
-  touchAgent(node, { remoteAddr = "", mode = "http-poll", kind = "agent", role = "", cursor = undefined } = {}) {
-    return this._touchNode(node, cursor, remoteAddr, 0, { mode, kind, role });
+  // 省略 role 时保留原角色。poll / claim 没带角色，不能把 check 刚写上的角色清成空。
+  touchAgent(node, { remoteAddr = "", mode = "http-poll", kind = "agent", role, cursor = undefined } = {}) {
+    const meta = { mode, kind };
+    if (role) meta.role = role;
+    return this._touchNode(node, cursor, remoteAddr, 0, meta);
   }
 
   // 删除 Agent 后立刻从名册消失，不必等 24 小时过期。对方若仍在轮询会被重新记上，所以要先吊销 Token。

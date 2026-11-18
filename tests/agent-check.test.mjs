@@ -198,6 +198,9 @@ test("GET check 只读：worker 任务、working、leader 计数且不推进水�
     assert.deepEqual(workerCheck.data.working, ["TASK-WORK"]);
     const poll = await apiJson(baseUrl, "/api/v1/agents/grok-bot/poll?timeout=0", { token: workerToken });
     assert.deepEqual(poll.data.tasks.map((item) => item.task_id), ["TASK-NEW"]);
+    const rosterKept = await apiJson(baseUrl, "/api/v1/agents", { token: apiToken });
+    assert.equal(rosterKept.data.agents.find((agent) => agent.node === "grok-bot").role, "worker");
+    assert.equal(rosterKept.data.agents.find((agent) => agent.node === "muse").role, "leader");
 
     const ownerBoth = await apiJson(baseUrl, "/api/v1/agents/grok-bot/check", { token: apiToken });
     assert.equal(ownerBoth.data.work, true);
