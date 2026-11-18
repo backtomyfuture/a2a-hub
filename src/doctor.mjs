@@ -13,6 +13,7 @@ import { isHubPublicKey, readHubPublicKey } from "./approval-sign.mjs";
 import { resolveScheduleTz } from "./hub/schedule.mjs";
 import { LocalScheduleService } from "./local-schedule.mjs";
 import { f1 } from "./bus/tables.mjs";
+import { selectAutostartName } from "./service.mjs";
 
 const ok = (msg) => console.log("  ✓ " + msg);
 const bad = (msg) => console.log("  ✗ " + msg);
@@ -664,27 +665,27 @@ export async function doctor(configDir, appDir, opts = {}) {
   }
 
   // 7. 自启状态（只报告，不动手）
+  // 只认本配置目录对应的确切名字：同机可能有别的配置目录注册了同角色同节点名的服务，按前缀匹配会误报。
+  const expected = (kind) => selectAutostartName({ role, node: raw?.node ?? "", configDir, kind });
   try {
     if (process.platform === "darwin") {
+      const label = expected("launchd");
       const out = execFileSync("launchctl", ["list"], { encoding: "utf8" });
-      const mine = out.split("\n").filter((l) => /(?:^|\s)ah-(?:hub|node)\./.test(l));
-      if (mine.length) ok(`launchd 自启在册：${mine.map((l) => l.trim().split(/\s+/).pop()).join(", ")}`);
-      else info("未发现 launchd 自启（可用 ah service 安装）");
+      const listed = out.split("\n").some((l) => l.trim().split(/\s+/).pop() === label);
+      if (listed) ok(`launchd 自启在册：${label}`);
+      else info(`未发现 launchd 自启 ${label}（可用 ah service 安装）`);
     } else if (process.platform === "linux") {
-      const units = fs.existsSync(path.join(os.homedir(), ".config/systemd/user"))
-        ? fs.readdirSync(path.join(os.homedir(), ".config/systemd/user")).filter((f) => f.startsWith("ah-hub-") || f.startsWith("ah-node-"))
-        : [];
-      if (units.length) ok(`systemd 用户单元在册：${units.join(", ")}`);
-      else info("未发现 systemd 用户单元（可用 ah service 安装）");
+      const unit = expected("systemd");
+      const listed = fs.existsSync(path.join(os.homedir(), ".config/systemd/user", unit));
+      if (listed) ok(`systemd 用户单元在册：${unit}`);
+      else info(`未发现 systemd 用户单元 ${unit}（可用 ah service 安装）`);
     } else if (process.platform === "win32") {
       try {
         const out = execFileSync("schtasks", ["/Query", "/FO", "LIST"], { encoding: "utf8" });
-        const mine = [...new Set(out.split(/\r?\n/).map((line) => {
-          const matched = line.match(/ah-(?:hub|node)-[A-Za-z0-9_.-]+/);
-          return matched ? matched[0] : "";
-        }).filter(Boolean))];
-        if (mine.length) ok(`任务计划程序自启在册：${mine.join(", ")}`);
-        else info("未发现任务计划程序自启（可用 ah service 安装）");
+        const task = expected("task");
+        const listed = out.split(/\r?\n/).some((line) => line.trim().endsWith(task));
+        if (listed) ok(`任务计划程序自启在册：${task}`);
+        else info(`未发现任务计划程序自启 ${task}（可用 ah service 安装）`);
       } catch {
         info("未发现任务计划程序自启（可用 ah service 安装）");
       }
