@@ -16,6 +16,7 @@ import {
 import { createTask } from "../src/hub/create.mjs";
 import { createLoop } from "../src/hub/loop.mjs";
 import { inventory } from "../src/inventory.mjs";
+import { BROWSER_USER_AGENT } from "../src/kernel-util.mjs";
 import { LocalScheduleService } from "../src/local-schedule.mjs";
 import { startHubHttpServer } from "../src/server/http-server.mjs";
 import { LongPollBroker } from "../src/server/longpoll-broker.mjs";
@@ -127,6 +128,18 @@ test("纯函数：buildOnboarding 协议 Skill 映射、真实 join 参数与 To
   });
   assert.match(noAuth.prompt, /无需 Token/);
   assert.equal(noAuth.prompt.includes("<AH_API_TOKEN>"), false);
+
+  // 云端 HTTP Agent 的提示词每段定时指令都要带浏览器 UA，否则 Cloudflare 会 403 / 1010。
+  for (const role of ["worker", "leader", "hybrid"]) {
+    for (const authRequired of [true, false]) {
+      const ob = buildOnboarding({ hubUrl: "https://hub.example", node: "n1", access: "http", role, authRequired });
+      const blocks = ob.prompt.split("（本段是").length - 1;
+      const uaHits = ob.prompt.split(`User-Agent: ${BROWSER_USER_AGENT}`).length - 1;
+      assert.ok(blocks >= 1);
+      assert.ok(uaHits >= blocks + 1, `${role}/${authRequired} 每段定时指令都要写 UA`);
+      assert.ok(ob.steps[0].includes("User-Agent: Mozilla/5.0"));
+    }
+  }
 });
 
 test("派单门：未接纳（pending/缺省）与 rejected 拒单且不写表，接纳后可派", async () => {

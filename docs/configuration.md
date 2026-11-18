@@ -406,7 +406,7 @@ ah loop cancel <Loop_ID> [--text "说明"] [--config <dir>]
 
 控制台名片墙分段为已接纳（默认）、待接纳（带数量徽标）、已拒绝。待接纳里可单卡接纳或拒绝，节点标题可整节点接纳。已接纳卡可编辑显示名与备注、移回待接纳或拒绝；`Dispatchable=Yes` 时可向该能力派单。已拒绝卡可恢复为待接纳或直接接纳。
 
-「+ 添加 Agent」是三步向导：选择接入类型、填写名字与角色、获取密钥与接入指引。接入类型为云端 HTTP、宿主机 `ah join` 或本机独立 Agent inbox；角色为执行方 `worker`、派单方 `leader` 或两者 `hybrid`。仅云端 HTTP 且角色为 `worker` 或 `hybrid` 时预建一张已接纳的默认 `agent` 名片；其余组合不预建卡（宿主机与 inbox 由守护进程登记后进入待接纳；纯 leader 没有名片）。云端 HTTP 会同时签发分 Agent Token，明文只在这一次响应和提示词里出现。宿主机与 inbox 的提示词仍用机主 Token 占位符 `<AH_API_TOKEN>`（`ah join` 认的是机主钥匙）。提示词是定时运行版：worker 每 10 分钟、leader 每 15 分钟，每次无上下文；worker 须在同一次运行内做完所认领任务。Hub 地址优先取 `node.json` 的 `publicUrl`；未配置时取本次请求的 `Host` 头（`http://<Host>`），没有 `Host` 时回退本机监听地址。在 Hub 本机用 `127.0.0.1` 打开控制台时，务必配置 `publicUrl`，否则远端拿到的地址不可达。
+「+ 添加 Agent」是三步向导：选择接入类型、填写名字与角色、获取密钥与接入指引。接入类型为云端 HTTP、宿主机 `ah join` 或本机独立 Agent inbox；角色为执行方 `worker`、派单方 `leader` 或两者 `hybrid`。仅云端 HTTP 且角色为 `worker` 或 `hybrid` 时预建一张已接纳的默认 `agent` 名片；其余组合不预建卡（宿主机与 inbox 由守护进程登记后进入待接纳；纯 leader 没有名片）。云端 HTTP 会同时签发分 Agent Token，明文只在这一次响应和提示词里出现。宿主机与 inbox 的提示词仍用机主 Token 占位符 `<AH_API_TOKEN>`（`ah join` 认的是机主钥匙）。提示词是定时运行版：worker 每 10 分钟、leader 每 15 分钟，每次无上下文；worker 须在同一次运行内做完所认领任务。Hub 地址优先取 `node.json` 的 `publicUrl`；未配置时取本次请求的 `Host` 头（`http://<Host>`），没有 `Host` 时回退本机监听地址。在 Hub 本机用 `127.0.0.1` 打开控制台时，务必配置 `publicUrl`，否则远端拿到的地址不可达。Hub 放在 Cloudflare 之后时，浏览器完整性检查会以 `403` / `error code: 1010` 拦下 curl、python-requests、node 等默认 UA，所以云端 HTTP 提示词与 `a2a-leader` / `a2a-worker` Skill 都要求每个请求带浏览器 `User-Agent`，远端节点的 `HttpBus` 也固定发送同一串浏览器 UA。
 
 管理 API（与其他 `/api/v1/*` 一样要 Bearer Token）：
 

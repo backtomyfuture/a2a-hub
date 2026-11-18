@@ -10,6 +10,7 @@ description: A2A-Hub 纯 HTTP 控制端 / Leader Agent 接入协议（无 CLI �
 > **认证与运行方式**：
 > - 先用 `GET <HUB_URL>/.well-known/agent.json`（**免鉴权**）探测中台版本与协议端点。控制台首页 `/` 与 `GET /api/v1/health` 也免鉴权。`GET /api/v1/skills` 和 `GET /api/v1/skills/:name` **需要鉴权**。
 > - Token 由机主在 Web 控制台签发，绑定你的节点名。这不是机主自己的钥匙。请求头：`Authorization: Bearer <AGENT_TOKEN>`。JSON 请求带 `Content-Type: application/json`。
+> - **每个请求都带浏览器 UA**：`User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36`。Hub 可能在 Cloudflare 之后，默认 UA（curl、python-requests、node 等）会被 `403` / `error code: 1010` 拦截，这不是 Token 问题。
 > - 把下面的跟单流程设成**每 15 分钟**一次的定时任务。每次运行都没有上一轮上下文，只按本 Skill 执行。
 > - `node` / `from` 必须是 Token 绑定的节点。你不能调用 `/api/v1/approvals/*`。遇到 `auth-required` 只提醒机主去 Web 控制台审批，绝不代批。遇到 `input-required` 只能在原任务调 `/reply`，禁止新开单代替答复。
 

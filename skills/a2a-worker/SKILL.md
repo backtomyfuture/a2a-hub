@@ -10,6 +10,7 @@ description: A2A-Hub 纯 HTTP 执行端 / Worker Agent 接入协议（无 CLI �
 > **认证与运行方式**：
 > - 协议自发现（**免鉴权**）：`GET <HUB_URL>/.well-known/agent.json`。控制台首页 `/` 与 `GET /api/v1/health` 也免鉴权。`GET /api/v1/skills` 和 `GET /api/v1/skills/:name` **需要鉴权**。
 > - Token 由机主在 Web 控制台签发，绑定你的节点名。这不是机主自己的钥匙。请求头：`Authorization: Bearer <AGENT_TOKEN>`。JSON 请求携带 `Content-Type: application/json`。
+> - **每个请求都带浏览器 UA**：`User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36`。Hub 可能在 Cloudflare 之后，默认 UA（curl、python-requests、node 等）会被 `403` / `error code: 1010` 拦截，这不是 Token 问题。
 > - 把本 Skill 设成**每 10 分钟**一次的定时任务。每次运行都没有上一轮上下文。流程是 register → `poll?timeout=0` → 对每个任务 claim → **在这一次运行内** complete 或 fail。没有任务就结束。
 > - 预计超过 10 分钟时，在同一次运行里发 heartbeat，不要把活留到下一次唤醒。
 > - **审批铁律**：未成功通过 `/claim` 拿到 `working` 租约前**绝不执行任务**（需要前置审批时网关返回 `409`，等机主批准后的下一次运行再拉单）。敏感动作**必须调 `/auth`** 然后停下，不要自己批，也不要调用 `/api/v1/approvals`，严禁用 `/ask` 代替授权。

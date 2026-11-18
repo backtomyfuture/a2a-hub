@@ -1,6 +1,7 @@
 // 名片接纳与新 Agent 接入引导纯函数：归一化 Admission、校验管理请求参数、构造 onboarding 指引。
 
 import { f1 } from "../bus/tables.mjs";
+import { BROWSER_USER_AGENT } from "../kernel-util.mjs";
 
 export const ADMISSION_VALUES = Object.freeze(["admitted", "pending", "rejected"]);
 export const ACCESS_VALUES = Object.freeze(["http", "host", "inbox"]);
@@ -168,13 +169,22 @@ function credentialOf(token, authRequired) {
   };
 }
 
+const UA_HEADER = `User-Agent: ${BROWSER_USER_AGENT}`;
+const UA_NOTE = `所有请求（含免鉴权地址）都要带浏览器请求头 ${UA_HEADER}。Hub 在 Cloudflare 之后，默认 UA（curl、python-requests、node 等）会被 403 / error 1010 拦截。`;
+
 function authBullet(cred) {
-  if (cred.mode === "none") return "当前 Hub 未开启鉴权，请求不带 Authorization 头。";
-  return `除 GET /.well-known/agent.json 与 GET /api/v1/health 外，所有 /api/*（含 /api/v1/skills/*）都要带请求头 ${cred.header}。不要把 Skill 地址当成免鉴权。`;
+  if (cred.mode === "none") return `当前 Hub 未开启鉴权，请求不带 Authorization 头。${UA_NOTE}`;
+  return `除 GET /.well-known/agent.json 与 GET /api/v1/health 外，所有 /api/*（含 /api/v1/skills/*）都要带请求头 ${cred.header}。不要把 Skill 地址当成免鉴权。${UA_NOTE}`;
+}
+
+function scheduleHeaders(cred) {
+  return cred.mode === "none"
+    ? `（当前免鉴权，不要加 Authorization）请求头：${UA_HEADER}`
+    : `请求头：${cred.header}；${UA_HEADER}（不带浏览器 UA 会被 Cloudflare 403 / 1010 拦截）`;
 }
 
 function workerSchedule(base, node, cred, role = "worker") {
-  const head = cred.mode === "none" ? "（当前免鉴权，不要加 Authorization）" : `请求头：${cred.header}`;
+  const head = scheduleHeaders(cred);
   return [
     `【定时指令】（每 10 分钟运行一次；每次都没有上一轮上下文，只按本段原文执行）`,
     `你是节点 ${node} 的 ${role}（本段是取单与回执）。Hub：${base}。${head}`,
@@ -191,7 +201,7 @@ function workerSchedule(base, node, cred, role = "worker") {
 }
 
 function leaderSchedule(base, node, cred, role = "leader") {
-  const head = cred.mode === "none" ? "（当前免鉴权，不要加 Authorization）" : `请求头：${cred.header}`;
+  const head = scheduleHeaders(cred);
   return [
     `【定时指令】（每 15 分钟运行一次；每次都没有上一轮上下文，只按本段原文执行）`,
     `你是节点 ${node} 的 ${role}（本段是跟单与派单）。Hub：${base}。${head}`,
@@ -291,7 +301,7 @@ export function buildOnboarding({ hubUrl, node, access, role, authRequired = fal
         ? "每 10 分钟按 prompt 里的 Worker【定时指令】取单收尾，每 15 分钟按 Leader【定时指令】跟单与派单。"
         : "每 10 分钟按 prompt 里的【定时指令】执行：register → poll?timeout=0 → claim → 本次运行内完成（超过 10 分钟发 heartbeat）→ complete/fail。";
     steps = [
-      `一次性接入：拉取协议 Skill（${authNote}）：${skills.map((s) => `GET ${s.url}`).join("、")}。/api/v1/skills/* 需要鉴权，只有 /.well-known/agent.json 与 /api/v1/health 免鉴权。`,
+      `一次性接入：拉取协议 Skill（${authNote}；${UA_HEADER}）：${skills.map((s) => `GET ${s.url}`).join("、")}。/api/v1/skills/* 需要鉴权，只有 /.well-known/agent.json 与 /api/v1/health 免鉴权。`,
       `一次性注册：POST ${base}/api/v1/agents/register ，body {"node":"${node}","role":"${role}","kind":"agent","receive_mode":"http-poll"}`,
       `为自己创建定时任务。${scheduleHint}完整原文在 prompt 的【定时指令】中，每次运行无上下文，地址、节点名和鉴权头都已写全。`,
     ];

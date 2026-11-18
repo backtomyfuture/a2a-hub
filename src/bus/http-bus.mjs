@@ -4,7 +4,7 @@
 import { randomUUID } from "node:crypto";
 import { f1 } from "./tables.mjs";
 import { normalizeTables } from "./tables.mjs";
-import { log as defaultLog } from "../kernel-util.mjs";
+import { BROWSER_USER_AGENT, log as defaultLog } from "../kernel-util.mjs";
 
 const DEFAULT_DELAYS_MS = [0, 1000, 3000, 8000];
 const STAT_KINDS = new Set(["list", "get", "write", "other"]);
@@ -39,7 +39,7 @@ export class HttpBus {
   }
 
   _headers(hasBody = false) {
-    const h = {};
+    const h = { "User-Agent": BROWSER_USER_AGENT };
     if (this.apiToken) h.Authorization = `Bearer ${this.apiToken}`;
     if (this.node) h["X-A2A-Node"] = this.node;
     if (hasBody) h["Content-Type"] = "application/json";
