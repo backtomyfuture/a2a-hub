@@ -147,6 +147,19 @@ export function formatOccurrenceKey(date, timeZone) {
   return `${wall.year}-${p(wall.month)}-${p(wall.day)}T${p(wall.hour)}:${p(wall.minute)}:${p(wall.second)}${formatOffset(offsetMinutes(date, tz))}`;
 }
 
+// 严格晚于 now 的下一期（分钟粒度）。当前这一分钟不算，避免「刚到点」被当成还没触发。
+// 窗口与 latestOccurrence 相同；窗口内没有就返回 null。
+export function nextOccurrence(parsed, now, timeZone = DEFAULT_SCHEDULE_TZ) {
+  const tz = resolveScheduleTz(timeZone);
+  const instant = now instanceof Date ? now : new Date(now);
+  const start = Math.floor(instant.getTime() / 60000) * 60000;
+  for (let i = 1; i <= SEARCH_MINUTES; i++) {
+    const t = new Date(start + i * 60_000);
+    if (cronMatches(parsed, wallClock(t, tz))) return t;
+  }
+  return null;
+}
+
 // 不晚于 now 的最近一期（分钟粒度，配置时区的墙钟）。窗口内没有就返回 null。
 // 按绝对分钟往回走：常见时区的偏移都是整分钟，墙钟的每一分钟都会被走到；
 // 跳过的夏令时小时自然不会出现，回拨的小时会以两个不同偏移各出现一次。

@@ -363,7 +363,7 @@ test("派单门：未接纳（pending/缺省）与 rejected 拒单且不写表�
   // 1. 缺省（pending）拒单（含 createTask 与 createLoop）
   await assert.rejects(
     () => createTask({ bus: mock, to: "node-a", cap: "echo", text: "hi" }),
-    /未接纳（Admission=pending），请在 Web 控制台「Agent 名片墙 → 待接纳」中接纳/,
+    /未接纳（Admission=pending），请在 Web 控制台「节点 → 待接纳」中接纳/,
   );
   await assert.rejects(
     () => createTask({ bus: mock, cap: "CAP-node-a-echo", text: "hi" }),
