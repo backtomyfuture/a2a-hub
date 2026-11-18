@@ -297,8 +297,8 @@ ah task begin --schedule <id> [--period <期次键>] [--cap <cap_id>] [--text <�
 | `ah update [--check] [--skip-skill]` | 自更新程序本体：git pull、依赖重装、入口与 Skill 补齐；不碰配置目录。`--check` 只看远端有没有新版本。tarball 安装请重跑 install.sh（Windows 为 install.ps1） |
 | `ah reconcile` | 单次回表认领与对账后退出 |
 | `ah inventory` | 只读盘点本节点名片与任务 |
-| `ah task create --to <node> [--worker <worker>] [--cap <cap_id 或技能名>] [--text …] [--params <json 或 @文件>] [--criteria <json 或 @文件>] [--idempotency-key <键>] [--from <node>]` | 派单。写表前按 AgentCards 名册校验 `--to` 与 `--cap`。`--criteria` 写入首条 instruction 的验收清单 |
-| `ah task reply --task <id> --text …` | 答复 `input-required` 的追问，原任务续跑 |
+| `ah task create --to <node> [--worker <worker>] [--cap <cap_id 或技能名>] [--text …] [--file <路径>]... [--params <json 或 @文件>] [--criteria <json 或 @文件>] [--idempotency-key <键>] [--from <node>]` | 派单。写表前按 AgentCards 名册校验 `--to` 与 `--cap`。`--criteria` 写入首条 instruction 的验收清单；`--file` 可重复（有附件时 `--text` 可省） |
+| `ah task reply --task <id> [--text …] [--file <路径>]...` | 答复 `input-required` 的追问，原任务续跑；`--file` 可重复（有附件时 `--text` 可省） |
 | `ah task show <id>` | 看状态与产物 |
 | `ah task why <id> [--json]` | 只读时间线：任务行、消息、Runs、Artifacts、本机待补交状态、调度幂等来源、验收 |
 | `ah task cancel --task <id> [--text …]` | 撤单。发起方只撤自己的单，hub 可撤任意单；终态报错且不改状态 |
@@ -310,7 +310,7 @@ ah task begin --schedule <id> [--period <期次键>] [--cap <cap_id>] [--text <�
 | `ah schedule register --id <id> --cron "<五段>" --cap <cap_id> [--text <指令>]` | 登记 Agent 观察镜像（不写本机计划） |
 | `ah present [--pop] [--task <Task_ID>] [--wait <秒>]` | 读取本机发起任务的回执队列。`--wait` 阻塞到出现匹配回执（超时退出码 2）；`--pop` 只移除本次输出的条目 |
 | `ah inbox [--pop] [--json]` | `kind=agent` 接单 |
-| `ah inbox done\|ask\|fail\|auth --task <id> --text …` | 完单（可带 `--artifact`，可重复 `--check <id>=<pass\|fail\|blocked>[:证据]`）、追问、失败、执行中请求审批回执 |
+| `ah inbox done\|ask\|fail\|auth --task <id> --text …` | 完单（可重复 `--artifact <路径或URL>`、`--check <id>=<pass\|fail\|blocked>[:证据]`）、追问（可重复 `--file`）、失败、执行中请求审批回执（可重复 `--file`） |
 
 回执队列 `present_queue.jsonl` 旁边的 `present_bell` 仍会在有新回执落盘时刷新 mtime，供想低成本感知的 Hook 使用。`ah present --wait` 不依赖门铃，直接轮询队列文件。
 
@@ -477,3 +477,31 @@ ah loop cancel <Loop_ID> [--text "说明"] [--config <dir>]
 | `GET /api/v1/schedules` | 仅机主 | `{schedules:[{rule_id, node, schedule_id, cron, tz, cap, text, enabled, last_fired, next_fire_at, source, note, last_task, anomaly}]}`。`source` 为 `node`（守护进程镜像）或 `http-agent`（Note 含「http-agent 自报」）。`last_task` 为 `{task_id, status, updated_at}` 或 `null`，按幂等键 `sched:<Node>:<Schedule_ID>:<期次键>`、Note 里的「上次运行」、或同前缀最近一条关联。`next_fire_at` 为 ISO 或空字符串。`anomaly` 先看节点离线（`node-offline`），再看最近任务 `failed`/`rejected`（`failed`），再看启用中的计划该触发却超过 10 分钟没有 `Last_Fired`（`missed`） |
 | `PUT /api/v1/agents/:node/schedules/:id` | 该节点自己的 Agent Token（任何角色）或机主 | body `{cron, tz?, cap?, text?, enabled?}`。`id` 只允许字母、数字、短横线或下划线，最长 64。写入 Rules 镜像，Note 为「http-agent 自报」（有时区则加 `tz=`）。响应 `{ok, rule_id, at}`。中台不按这行建单 |
 | `DELETE` 同路径 | 同上 | 删除该镜像行。不存在则 404 |
+
+## 8. 附件与文件存储
+
+中台托管附件（`hub://files/<file_id>`）的目录、配置与接口如下（完整协议见 [attachments.md](attachments.md)）：
+
+- **存储目录**：`<configDir>/files/`，内含 `blobs/`（按 `file_id` 前 2 位分片存储原始文件，目录权限 `0700`、文件权限 `0600`）与 `files.db`（`node:sqlite` WAL 索引）。
+- **`node.json` 配置**：可选 `maxFileBytes`（单文件字节上限，默认 `104857600`，即 100MB）。
+- **HTTP 接口**：需 Bearer Token（下文以 `$A2A_HUB_TOKEN` 占位）；可见性限于机主、上传者或能看到引用任务的 Agent；已清理文件下载返回 `410`。
+  - `POST /api/v1/files`：请求体为文件原始字节，`Content-Type` 填 MIME（缺省 `application/octet-stream`），`X-File-Name` 填 URL 编码后的文件名。
+  - `GET /api/v1/files/:id`：流式下载（加 `?inline=1` 时常见位图按 `inline` 返回，否则为 `attachment`）。
+
+```bash
+# 上传附件（返回 201 JSON，含 file_id 与 uri）
+curl -sS -X POST "http://<HUB>:8787/api/v1/files" \
+  -H "Authorization: Bearer $A2A_HUB_TOKEN" \
+  -H "Content-Type: text/plain" \
+  -H "X-File-Name: report.txt" \
+  --data-binary @./report.txt
+
+# 下载附件
+curl -sS -L "http://<HUB>:8787/api/v1/files/<file_id>" \
+  -H "Authorization: Bearer $A2A_HUB_TOKEN" \
+  -o ./report.txt
+```
+
+- **CLI 新参数**：
+  - `ah task create`、`ah task reply`、`ah inbox ask`、`ah inbox auth`：支持可重复的 `--file <路径>`（`task create` 与 `task reply` 在传入 `--file` 时可省略 `--text`）。
+  - `ah inbox done`：支持可重复的 `--artifact <路径或URL>`。

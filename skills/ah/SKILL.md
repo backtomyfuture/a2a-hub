@@ -33,13 +33,16 @@ ah task create \
   --to <Target_Node> \
   [--worker <Worker>] \
   [--cap <Skill_ID 或 Cap_ID>] \
-  --text "<清晰可执行的指令说明>" \
+  [--text "<清晰可执行的指令说明>"] \
+  [--file <本地文件路径>]... \
   [--params '<JSON字符串或@文件>'] \
   [--criteria '<验收清单JSON数组或@文件>'] \
   [--approval auto|notify|approve] \
   [--context <Context_ID>] \
   [--idempotency-key <幂等键>]
 ```
+
+- `--file` 可重复（单条消息最多 20 个附件），本地文件会先上传为 `hub://files/<file_id>`；传入 `--file` 时 `--text` 可省略。执行器在 `runs/<Task_ID>/input.json` 的 `files[]` 中读取附件（已下载填 `local_path`，失败时 `error` 为 `expired`、`not_found` 或 `download_failed`）。
 
 - **三层寻址**：
   - 只写 `--to <node>`：自动挑选该节点首选 Worker（`Skill_ID=agent`）。
@@ -99,8 +102,9 @@ ah present [--pop] [--task <Task_ID>]
 当回执状态为 `input-required` 时，向原任务追加答复（目标节点或 HTTP Worker 将自动恢复执行），然后再次等待结果：
 
 ```bash
-ah task reply --task <Task_ID> --text "<补充信息或明确选择>"
+ah task reply --task <Task_ID> [--text "<补充信息或明确选择>"] [--file <本地文件路径>]...
 ```
+- `--file` 可重复（最多 20 个）；传入 `--file` 时 `--text` 可省略。
 
 ---
 
