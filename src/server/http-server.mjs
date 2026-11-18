@@ -22,6 +22,7 @@ import { createTask } from "../hub/create.mjs";
 import { BUILTIN_LOOP_TEMPLATES, cancelLoop, createLoop } from "../hub/loop.mjs";
 import { getTaskWhy } from "../why.mjs";
 import { handleAgentGatewayRequest } from "./agent-gateway.mjs";
+import { rosterNodeVisible } from "./longpoll-broker.mjs";
 import { renderWebConsoleHtml } from "./web-ui.mjs";
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -325,7 +326,14 @@ export async function startHubHttpServer({
           bus.listRecords(bus.tables.agentCards),
           bus.tables.loops ? bus.listRecords(bus.tables.loops) : Promise.resolve([]),
         ]);
-        const connectedNodes = broker ? broker.connectedNodes() : [];
+        const cardNodes = new Set();
+        for (const c of cards) {
+          const node = f1(c, "Node");
+          if (node) cardNodes.add(node);
+        }
+        // 无名片且 30 分钟内没活动的在线记录不进总览。有名片的离线节点仍留在 agentCards 里。
+        const connectedNodes = (broker ? broker.connectedNodes() : [])
+          .filter((n) => rosterNodeVisible(n, cardNodes.has(n.node)));
         sendJson(res, 200, {
           hubNode: cfg?.node || "hub",
           hubPublicKey: cfg?.hubPublicKey || "",

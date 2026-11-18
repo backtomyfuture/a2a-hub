@@ -12,6 +12,7 @@ import { pickSignedDecision, publicKeyOf } from "../approval-sign.mjs";
 import { f1 } from "../bus/tables.mjs";
 import { capIdOf } from "../config.mjs";
 import { admissionOf, httpError, validateNodeName } from "../hub/admission.mjs";
+import { rosterNodeVisible } from "./longpoll-broker.mjs";
 import { submitAgentReceipt } from "../inbox.mjs";
 import { DAEMON_VERSION } from "../kernel.mjs";
 
@@ -23,6 +24,51 @@ const LEADER_UPDATE_STATUSES = new Set([
   "input-required",
   "auth-required",
 ]);
+
+// 这两态还等着 Leader 处理，不能因为水位已经走过就藏起来。
+const LEADER_PENDING_STATUSES = new Set(["input-required", "auth-required"]);
+
+// SqliteBus 用 meta 表持久化水位。没有 getMeta/setMeta 的总线（测试 Mock、旧客户端）退回进程内 Map。
+const watermarkFallback = new Map();
+
+function changedSeqOf(task, taskMsgs) {
+  let max = Number(task?.seq) || 0;
+  if (!Number.isFinite(max) || max < 0) max = 0;
+  for (const m of taskMsgs || []) {
+    const s = Number(m?.seq) || 0;
+    if (s > max) max = s;
+  }
+  return max;
+}
+
+function updatesWatermarkKey(node) {
+  return `updates_watermark:${node}`;
+}
+
+function busHasMeta(bus) {
+  return typeof bus?.getMeta === "function" && typeof bus?.setMeta === "function";
+}
+
+async function readUpdatesWatermark(bus, node) {
+  if (busHasMeta(bus)) {
+    const n = Number(await bus.getMeta(updatesWatermarkKey(node)));
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }
+  return watermarkFallback.get(node) ?? 0;
+}
+
+async function writeUpdatesWatermark(bus, node, seq) {
+  if (busHasMeta(bus)) {
+    await bus.setMeta(updatesWatermarkKey(node), String(seq));
+    return;
+  }
+  watermarkFallback.set(node, seq);
+}
+
+function selectLeaderUpdates(updates, since) {
+  if (since == null) return updates;
+  return updates.filter((u) => LEADER_PENDING_STATUSES.has(u.status) || u.changed_seq > since);
+}
 
 // 2×2 四类 Skill 目录：控制端/执行端 × 有 ah CLI / 纯 HTTP，避免向工作机或云端 Agent 下发无关指令
 const SKILL_CATALOG = [
@@ -766,7 +812,10 @@ export async function handleAgentGatewayRequest({
       });
     }
 
-    sendJson(res, 200, { agents: Array.from(grouped.values()) });
+    // 有名片的节点（含离线）保留。只藏无名片且超过 30 分钟没活动的探针记录。
+    const agents = Array.from(grouped.values()).filter((agent) =>
+      rosterNodeVisible({ lastSeenAt: agent.last_seen_at }, agent.caps.length > 0));
+    sendJson(res, 200, { agents });
     return true;
   }
 
@@ -878,6 +927,16 @@ export async function handleAgentGatewayRequest({
     const wantedStatuses = statusParam
       ? new Set(statusParam.split(",").map((s) => s.trim()).filter(Boolean))
       : LEADER_UPDATE_STATUSES;
+    const sinceParam = reqUrl.searchParams.get("since");
+    let since = null;
+    if (sinceParam != null && sinceParam.trim() !== "") {
+      since = Number(sinceParam);
+      if (!Number.isFinite(since)) throw httpError(400, "since 必须是数字序号");
+    }
+    // new=1 用本节点已持久化的水位；显式 since 优先，避免和水位互相覆盖过滤条件。
+    const useNew = reqUrl.searchParams.get("new") === "1";
+    const storedWatermark = await readUpdatesWatermark(bus, node);
+    const threshold = since != null ? since : (useNew ? storedWatermark : null);
 
     broker?.touchAgent?.(node, {
       remoteAddr,
@@ -902,9 +961,11 @@ export async function handleAgentGatewayRequest({
         const instr = instructionOfTask(taskMsgs, partsByParent);
         const initiator = instr.fromNode || f1(task, "Source");
         if (initiator !== node) continue;
-        out.push(buildTaskBrief(task, taskMsgs, partsByParent, artsByTask));
+        const brief = buildTaskBrief(task, taskMsgs, partsByParent, artsByTask);
+        // 只取任务行和它的消息行。Parts 是另一张表，不能把无关写入算进这条任务的变更。
+        out.push({ ...brief, changed_seq: changedSeqOf(task, taskMsgs) });
       }
-      return out.reverse();
+      return selectLeaderUpdates(out.reverse(), threshold);
     };
 
     let list = await queryUpdates();
@@ -928,7 +989,28 @@ export async function handleAgentGatewayRequest({
     }
 
     if (!res.writableEnded) {
-      sendJson(res, 200, { node, seq: broker?.latestSeq ?? 0, cursor: nextCursor, wake, count: list.length, updates: list });
+      // 水位停在本次实际读到的最大 changed_seq，而不是 broker.latestSeq。
+      // 读表之后才落库的写入序号更大，下一轮仍能看见。status 切片不推进，免得把没返回的终态跳过。
+      let watermark = storedWatermark;
+      if (useNew && !statusParam) {
+        let peak = watermark;
+        for (const u of list) {
+          if (u.changed_seq > peak) peak = u.changed_seq;
+        }
+        if (peak > watermark) {
+          await writeUpdatesWatermark(bus, node, peak);
+          watermark = peak;
+        }
+      }
+      sendJson(res, 200, {
+        node,
+        seq: broker?.latestSeq ?? 0,
+        cursor: nextCursor,
+        wake,
+        count: list.length,
+        watermark,
+        updates: list,
+      });
     }
     return true;
   }
