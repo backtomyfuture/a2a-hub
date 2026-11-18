@@ -1,0 +1,311 @@
+// 机主配置的 Webhook 门铃：中台在任务状态变化时 POST 一条不含指令正文的通知。
+// secret 明文落盘是因为出站 HMAC 每次都要用；列表和日志不能带出它。
+
+import { createHmac, randomBytes, randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { BROWSER_USER_AGENT } from "../kernel-util.mjs";
+import { httpError } from "./admission.mjs";
+
+const FILE_NAME = "agent_webhooks.json";
+const RETRY_DELAYS_MS = Object.freeze([0, 1000, 3000, 8000]);
+const TIMEOUT_MS = 10_000;
+const LEADER_STATUSES = new Set([
+  "completed",
+  "failed",
+  "canceled",
+  "rejected",
+  "input-required",
+  "auth-required",
+]);
+
+function fieldOf(fields, key) {
+  const v = fields?.[key];
+  if (Array.isArray(v)) return String(v[0] ?? "").trim();
+  return String(v ?? "").trim();
+}
+
+function errorText(err) {
+  if (err?.name === "TimeoutError" || err?.name === "AbortError") return "timeout";
+  return String(err?.message ?? err).slice(0, 300);
+}
+
+export function validateWebhookUrl(raw) {
+  const url = String(raw ?? "").trim();
+  if (!url || url.length > 2048) {
+    throw httpError(400, "webhook_url 长度须在 1 到 2048 之间");
+  }
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw httpError(400, "webhook_url 不是合法 URL");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw httpError(400, "webhook_url 只允许 http 或 https");
+  }
+  if (parsed.username || parsed.password) {
+    throw httpError(400, "webhook_url 不能包含用户名或密码");
+  }
+  return url;
+}
+
+export function webhookSignature(secret, timestamp, rawBody) {
+  return createHmac("sha256", String(secret)).update(`${timestamp}.${rawBody}`).digest("hex");
+}
+
+function publicHook(hook) {
+  return {
+    node: hook.node,
+    url: hook.url,
+    created_at: hook.created_at,
+    updated_at: hook.updated_at,
+    last_status: hook.last_status ?? "",
+    last_error: hook.last_error ?? "",
+    last_delivered_at: hook.last_delivered_at ?? "",
+  };
+}
+
+export class AgentWebhookStore {
+  constructor(configDir, { now = () => new Date() } = {}) {
+    if (!configDir) throw httpError(500, "未配置 configDir，无法管理 Webhook");
+    this.path = path.join(configDir, FILE_NAME);
+    this.#now = now;
+  }
+
+  #now;
+  #cache = null;
+  #mtimeMs = -1;
+
+  #load() {
+    if (!fs.existsSync(this.path)) {
+      this.#cache = { version: 1, hooks: [] };
+      this.#mtimeMs = 0;
+      return this.#cache;
+    }
+    const st = fs.statSync(this.path);
+    if (this.#cache && st.mtimeMs === this.#mtimeMs) return this.#cache;
+    let parsed;
+    try {
+      parsed = JSON.parse(fs.readFileSync(this.path, "utf8"));
+    } catch {
+      throw httpError(500, "agent_webhooks.json 无法解析");
+    }
+    if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.hooks)) {
+      throw httpError(500, "agent_webhooks.json 格式不正确");
+    }
+    this.#cache = parsed;
+    this.#mtimeMs = st.mtimeMs;
+    return parsed;
+  }
+
+  #save(hooks) {
+    const json = `${JSON.stringify({ version: 1, hooks }, null, 2)}\n`;
+    const tmp = `${this.path}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, json, { mode: 0o600 });
+    fs.renameSync(tmp, this.path);
+    // writeFile 的 mode 会被 umask 削掉，落盘后再收到 0600。
+    fs.chmodSync(this.path, 0o600);
+    this.#cache = { version: 1, hooks };
+    this.#mtimeMs = fs.statSync(this.path).mtimeMs;
+  }
+
+  #mint() {
+    return `whsec_${randomBytes(32).toString("base64url")}`;
+  }
+
+  get(node) {
+    const name = String(node ?? "").trim();
+    return this.#load().hooks.find((h) => h.node === name) ?? null;
+  }
+
+  listPublic() {
+    return this.#load().hooks.map((h) => publicHook(h));
+  }
+
+  // secret 只在新建或 rotate 时返回；改 URL 不把已发出的密钥再交出来。
+  put({ node, url, rotate = false } = {}) {
+    const name = String(node ?? "").trim();
+    const data = this.#load();
+    const nowIso = this.#now().toISOString();
+    const idx = data.hooks.findIndex((h) => h.node === name);
+    if (idx < 0) {
+      const secret = this.#mint();
+      const hook = {
+        node: name,
+        url,
+        secret,
+        created_at: nowIso,
+        updated_at: nowIso,
+        last_status: "",
+        last_error: "",
+        last_delivered_at: "",
+      };
+      data.hooks.push(hook);
+      this.#save(data.hooks);
+      return { created: true, secret, hook };
+    }
+    const next = { ...data.hooks[idx], url, updated_at: nowIso };
+    let secret = null;
+    if (rotate) {
+      secret = this.#mint();
+      next.secret = secret;
+    }
+    data.hooks[idx] = next;
+    this.#save(data.hooks);
+    return { created: false, secret, hook: next };
+  }
+
+  remove(node) {
+    const name = String(node ?? "").trim();
+    const data = this.#load();
+    const next = data.hooks.filter((h) => h.node !== name);
+    if (next.length === data.hooks.length) return false;
+    this.#save(next);
+    return true;
+  }
+
+  markDelivery(node, { last_status, last_error, last_delivered_at } = {}) {
+    const name = String(node ?? "").trim();
+    const data = this.#load();
+    const idx = data.hooks.findIndex((h) => h.node === name);
+    if (idx < 0) return null;
+    const prev = data.hooks[idx];
+    const next = {
+      ...prev,
+      last_status: String(last_status ?? ""),
+      last_error: String(last_error ?? ""),
+      last_delivered_at: last_delivered_at == null ? (prev.last_delivered_at ?? "") : String(last_delivered_at),
+    };
+    data.hooks[idx] = next;
+    this.#save(data.hooks);
+    return publicHook(next);
+  }
+}
+
+export class WebhookDispatcher {
+  constructor({
+    store,
+    configDir,
+    hubNode = "hub",
+    taskTable = "tasks",
+    fetchImpl,
+    log,
+    now = () => Date.now(),
+    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    retryDelays = RETRY_DELAYS_MS,
+    timeoutMs = TIMEOUT_MS,
+  } = {}) {
+    this.store = store ?? new AgentWebhookStore(configDir, { now: () => new Date(now()) });
+    this.hubNode = String(hubNode || "hub");
+    this.taskTable = String(taskTable || "tasks");
+    this.fetch = fetchImpl ?? globalThis.fetch;
+    this.log = log ?? (() => {});
+    this.now = now;
+    this.sleep = sleep;
+    this.retryDelays = retryDelays;
+    this.timeoutMs = timeoutMs;
+    this.#seen = new Set();
+  }
+
+  #seen;
+
+  async onBusEvent(ev) {
+    if (!ev || String(ev.table ?? "") !== this.taskTable) return null;
+    const fields = ev.fields ?? {};
+    const status = fieldOf(fields, "Status");
+    const taskId = fieldOf(fields, "Task_ID");
+    if (!taskId || !status) return null;
+    const seq = Number(ev.seq) || 0;
+    // 答复把任务拉回 working 是续跑，不是新门铃。只有首次 submitted 才通知执行节点。
+    if (status === "submitted") {
+      const node = fieldOf(fields, "Target_Node");
+      if (!node) return null;
+      return this.#push("task.assigned", node, taskId, status, seq);
+    }
+    if (LEADER_STATUSES.has(status)) {
+      const node = fieldOf(fields, "From_Node");
+      if (!node) return null;
+      return this.#push("task.updated", node, taskId, status, seq);
+    }
+    return null;
+  }
+
+  async ping(node) {
+    const name = String(node ?? "").trim();
+    const hook = this.store.get(name);
+    if (!hook?.url || !hook.secret) return { missing: true, ok: false, status: 0, error: "not found" };
+    return this.deliver(hook, this.#body({ event: "ping", node: name, taskId: "", status: "", seq: 0 }));
+  }
+
+  async #push(event, node, taskId, status, seq) {
+    const hook = this.store.get(node);
+    if (!hook?.url || !hook.secret) return null;
+    const key = `${node}\0${taskId}\0${status}`;
+    if (this.#seen.has(key)) return null;
+    this.#seen.add(key);
+    if (this.#seen.size > 4096) this.#seen.delete(this.#seen.values().next().value);
+    return this.deliver(hook, this.#body({ event, node, taskId, status, seq }));
+  }
+
+  #body({ event, node, taskId, status, seq }) {
+    return {
+      event,
+      node,
+      task_id: taskId,
+      status,
+      seq,
+      hub: this.hubNode,
+      at: new Date(this.now()).toISOString(),
+    };
+  }
+
+  async deliver(hook, payload) {
+    const rawBody = JSON.stringify(payload);
+    let lastStatus = 0;
+    let lastError = "";
+    for (let i = 0; i < this.retryDelays.length; i++) {
+      const delay = this.retryDelays[i];
+      if (delay > 0) await this.sleep(delay);
+      const timestamp = String(Math.floor(this.now() / 1000));
+      try {
+        const res = await this.fetch(hook.url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "User-Agent": BROWSER_USER_AGENT,
+            "X-A2A-Event": payload.event,
+            "X-A2A-Delivery": randomUUID(),
+            "X-A2A-Timestamp": timestamp,
+            "X-A2A-Signature": `sha256=${webhookSignature(hook.secret, timestamp, rawBody)}`,
+          },
+          body: rawBody,
+          // 不跟随重定向：机主核过的是这个地址，3xx 不能把带签名的请求带去别处。
+          redirect: "manual",
+          signal: AbortSignal.timeout(this.timeoutMs),
+        });
+        lastStatus = Number(res?.status) || 0;
+        if (lastStatus >= 200 && lastStatus < 300) {
+          const deliveredAt = new Date(this.now()).toISOString();
+          this.store.markDelivery(hook.node, {
+            last_status: String(lastStatus),
+            last_error: "",
+            last_delivered_at: deliveredAt,
+          });
+          this.log(`webhook ${hook.node} ${payload.event} ok ${lastStatus}`);
+          return { ok: true, status: lastStatus, error: "" };
+        }
+        lastError = `HTTP ${lastStatus}`;
+      } catch (err) {
+        lastStatus = 0;
+        lastError = errorText(err);
+      }
+    }
+    this.store.markDelivery(hook.node, {
+      last_status: lastStatus ? String(lastStatus) : "error",
+      last_error: lastError,
+    });
+    this.log(`webhook ${hook.node} ${payload.event} fail ${lastError}`);
+    return { ok: false, status: lastStatus, error: lastError };
+  }
+}

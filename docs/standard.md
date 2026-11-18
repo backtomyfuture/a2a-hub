@@ -8,13 +8,15 @@
 
 1. **A2A 数据模型 + 统一 SQLite / HTTP 总线**：借 A2A 的数据模型组织任务、消息、内容块与能力名片；通信统一收敛到 Hub 托管的 SQLite WAL 总线与 HTTP 网关，宿主节点通过出站长轮询或定时轮询接入，无守护进程的纯 HTTP 外部 Agent 通过 `agent-gateway` REST 端点接入，见 §10.3。
 2. **三层分离**：沟通归 Messages、状态与成果归 Tasks/Artifacts、执行细节归 Runs。任何一层不许再兼另一层的职。
-3. **节点只出不进、Hub 显式鉴权**：边缘执行节点与外部 Agent 只发起出站 HTTP 请求，不开监听端口、不做端口映射与反向隧道、不暴露所在局域网。Hub 按 `listen` 配置绑定 HTTP 服务（默认 `0.0.0.0:8787`），对除健康探针（`/api/v1/health`）、静态首页（`/`）与自发现名片（`/.well-known/agent.json`）外的 `/api/*` 路由执行 Bearer Token 鉴权（`AH_API_TOKEN`）。
+3. **节点只出不进、Hub 显式鉴权**：边缘执行节点与外部 Agent 只发起出站 HTTP 请求，不开监听端口、不做端口映射与反向隧道、不暴露所在局域网。唯一例外是机主为某个 HTTP Agent 配置了 Webhook：Hub 向该 URL 出站 POST 一条门铃（§10.3），URL 只能由机主填写，Agent 不能自报。Hub 按 `listen` 配置绑定 HTTP 服务（默认 `0.0.0.0:8787`），对除健康探针（`/api/v1/health`）、静态首页（`/`）与自发现名片（`/.well-known/agent.json`）外的 `/api/*` 路由执行 Bearer Token 鉴权（`AH_API_TOKEN`）。
 4. **机主审批红线**：涉及对外发消息、删改数据、花钱、提交表单、改权限的动作，最终只认机主本人批准并由 Hub 签名的审批决定。任务行与本机 `approval_class` 是认领前的静态门；执行中由执行方按实际动作再发起 `auth-required`（§8.3）。
 5. **凭据与敏感原文不入表、不进载荷**；结果回传统一「摘要＋指针」。
 6. **hub 是 node 的单进程超集**：枢纽（hub）是一组逻辑职责，也是普通执行节点（node）的超集——单进程、单配置目录（默认 `~/.a2a-hub`）即可同时承载，无需再拆两个进程。由 `ah daemon --role node|hub` 承载；省略 `--role` 时读该配置目录 `node.json` 的 `role`，缺省 node。`role=hub` 既像普通节点一样读取 `commands.json`、登记 `AgentCards`、认领并执行指派给自己的任务（含定时任务），又同时运行 `SqliteBus`、HTTP 网关（REST API + `LongPollBroker` + `agent-gateway` + Web 控制台）、`ApprovalService`（ed25519 签名）、`PresentService`、`StaleService`、`ScheduleService`、`LoopService` 与可选 `ExternalNotifier`（§10.1）。
 7. **发起方身份与回执原路返回**：任何节点或 Agent 都可以作为任务入口。`ah task create` 默认以发起节点作为首条 `instruction` 消息的 `From_Node` 与 `Tasks.Source`。执行节点写回执消息（`result`、`question`、`notice` 等）时，`To_Node` 原路指向该任务首条 `instruction` 消息的 `From_Node`（回退 `Source` || `"hub"`）；唯独 `auth_request` 的 `To_Node` 固定为 `"hub"`。结果呈递按「谁发起、回给谁」原则落入发起节点的本地 `present_queue.jsonl`（纯 HTTP Leader 经 `/api/v1/agents/:node/updates` 拉取）；可选通过 `ExternalNotifier`（如飞书群机器人 Webhook、Bark、Telegram 或通用 Webhook）推送精简提醒与控制台深链（§8.5）。
 
 8. **三层寻址：Node / Worker / Skill**：Node 是工作节点（一台机器上的一个守护进程或接入端点，管网络位置、认领租约与心跳）；Worker 是节点上的执行者（一个 Agent CLI，管启动模板、续接命令、执行语境与无头权限）；Skill 是这个 Worker 能做的一类任务（管名称、说明、副作用等级与审批下限）。任务行用 `Target_Node` / `Worker_Hint` / `Skill_ID` 三列寻址，名片一行是 Node × Worker × Skill。Worker 留空表示由节点本尊直接执行：脚本类能力由守护进程直接拉起，独立 Agent 节点（§10.4）的本尊即 Worker。三层的名字都只是本机 `commands.json` 白名单里的选择键，不携带命令内容（§9）。名册里每个 Worker 有且只有一张 **Worker 名片**（`Skill_ID=agent` 的那一行），代表该 Worker 在册及其通用执行，不是一项技能；Worker 的专长技能各占一行，挂在它的名片下。
+
+界面和提示词用中文说法，API 字段与表字段不改名：节点 = Node（`node` / `Target_Node`），Agent = Worker（`Skill_ID=agent` 的名片，或一个 HTTP Agent 本身），能力 = Skill（`Skill_ID` 不是 `agent`）。控制台按「节点 → Agent → 能力」展示；节点本尊直接执行、Worker 为空且 `Skill_ID` 不是 `agent` 的能力归在「节点直属能力」。旧称「名片墙」改为「节点」。
 
 ## 1. 对象总览（八张逻辑表：A2A 主干＋本地扩展列）
 
@@ -149,7 +151,7 @@
 - Metadata：A2A 原生自由字段（文本，JSON 字符串）。内核登记名片时写入 `kind` 与 `mode`（节点类型与执行模式，见 §10.4 与 §9），供建单侧识别该能力；协议节点手工登记的名片，以及尚未填写的旧名片，可以留空。
 - **v3.5 收拢方向**：Tags / Examples / Required_Assets 已删（无消费者）；Input_Modes / Output_Modes / Default_Input_Modes / Default_Output_Modes / Cap_Streaming / Cap_Push / Cap_State_History 与本地扩展 Zone、Skill_Name 将收拢进 Metadata 的 `a2a` 子对象（一份 A2A 名片本就是一个 JSON 文档，Modes 与 capabilities 是它的原生组成部分，不另占列）；代码先行改写为写 JSON，列在观察一个登记周期后删除。Side_Effect 与审批下限相关，保留独立列与选项约束。
 
-本地扩展字段：Cap_ID（行主键）、Worker（文本；该能力由哪个 Worker 执行，留空＝节点本尊。它与 Node、Skill_ID 同为路由键，所以单独占列而不进 Metadata）、Zone、Side_Effect、Availability、Dispatchable、Receive_Mode（唤醒方式，与 §10.3 传输方式对应：守护进程节点取 `event`（长轮询）或 `poll`（定时轮询）；纯 HTTP 外部 Agent 经 `agent-gateway` 注册时取 `http-poll`）、Admission、Display_Name、Admin_Note。
+本地扩展字段：Cap_ID（行主键）、Worker（文本；该能力由哪个 Worker 执行，留空＝节点本尊。它与 Node、Skill_ID 同为路由键，所以单独占列而不进 Metadata）、Zone、Side_Effect、Availability、Dispatchable、Receive_Mode（唤醒方式，与 §10.3 对应：守护进程节点取 `event` 或 `poll`；纯 HTTP 外部 Agent 取 `http-poll`、`http-longpoll` 或 `webhook`）、Admission、Display_Name、Admin_Note。
 
 `Admission` 取 `admitted` / `pending` / `rejected`；缺省、空或其他值一律按 `pending`（因此没有该字段的老名片都在待接纳池）。`Display_Name` 是机主起的显示名，可空，不超过 64 字符。`Admin_Note` 是机主备注，可空，不超过 500 字符。这三个字段只有 Hub 管理 API（`/api/v1/admin/*`，见 `src/hub/admission.mjs`）可写；守护进程对账（`desiredCard` / `reconcileCards`）与 `POST /api/v1/agents/register` 不写，新建行因此缺省为 `pending`。
 
@@ -333,11 +335,45 @@ Cap_ID 推导口径（守护进程登记时）：节点本尊的能力为条目�
 |---|---|---|---|
 | `longpoll` | 远端宿主节点向 Hub 发起出站长轮询 `GET /api/v1/poll?node=<node>&cursor=<seq>&timeout=25`；Hub 进程内直接订阅 `LongPollBroker` 本地事件；每次写后毫秒级唤醒 | **默认推荐**：Hub 节点与远端宿主守护节点（`ah join`） | `event` |
 | `poll` | 宿主守护进程按 `pollSec`（默认 45 秒）定时扫表（`events: false` 时启用） | 无法维持长连接或显式降级轮询的守护节点 | `poll` |
-| `http-poll` | 纯 HTTP 外部 Agent 通过 `agent-gateway` 主动拉取 `/api/v1/agents/:node/poll` 或 `/updates`（支持短轮询 `timeout=0` 与长轮询 `timeout=5..60`） | 无常驻守护进程的云端或定时驱动 Agent（如 Muse / Grok Bot） | `http-poll` |
+| `http-poll` | 纯 HTTP 外部 Agent 定时跑检查脚本，有事再短轮询 `GET /api/v1/agents/:node/poll?timeout=0` 或 `updates?new=1` | 无常驻进程、由外部定时器唤醒的 Agent（默认） | `http-poll` |
+| `http-longpoll` | 同一网关的常驻进程循环 `GET /api/v1/agents/:node/poll?timeout=25`（Leader 循环 `updates?new=1`） | 能挂住出站连接、不开监听端口的 HTTP Agent | `http-longpoll` |
+| `webhook` | Hub 向机主登记的 URL 出站 POST 门铃；接收方再用自己的 Agent Token 回网关拉正文 | 能提供一个 HTTP 端点、希望少做空轮询的 HTTP Agent | `webhook` |
+
+`receive`（仅 `access=http` 的添加 Agent / 接入提示词）与名片 `Receive_Mode` 的对应：`poll` → `http-poll`，`longpoll` → `http-longpoll`，`webhook` → `webhook`。`access` 不是 `http` 时忽略 `receive`。`register` 把请求体里的 `receive_mode` 原样写入 `Receive_Mode`（缺省 `http-poll`）。
+
+#### Webhook 门铃
+
+存储是配置目录 `agent_webhooks.json`（0600），形如 `{version:1, hooks:[{node, url, secret, created_at, updated_at, last_status, last_error, last_delivered_at}]}`。`secret` 明文落盘，因为每次出站 HMAC 都要用它；GET 列表、日志和门铃正文都不含 `secret`。明文只在新建或 `rotate_secret=true` 的响应里出现一次，形如 `whsec_` 加随机串。URL 只由机主填写：仅 `http` / `https`，长度 1–2048，禁止用户名或密码。Agent 身份不能调用 `/api/v1/admin/webhooks*`。删除节点时一并删除该节点的 Webhook。
+
+推送只是门铃，不含指令正文和参数。Hub 使用 `redirect: manual`，不跟随 3xx。单次超时 10 秒；非 2xx 或网络错误按 0 / 1 / 3 / 8 秒重试后放弃，并写入 `last_status` / `last_error`。2xx 记成功和 `last_delivered_at`。每次尝试更换 `X-A2A-Delivery` 与时间戳，正文不变，签名随时间戳重算。
+
+```http
+POST <机主登记的 URL>
+Content-Type: application/json
+User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36
+X-A2A-Event: task.assigned | task.updated | ping
+X-A2A-Delivery: <uuid，每次尝试一个>
+X-A2A-Timestamp: <unix 秒>
+X-A2A-Signature: sha256=<hex>
+```
+
+`User-Agent` 与出站 `HttpBus`、检查脚本相同。签名是 `HMAC-SHA256(secret, timestamp + "." + rawBody)` 的十六进制小写，`rawBody` 是未经改写的原始 JSON。`timestamp` 用请求头原文，不要先 `JSON.parse` 再序列化。接收方用时序安全比较；`X-A2A-Timestamp` 与当前时间相差超过 300 秒则拒绝并返回非 2xx。
+
+正文：
+
+```json
+{"event":"task.assigned","node":"<接收节点>","task_id":"...","status":"submitted","seq":1,"hub":"<hub 节点名>","at":"<ISO>"}
+```
+
+- `task.assigned`：`Target_Node` 为该节点且 `Status=submitted`。答复后回到 `working` 的续跑不是 `submitted`，不推。
+- `task.updated`：`From_Node` 为该节点，且状态进入 `completed` / `failed` / `canceled` / `rejected` / `input-required` / `auth-required`（给发起方 Leader）。
+- `ping`：机主测试按钮。`task_id` 与 `status` 为空字符串，`seq` 为 0。验签通过后直接返回 2xx。
+
+去重键是进程内的 `(node, task_id, status)`，最多保留 4096 条；同一进程里同一键只推一次，重启后会再推。`ping` 不进这张表。收到门铃后用自己的 Agent Token 走现有 `poll` / `claim` / `updates` 拉详情。Webhook 模式另以每 30 分钟一次的 `a2a_check.py` 兜底，防止漏推。
 
 - **对账兜底**：守护进程模式必须保留低频对账扫表，默认 15 分钟（`sweepSec=900`）。`poll` 方式的轮询间隔不得长于对账周期。
 - **挂起复查（等的一方自己回表看）**：答复（`answer`）与审批决定（`auth_decision`）只追加在 Messages；执行中批准连任务行都不改。守护进程型节点名下有 `input-required` 或 `auth-required` 任务时，两次扫表的间隔按挂起时长缩短：前 10 分钟不超过 60 秒，10～60 分钟不超过 180 秒，超过 60 分钟回到原周期。计时以 (Task_ID, Status_Msg) 为键，同一任务再提问或再申请审批重新计时。事件仍是提前叫醒，这一节奏只保证事件漏掉时的上限；它只缩短等待，不拉长。
-- **节点侧零监听**：边缘宿主节点与外部 HTTP Agent 绝不开设任何监听端口，也不做反向隧道；`Receive_Mode` 取 `event` / `poll`（守护节点）或 `http-poll`（外部 HTTP Agent）。
+- **节点侧零监听**：边缘宿主节点绝不开设监听端口，也不做反向隧道；`Receive_Mode` 取 `event` / `poll`。定时检查与常驻长轮询的外部 HTTP Agent 同样只出站。`webhook` 只让 Hub 去打机主登记的 URL，Agent 不能自报地址。
 
 ### 10.4 节点类型（Kind）：宿主（host）vs 独立 Agent（agent）
 

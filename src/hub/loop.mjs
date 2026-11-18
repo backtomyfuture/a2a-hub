@@ -6,7 +6,7 @@
 import { randomBytes } from "node:crypto";
 import { f1 } from "../bus/tables.mjs";
 import { acceptanceForTask, parseCriteria } from "../acceptance.mjs";
-import { createTask, formatCreatedAt } from "./create.mjs";
+import { createTask, formatCreatedAt, resolveDispatchTarget } from "./create.mjs";
 import { messageText } from "./cards.mjs";
 import { cancelTask } from "./cancel.mjs";
 
@@ -271,6 +271,27 @@ export async function createLoop({
   const loopId = freshLoopId(ids, now instanceof Date ? now : new Date(now));
   const contextId = String(context ?? "").trim() || `ctx-${loopId.toLowerCase()}`;
   const loopTitle = String(title ?? "").trim() || goalText.split("\n")[0].slice(0, 80);
+
+  // 任一阶段目标不合法就整单拒绝，避免先写出第一阶段任务再在后面的阶段失败。
+  if (validateTarget) {
+    const problems = [];
+    for (const st of normalizedStages) {
+      try {
+        await resolveDispatchTarget({
+          bus,
+          to: st.to,
+          cap: st.cap,
+          worker: st.worker,
+          validateTarget: true,
+        });
+      } catch (e) {
+        problems.push(`阶段 ${st.id}：${e?.message ?? e}`);
+      }
+    }
+    if (problems.length) {
+      throw new Error(`拒绝创建闭环：${problems.join("；")}`);
+    }
+  }
 
   const first = normalizedStages[0];
   const prompt = renderStagePrompt(first.prompt, {

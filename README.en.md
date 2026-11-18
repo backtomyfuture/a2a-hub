@@ -49,6 +49,7 @@ flowchart LR
 - **Node**: A physical or virtual machine (`mac-mini-hub`, `edge-node-1`).
 - **Worker**: An agent runtime template configured under `workers` in `commands.json` (represented in `AgentCards` with `Skill_ID=agent`).
 - **Skill**: A specialized skill targeting `workers: [...]` or a deterministic node script (`mode: json`).
+- Console and prompt wording: 节点 = Node, Agent = Worker (`Skill_ID=agent`), 能力 = Skill. API fields stay `node`, `Worker`, and `Skill_ID`.
 
 ### 2. Eight-State A2A Task Lifecycle
 
@@ -105,7 +106,7 @@ node bin/ah.mjs join http://<AH_API_TOKEN>@<HUB_IP>:8787
 
 ### Option C: Connect Pure HTTP External Agents (Muse / Grok Bot, No Daemon)
 
-Cloud or cron-driven Agents do not install a daemon. Add the agent in the Web Console and copy its per-agent token (shown once). Discovery at `GET http://<HUB_IP>:8787/.well-known/agent.json` is unauthenticated. Skill fetch (`GET /api/v1/skills/a2a-leader` or `a2a-worker`) and every other call need that token. `<AGENT_TOKEN>` below is not the owner `AH_API_TOKEN`.
+Cloud Agents do not install a daemon. Add the agent in the Web Console, copy its per-agent token (shown once), and pick a receive mode: scheduled check (default, `receive_mode=http-poll`), resident long-poll (`http-longpoll`), or a webhook doorbell (`webhook`; the owner sets the URL, and the push has no instruction body). Discovery at `GET http://<HUB_IP>:8787/.well-known/agent.json` is unauthenticated. Skill fetch (`GET /api/v1/skills/a2a-leader` or `a2a-worker`) and every other call need that token. `<AGENT_TOKEN>` below is not the owner `AH_API_TOKEN`. The sample is the scheduled check.
 
 ```bash
 # 1) Register a Leader (Muse, every 15 minutes) or Worker (Grok Bot, every 10 minutes)

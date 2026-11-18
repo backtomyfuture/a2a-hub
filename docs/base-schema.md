@@ -111,7 +111,7 @@ AgentCard 规范化展开：一行一项能力
 | Dispatchable | select | Yes 才可派发（选项：Yes / No） |
 | Daemon_Version | text |  |
 | Node_Desc | text |  |
-| Receive_Mode | select | 唤醒方式（选项：longpoll / poll） |
+| Receive_Mode | select | 唤醒方式：守护进程 longpoll/poll；纯 HTTP Agent 为 http-poll（定时检查）、http-longpoll（常驻长轮询）、webhook（中台门铃推送）（选项：longpoll / poll / http-poll / http-longpoll / webhook） |
 | Skill_Name | text |  |
 | Input_Modes | text |  |
 | Output_Modes | text |  |

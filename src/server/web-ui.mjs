@@ -7,7 +7,7 @@ export function renderWebConsoleHtml() {
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>A2A-Hub · 我的 Agent 控制台</title>
+<title>A2A-Hub · 多节点编排控制台</title>
 <style>
   :root {
     --bg: #09090b;
@@ -288,9 +288,33 @@ export function renderWebConsoleHtml() {
     display: flex; flex-direction: column; gap: 10px;
     padding-top: 10px; border-top: 1px solid var(--border);
   }
+  .agent-group {
+    padding: 10px; border-radius: 9px; background: var(--bg); border: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .sub-group-title {
+    font-size: 12px; font-weight: 650; color: var(--text-2);
+    display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;
+  }
   .cap-item {
     padding: 11px 12px; border-radius: 8px; background: var(--surface-2); border: 1px solid var(--border);
     display: flex; flex-direction: column; gap: 8px;
+  }
+  .info-banner {
+    padding: 11px 13px; border-radius: 8px; background: var(--accent-soft);
+    border: 1px solid rgba(99,102,241,0.28); font-size: 12px; line-height: 1.6; color: var(--text-2);
+    margin-bottom: 14px;
+  }
+  .info-banner strong { color: var(--text); }
+  .stage-bind-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+  .stage-bind-row {
+    display: grid; grid-template-columns: 150px 1fr 1fr; gap: 8px; align-items: center;
+    padding: 8px 10px; border-radius: 8px; background: var(--surface-2); border: 1px solid var(--border);
+  }
+  .bulk-bind-bar {
+    display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; align-items: center;
+    padding: 8px 10px; border-radius: 8px; background: var(--surface-2); border: 1px dashed var(--border-strong);
+    margin-bottom: 8px;
   }
   .tech-details { font-size: 12px; color: var(--muted); }
   .tech-details summary { cursor: pointer; user-select: none; }
@@ -428,6 +452,7 @@ export function renderWebConsoleHtml() {
     .tasks-split { grid-template-columns: 1fr; height: auto; }
     .task-list-col { max-height: 360px; }
     .crit-row { grid-template-columns: 1fr; }
+    .stage-bind-row, .bulk-bind-bar { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -447,7 +472,7 @@ export function renderWebConsoleHtml() {
         <span class="badge" id="navTodoCount">0</span>
       </button>
       <button class="nav-btn" data-view="agents">
-        <span>Agent</span>
+        <span>节点</span>
         <span class="badge" id="navAgentCount">0</span>
       </button>
       <button class="nav-btn" data-view="tasks">
@@ -457,6 +482,10 @@ export function renderWebConsoleHtml() {
       <button class="nav-btn" data-view="loops">
         <span>SOP 闭环</span>
         <span class="badge indigo" id="navLoopCount">0</span>
+      </button>
+      <button class="nav-btn" data-view="schedules">
+        <span>定时任务</span>
+        <span class="badge" id="navScheduleCount">0</span>
       </button>
     </nav>
     <div class="sidebar-footer">
@@ -485,9 +514,10 @@ export function renderWebConsoleHtml() {
     </header>
     <nav class="mobile-nav" id="mobileNav">
       <button class="nav-btn active" data-view="overview">首页</button>
-      <button class="nav-btn" data-view="agents">Agent</button>
+      <button class="nav-btn" data-view="agents">节点</button>
       <button class="nav-btn" data-view="tasks">任务</button>
       <button class="nav-btn" data-view="loops">SOP 闭环</button>
+      <button class="nav-btn" data-view="schedules">定时任务</button>
       <button class="nav-btn" id="mobileThemeBtn" type="button">深浅</button>
       <button class="nav-btn" id="mobileTokenBtn" type="button">密钥</button>
     </nav>
@@ -506,7 +536,7 @@ export function renderWebConsoleHtml() {
       <div class="form-row">
         <label>交给谁</label>
         <select class="input" id="tfTargetSelect"></select>
-        <div class="hint" id="tfTargetHint">只列出您已接纳且可接收任务的 Agent 能力。</div>
+        <div class="hint" id="tfTargetHint">只列出您已接纳且可接收任务的节点与能力。</div>
       </div>
       <div class="form-row">
         <label>要做什么</label>
@@ -565,10 +595,15 @@ export function renderWebConsoleHtml() {
 
 <!-- 新建 SOP 闭环弹窗 -->
 <div class="modal-backdrop" id="loopModal">
-  <div class="modal">
+  <div class="modal" style="max-width:680px;">
     <div class="modal-head">
       <span>新建 SOP 闭环</span>
       <button class="btn sm" type="button" data-close-modal="loopModal">关闭</button>
+    </div>
+    <div class="info-banner">
+      <div><strong>什么是闭环：</strong>多阶段自动化任务链，每个阶段可派给不同节点上的不同 Agent，验收不过时自动带反馈打回修复。</div>
+      <div><strong>与单次任务的区别：</strong>单次任务发给单一目标执行一次即止；闭环会按阶段自动接力并在失败/未达标时自动重跑。</div>
+      <div><strong>与能力（Skill）的区别：</strong>能力是单个 Agent 具备的专长技能；闭环则是编排多个节点与能力的跨阶段协作流程。</div>
     </div>
     <form id="loopForm">
       <div class="form-row">
@@ -577,34 +612,39 @@ export function renderWebConsoleHtml() {
         <div class="token-box" id="lfTemplateDesc" style="margin-top:6px;"></div>
       </div>
       <div class="form-row">
-        <label>交给哪个节点执行</label>
-        <select class="input" id="lfTargetSelect"></select>
+        <label>阶段分派（为每个阶段选择节点与已接纳的 Agent / 能力）</label>
+        <div class="bulk-bind-bar" id="lfBulkBar">
+          <select class="input" id="lfBulkNode"></select>
+          <select class="input" id="lfBulkCap"></select>
+          <button type="button" class="btn sm" id="lfApplyAllBtn">全部阶段用同一个</button>
+        </div>
+        <div class="stage-bind-list" id="lfStageBindings"></div>
       </div>
       <div class="form-row">
         <label>闭环总目标</label>
         <textarea class="input" id="lfGoal" placeholder="描述希望多个步骤接力完成的最终目标..." required></textarea>
       </div>
       <details class="adv-box" id="lfAdvanced">
-        <summary>高级选项（手动节点、能力与轮次上限）</summary>
+        <summary>高级选项（轮次上限与手动兜底目标）</summary>
         <div class="adv-body">
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
             <div class="form-row">
-              <label>手动指定节点</label>
-              <input class="input" id="lfTo" placeholder="例如 mac-mini" />
+              <label>最多来回几轮（1-8）</label>
+              <input class="input" type="number" id="lfMaxIter" value="5" min="1" max="8" />
             </div>
             <div class="form-row">
-              <label>默认能力</label>
-              <input class="input" id="lfCap" value="agent" />
+              <label>手动兜底节点（可选）</label>
+              <input class="input" id="lfTo" placeholder="仅在暂无已接纳能力时手动填写" />
             </div>
           </div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
             <div class="form-row">
-              <label>指定执行者（Worker，可选）</label>
-              <input class="input" id="lfWorker" placeholder="留空由节点默认" />
+              <label>手动默认能力</label>
+              <input class="input" id="lfCap" value="agent" />
             </div>
             <div class="form-row">
-              <label>最多来回几轮（1-8）</label>
-              <input class="input" type="number" id="lfMaxIter" value="5" min="1" max="8" />
+              <label>手动指定 Agent（Worker，可选）</label>
+              <input class="input" id="lfWorker" placeholder="留空由节点默认" />
             </div>
           </div>
         </div>
@@ -656,21 +696,21 @@ export function renderWebConsoleHtml() {
           <input type="radio" name="afAccessRadio" value="http" checked />
           <div>
             <div style="font-weight:650;">云端 / HTTP Agent（如 Muse、Grok Bot）</div>
-            <div class="hint">适合跑在云端或定时脚本里的 Agent，通过网址定时来取单或派单，不用装本地守护进程。</div>
+            <div class="hint">适合跑在云端、容器或独立脚本里的 Agent，无需本地守护进程；下一步可选「定时检查」「常驻长连接」或「Webhook 推送」。</div>
           </div>
         </label>
         <label class="choice-card" data-access="host">
           <input type="radio" name="afAccessRadio" value="host" />
           <div>
             <div style="font-weight:650;">另一台电脑（工作机节点）</div>
-            <div class="hint">适合您自己的另一台 Mac / Linux / Windows 电脑，接入后可执行本地命令或 AI 编程任务。</div>
+            <div class="hint">适合您自己的另一台 Mac / Linux / Windows 电脑，通过 ah daemon 保持出站常驻长连接（无需开放入站端口），可执行本地命令或挂载 Claude/Codex 等 Agent。</div>
           </div>
         </label>
         <label class="choice-card" data-access="inbox">
           <input type="radio" name="afAccessRadio" value="inbox" />
           <div>
-            <div style="font-weight:650;">本机独立 Agent</div>
-            <div class="hint">适合跑在同一台机器上、由脚本自主读取收件箱来消费任务的 Agent。</div>
+            <div style="font-weight:650;">本机独立 Agent（收件箱模式）</div>
+            <div class="hint">同样通过 ah daemon 保持出站常驻长连接接入中台，本地脚本通过 ah inbox 自主消费并回执任务。</div>
           </div>
         </label>
       </div>
@@ -697,6 +737,37 @@ export function renderWebConsoleHtml() {
           <option value="leader">负责派单的 Leader（如 Muse，只派单与跟进）</option>
           <option value="hybrid">两者都做（既能派单，也能接活执行）</option>
         </select>
+      </div>
+      <div class="form-row" id="afReceiveGroup">
+        <label>接收方式（HTTP 接入方式）</label>
+        <div class="choice-list" id="receiveChoices" style="margin-bottom:0;">
+          <label class="choice-card selected" data-receive="poll">
+            <input type="radio" name="afReceiveRadio" value="poll" checked />
+            <div>
+              <div style="font-weight:600;">定时检查（poll，默认）</div>
+              <div class="hint">适合被定时唤醒的云端 Agent，按固定间隔运行检查脚本取单。</div>
+            </div>
+          </label>
+          <label class="choice-card" data-receive="longpoll">
+            <input type="radio" name="afReceiveRadio" value="longpoll" />
+            <div>
+              <div style="font-weight:600;">常驻长连接（longpoll）</div>
+              <div class="hint">适合常驻运行的进程，循环长轮询实时取单，无需额外定时脚本。</div>
+            </div>
+          </label>
+          <label class="choice-card" data-receive="webhook">
+            <input type="radio" name="afReceiveRadio" value="webhook" />
+            <div>
+              <div style="font-weight:600;">Webhook 推送（webhook）</div>
+              <div class="hint">有新任务或状态变化时，中台主动向您的回调 URL 推门铃通知。</div>
+            </div>
+          </label>
+        </div>
+      </div>
+      <div class="form-row" id="afWebhookUrlRow" style="display:none;">
+        <label>Webhook 回调 URL（必填）</label>
+        <input class="input mono" type="url" id="afWebhookUrl" maxlength="2048" placeholder="https://example.com/a2a/webhook" />
+        <div class="hint">仅允许 http/https，长度 ≤ 2048，禁止带用户名密码；创建后将生成只显示一次的 Webhook Secret。</div>
       </div>
       <div class="form-row" id="afDescRow">
         <label>它擅长做什么（能力说明，可选）</label>
@@ -761,6 +832,129 @@ export function renderWebConsoleHtml() {
   </div>
 </div>
 
+<!-- 添加能力弹窗（按 HTTP / 宿主节点自动切换为建卡或生成 commands.json 片段） -->
+<div class="modal-backdrop" id="addCapModal">
+  <div class="modal" style="max-width:580px;">
+    <div class="modal-head">
+      <span id="acTitle">添加能力</span>
+      <button class="btn sm" type="button" data-close-modal="addCapModal">关闭</button>
+    </div>
+    <div id="acModeBanner" class="info-banner" style="margin-bottom:12px;"></div>
+    <div id="acErrBox" class="err-banner" style="display:none;"></div>
+    <form id="addCapForm">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+        <div class="form-row">
+          <label>能力标识（Skill_ID，必填）</label>
+          <input class="input mono" id="acSkillId" placeholder="例如 translate / code-review" required />
+          <div class="hint">字母、数字或 . _ -，不能是保留键 workers。</div>
+        </div>
+        <div class="form-row">
+          <label>归属 Agent（Worker，可选）</label>
+          <input class="input mono" id="acWorker" list="acWorkerList" placeholder="留空则为节点直属能力" />
+          <datalist id="acWorkerList"></datalist>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+        <div class="form-row">
+          <label>能力名称（可选）</label>
+          <input class="input" id="acSkillName" placeholder="例如：技术翻译 / 代码审查" />
+        </div>
+        <div class="form-row" id="acDisplayNameRow">
+          <label>控制台显示名（可选）</label>
+          <input class="input" id="acDisplayName" maxlength="64" placeholder="留空则使用能力名称" />
+        </div>
+      </div>
+      <div class="form-row">
+        <label>能力说明（可选）</label>
+        <input class="input" id="acDesc" placeholder="简述该能力擅长做什么、输入输出要求..." />
+      </div>
+      <div id="acCommandRow" style="display:none;">
+        <div style="display:grid;grid-template-columns:2fr 1fr;gap:10px;">
+          <div class="form-row">
+            <label>本地执行命令（未填 Worker 时必填）</label>
+            <input class="input mono" id="acCommand" placeholder="例如 python3 /path/to/tool.py" />
+          </div>
+          <div class="form-row">
+            <label>输出模式</label>
+            <select class="input" id="acMode">
+              <option value="agent">agent</option>
+              <option value="json">json</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+        <div class="form-row">
+          <label>副作用级别</label>
+          <select class="input" id="acSideEffect">
+            <option value="write">会改动内容 (write)</option>
+            <option value="read">只读查看 (read)</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label>审批门禁</label>
+          <select class="input" id="acApproval">
+            <option value="auto">自动执行 (auto)</option>
+            <option value="notify">执行时通知 (notify)</option>
+            <option value="approve">执行前需审批 (approve)</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-row" id="acNoteRow">
+        <label>机主备注（可选）</label>
+        <input class="input" id="acNote" maxlength="500" placeholder="仅自己可见的备注" />
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;">
+        <button type="button" class="btn" data-close-modal="addCapModal">取消</button>
+        <button type="submit" class="btn primary" id="acSubmitBtn">添加能力</button>
+      </div>
+    </form>
+    <div id="acSnippetBox" style="display:none;margin-top:14px;padding-top:14px;border-top:1px solid var(--border);">
+      <div class="token-reveal" style="background:var(--accent-soft);border-color:rgba(99,102,241,0.35);">
+        <div style="font-weight:650;">请复制到宿主节点的 commands.json</div>
+        <div class="hint" id="acSnippetHint" style="color:var(--text-2);">去该节点改 commands.json，守护进程自动热重载。</div>
+        <textarea class="input mono" id="acSnippetText" readonly style="min-height:130px;"></textarea>
+        <div style="display:flex;justify-content:flex-end;">
+          <button type="button" class="btn sm primary" id="copySnippetBtn">复制片段</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 编辑 / 查看节点 Webhook 弹窗 -->
+<div class="modal-backdrop" id="webhookModal">
+  <div class="modal" style="max-width:540px;">
+    <div class="modal-head">
+      <span id="whTitle">配置 Webhook 推送</span>
+      <button class="btn sm" type="button" data-close-modal="webhookModal">关闭</button>
+    </div>
+    <div id="whErrBox" class="err-banner" style="display:none;"></div>
+    <form id="webhookForm">
+      <input type="hidden" id="whNode" />
+      <div class="form-row">
+        <label>Webhook 回调 URL</label>
+        <input class="input mono" type="url" id="whUrl" maxlength="2048" placeholder="https://example.com/a2a/webhook" required />
+        <div class="hint">仅允许 http/https，长度 ≤ 2048，禁止带用户名密码。</div>
+      </div>
+      <div class="form-row" id="whRotateRow" style="display:none;">
+        <label class="checkbox-row">
+          <input type="checkbox" id="whRotateSecret" />
+          <span>
+            <strong style="display:block;font-size:13px;">同时轮换签名密钥（rotate_secret）</strong>
+            <span class="hint">勾选后旧的 Webhook Secret 将立即失效，并生成新的只显示一次的密钥。</span>
+          </span>
+        </label>
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;">
+        <button type="button" class="btn" data-close-modal="webhookModal">取消</button>
+        <button type="submit" class="btn primary">保存 Webhook</button>
+      </div>
+    </form>
+    <div id="whSecretRevealBox" style="margin-top:12px;"></div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -800,12 +994,19 @@ const state = {
   expandedNodes: new Set(),
   tokensApiAvailable: false,
   tokensByNode: new Map(),
+  webhooksApiAvailable: true,
+  webhooksByNode: new Map(),
+  schedulesApiAvailable: true,
+  schedulesError: "",
+  schedules: [],
   dismissedFailed: loadDismissedAlerts(),
   cursor: 0,
   token: localStorage.getItem("a2a_hub_token") || localStorage.getItem("lobe_a2a_token") || "",
   templates: [],
   wizardStep: 1,
   wizardAccess: "http",
+  wizardReceive: "poll",
+  addCapTarget: { node: "", isHttp: true },
 };
 
 const TASK_STATUS_META = {
@@ -879,6 +1080,22 @@ function formatRelativeTime(raw) {
   return days + " 天前";
 }
 
+function formatNextFireTime(raw) {
+  if (!raw) return "暂无排期";
+  const ms = parseTs(raw);
+  if (ms == null) return String(raw);
+  const diffSec = Math.round((ms - Date.now()) / 1000);
+  if (diffSec <= 0) {
+    return diffSec >= -60 ? "即将触发" : ("已过预期（" + formatRelativeTime(raw) + "）");
+  }
+  if (diffSec < 60) return diffSec + " 秒后";
+  const mins = Math.floor(diffSec / 60);
+  if (mins < 60) return mins + " 分钟后";
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return hrs + " 小时后";
+  return Math.floor(hrs / 24) + " 天后";
+}
+
 function isTaskStale(task) {
   if (!task || task.status !== "working") return false;
   const ms = parseTs(task.heartbeat_at);
@@ -901,9 +1118,27 @@ function roleLabelZh(role) {
 }
 
 function kindLabelZh(kind, mode) {
-  if (mode === "http-poll") return "云端 HTTP Agent";
-  if (kind === "agent") return "独立 Agent";
+  if (mode === "http-poll" || mode === "http-longpoll" || mode === "webhook") return "云端 HTTP 节点";
+  if (kind === "agent") return "独立 Agent 节点";
   return "工作机节点";
+}
+
+function receiveModeLabelZh(mode) {
+  if (mode === "webhook") return "Webhook 推送";
+  if (mode === "http-longpoll") return "常驻长连接";
+  if (mode === "http-poll") return "定时检查";
+  if (mode === "longpoll") return "常驻长连接";
+  return mode || "";
+}
+
+function isHttpNodeGroup(g) {
+  if (!g) return false;
+  if (state.tokensByNode.has(g.node)) return true;
+  const httpModes = new Set(["http-poll", "http-longpoll", "webhook"]);
+  if ((g.cards || []).some((c) => c.daemon_version === "http-agent" || (c.kind === "agent" && httpModes.has(c.receive_mode)))) {
+    return true;
+  }
+  return Boolean(g.conn && g.conn.kind === "agent" && httpModes.has(g.conn.mode));
 }
 
 function agentTypeSummary(kind, role, mode) {
@@ -987,8 +1222,13 @@ async function api(path, opts = {}) {
   }
   const d = await r.json().catch(() => ({}));
   if (!r.ok) {
-    const err = new Error(d.error || ("请求失败 (HTTP " + r.status + ")"));
+    const rawMsg = d && typeof d.error === "string" ? d.error : "";
+    const msg = r.status === 404 && (!rawMsg || rawMsg === "Not Found")
+      ? "后端接口尚未启用 (HTTP 404)"
+      : (rawMsg || ("请求失败 (HTTP " + r.status + ")"));
+    const err = new Error(msg);
     err.status = r.status;
+    err.data = d;
     throw err;
   }
   return d;
@@ -1013,6 +1253,53 @@ async function refreshTokens() {
     }
   } catch {
     // 网络波动时不推翻已有状态
+  }
+}
+
+// 并行分支尚未合并时，admin/webhooks 可能返回 404，此时静默降级并在显式操作时提示。
+async function refreshWebhooks() {
+  try {
+    const headers = {};
+    if (state.token) headers.Authorization = "Bearer " + state.token;
+    const r = await fetch("/api/v1/admin/webhooks", { headers });
+    if (r.status === 404) {
+      state.webhooksApiAvailable = false;
+      state.webhooksByNode = new Map();
+      return;
+    }
+    if (!r.ok) return;
+    const d = await r.json().catch(() => null);
+    if (d && Array.isArray(d.webhooks)) {
+      state.webhooksApiAvailable = true;
+      state.webhooksByNode = new Map(d.webhooks.map((w) => [w.node, w]));
+    }
+  } catch {
+    // 网络波动时不推翻已有状态
+  }
+}
+
+async function refreshSchedules() {
+  try {
+    const headers = {};
+    if (state.token) headers.Authorization = "Bearer " + state.token;
+    const r = await fetch("/api/v1/schedules", { headers });
+    if (r.status === 404) {
+      state.schedulesApiAvailable = false;
+      state.schedulesError = "";
+      state.schedules = [];
+      return;
+    }
+    const d = await r.json().catch(() => null);
+    if (!r.ok) {
+      state.schedulesApiAvailable = true;
+      state.schedulesError = (d && d.error) || ("获取定时任务失败 (HTTP " + r.status + ")");
+      return;
+    }
+    state.schedulesApiAvailable = true;
+    state.schedulesError = "";
+    state.schedules = Array.isArray(d && d.schedules) ? d.schedules : [];
+  } catch (e) {
+    state.schedulesError = "拉取定时任务失败: " + e.message;
   }
 }
 
@@ -1116,7 +1403,7 @@ function computeTodos(d) {
 
 async function refreshState() {
   try {
-    const [d] = await Promise.all([api("/api/v1/state"), refreshTokens()]);
+    const [d] = await Promise.all([api("/api/v1/state"), refreshTokens(), refreshWebhooks(), refreshSchedules()]);
     state.data = d;
     if (d.seq != null && d.seq > state.cursor) state.cursor = d.seq;
     document.getElementById("hubNodeLabel").textContent = "中台节点: " + (d.hubNode || "hub");
@@ -1136,6 +1423,15 @@ async function refreshState() {
     const activeTasks = (d.tasks || []).filter((t) => ["submitted", "working", "auth-required", "input-required"].includes(t.status)).length;
     document.getElementById("navTaskCount").textContent = String(activeTasks);
     document.getElementById("navLoopCount").textContent = String((d.loops || []).filter((l) => l.status === "running").length);
+
+    const navSched = document.getElementById("navScheduleCount");
+    if (navSched) {
+      const anomalyCnt = state.schedules.filter((s) => Boolean(s.anomaly)).length;
+      navSched.textContent = !state.schedulesApiAvailable
+        ? "-"
+        : (anomalyCnt > 0 ? (state.schedules.length + " · 异" + anomalyCnt) : String(state.schedules.length));
+      navSched.className = "badge" + (anomalyCnt > 0 ? " amber" : "");
+    }
 
     fillDispatchCandidates();
     fillLoopCandidates();
@@ -1311,44 +1607,126 @@ function addCriteriaRow(textVal = "", evidenceVal = false) {
   wrap.appendChild(row);
 }
 
+function capOptionLabel(c) {
+  const dn = c.display_name && String(c.display_name).trim();
+  const sname = c.skill_name && String(c.skill_name).trim();
+  if (c.skill_id === "agent") {
+    if (c.worker) return "Agent: " + c.worker + (dn && dn !== c.worker ? (" · " + dn) : "");
+    return "Agent: " + (dn || sname || c.node || "agent");
+  }
+  const capLabel = dn || sname || c.skill_id || "能力";
+  if (c.worker) return "Agent: " + c.worker + " / 能力: " + capLabel + " (" + c.skill_id + ")";
+  return "直属能力: " + capLabel + " (" + c.skill_id + ")";
+}
+
+function getDispatchableCardsForNode(node) {
+  const cards = ((state.data && state.data.agentCards) || [])
+    .filter((c) => c.node === node && admissionOf(c) === "admitted" && c.dispatchable === "Yes");
+  // 将 skill_id === "agent" 排在前面，便于默认选中
+  return cards.sort((a, b) => {
+    const aIsAgent = a.skill_id === "agent" ? 0 : 1;
+    const bIsAgent = b.skill_id === "agent" ? 0 : 1;
+    if (aIsAgent !== bIsAgent) return aIsAgent - bIsAgent;
+    return String(a.cap_id || "").localeCompare(String(b.cap_id || ""));
+  });
+}
+
+function populateCapSelect(selEl, node, preferredCap = "") {
+  if (!selEl) return;
+  const cards = node ? getDispatchableCardsForNode(node) : [];
+  if (!cards.length) {
+    selEl.innerHTML = '<option value="">无已接纳的可用 Agent / 能力</option>';
+    return;
+  }
+  selEl.innerHTML = cards.map((c) => '<option value="' + esc(c.cap_id) + '">' + esc(capOptionLabel(c)) + '</option>').join("");
+  const matched = (preferredCap && cards.find((c) => c.skill_id === preferredCap))
+    || cards.find((c) => c.skill_id === "agent")
+    || cards[0];
+  if (matched) selEl.value = matched.cap_id;
+}
+
 function fillLoopCandidates() {
-  const sel = document.getElementById("lfTargetSelect");
-  if (!sel) return;
-  const prev = sel.value;
+  const bulkNode = document.getElementById("lfBulkNode");
+  const bulkCap = document.getElementById("lfBulkCap");
+  if (!bulkNode) return;
+  const prevNode = bulkNode.value;
   const groups = buildNodeGroups(state.data).filter((g) => g.admittedCards.some((c) => c.dispatchable === "Yes"));
   let html = "";
   if (!groups.length) {
-    html += '<option value="__manual__">暂无已接纳的执行节点（在高级选项手动填写）</option>';
+    html += '<option value="">暂无已接纳的执行节点</option>';
   } else {
-    html += '<option value="">请选择负责执行的节点...</option>';
     for (const g of groups) {
       const label = g.displayName !== g.node ? (g.displayName + "（" + g.node + "）") : g.node;
       html += '<option value="' + esc(g.node) + '">' + esc(label) + '</option>';
     }
-    html += '<option value="__manual__">手动填写节点（高级）</option>';
   }
-  sel.innerHTML = html;
-  if (prev && [...sel.options].some((o) => o.value === prev)) {
-    sel.value = prev;
-  } else if (!groups.length) {
-    sel.value = "__manual__";
+  bulkNode.innerHTML = html;
+  if (prevNode && [...bulkNode.options].some((o) => o.value === prevNode)) {
+    bulkNode.value = prevNode;
+  } else if (groups.length) {
+    bulkNode.value = groups[0].node;
   }
+  populateCapSelect(bulkCap, bulkNode.value);
+  renderLoopStageBindings();
 }
 
-function applyLoopSelect() {
-  const val = document.getElementById("lfTargetSelect").value;
-  if (val === "__manual__") {
-    document.getElementById("lfAdvanced").open = true;
+function renderLoopStageBindings() {
+  const wrap = document.getElementById("lfStageBindings");
+  const tplSel = document.getElementById("lfTemplate");
+  if (!wrap || !tplSel) return;
+  const tpl = state.templates.find((t) => t.id === tplSel.value) || state.templates[0];
+  const stages = (tpl && Array.isArray(tpl.stages)) ? tpl.stages : [];
+  const groups = buildNodeGroups(state.data).filter((g) => g.admittedCards.some((c) => c.dispatchable === "Yes"));
+
+  if (!stages.length) {
+    wrap.innerHTML = '<div class="hint">请先选择一个闭环模板。</div>';
     return;
   }
-  if (!val) return;
-  document.getElementById("lfTo").value = val;
-  const cards = ((state.data && state.data.agentCards) || []).filter((c) => c.node === val && admissionOf(c) === "admitted" && c.dispatchable === "Yes");
-  const preferred = cards.find((c) => c.skill_id === "agent") || cards[0];
-  if (preferred) {
-    document.getElementById("lfCap").value = preferred.skill_id || "agent";
-    document.getElementById("lfWorker").value = preferred.worker || "";
+  if (!groups.length) {
+    wrap.innerHTML = '<div class="err-banner" style="margin-bottom:0;">暂无已接纳的可执行节点。请先到「节点 → 待接纳」接纳节点，或在下方高级选项手动填写。</div>';
+    return;
   }
+
+  // 保留同一模板下用户已选中的阶段绑定，避免刷新状态时被重置
+  const prevByStage = new Map();
+  for (const row of wrap.querySelectorAll(".stage-bind-row")) {
+    prevByStage.set(row.dataset.stageId, {
+      node: row.querySelector(".stage-node-sel")?.value || "",
+      capId: row.querySelector(".stage-cap-sel")?.value || "",
+    });
+  }
+
+  let html = "";
+  for (const st of stages) {
+    const prev = prevByStage.get(st.id);
+    const chosenNode = (prev && prev.node && groups.some((g) => g.node === prev.node))
+      ? prev.node
+      : groups[0].node;
+    const nodeOpts = groups.map((g) => {
+      const label = g.displayName !== g.node ? (g.displayName + "（" + g.node + "）") : g.node;
+      return '<option value="' + esc(g.node) + '"' + (g.node === chosenNode ? " selected" : "") + '>' + esc(label) + '</option>';
+    }).join("");
+    const cards = getDispatchableCardsForNode(chosenNode);
+    const chosenCard = (prev && prev.capId && cards.find((c) => c.cap_id === prev.capId))
+      || (st.cap && cards.find((c) => c.skill_id === st.cap))
+      || cards.find((c) => c.skill_id === "agent")
+      || cards[0];
+    const capOpts = cards.map((c) => (
+      '<option value="' + esc(c.cap_id) + '"' + (chosenCard && c.cap_id === chosenCard.cap_id ? " selected" : "") + '>'
+      + esc(capOptionLabel(c)) + '</option>'
+    )).join("");
+    const failHint = st.on_fail && st.on_fail.startsWith("goto:")
+      ? ("不通过 → 回 " + st.on_fail.slice(5))
+      : (st.on_fail === "abort" ? "不通过 → 中止" : "不通过 → 重试");
+
+    html += '<div class="stage-bind-row" data-stage-id="' + esc(st.id) + '" data-default-cap="' + esc(st.cap || "agent") + '">'
+      + '<div><div style="font-weight:600;font-size:13px;">' + esc(st.name || st.id) + '</div>'
+      + '<div class="hint mono" style="font-size:11px;">' + esc(st.id) + ' · ' + esc(failHint) + '</div></div>'
+      + '<select class="input stage-node-sel" aria-label="选择阶段节点">' + nodeOpts + '</select>'
+      + '<select class="input stage-cap-sel" aria-label="选择阶段 Agent 或能力">' + capOpts + '</select>'
+      + '</div>';
+  }
+  wrap.innerHTML = html;
 }
 
 function renderTemplatePreview() {
@@ -1363,6 +1741,7 @@ function renderTemplatePreview() {
   const stageNames = (tpl.stages || []).map((s) => esc(s.name || s.id)).join(" → ");
   box.innerHTML = '<div>' + esc(tpl.description || "按预设阶段顺序执行并在不达标时自动打回。") + '</div>'
     + (stageNames ? '<div class="muted">流程阶段：' + stageNames + '</div>' : '');
+  renderLoopStageBindings();
 }
 
 async function setCardAdmission(capId, admission) {
@@ -1375,8 +1754,12 @@ async function setCardAdmission(capId, admission) {
       showToast("更新状态失败: 服务端响应不完整");
       return;
     }
-    const labels = { admitted: "已接纳", pending: "已移回待接纳", rejected: "已拒绝" };
-    showToast((labels[admission] || "已更新") + "该能力");
+    const labels = {
+      admitted: "已接纳该能力",
+      pending: "已移回待接纳",
+      rejected: "已拒绝该能力，可在「已拒绝」筛选中查看或恢复",
+    };
+    showToast(labels[admission] || "已更新该能力");
     await refreshState();
   } catch (e) {
     showToast("操作失败: " + e.message);
@@ -1431,6 +1814,19 @@ function syncAccessChoiceCards() {
   });
 }
 
+function syncReceiveChoiceCards() {
+  document.querySelectorAll("#receiveChoices .choice-card").forEach((card) => {
+    const checked = card.dataset.receive === state.wizardReceive;
+    card.classList.toggle("selected", checked);
+    const radio = card.querySelector("input[type=radio]");
+    if (radio) radio.checked = checked;
+  });
+  const urlRow = document.getElementById("afWebhookUrlRow");
+  if (urlRow) {
+    urlRow.style.display = (state.wizardAccess === "http" && state.wizardReceive === "webhook") ? "flex" : "none";
+  }
+}
+
 function openAgentModal() {
   document.getElementById("agentStep2").reset();
   document.getElementById("onboardBox").innerHTML = "";
@@ -1438,7 +1834,9 @@ function openAgentModal() {
   errBox.style.display = "none";
   errBox.textContent = "";
   state.wizardAccess = "http";
+  state.wizardReceive = "poll";
   syncAccessChoiceCards();
+  syncReceiveChoiceCards();
   setWizardStep(1);
   openModal("agentModal");
 }
@@ -1447,6 +1845,7 @@ function renderOnboardingResult(res) {
   const ob = res.onboarding || {};
   const card = res.card || null;
   const token = res.token || "";
+  const webhook = res.webhook || null;
   const steps = Array.isArray(ob.steps) ? ob.steps : [];
   const skills = Array.isArray(ob.skills) ? ob.skills : [];
 
@@ -1461,6 +1860,17 @@ function renderOnboardingResult(res) {
       + '</div></div>';
   }
 
+  if (webhook && webhook.secret) {
+    html += '<div class="token-reveal">'
+      + '<div class="token-reveal-title">Webhook 签名密钥已生成（Webhook Secret 只显示这一次）</div>'
+      + '<div class="hint" style="color:var(--text);">请立即保存到您的服务环境变量（例如 <span class="mono">A2A_HUB_WEBHOOK_SECRET</span>），关闭窗口后无法再次查看明文。</div>'
+      + (webhook.url ? '<div class="hint mono" style="color:var(--text-2);">回调地址：' + esc(webhook.url) + '</div>' : '')
+      + '<div style="display:flex;gap:8px;align-items:center;">'
+      + '<input class="input mono" id="newWebhookSecret" readonly value="' + esc(webhook.secret) + '" />'
+      + '<button type="button" class="btn sm primary" id="copyWebhookSecretBtn">复制 Secret</button>'
+      + '</div></div>';
+  }
+
   if (card && card.cap_id) {
     html += '<div class="card" style="padding:12px;margin-bottom:12px;background:var(--green-soft);border-color:rgba(16,185,129,0.3);">'
       + '<strong>已准备就绪</strong>：已为它预建并自动接纳能力，上线后即可直接派单。</div>';
@@ -1469,7 +1879,7 @@ function renderOnboardingResult(res) {
       + '<strong>已登记为派单方 (Leader)</strong>：它只负责派单与跟单，连接后将出现在在线概览中。</div>';
   } else {
     html += '<div class="card" style="padding:12px;margin-bottom:12px;">'
-      + '<strong>已生成接入命令</strong>：目标电脑或独立 Agent 上线后，请到「Agent → 待接纳」点一次接纳即可派单。</div>';
+      + '<strong>已生成接入命令</strong>：目标电脑或独立 Agent 上线后，请到「节点 → 待接纳」点一次接纳即可派单。</div>';
   }
 
   if (ob.prompt) {
@@ -1604,12 +2014,12 @@ function openDeleteNodeConfirm(node, kind) {
   const name = g ? g.displayName : node;
   const openTasks = ((state.data && state.data.tasks) || [])
     .filter((t) => t.target_node === node && ["submitted", "working", "input-required", "auth-required"].includes(t.status)).length;
-  document.getElementById("tmTitle").textContent = "删除 Agent · " + name;
+  document.getElementById("tmTitle").textContent = "删除节点 · " + name;
   let html = '<div style="margin-bottom:14px;line-height:1.7;">'
-    + '将从中台移除 <strong>' + esc(name) + '</strong>（<span class="mono">' + esc(node) + '</span>）：'
+    + '将从中台移除节点 <strong>' + esc(name) + '</strong>（<span class="mono">' + esc(node) + '</span>）：'
     + '<ul style="margin:6px 0 0 18px;padding:0;">'
-    + '<li>删除它的全部能力名片，不再出现在 Agent 列表与派单选项里</li>'
-    + '<li>吊销它的专属密钥（如有），它之后的请求会被拒绝</li>'
+    + '<li>删除该节点下的全部 Agent 与能力名片，不再出现在节点列表与派单选项里</li>'
+    + '<li>吊销它的专属密钥与 Webhook 配置（如有），之后的请求会被拒绝</li>'
     + '<li>历史任务与消息保留，不受影响</li>'
     + '</ul></div>';
   if (openTasks) {
@@ -1631,10 +2041,131 @@ async function doDeleteNode(node) {
     const res = await api("/api/v1/admin/agents/" + encodeURIComponent(node), { method: "DELETE" });
     closeModal("tokenManageModal");
     state.expandedNodes.delete(node);
-    showToast("已删除 " + node + (res.openTasks ? "，仍有 " + res.openTasks + " 个未结束任务待处理" : ""));
+    showToast("已删除节点 " + node + (res.openTasks ? "，仍有 " + res.openTasks + " 个未结束任务待处理" : ""));
     await refreshState();
   } catch (e) {
     showToast("删除失败: " + e.message);
+  }
+}
+
+function syncHostCommandVisibility() {
+  const isHttp = state.addCapTarget.isHttp;
+  const workerVal = (document.getElementById("acWorker")?.value || "").trim();
+  const cmdRow = document.getElementById("acCommandRow");
+  if (cmdRow) cmdRow.style.display = (!isHttp && !workerVal) ? "block" : "none";
+}
+
+function openAddCapModal(node) {
+  const g = buildNodeGroups(state.data).find((x) => x.node === node);
+  const isHttp = g ? isHttpNodeGroup(g) : state.tokensByNode.has(node);
+  state.addCapTarget = { node, isHttp };
+
+  document.getElementById("addCapForm").reset();
+  document.getElementById("acTitle").textContent = "添加能力 · " + (g ? g.displayName : node);
+  const errBox = document.getElementById("acErrBox");
+  errBox.style.display = "none";
+  errBox.textContent = "";
+  document.getElementById("acSnippetBox").style.display = "none";
+  document.getElementById("acSnippetText").value = "";
+
+  const banner = document.getElementById("acModeBanner");
+  if (isHttp) {
+    banner.innerHTML = '<strong>云端 / HTTP 节点（' + esc(node) + '）：</strong>将直接在中台登记已接纳的能力名片，立即可在派单与闭环中选用。';
+    document.getElementById("acDisplayNameRow").style.display = "flex";
+    document.getElementById("acNoteRow").style.display = "flex";
+    document.getElementById("acSubmitBtn").textContent = "立即添加能力";
+  } else {
+    banner.innerHTML = '<strong>工作机 / 宿主节点（' + esc(node) + '）：</strong>宿主节点的本地命令与安全边界由本机守护，这里会生成 <span class="mono">commands.json</span> 配置片段；去该节点改 <span class="mono">commands.json</span>，守护进程自动热重载。';
+    document.getElementById("acDisplayNameRow").style.display = "none";
+    document.getElementById("acNoteRow").style.display = "none";
+    document.getElementById("acSubmitBtn").textContent = "生成 commands.json 片段";
+  }
+
+  const workers = [...new Set(((g && g.cards) || []).map((c) => c.worker).filter(Boolean))];
+  document.getElementById("acWorkerList").innerHTML = workers.map((w) => '<option value="' + esc(w) + '"></option>').join("");
+  syncHostCommandVisibility();
+  openModal("addCapModal");
+}
+
+function openDeleteCardConfirm(capId) {
+  const c = ((state.data && state.data.agentCards) || []).find((x) => x.cap_id === capId);
+  const label = c ? ((c.display_name && c.display_name.trim()) || c.skill_name || c.skill_id || capId) : capId;
+  document.getElementById("tmTitle").textContent = "删除手动添加的能力";
+  document.getElementById("tmBody").innerHTML = '<div style="margin-bottom:14px;line-height:1.6;">'
+    + '确定要删除能力 <strong>' + esc(label) + '</strong>（<span class="mono">' + esc(capId) + '</span>）吗？'
+    + '<div class="hint" style="margin-top:6px;">仅支持删除手动添加或预设的 HTTP 节点能力；宿主节点能力请在对应机器修改 commands.json。</div>'
+    + '</div>'
+    + '<div style="display:flex;justify-content:flex-end;gap:8px;">'
+    + '<button type="button" class="btn" data-close-modal="tokenManageModal">取消</button>'
+    + '<button type="button" class="btn danger" data-action="do-delete-card" data-cap-id="' + esc(capId) + '">确认删除</button>'
+    + '</div>';
+  openModal("tokenManageModal");
+}
+
+async function doDeleteCard(capId) {
+  try {
+    await api("/api/v1/admin/cards/" + encodeURIComponent(capId), { method: "DELETE" });
+    closeModal("tokenManageModal");
+    showToast("已删除能力 " + capId);
+    await refreshState();
+  } catch (e) {
+    showToast("删除能力失败: " + e.message);
+  }
+}
+
+function openWebhookModal(node) {
+  const existing = state.webhooksByNode.get(node) || null;
+  document.getElementById("whTitle").textContent = (existing ? "修改 Webhook · " : "配置 Webhook · ") + node;
+  document.getElementById("whNode").value = node;
+  document.getElementById("whUrl").value = existing ? (existing.url || "") : "";
+  document.getElementById("whRotateSecret").checked = false;
+  document.getElementById("whRotateRow").style.display = existing ? "block" : "none";
+  const errBox = document.getElementById("whErrBox");
+  errBox.style.display = "none";
+  errBox.textContent = "";
+  document.getElementById("whSecretRevealBox").innerHTML = "";
+  openModal("webhookModal");
+}
+
+async function testWebhookAction(node) {
+  try {
+    const res = await api("/api/v1/admin/webhooks/" + encodeURIComponent(node) + "/test", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    if (res && res.ok) {
+      showToast("Webhook 测试推送成功（HTTP " + (res.status ?? 200) + "）");
+    } else {
+      showToast("Webhook 测试失败: " + ((res && res.error) || ("HTTP " + (res && res.status ? res.status : "未知"))));
+    }
+    await refreshWebhooks();
+    render();
+  } catch (e) {
+    showToast("测试 Webhook 失败: " + e.message);
+  }
+}
+
+function openDeleteWebhookConfirm(node) {
+  document.getElementById("tmTitle").textContent = "删除 Webhook · " + node;
+  document.getElementById("tmBody").innerHTML = '<div style="margin-bottom:14px;line-height:1.6;">'
+    + '确定要删除节点 <strong>' + esc(node) + '</strong> 的 Webhook 推送配置吗？<br/>'
+    + '<span class="muted">删除后中台不再向该 URL 推门铃，节点仍可通过定时检查或长轮询取单。</span></div>'
+    + '<div style="display:flex;justify-content:flex-end;gap:8px;">'
+    + '<button type="button" class="btn" data-close-modal="tokenManageModal">取消</button>'
+    + '<button type="button" class="btn danger" data-action="do-delete-webhook" data-node="' + esc(node) + '">确认删除</button>'
+    + '</div>';
+  openModal("tokenManageModal");
+}
+
+async function doDeleteWebhook(node) {
+  try {
+    await api("/api/v1/admin/webhooks/" + encodeURIComponent(node), { method: "DELETE" });
+    closeModal("tokenManageModal");
+    showToast("已删除节点 " + node + " 的 Webhook");
+    await refreshWebhooks();
+    render();
+  } catch (e) {
+    showToast("删除 Webhook 失败: " + e.message);
   }
 }
 
@@ -1651,13 +2182,13 @@ function renderOverview(d) {
     + '<div class="section-title"><span>待我处理</span>'
     + (todos.total > 0 ? '<span class="badge amber">' + todos.total + ' 项需要关注</span>' : '')
     + '</div>'
-    + '<span class="section-sub">优先列出需要您审批、回复、确认新 Agent 或排查故障的事项</span>'
+    + '<span class="section-sub">优先列出需要您审批、回复、确认新节点/能力或排查故障的事项</span>'
     + '</div>';
 
   if (todos.total === 0) {
     html += '<div class="all-clear">'
       + '<div><div class="all-clear-title">一切正常</div>'
-      + '<div class="hint" style="color:var(--text-2);margin-top:2px;">当前没有待审批任务、Agent 提问、异常告警或待接纳的新 Agent。</div></div>'
+      + '<div class="hint" style="color:var(--text-2);margin-top:2px;">当前没有待审批任务、Agent 提问、异常告警或待接纳的新节点。</div></div>'
       + '<button class="btn sm primary" data-action="open-new-task">+ 派发新任务</button>'
       + '</div>';
   } else {
@@ -1693,14 +2224,15 @@ function renderOverview(d) {
       if (pg.cards.length === 1) {
         const c = pg.cards[0];
         const cname = (c.display_name && String(c.display_name).trim()) || c.skill_name || c.skill_id || c.cap_id;
+        const badgeText = c.skill_id === "agent" ? "新 Agent 待接纳" : "新能力待接纳";
         html += '<div class="action-item pending">'
           + '<div style="min-width:0;flex:1;">'
           + '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">'
-          + '<span class="badge cyan">新 Agent 待接纳</span>'
+          + '<span class="badge cyan">' + badgeText + '</span>'
           + '<strong>' + esc(cname) + '</strong>'
           + '<span class="mono muted">' + esc(pg.node) + '</span>'
           + '</div>'
-          + '<div class="hint" style="margin-top:4px;">新接入的能力需要您点「接纳」确认身份后才能派单</div>'
+          + '<div class="hint" style="margin-top:4px;">新接入的节点能力需要您点「接纳」确认身份后才能派单</div>'
           + '</div>'
           + '<div style="display:flex;gap:6px;flex-wrap:wrap;">'
           + '<button class="btn sm success" data-action="set-admission" data-cap-id="' + esc(c.cap_id) + '" data-admission="admitted">接纳</button>'
@@ -1714,7 +2246,7 @@ function renderOverview(d) {
           + '<strong>' + esc(nodeFriendlyName(d, pg.node)) + '</strong>'
           + '<span class="badge">' + pg.cards.length + ' 项能力</span>'
           + '</div>'
-          + '<div class="hint" style="margin-top:4px;">该节点申报了多项能力，确认可信后可一键接纳，或前往 Agent 页逐项审核</div>'
+          + '<div class="hint" style="margin-top:4px;">该节点申报了多项能力，确认可信后可一键接纳，或前往节点页逐项审核</div>'
           + '</div>'
           + '<div style="display:flex;gap:6px;flex-wrap:wrap;">'
           + '<button class="btn sm" data-action="goto-pending-agents">逐项查看</button>'
@@ -1754,18 +2286,18 @@ function renderOverview(d) {
   }
   html += '</div>';
 
-  // 2. Agent 在线状态概览（每个节点一行：显示名、在线/离线、最近活动「x 分钟前」、类型）
+  // 2. 节点在线状态概览（每个节点一行：显示名、在线/离线、最近活动「x 分钟前」、类型）
   const visibleGroups = groups.filter((g) => g.admittedCards.length > 0 || g.conn);
   const onlineCnt = visibleGroups.filter((g) => g.online).length;
   html += '<div class="card"><div class="section-head">'
-    + '<div class="section-title"><span>Agent 在线状态概览</span>'
+    + '<div class="section-title"><span>节点在线状态概览</span>'
     + '<span class="badge ' + (onlineCnt > 0 ? "green" : "") + '">' + onlineCnt + ' / ' + visibleGroups.length + ' 在线</span>'
     + '<span class="section-sub">在线节点与外部 Agent 连接</span></div>'
-    + '<div style="display:flex;gap:8px;"><button class="btn sm" data-action="goto-agents">管理 Agent</button>'
+    + '<div style="display:flex;gap:8px;"><button class="btn sm" data-action="goto-agents">管理节点</button>'
     + '<button class="btn sm primary" data-action="open-add-agent">+ 添加 Agent</button></div></div>';
 
   if (!visibleGroups.length) {
-    html += '<div class="muted" style="padding:8px 0;">还没有接入任何 Agent。点击右上角「+ 添加 Agent」，按向导即可把云端 Agent 或其他电脑接进来。</div>';
+    html += '<div class="muted" style="padding:8px 0;">还没有接入任何节点或 Agent。点击右上角「+ 添加 Agent」，按向导即可把云端 Agent 或其他电脑接进来。</div>';
   } else {
     html += '<div class="table-wrap"><table class="clean-table"><thead><tr>'
       + '<th>显示名</th><th>状态</th><th>最近活动</th><th>类型</th><th style="text-align:right;">操作</th>'
@@ -1829,11 +2361,11 @@ function renderOverview(d) {
 
 function renderGlossary() {
   return '<details class="glossary">'
-    + '<summary>名词一分钟看懂（接纳、Worker/Leader、能力、审批门禁）</summary>'
+    + '<summary>名词一分钟看懂（节点、Agent、能力、接纳与审批门禁）</summary>'
     + '<div class="glossary-grid">'
-    + '<div class="glossary-card"><strong>接纳是什么？</strong>新接入的 Agent 必须经过您点击「接纳」确认身份后才能接活，防止陌生程序冒名连进来。</div>'
-    + '<div class="glossary-card"><strong>Worker 与 Leader 的区别</strong><strong>Worker（执行方）</strong>负责实际干活并交回结果；<strong>Leader（派单方）</strong>负责拆任务并派给别人（如云端 Muse），自己不接活。</div>'
-    + '<div class="glossary-card"><strong>能力（Skill）是什么？</strong>Agent 具备的具体本领（比如通用对话 <code>agent</code> 或专项脚本）。一个节点可以挂多个能力，展开卡片即可查看。</div>'
+    + '<div class="glossary-card"><strong>节点（Node）是什么？</strong>一台设备或终端（如您的 Mac、服务器，或一个接入的 HTTP 节点），节点下可挂载多个 Agent 与能力。</div>'
+    + '<div class="glossary-card"><strong>Agent 与 能力（Skill）的区别</strong><strong>Agent</strong> 是节点上执行任务的智能体（对应 <code>agent</code> 名片，如 Claude/Codex 或 HTTP Agent）；<strong>能力</strong> 是 Agent 名下的专长技能，节点直属能力归在「节点直属能力」。</div>'
+    + '<div class="glossary-card"><strong>接纳与 Worker / Leader</strong>新接入的节点/能力必须经您点击「接纳」才能接活；<strong>Worker</strong> 负责执行，<strong>Leader</strong> 仅负责派单与跟单。</div>'
     + '<div class="glossary-card"><strong>审批门禁是什么？</strong>高风险任务在动手前会暂停并提醒您签字确认，只有您点「批准执行」才会继续运行。</div>'
     + '</div></details>';
 }
@@ -1878,7 +2410,56 @@ function renderTokenManageBox(node, kind) {
     + '</div></div>';
 }
 
-function renderCapabilityItem(c, mode) {
+function renderWebhookManageBox(g) {
+  const isHttp = isHttpNodeGroup(g);
+  const wh = state.webhooksByNode.get(g.node);
+  if (!state.webhooksApiAvailable) {
+    if (g.mode === "webhook") {
+      return '<div class="token-box"><span class="hint">Webhook 管理接口尚未启用（HTTP 404）</span></div>';
+    }
+    return "";
+  }
+  if (!wh && !isHttp) return "";
+  if (!wh) {
+    return '<div class="token-box">'
+      + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">'
+      + '<div><strong>Webhook 推送</strong> <span class="badge">未配置</span></div>'
+      + '<button class="btn sm" data-action="edit-webhook" data-node="' + esc(g.node) + '">配置 Webhook</button>'
+      + '</div></div>';
+  }
+  let statusBadge = '<span class="badge">待投递</span>';
+  if (wh.last_status != null && wh.last_status !== "") {
+    const code = Number(wh.last_status);
+    statusBadge = (code >= 200 && code < 300)
+      ? '<span class="badge green">最近投递 HTTP ' + esc(code) + '</span>'
+      : '<span class="badge red">投递失败 HTTP ' + esc(code) + '</span>';
+  } else if (wh.last_error) {
+    statusBadge = '<span class="badge red">投递异常</span>';
+  }
+  const deliveredText = wh.last_delivered_at ? formatRelativeTime(wh.last_delivered_at) : "暂无投递";
+  return '<div class="token-box">'
+    + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">'
+    + '<div><strong>Webhook 推送</strong> ' + statusBadge + '</div>'
+    + '<span class="muted">最近投递：' + esc(deliveredText) + '</span>'
+    + '</div>'
+    + '<div class="mono muted" style="word-break:break-all;">' + esc(wh.url || "") + '</div>'
+    + (wh.last_error ? '<div class="hint" style="color:var(--red-text);">最近错误：' + esc(wh.last_error) + '</div>' : '')
+    + '<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">'
+    + '<button class="btn sm" data-action="edit-webhook" data-node="' + esc(g.node) + '">修改</button>'
+    + '<button class="btn sm" data-action="test-webhook" data-node="' + esc(g.node) + '">测试</button>'
+    + '<button class="btn sm danger" data-action="delete-webhook" data-node="' + esc(g.node) + '">删除</button>'
+    + '</div></div>';
+}
+
+function canDeleteCard(c, isHttp) {
+  if (!isHttp) return false;
+  if (c.manual === true || c.preset === true) return true;
+  if (c.metadata && (c.metadata.manual || c.metadata.preset)) return true;
+  if (c.manual === false && c.preset === false) return false;
+  return true;
+}
+
+function renderCapabilityItem(c, mode, isHttp = false) {
   const cname = (c.display_name && String(c.display_name).trim()) || c.skill_name || c.skill_id || "未命名能力";
   const note = c.admin_note && String(c.admin_note).trim();
   const approvalText = c.approval_class === "approve" ? "执行前需审批" : (c.approval_class === "notify" ? "执行时通知" : "自动执行");
@@ -1901,6 +2482,9 @@ function renderCapabilityItem(c, mode) {
     actions += '<button class="btn sm" data-action="set-admission" data-cap-id="' + esc(c.cap_id) + '" data-admission="pending">恢复为待接纳</button>';
     actions += '<button class="btn sm success" data-action="set-admission" data-cap-id="' + esc(c.cap_id) + '" data-admission="admitted">接纳</button>';
   }
+  if (canDeleteCard(c, isHttp)) {
+    actions += '<button class="btn sm danger" data-action="delete-card" data-cap-id="' + esc(c.cap_id) + '">删除</button>';
+  }
 
   return '<div class="cap-item">'
     + '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap;">'
@@ -1915,6 +2499,63 @@ function renderCapabilityItem(c, mode) {
     + '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">' + actions + '</div>'
     + renderCapTechnicalDetails(c)
     + '</div>';
+}
+
+function renderNodeHierarchy(cards, allNodeCards, mode, g) {
+  const isHttp = isHttpNodeGroup(g);
+  const agentCards = cards.filter((c) => c.skill_id === "agent");
+  const workerSkillCards = cards.filter((c) => c.worker && c.skill_id !== "agent");
+  const directCapCards = cards.filter((c) => !c.worker && c.skill_id !== "agent");
+
+  const buckets = [];
+  const bucketByWorker = new Map();
+  for (const ac of agentCards) {
+    const b = { worker: ac.worker || "", agentCard: ac, externalAgent: false, skills: [] };
+    buckets.push(b);
+    if (ac.worker) bucketByWorker.set(ac.worker, b);
+  }
+  for (const sc of workerSkillCards) {
+    let b = bucketByWorker.get(sc.worker);
+    if (!b) {
+      const extAgent = (allNodeCards || []).find((x) => x.worker === sc.worker && x.skill_id === "agent") || null;
+      b = { worker: sc.worker, agentCard: extAgent, externalAgent: true, skills: [] };
+      buckets.push(b);
+      bucketByWorker.set(sc.worker, b);
+    }
+    b.skills.push(sc);
+  }
+
+  let html = '<div class="cap-list">';
+  for (const b of buckets) {
+    const titleName = b.agentCard
+      ? ((b.agentCard.display_name && b.agentCard.display_name.trim()) || b.agentCard.skill_name || b.worker || g.displayName)
+      : b.worker;
+    html += '<div class="agent-group">'
+      + '<div class="sub-group-title">'
+      + '<span><span class="badge indigo">Agent</span> ' + esc(titleName)
+      + (b.worker ? ' <span class="mono muted">(' + esc(b.worker) + ')</span>' : '') + '</span>'
+      + (b.skills.length ? '<span class="hint">' + b.skills.length + ' 项专长能力</span>' : '')
+      + '</div>';
+    if (b.agentCard && !b.externalAgent) {
+      html += renderCapabilityItem(b.agentCard, mode, isHttp);
+    }
+    if (b.skills.length) {
+      html += '<div style="padding-left:10px;border-left:2px solid var(--border-strong);display:flex;flex-direction:column;gap:8px;">';
+      for (const sk of b.skills) html += renderCapabilityItem(sk, mode, isHttp);
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+
+  if (directCapCards.length) {
+    html += '<div class="agent-group">'
+      + '<div class="sub-group-title"><span>节点直属能力</span><span class="badge">' + directCapCards.length + '</span></div>';
+    for (const dc of directCapCards) html += renderCapabilityItem(dc, mode, isHttp);
+    html += '</div>';
+  }
+
+  html += '</div>';
+  return html;
 }
 
 function renderAgents(d) {
@@ -1940,19 +2581,24 @@ function renderAgents(d) {
 
   if (filter === "admitted") {
     if (!admittedGroups.length) {
-      html += '<div class="card muted">当前没有已接入的 Agent。点击右上角「+ 添加 Agent」开始接入，或切换到「待接纳」确认新发现的节点。</div>';
+      html += '<div class="card muted">当前没有已接入的节点。点击右上角「+ 添加 Agent」开始接入，或切换到「待接纳」确认新发现的节点。</div>';
     } else {
       html += '<div class="node-grid">';
       for (const g of admittedGroups) {
         const expanded = state.expandedNodes.has(g.node);
         const dispatchable = g.admittedCards.find((c) => c.dispatchable === "Yes");
+        const isHttp = isHttpNodeGroup(g);
+        const agentCnt = g.admittedCards.filter((c) => c.skill_id === "agent").length;
+        const skillCnt = g.admittedCards.filter((c) => c.skill_id !== "agent").length;
+        const modeTag = isHttp && g.mode ? (' · ' + receiveModeLabelZh(g.mode)) : '';
+
         html += '<div class="node-card">'
           + '<div class="node-head">'
           + '<div>'
           + '<div class="node-name"><span class="dot ' + (g.online ? "on" : "") + '"></span>' + esc(g.displayName)
           + (g.displayName !== g.node ? ' <span class="mono muted" style="font-size:12px;font-weight:400;">(' + esc(g.node) + ')</span>' : '')
           + '</div>'
-          + '<div class="hint" style="margin-top:4px;">' + esc(agentTypeSummary(g.kind, g.role, g.mode)) + ' · 最近活动：' + esc(formatRelativeTime(g.lastSeenAt)) + '</div>'
+          + '<div class="hint" style="margin-top:4px;">' + esc(agentTypeSummary(g.kind, g.role, g.mode) + modeTag) + ' · 最近活动：' + esc(formatRelativeTime(g.lastSeenAt)) + '</div>'
           + '</div>'
           + '<span class="badge ' + (g.online ? "green" : "") + '">' + (g.online ? "在线" : "离线") + '</span>'
           + '</div>';
@@ -1966,15 +2612,17 @@ function renderAgents(d) {
             ? '纯协调者 / 外部 HTTP Agent（Leader）：仅负责派单与跟进任务，不接收外部派单。'
             : '已连接（尚未启用可执行能力）。') + '</div>';
         } else {
-          html += '<div class="hint">已接纳 <strong>' + g.admittedCards.length + '</strong> 项能力</div>';
+          html += '<div class="hint">已接纳 <strong>' + agentCnt + '</strong> 个 Agent · <strong>' + skillCnt + '</strong> 项能力</div>';
         }
 
         html += renderTokenManageBox(g.node, g.kind);
+        html += renderWebhookManageBox(g);
 
         html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:auto;">';
         if (dispatchable) {
           html += '<button class="btn sm primary" data-action="dispatch-node" data-node="' + esc(g.node) + '" data-worker="' + esc(dispatchable.worker || "") + '" data-skill="' + esc(dispatchable.skill_id || "") + '" data-cap-id="' + esc(dispatchable.cap_id || "") + '">派发任务</button>';
         }
+        html += '<button class="btn sm" data-action="open-add-cap" data-node="' + esc(g.node) + '">+ 添加能力</button>';
         if (g.admittedCards.length > 0) {
           html += '<button class="btn sm" data-action="toggle-node" data-node="' + esc(g.node) + '">'
             + (expanded ? '收起能力' : ('展开能力 (' + g.admittedCards.length + ')')) + '</button>';
@@ -1983,9 +2631,7 @@ function renderAgents(d) {
         html += '</div>';
 
         if (expanded && g.admittedCards.length > 0) {
-          html += '<div class="cap-list">';
-          for (const c of g.admittedCards) html += renderCapabilityItem(c, "admitted");
-          html += '</div>';
+          html += renderNodeHierarchy(g.admittedCards, g.cards, "admitted", g);
         }
         html += '</div>';
       }
@@ -1993,21 +2639,20 @@ function renderAgents(d) {
     }
   } else if (filter === "pending") {
     if (!pendingGroups.length) {
-      html += '<div class="card muted">目前没有待接纳的新 Agent 能力。</div>';
+      html += '<div class="card muted">目前没有待接纳的新节点或能力。</div>';
     } else {
       html += '<div class="node-grid">';
       for (const g of pendingGroups) {
         html += '<div class="node-card">'
           + '<div class="node-head">'
           + '<div><div class="node-name">' + esc(g.displayName) + '</div>'
-          + '<div class="hint">节点标识：<span class="mono">' + esc(g.node) + '</span> · ' + g.pendingCards.length + ' 项能力等待确认</div></div>'
+          + '<div class="hint">节点标识：<span class="mono">' + esc(g.node) + '</span> · ' + g.pendingCards.length + ' 项待确认</div></div>'
           + '<div style="display:flex;gap:6px;">'
           + '<button class="btn sm success" data-action="admit-node" data-node="' + esc(g.node) + '">全部接纳</button>'
           + deleteNodeButton(g)
           + '</div></div>'
-          + '<div class="cap-list">';
-        for (const c of g.pendingCards) html += renderCapabilityItem(c, "pending");
-        html += '</div></div>';
+          + renderNodeHierarchy(g.pendingCards, g.cards, "pending", g)
+          + '</div>';
       }
       html += '</div>';
     }
@@ -2020,9 +2665,8 @@ function renderAgents(d) {
         html += '<div class="node-card">'
           + '<div class="node-head"><div><div class="node-name">' + esc(g.displayName) + '</div>'
           + '<div class="hint mono">' + esc(g.node) + '</div></div>' + deleteNodeButton(g) + '</div>'
-          + '<div class="cap-list">';
-        for (const c of g.rejectedCards) html += renderCapabilityItem(c, "rejected");
-        html += '</div></div>';
+          + renderNodeHierarchy(g.rejectedCards, g.cards, "rejected", g)
+          + '</div>';
       }
       html += '</div>';
     }
@@ -2064,7 +2708,7 @@ function renderTasks(d) {
 
   let listHtml = '<div class="task-list-col">'
     + '<div class="task-filters">'
-    + '<input class="input" id="taskSearchInput" placeholder="搜索任务内容、编号或 Agent..." value="' + esc(state.search) + '" />'
+    + '<input class="input" id="taskSearchInput" placeholder="搜索任务内容、编号或节点..." value="' + esc(state.search) + '" />'
     + '<div class="chip-row">';
   for (const f of filterDefs) {
     listHtml += '<button class="chip ' + (state.statusFilter === f.key ? "active" : "") + '" title="' + esc(f.tip) + '" data-action="task-filter" data-filter="' + esc(f.key) + '">' + esc(f.label) + '</button>';
@@ -2184,9 +2828,13 @@ function renderLoopCard(l, d) {
   let stageHtml = '<div class="loop-stages">';
   stages.forEach((s, idx) => {
     const cls = l.status === "completed" || idx < l.stage_index ? "done" : (idx === l.stage_index && l.status === "running" ? "current" : "");
-    const targetName = s.to ? nodeFriendlyName(d, s.to) : (s.cap || "");
+    const nodeLabel = s.to ? nodeFriendlyName(d, s.to) : "";
+    const agentCap = s.worker
+      ? (s.cap && s.cap !== "agent" ? (s.worker + "/" + s.cap) : s.worker)
+      : (s.cap || "");
+    const assignee = [nodeLabel, agentCap].filter(Boolean).join(" · ");
     stageHtml += '<div class="stage-node ' + cls + '"><span>' + esc(s.name || s.id) + '</span>'
-      + (targetName ? '<span class="muted">(' + esc(targetName) + ')</span>' : '') + '</div>';
+      + (assignee ? '<span class="muted">→ ' + esc(assignee) + '</span>' : '') + '</div>';
     if (idx < stages.length - 1) stageHtml += '<span class="stage-arrow">→</span>';
   });
   stageHtml += '</div>';
@@ -2230,6 +2878,98 @@ function renderLoops(d) {
   return html;
 }
 
+function renderScheduleAnomalyBadge(anomaly) {
+  if (anomaly === "missed") return '<span class="badge red">漏触发 (missed)</span>';
+  if (anomaly === "failed") return '<span class="badge red">最近失败 (failed)</span>';
+  if (anomaly === "node-offline") return '<span class="badge amber">节点离线 (node-offline)</span>';
+  return '<span class="badge green">正常</span>';
+}
+
+function renderSchedules(d) {
+  let html = '<div class="page-wrap">';
+  html += '<div class="toolbar">'
+    + '<div><div class="section-title">定时任务（只读总览）</div>'
+    + '<div class="section-sub">计划在各节点本地管理，用 ah schedule 修改；HTTP 节点也可主动上报计划供集中观测。</div></div>'
+    + '<button class="btn sm" data-action="refresh-schedules">刷新计划</button>'
+    + '</div>';
+
+  if (!state.schedulesApiAvailable) {
+    html += '<div class="card muted">后端暂未启用定时任务查询接口（<span class="mono">GET /api/v1/schedules</span> 返回 404）。待服务端升级后即可在此查看各节点的定时计划、下次触发与异常状态。</div>';
+    html += '</div>';
+    return html;
+  }
+
+  if (state.schedulesError) {
+    html += '<div class="err-banner">' + esc(state.schedulesError) + '</div>';
+  }
+
+  const list = state.schedules || [];
+  if (!list.length) {
+    html += '<div class="card muted">当前没有已登记的定时任务。计划在各节点本地管理，用 <span class="mono">ah schedule</span> 修改后会自动镜像到中台。</div>';
+    html += '</div>';
+    return html;
+  }
+
+  const nodeGroupMap = new Map(buildNodeGroups(d).map((g) => [g.node, g]));
+  const byNode = new Map();
+  for (const s of list) {
+    const key = s.node || "unknown";
+    if (!byNode.has(key)) byNode.set(key, []);
+    byNode.get(key).push(s);
+  }
+
+  for (const [node, items] of byNode.entries()) {
+    const g = nodeGroupMap.get(node);
+    const online = g ? g.online : false;
+    html += '<div class="card">'
+      + '<div class="section-head">'
+      + '<div class="section-title">'
+      + '<span class="dot ' + (online ? "on" : "") + '"></span>'
+      + '<span>' + esc(nodeFriendlyName(d, node)) + '</span>'
+      + '<span class="badge">' + items.length + ' 条计划</span>'
+      + '</div>'
+      + '<span class="badge ' + (online ? "green" : "") + '">' + (online ? "节点在线" : "节点离线") + '</span>'
+      + '</div>'
+      + '<div class="table-wrap"><table class="clean-table"><thead><tr>'
+      + '<th>计划 / 触发内容</th><th>Cron 表达式</th><th>下次触发</th><th>指向能力</th><th>启用状态</th><th>上次任务</th><th>异常标记</th>'
+      + '</tr></thead><tbody>';
+
+    for (const s of items) {
+      const sourceLabel = s.source === "http-agent"
+        ? '<span class="badge indigo">HTTP 自报</span>'
+        : '<span class="badge">节点本地</span>';
+      const lastTaskHtml = s.last_task && s.last_task.task_id
+        ? '<button class="btn sm ghost" data-action="jump-task" data-task-id="' + esc(s.last_task.task_id) + '">'
+          + '<span class="mono">' + esc(s.last_task.task_id) + '</span> '
+          + statusPill(s.last_task.status)
+          + '</button>'
+          + (s.last_task.updated_at ? '<div class="hint">' + esc(formatRelativeTime(s.last_task.updated_at)) + '</div>' : '')
+        : (s.last_fired
+          ? '<span class="hint">上次触发：' + esc(formatRelativeTime(s.last_fired)) + '</span>'
+          : '<span class="hint">暂无执行记录</span>');
+
+      html += '<tr>'
+        + '<td><div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;"><strong>' + esc(s.schedule_id || s.rule_id || "-") + '</strong>' + sourceLabel + '</div>'
+        + (s.text ? '<div class="hint" style="margin-top:3px;max-width:260px;">' + esc(s.text) + '</div>' : '')
+        + (s.note ? '<div class="hint" style="margin-top:2px;">' + esc(s.note) + '</div>' : '')
+        + '</td>'
+        + '<td><div class="mono">' + esc(s.cron || "-") + '</div>' + (s.tz ? '<div class="hint">' + esc(s.tz) + '</div>' : '') + '</td>'
+        + '<td><div>' + esc(formatNextFireTime(s.next_fire_at)) + '</div>'
+        + (s.next_fire_at ? '<div class="hint mono" style="font-size:11px;">' + esc(s.next_fire_at) + '</div>' : '')
+        + '</td>'
+        + '<td class="mono">' + esc(s.cap || "-") + '</td>'
+        + '<td>' + (s.enabled ? '<span class="badge green">已启用</span>' : '<span class="badge">已停用</span>') + '</td>'
+        + '<td>' + lastTaskHtml + '</td>'
+        + '<td>' + renderScheduleAnomalyBadge(s.anomaly) + '</td>'
+        + '</tr>';
+    }
+    html += '</tbody></table></div></div>';
+  }
+
+  html += '</div>';
+  return html;
+}
+
 function render() {
   const d = state.data;
   const el = document.getElementById("content");
@@ -2256,15 +2996,18 @@ function render() {
     }
   } else if (state.view === "loops") {
     el.innerHTML = renderLoops(d);
+  } else if (state.view === "schedules") {
+    el.innerHTML = renderSchedules(d);
   }
 }
 
 function syncNav() {
   const titles = {
     overview: "首页 · 待我处理",
-    agents: "Agent 管理",
+    agents: "节点管理",
     tasks: "任务与沟通记录",
     loops: "SOP 多阶段闭环",
+    schedules: "定时任务",
   };
   document.getElementById("viewTitle").textContent = titles[state.view] || "";
   document.querySelectorAll(".nav-btn[data-view]").forEach((b) => {
@@ -2330,7 +3073,11 @@ document.addEventListener("click", (e) => {
   if (navTarget) {
     state.view = navTarget.dataset.view;
     syncNav();
-    render();
+    if (state.view === "schedules") {
+      refreshSchedules().then(() => render());
+    } else {
+      render();
+    }
     return;
   }
   const actEl = e.target.closest("[data-action]");
@@ -2339,6 +3086,14 @@ document.addEventListener("click", (e) => {
   if (act === "open-new-task") openNewTaskModal();
   else if (act === "open-add-agent") openAgentModal();
   else if (act === "open-new-loop") openLoopModal();
+  else if (act === "open-add-cap") openAddCapModal(actEl.dataset.node);
+  else if (act === "delete-card") openDeleteCardConfirm(actEl.dataset.capId);
+  else if (act === "do-delete-card") doDeleteCard(actEl.dataset.capId);
+  else if (act === "edit-webhook") openWebhookModal(actEl.dataset.node);
+  else if (act === "test-webhook") testWebhookAction(actEl.dataset.node);
+  else if (act === "delete-webhook") openDeleteWebhookConfirm(actEl.dataset.node);
+  else if (act === "do-delete-webhook") doDeleteWebhook(actEl.dataset.node);
+  else if (act === "refresh-schedules") refreshSchedules().then(() => { showToast("已刷新定时任务"); render(); });
   else if (act === "goto-agents") { state.view = "agents"; syncNav(); render(); }
   else if (act === "goto-pending-agents") { state.view = "agents"; state.agentFilter = "pending"; syncNav(); render(); }
   else if (act === "goto-tasks") { state.view = "tasks"; syncNav(); render(); }
@@ -2386,6 +3141,10 @@ document.addEventListener("click", (e) => {
     const box = document.getElementById("rotatedPromptBox");
     copyText(box ? box.value : "", "已复制接入提示词");
   }
+  else if (act === "copy-wh-secret") {
+    const box = document.getElementById("whNewSecretBox");
+    copyText(box ? box.value : "", "已复制 Webhook Secret");
+  }
 });
 
 document.getElementById("btnRefresh").addEventListener("click", refreshState);
@@ -2409,8 +3168,36 @@ document.getElementById("saveTokenBtn").addEventListener("click", () => {
 });
 
 document.getElementById("tfTargetSelect").addEventListener("change", applyDispatchSelect);
-document.getElementById("lfTargetSelect").addEventListener("change", applyLoopSelect);
 document.getElementById("lfTemplate").addEventListener("change", renderTemplatePreview);
+document.getElementById("lfBulkNode").addEventListener("change", (e) => {
+  populateCapSelect(document.getElementById("lfBulkCap"), e.target.value);
+});
+document.getElementById("lfApplyAllBtn").addEventListener("click", () => {
+  const nodeVal = document.getElementById("lfBulkNode").value;
+  const capId = document.getElementById("lfBulkCap").value;
+  if (!nodeVal) return showToast("请先选择一个节点");
+  const rows = document.querySelectorAll("#lfStageBindings .stage-bind-row");
+  if (!rows.length) return;
+  rows.forEach((row) => {
+    const nodeSel = row.querySelector(".stage-node-sel");
+    const capSel = row.querySelector(".stage-cap-sel");
+    if (nodeSel) nodeSel.value = nodeVal;
+    populateCapSelect(capSel, nodeVal, "");
+    if (capSel && capId && [...capSel.options].some((o) => o.value === capId)) {
+      capSel.value = capId;
+    }
+  });
+  showToast("已将全部阶段设为同一执行目标");
+});
+document.getElementById("lfStageBindings").addEventListener("change", (e) => {
+  if (e.target && e.target.classList.contains("stage-node-sel")) {
+    const row = e.target.closest(".stage-bind-row");
+    if (!row) return;
+    const capSel = row.querySelector(".stage-cap-sel");
+    populateCapSelect(capSel, e.target.value, row.dataset.defaultCap || "");
+  }
+});
+
 document.getElementById("addCritBtn").addEventListener("click", () => addCriteriaRow("", false));
 document.getElementById("criteriaRows").addEventListener("click", (e) => {
   if (e.target && e.target.classList.contains("crit-del")) {
@@ -2425,10 +3212,19 @@ document.getElementById("accessChoices").addEventListener("click", (e) => {
   state.wizardAccess = card.dataset.access;
   syncAccessChoiceCards();
 });
+document.getElementById("receiveChoices").addEventListener("click", (e) => {
+  const card = e.target.closest(".choice-card[data-receive]");
+  if (!card) return;
+  state.wizardReceive = card.dataset.receive;
+  syncReceiveChoiceCards();
+});
 document.getElementById("agentNextBtn").addEventListener("click", () => {
   setWizardStep(2);
   const roleVal = document.getElementById("afRole").value;
-  document.getElementById("afDescRow").style.display = (state.wizardAccess === "http" && roleVal !== "leader") ? "flex" : "none";
+  const isHttp = state.wizardAccess === "http";
+  document.getElementById("afReceiveGroup").style.display = isHttp ? "flex" : "none";
+  document.getElementById("afDescRow").style.display = (isHttp && roleVal !== "leader") ? "flex" : "none";
+  syncReceiveChoiceCards();
 });
 document.getElementById("afRole").addEventListener("change", (e) => {
   document.getElementById("afDescRow").style.display = (state.wizardAccess === "http" && e.target.value !== "leader") ? "flex" : "none";
@@ -2442,6 +3238,9 @@ document.getElementById("agentModal").addEventListener("click", (e) => {
   } else if (e.target && e.target.id === "copyIssuedTokenBtn") {
     const el = document.getElementById("newIssuedToken");
     copyText(el ? el.value : "", "已复制 Token");
+  } else if (e.target && e.target.id === "copyWebhookSecretBtn") {
+    const el = document.getElementById("newWebhookSecret");
+    copyText(el ? el.value : "", "已复制 Webhook Secret");
   }
 });
 
@@ -2464,6 +3263,20 @@ document.getElementById("agentStep2").addEventListener("submit", async (e) => {
   if (adminNote) body.admin_note = adminNote;
   if (description) body.description = description;
 
+  if (access === "http") {
+    const receive = state.wizardReceive || "poll";
+    body.receive = receive;
+    if (receive === "webhook") {
+      const webhookUrl = document.getElementById("afWebhookUrl").value.trim();
+      if (!webhookUrl) {
+        errBox.textContent = "选择 Webhook 推送时，必须填写回调 URL";
+        errBox.style.display = "block";
+        return showToast("请填写 Webhook 回调 URL");
+      }
+      body.webhook_url = webhookUrl;
+    }
+  }
+
   try {
     const res = await api("/api/v1/admin/agents", { method: "POST", body: JSON.stringify(body) });
     if (!res || res.ok !== true) {
@@ -2478,9 +3291,132 @@ document.getElementById("agentStep2").addEventListener("submit", async (e) => {
   } catch (err) {
     let msg = err.message || "添加失败";
     if (err.status === 409) {
-      msg += "（如果该节点已存在并需要更换访问密钥，请到 Agent 页面对应卡片中点击「重新生成」）";
+      msg += "（如果该节点已存在并需要更换访问密钥，请到「节点」页面对应卡片中点击「重新生成」）";
     }
     errBox.textContent = msg;
+    errBox.style.display = "block";
+    showToast(err.message);
+  }
+});
+
+document.getElementById("acWorker").addEventListener("input", syncHostCommandVisibility);
+document.getElementById("copySnippetBtn").addEventListener("click", () => {
+  const el = document.getElementById("acSnippetText");
+  copyText(el ? el.value : "", "已复制 commands.json 片段");
+});
+
+document.getElementById("addCapForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const errBox = document.getElementById("acErrBox");
+  errBox.style.display = "none";
+  errBox.textContent = "";
+
+  const { node, isHttp } = state.addCapTarget;
+  const skillId = document.getElementById("acSkillId").value.trim();
+  const worker = document.getElementById("acWorker").value.trim();
+  const skillName = document.getElementById("acSkillName").value.trim();
+  const displayName = document.getElementById("acDisplayName").value.trim();
+  const description = document.getElementById("acDesc").value.trim();
+  const sideEffect = document.getElementById("acSideEffect").value;
+  const approvalClass = document.getElementById("acApproval").value;
+  const adminNote = document.getElementById("acNote").value.trim();
+  const command = document.getElementById("acCommand").value.trim();
+  const mode = document.getElementById("acMode").value;
+
+  if (!skillId || !/^[A-Za-z0-9._-]+$/.test(skillId) || skillId === "workers") {
+    errBox.textContent = "能力标识不合法（只允许字母、数字或 . _ -，且不能为保留键 workers）";
+    errBox.style.display = "block";
+    return;
+  }
+
+  try {
+    if (isHttp) {
+      const body = {
+        node,
+        skill_id: skillId,
+        side_effect: sideEffect,
+        approval_class: approvalClass,
+      };
+      if (worker) body.worker = worker;
+      if (skillName) body.skill_name = skillName;
+      if (displayName) body.display_name = displayName;
+      if (description) body.description = description;
+      if (adminNote) body.admin_note = adminNote;
+      await api("/api/v1/admin/cards", { method: "POST", body: JSON.stringify(body) });
+      closeModal("addCapModal");
+      state.expandedNodes.add(node);
+      showToast("已为节点 " + node + " 添加能力 " + skillId);
+      await refreshState();
+    } else {
+      if (!worker && !command) {
+        errBox.textContent = "宿主节点未指定归属 Agent（Worker）时，必须填写本地执行命令 command";
+        errBox.style.display = "block";
+        return;
+      }
+      const body = {
+        skill_id: skillId,
+        side_effect: sideEffect,
+        approval_class: approvalClass,
+      };
+      if (worker) body.worker = worker;
+      else {
+        body.command = command;
+        body.mode = mode;
+      }
+      if (skillName) body.name = skillName;
+      if (description) body.description = description;
+      const res = await api("/api/v1/admin/commands-snippet", { method: "POST", body: JSON.stringify(body) });
+      const text = (res && res.text) || JSON.stringify((res && res.snippet) || {}, null, 2);
+      document.getElementById("acSnippetText").value = text;
+      document.getElementById("acSnippetHint").textContent = (res && res.hint) || "去该节点改 commands.json，守护进程自动热重载。";
+      document.getElementById("acSnippetBox").style.display = "block";
+      showToast("已生成 commands.json 配置片段");
+    }
+  } catch (err) {
+    errBox.textContent = err.message || "操作失败";
+    errBox.style.display = "block";
+    if (err.data && err.data.snippet) {
+      document.getElementById("acSnippetText").value = JSON.stringify(err.data.snippet, null, 2);
+      document.getElementById("acSnippetBox").style.display = "block";
+    }
+    showToast(err.message);
+  }
+});
+
+document.getElementById("webhookForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const errBox = document.getElementById("whErrBox");
+  errBox.style.display = "none";
+  errBox.textContent = "";
+  const node = document.getElementById("whNode").value.trim();
+  const url = document.getElementById("whUrl").value.trim();
+  const rotateSecret = document.getElementById("whRotateSecret").checked;
+  if (!node || !url) return showToast("请填写 Webhook 回调 URL");
+  try {
+    const body = { url };
+    if (rotateSecret) body.rotate_secret = true;
+    const res = await api("/api/v1/admin/webhooks/" + encodeURIComponent(node), {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+    const secret = res && res.webhook && res.webhook.secret;
+    if (secret) {
+      document.getElementById("whSecretRevealBox").innerHTML = '<div class="token-reveal">'
+        + '<div class="token-reveal-title">新的 Webhook Secret（只显示这一次）</div>'
+        + '<div class="hint" style="color:var(--text);">请立即保存为 <span class="mono">A2A_HUB_WEBHOOK_SECRET</span>，关闭窗口后无法再次查看。</div>'
+        + '<div style="display:flex;gap:8px;align-items:center;">'
+        + '<input class="input mono" id="whNewSecretBox" readonly value="' + esc(secret) + '" />'
+        + '<button type="button" class="btn sm primary" data-action="copy-wh-secret">复制 Secret</button>'
+        + '</div></div>';
+      showToast("Webhook 已保存，请及时复制新密钥");
+    } else {
+      closeModal("webhookModal");
+      showToast("Webhook 配置已更新");
+    }
+    await refreshWebhooks();
+    render();
+  } catch (err) {
+    errBox.textContent = err.message || "保存 Webhook 失败";
     errBox.style.display = "block";
     showToast(err.message);
   }
@@ -2551,18 +3487,60 @@ document.getElementById("taskForm").addEventListener("submit", async (e) => {
 document.getElementById("loopForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   try {
-    const to = document.getElementById("lfTo").value.trim();
-    const cap = document.getElementById("lfCap").value.trim();
-    if (!to && !cap) {
-      document.getElementById("lfAdvanced").open = true;
-      return showToast("请选择执行节点，或在高级选项中填写");
+    const fallbackTo = document.getElementById("lfTo").value.trim();
+    const fallbackCap = document.getElementById("lfCap").value.trim() || "agent";
+    const fallbackWorker = document.getElementById("lfWorker").value.trim();
+    const cards = ((state.data && state.data.agentCards) || [])
+      .filter((c) => admissionOf(c) === "admitted" && c.dispatchable === "Yes");
+
+    const stageBindings = {};
+    const rows = Array.from(document.querySelectorAll("#lfStageBindings .stage-bind-row"));
+    for (const row of rows) {
+      const stageId = row.dataset.stageId;
+      if (!stageId) continue;
+      const nodeVal = (row.querySelector(".stage-node-sel")?.value || "").trim();
+      const capId = (row.querySelector(".stage-cap-sel")?.value || "").trim();
+      const matched = cards.find((c) => c.cap_id === capId);
+      if (matched) {
+        stageBindings[stageId] = {
+          to: matched.node || nodeVal,
+          worker: matched.worker || "",
+          cap: matched.skill_id || "agent",
+        };
+      } else if (nodeVal) {
+        stageBindings[stageId] = {
+          to: nodeVal,
+          worker: fallbackWorker,
+          cap: fallbackCap,
+        };
+      } else if (fallbackTo) {
+        stageBindings[stageId] = {
+          to: fallbackTo,
+          worker: fallbackWorker,
+          cap: fallbackCap,
+        };
+      } else {
+        document.getElementById("lfAdvanced").open = true;
+        return showToast("请为每个阶段选择节点与 Agent/能力，或在高级选项填写兜底节点");
+      }
     }
+
+    const firstBind = Object.values(stageBindings)[0] || null;
+    const to = fallbackTo || (firstBind ? firstBind.to : "");
+    const cap = firstBind ? firstBind.cap : fallbackCap;
+    const worker = firstBind ? firstBind.worker : fallbackWorker;
+    if (!Object.keys(stageBindings).length && !to) {
+      document.getElementById("lfAdvanced").open = true;
+      return showToast("请为阶段选择执行节点，或在高级选项中填写");
+    }
+
     const body = {
       template: document.getElementById("lfTemplate").value,
       goal: document.getElementById("lfGoal").value,
+      stageBindings,
       to,
       cap,
-      worker: document.getElementById("lfWorker").value.trim(),
+      worker,
       maxIterations: Number(document.getElementById("lfMaxIter").value) || 5,
     };
     await api("/api/v1/loops", { method: "POST", body: JSON.stringify(body) });

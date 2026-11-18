@@ -2,6 +2,13 @@
 
 本项目的主要变更记录如下。节点与中台版本号见 `package.json` / `ah --version`；中台规范见 [docs/standard.md](docs/standard.md)。
 
+## 未发布
+
+- **Webhook 门铃**：HTTP Agent 增加接收方式 `http-longpoll` 与 `webhook`（默认定时检查仍是 `http-poll`）。配置目录 `agent_webhooks.json`（0600）保存机主填写的 URL 与 HMAC 密钥；密钥明文只在新建或轮换时返回一次，列表与日志不含密钥。推送只有门铃（`task.assigned` / `task.updated` / `ping`），不含指令正文。签名为 `HMAC-SHA256(secret, timestamp.rawBody)`，不跟随重定向，超时 10 秒，失败按 0/1/3/8 秒重试。管理接口为 `GET|PUT|DELETE /api/v1/admin/webhooks*` 与 `POST .../test`，仅机主可用。
+- **添加能力**：`POST /api/v1/admin/cards` 给 http 节点加已接纳名片（带 `admin` scope 的 leader 也可）；宿主节点改为 `POST /api/v1/admin/commands-snippet` 生成 `commands.json` 片段，中台不下发。`DELETE /api/v1/admin/cards/:capId` 仅机主，且只删手动或预置的 http 名片。
+- **定时任务只读**：`GET /api/v1/schedules` 仅机主，按节点汇总 cron、下次触发、上次任务与异常（离线 / 失败 / 漏触发）。HTTP Agent 用 `PUT|DELETE /api/v1/agents/:node/schedules/:id` 自报计划，只能改自己的节点，中台不据此触发。
+- **控制台**：导航「节点」按节点、Agent、能力分组，可添加能力、选择接收方式并管理 Webhook。新增只读「定时任务」页。界面说法改为节点 / Agent / 能力，API 字段名不变。
+
 ## [Unreleased]
 
 - **分 Agent Token**：配置目录 `agent_tokens.json`（0600，只存 sha256 与展示前缀）。机主 `apiToken` 仍是 owner。外部 HTTP Agent 使用绑定 `{node, role, scopes}` 的 Token。`worker` 只走 register、poll、inbox 与任务生命周期；`leader` 可派单、查看自己发起或指向自己的任务、答复和撤销自己发起的任务、loops 与 updates；`hybrid` 两边都有；`scopes` 含 `admin` 的 leader 可接纳名片、改显示名、为其他节点生成接入提示词。任何 Agent 身份不能访问 `/approvals/*`、`/admin/agents`、`/admin/tokens*`、`/state`、`/tables/*`、`/poll`。路径节点、`node`/`from` 与 `X-A2A-Node` 冒充返回 403。仅机主可 `POST /api/v1/admin/agents`（`access=http` 时签发，明文只出现一次）、`GET /api/v1/admin/tokens`、`POST /api/v1/admin/tokens/:node/rotate`、`DELETE /api/v1/admin/tokens/:node`。未配置机主 `apiToken` 时拒绝签发。两把钥匙都没有时接口仍免鉴权。

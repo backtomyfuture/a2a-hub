@@ -246,9 +246,50 @@ function parseJoinCliArgs(rest) {
   return { joinTarget: String(joinTarget).trim(), forwarded };
 }
 
+// 总用法表。printUsage 按子命令筛行，所以每行都以「  ah <子命令> 」开头。
+const USAGE_LINES = [
+  "  ah up      [--listen 0.0.0.0:8787] [--node mac-mini] [--service]  一行初始化并启动独立中台 Hub",
+  "  ah join    http://[<token>@]<hub-ip>:8787 [--node worker-1] [--service]  一行接入远端 Hub 并启动长轮询",
+  "  ah setup   [--config <dir>] [--role node|hub] [--kind host|agent] [--hub] [--join <url>] [--skip-skill]  一键配置向导（独立 SQLite Hub / 长轮询 Node）",
+  "  ah daemon  [--config <dir>] [--role node|hub]  常驻守护进程（省略 --role 时读 node.json，缺省 node）",
+  "  ah reconcile [--config <dir>]  单次回表认领/对账后退出（不长驻；不停派、不改写命令表外的手工名片）",
+  "  ah inventory [--config <dir>]  只读盘点本节点名片与任务，不写入",
+  "  ah doctor  [--config <dir>] [--role node|hub]  本机自检",
+  "  ah service [--config <dir>] [--role node|hub]  注册开机自启（--remove 卸载）",
+  "  ah update  [--check] [--skip-skill] [--config <dir>]  自更新程序本体（git pull + 依赖重装 + 软链/Skill 补齐）",
+  "  ah inbox   [--pop] [--json]    读取专属 Agent 收件箱（--pop 提取并标为 acked）",
+  "  ah inbox done --task <Task_ID> --text <处理结果> [--artifact <路径>] [--check <id>=<pass|fail|blocked>[:<证据>]]",
+  "  ah inbox ask  --task <Task_ID> --text <补充提问>",
+  "  ah inbox fail --task <Task_ID> --text <失败原因>",
+  "  ah inbox auth --task <Task_ID> --text <具体动作、对象与风险>",
+  "  ah task create --to <node> [--cap/--skill <cap_id>] [--text <指令>] [--from <node>] [--params <json 或 @文件>] [--criteria <json 数组或 @文件>] [--idempotency-key <键>]",
+  "  ah task reply  --task <Task_ID> --text <答复内容>",
+  "  ah task show   <Task_ID>",
+  "  ah task why    <Task_ID> [--config <dir>] [--json]",
+  "  ah task cancel --task <Task_ID> [--text <说明>] [--config <dir>]",
+  "  ah task begin  --schedule <id> [--period <期次键>] [--cap <cap_id>] [--text <指令>]  Agent 定时触发",
+  "  ah loop templates  列出内置 SOP 闭环模板",
+  "  ah loop create --goal <目标> --to <node> [--template plan-code-verify] [--cap <cap_id>] [--stages @sop.json]  创建 LoopForge SOP 闭环",
+  "  ah loop ls [--json]  列出 SOP 闭环",
+  "  ah loop show <Loop_ID>  查看 SOP 闭环详情",
+  "  ah loop cancel <Loop_ID> [--text <说明>]  取消 SOP 闭环",
+  "  ah schedule ls [--config <dir>] [--json]  列出本机定时调度计划",
+  "  ah schedule add --id <id> --cron \"<五段>\" --cap <cap_id> --text <指令> [--approval auto|notify|approve] [--disabled]  添加本机定时计划",
+  "  ah schedule rm <id> [--config <dir>]  删除本机计划",
+  "  ah schedule enable|disable <id> [--config <dir>]  启用/停用本机计划",
+  "  ah schedule register --id <id> --cron \"<五段>\" --cap <cap_id> [--text <指令>]  登记 Agent 观察镜像（不写本机计划）",
+  "  ah present [--pop] [--task <Task_ID>] [--wait <秒>]  读取本机结果呈递队列"
+];
+
 const [cmd, ...rest] = process.argv.slice(2);
 
-if (cmd === "up") {
+// 带副作用的子命令（service、update、setup 等）以前不认 --help，会直接执行。
+// 只要出现 --help / -h 就只打印用法，绝不往下分发。
+const wantsHelp = cmd === "help" || cmd === "--help" || cmd === "-h" || rest.includes("--help") || rest.includes("-h");
+
+if (wantsHelp) {
+  printUsage(cmd === "help" ? rest[0] : cmd);
+} else if (cmd === "up") {
   const configDir = path.resolve(configDirFrom(rest));
   const hasNodeJson = fs.existsSync(path.join(configDir, "node.json"));
   const needSetup = !hasNodeJson || rest.includes("--force") || rest.includes("--setup");
@@ -766,37 +807,11 @@ if (cmd === "up") {
 } else if (cmd === "--version" || cmd === "-v") {
   console.log(DAEMON_VERSION);
 } else {
-  console.log(`ah ${DAEMON_VERSION}
-用法：
-  ah up      [--listen 0.0.0.0:8787] [--node mac-mini] [--service]  一行初始化并启动独立中台 Hub
-  ah join    http://[<token>@]<hub-ip>:8787 [--node worker-1] [--service]  一行接入远端 Hub 并启动长轮询
-  ah setup   [--config <dir>] [--role node|hub] [--kind host|agent] [--hub] [--join <url>] [--skip-skill]  一键配置向导（独立 SQLite Hub / 长轮询 Node）
-  ah daemon  [--config <dir>] [--role node|hub]  常驻守护进程（省略 --role 时读 node.json，缺省 node）
-  ah reconcile [--config <dir>]  单次回表认领/对账后退出（不长驻；不停派、不改写命令表外的手工名片）
-  ah inventory [--config <dir>]  只读盘点本节点名片与任务，不写入
-  ah doctor  [--config <dir>] [--role node|hub]  本机自检
-  ah service [--config <dir>] [--role node|hub]  注册开机自启（--remove 卸载）
-  ah update  [--check] [--skip-skill] [--config <dir>]  自更新程序本体（git pull + 依赖重装 + 软链/Skill 补齐）
-  ah inbox   [--pop] [--json]    读取专属 Agent 收件箱（--pop 提取并标为 acked）
-  ah inbox done --task <Task_ID> --text <处理结果> [--artifact <路径>] [--check <id>=<pass|fail|blocked>[:<证据>]]
-  ah inbox ask  --task <Task_ID> --text <补充提问>
-  ah inbox fail --task <Task_ID> --text <失败原因>
-  ah inbox auth --task <Task_ID> --text <具体动作、对象与风险>
-  ah task create --to <node> [--cap/--skill <cap_id>] [--text <指令>] [--from <node>] [--params <json 或 @文件>] [--criteria <json 数组或 @文件>] [--idempotency-key <键>]
-  ah task reply  --task <Task_ID> --text <答复内容>
-  ah task show   <Task_ID>
-  ah task why    <Task_ID> [--config <dir>] [--json]
-  ah task cancel --task <Task_ID> [--text <说明>] [--config <dir>]
-  ah task begin  --schedule <id> [--period <期次键>] [--cap <cap_id>] [--text <指令>]  Agent 定时触发
-  ah loop templates  列出内置 SOP 闭环模板
-  ah loop create --goal <目标> --to <node> [--template plan-code-verify] [--cap <cap_id>] [--stages @sop.json]  创建 LoopForge SOP 闭环
-  ah loop ls [--json]  列出 SOP 闭环
-  ah loop show <Loop_ID>  查看 SOP 闭环详情
-  ah loop cancel <Loop_ID> [--text <说明>]  取消 SOP 闭环
-  ah schedule ls [--config <dir>] [--json]  列出本机定时调度计划
-  ah schedule add --id <id> --cron "<五段>" --cap <cap_id> --text <指令> [--approval auto|notify|approve] [--disabled]  添加本机定时计划
-  ah schedule rm <id> [--config <dir>]  删除本机计划
-  ah schedule enable|disable <id> [--config <dir>]  启用/停用本机计划
-  ah schedule register --id <id> --cron "<五段>" --cap <cap_id> [--text <指令>]  登记 Agent 观察镜像（不写本机计划）
-  ah present [--pop] [--task <Task_ID>] [--wait <秒>]  读取本机结果呈递队列`);
+  printUsage();
+}
+
+function printUsage(only) {
+  const lines = USAGE_LINES;
+  const picked = only && !only.startsWith("-") ? lines.filter((l) => l.startsWith(`  ah ${only} `) || l.startsWith(`  ah ${only}\t`)) : [];
+  console.log(`ah ${DAEMON_VERSION}\n用法：\n${(picked.length ? picked : lines).join("\n")}`);
 }

@@ -62,6 +62,8 @@ export class SqliteBus {
     this.tables = normalizeTables(tables);
     this.broker = broker;
     this.notifier = notifier;
+    // attachNotifier 仍只保留一个外部通知器；Webhook 等通过 addListener 追加，互不覆盖。
+    this.listeners = [];
     this.log = log ?? (() => {});
     this._stats = { list: 0, get: 0, write: 0, other: 0, backoff: 0 };
 
@@ -148,6 +150,12 @@ export class SqliteBus {
 
   attachNotifier(notifier) {
     this.notifier = notifier;
+  }
+
+  addListener(listener) {
+    if (!listener || typeof listener.onBusEvent !== "function") return;
+    if (this.listeners.includes(listener)) return;
+    this.listeners.push(listener);
   }
 
   currentSeq() {
@@ -449,10 +457,19 @@ export class SqliteBus {
   }
 
   _notifyAsync(ev, fields) {
-    if (!this.notifier || typeof this.notifier.onBusEvent !== "function") return;
-    Promise.resolve(this.notifier.onBusEvent({ ...ev, fields })).catch((e) => {
-      this.log("notifier error: " + (e?.message ?? e));
-    });
+    const targets = [];
+    if (this.notifier && typeof this.notifier.onBusEvent === "function") targets.push(this.notifier);
+    for (const listener of this.listeners) {
+      if (listener !== this.notifier) targets.push(listener);
+    }
+    if (!targets.length) return;
+    const payload = { ...ev, fields: { ...fields } };
+    for (const target of targets) {
+      // 包进微任务：监听者同步抛错时不会打断其余监听者，也不会冲出写表事务之后的调用方。
+      Promise.resolve().then(() => target.onBusEvent(payload)).catch((e) => {
+        this.log("notifier error: " + (e?.message ?? e));
+      });
+    }
   }
 
   close() {

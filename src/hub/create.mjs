@@ -168,7 +168,7 @@ function undispatchableReason(card) {
   }
   const admission = admissionOf(card);
   if (admission !== "admitted") {
-    reasons.push(`未接纳（Admission=${admission}），请在 Web 控制台「Agent 名片墙 → 待接纳」中接纳`);
+    reasons.push(`未接纳（Admission=${admission}），请在 Web 控制台「节点 → 待接纳」中接纳`);
   }
   return reasons;
 }
@@ -204,13 +204,9 @@ function freshTaskId(taken, now) {
   throw new Error("无法生成不重复的 Task_ID");
 }
 
-export async function createTask({
-  bus, from = "", source = "", to, cap, worker = "", text = "", params, criteria, context = "", ref = "", approval = "", idempotencyKey = "", now = new Date(), validateTarget = true,
-}) {
-  if (!bus?.tables?.messages || !bus.tables.parts || !bus.tables.tasks) {
-    throw new Error("总线缺少 messages / parts / tasks 表");
-  }
-  const data = buildInstructionData(params, criteria);
+// 与 createTask 的 validateTarget 同一口径，供闭环在写第一张单之前逐阶段复用。
+// 拒绝都发生在写表之前；返回值是解析后的节点、技能与 Worker。
+export async function resolveDispatchTarget({ bus, to = "", cap = "", worker = "", validateTarget = true } = {}) {
   const rawTo = String(to ?? "").trim();
   const rawCap = String(cap ?? "").trim();
   // 指定了 Worker 就是硬约束（标准 §2）：下面所有按名册的挑选都只在这个 Worker 的名片里做。
@@ -220,7 +216,7 @@ export async function createTask({
   let workerHint = rawWorker;
 
   // 若总线提供了 AgentCards 表，尝试自动解析能力与节点并按名册校验
-  if (bus.tables.agentCards) {
+  if (bus?.tables?.agentCards) {
     let cards = [];
     try {
       cards = await bus.listRecords(bus.tables.agentCards);
@@ -369,6 +365,17 @@ export async function createTask({
 
   if (!node) throw new Error("task create 需要 --to <node>（或提供可在 AgentCards 反查到节点的 --cap/--skill）");
   if (!skill) throw new Error(`task create 未指定 --cap/--skill，且目标节点 ${node} 未登记任何可用能力`);
+  return { node, skill, workerHint };
+}
+
+export async function createTask({
+  bus, from = "", source = "", to, cap, worker = "", text = "", params, criteria, context = "", ref = "", approval = "", idempotencyKey = "", now = new Date(), validateTarget = true,
+}) {
+  if (!bus?.tables?.messages || !bus.tables.parts || !bus.tables.tasks) {
+    throw new Error("总线缺少 messages / parts / tasks 表");
+  }
+  const data = buildInstructionData(params, criteria);
+  const { node, skill, workerHint } = await resolveDispatchTarget({ bus, to, cap, worker, validateTarget });
   const sender = String(from || source || "hub").trim();
   const taskSource = String(source || from || "hub").trim();
   const approvalClass = String(approval ?? "").trim();

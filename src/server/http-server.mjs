@@ -11,14 +11,24 @@ import { agentCanSeeTask, assertAgentRoute, bindAgentBody } from "../hub/agent-a
 import { AgentTokenStore } from "../hub/agent-tokens.mjs";
 import {
   buildOnboarding,
+  admissionOf,
   formatAgentCard,
   httpError,
+  receiveModeFor,
   validateAccess,
   validateAdmission,
   validateNodeName,
   validateProfileFields,
+  validateReceive,
   validateRole,
 } from "../hub/admission.mjs";
+import { validateWebhookUrl, WebhookDispatcher } from "../hub/webhooks.mjs";
+import {
+  buildCommandsSnippet,
+  createManualCard,
+  deleteManualCard,
+  listSchedules,
+} from "../hub/capabilities.mjs";
 import { cancelTask } from "../hub/cancel.mjs";
 import { createTask } from "../hub/create.mjs";
 import { initiatorOf } from "../inbox.mjs";
@@ -163,10 +173,20 @@ export async function startHubHttpServer({
   approval,
   log = () => {},
   onWake = () => {},
+  webhookDispatcher = null,
 } = {}) {
   const { host, port } = resolveListenAddr(cfg?.listen ?? "0.0.0.0:8787");
   const apiToken = String(cfg?.apiToken ?? "").trim();
   const tokenStore = cfg?.configDir ? new AgentTokenStore(cfg.configDir) : null;
+  const webhooks = webhookDispatcher
+    ?? (cfg?.configDir
+      ? new WebhookDispatcher({
+        configDir: cfg.configDir,
+        hubNode: cfg?.node || "hub",
+        taskTable: bus?.tables?.tasks || "tasks",
+        log,
+      })
+      : null);
   const runtimePath = cfg?.configDir ? path.join(cfg.configDir, "hub_runtime.json") : "";
   const connectHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
   let activePort = port;
@@ -761,6 +781,57 @@ export async function startHubHttpServer({
         return;
       }
 
+      if (method === "POST" && pathname === "/api/v1/admin/cards") {
+        // body.node 是要添加能力的目标节点，不是调用者身份。带 admin 的 Leader 会给别的节点建名片。
+        const body = await readJsonBody(req);
+        try {
+          const record = await createManualCard({ bus, tokenStore, body });
+          onWake();
+          sendJson(res, 201, { ok: true, card: formatAgentCard(record) });
+        } catch (e) {
+          if (Number(e?.status) === 409 && e.snippet) {
+            sendJson(res, 409, { error: e.message, snippet: e.snippet, text: e.text, hint: e.hint });
+            return;
+          }
+          throw e;
+        }
+        return;
+      }
+
+      const deleteCardMatch = pathname.match(/^\/api\/v1\/admin\/cards\/([^/]+)$/);
+      if (method === "DELETE" && deleteCardMatch) {
+        const capId = decodeParam(deleteCardMatch[1]);
+        const result = await deleteManualCard({ bus, tokenStore, capId });
+        onWake();
+        sendJson(res, 200, result);
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/v1/admin/commands-snippet") {
+        const body = await readJsonBodyBound();
+        sendJson(res, 200, buildCommandsSnippet(body));
+        return;
+      }
+
+      if (method === "GET" && pathname === "/api/v1/schedules") {
+        const [rules, tasks, cards] = await Promise.all([
+          bus.tables.rules ? bus.listRecords(bus.tables.rules) : Promise.resolve([]),
+          bus.listRecords(bus.tables.tasks),
+          bus.listRecords(bus.tables.agentCards),
+        ]);
+        sendJson(res, 200, {
+          schedules: listSchedules({
+            rules,
+            tasks,
+            cards,
+            connected: broker ? broker.connectedNodes() : [],
+            hubNode: cfg?.node || "",
+            hubTz: cfg?.tz || "",
+          }),
+        });
+        return;
+      }
+
       if (method === "POST" && pathname === "/api/v1/admin/agents") {
         const body = await readJsonBodyBound();
         const node = validateNodeName(body?.node);
@@ -770,6 +841,13 @@ export async function startHubHttpServer({
         const displayName = profile.Display_Name ?? "";
         const adminNote = profile.Admin_Note ?? "";
         const description = body?.description == null ? "" : String(body.description).trim();
+        // receive 只对 HTTP Agent 有意义；host / inbox 的唤醒方式由本机 ah daemon 决定。
+        let receive = "poll";
+        let webhookUrl = "";
+        if (access === "http") {
+          receive = validateReceive(body?.receive);
+          if (receive === "webhook") webhookUrl = validateWebhookUrl(body?.webhook_url);
+        }
 
         if (access === "http") {
           if (!tokenStore) {
@@ -782,7 +860,7 @@ export async function startHubHttpServer({
             return;
           }
           if (tokenStore.get(node)) {
-            sendJson(res, 409, { error: `节点 ${node} 已有 Token，请使用 POST /api/v1/admin/tokens/${node}/rotate 轮换` });
+            sendJson(res, 409, { error: `节点 ${node} 已存在（已有 Token）。如需重新接入，请在「节点」页重新生成 Token（即轮换：POST /api/v1/admin/tokens/${node}/rotate），或先删除该节点再添加` });
             return;
           }
         }
@@ -792,7 +870,11 @@ export async function startHubHttpServer({
           const capId = capIdOf("agent", {}, node);
           const existing = await bus.listRecords(bus.tables.agentCards);
           if (existing.some((r) => f1(r, "Cap_ID") === capId)) {
-            sendJson(res, 409, { error: `名片已存在：${capId}` });
+            const prev = existing.find((r) => f1(r, "Cap_ID") === capId);
+            const adm = admissionOf(prev);
+            // 被拒绝的名片仍占着 Cap_ID，直接报「已存在」会让人以为节点凭空消失了。
+            const where = adm === "rejected" ? "它在「节点 → 已拒绝」里，可以恢复为待接纳" : (adm === "pending" ? "它在「节点 → 待接纳」里" : "它已经接入");
+            sendJson(res, 409, { error: `节点 ${node} 已存在：${where}；也可先删除该节点再添加` });
             return;
           }
           const created = await bus.createRecord(bus.tables.agentCards, {
@@ -806,14 +888,14 @@ export async function startHubHttpServer({
             Approval_Class: "auto",
             Availability: "offline",
             Dispatchable: "Yes",
-            Receive_Mode: "http-poll",
+            Receive_Mode: receiveModeFor(receive),
             Zone: "cloud",
             Daemon_Version: "http-agent",
             Admission: "admitted",
             Display_Name: displayName,
             Admin_Note: adminNote,
             Updated_At: nowMinute(),
-            Metadata: JSON.stringify({ kind: "agent", role, mode: "http-poll", preset: true }),
+            Metadata: JSON.stringify({ kind: "agent", role, mode: receiveModeFor(receive), preset: true }),
           });
           onWake();
           card = formatAgentCard(created?.record);
@@ -823,6 +905,18 @@ export async function startHubHttpServer({
         if (access === "http") {
           issued = tokenStore.issue({ node, role, scopes: [] });
         }
+        let webhookPayload = null;
+        let webhookSecret = "";
+        if (access === "http" && receive === "webhook") {
+          if (!webhooks) throw httpError(500, "未配置 configDir，无法保存 Webhook");
+          const saved = webhooks.store.put({ node, url: webhookUrl });
+          webhookPayload = { url: saved.hook.url };
+          // 密钥只在本次新建时出现。节点上已经有 Webhook 时不再把旧密钥交出来。
+          if (saved.secret) {
+            webhookPayload.secret = saved.secret;
+            webhookSecret = saved.secret;
+          }
+        }
         const onboarding = buildOnboarding({
           hubUrl: requestHubUrl(req),
           node,
@@ -830,10 +924,13 @@ export async function startHubHttpServer({
           role,
           authRequired: Boolean(apiToken) || Boolean(issued),
           token: issued?.token || "",
+          receive,
+          webhookSecret,
         });
-        sendJson(res, 200, issued
-          ? { ok: true, node, card, token: issued.token, onboarding }
-          : { ok: true, node, card, onboarding });
+        const payload = { ok: true, node, card, onboarding };
+        if (issued) payload.token = issued.token;
+        if (webhookPayload) payload.webhook = webhookPayload;
+        sendJson(res, 200, payload);
         return;
       }
 
@@ -851,9 +948,10 @@ export async function startHubHttpServer({
         const cards = (await bus.listRecords(bus.tables.agentCards)).filter((c) => f1(c, "Node") === node);
         // 先吊销再删名片：顺序反过来时，对方恰好在这之间注册会把名片写回来。
         const tokenRevoked = tokenStore ? tokenStore.revoke(node) : false;
+        const webhookRemoved = webhooks ? webhooks.store.remove(node) : false;
         for (const c of cards) await bus.deleteRecord(bus.tables.agentCards, c.record_id);
         const forgotten = broker?.forgetNode ? broker.forgetNode(node) : false;
-        if (!cards.length && !tokenRevoked && !forgotten) {
+        if (!cards.length && !tokenRevoked && !forgotten && !webhookRemoved) {
           sendJson(res, 404, { error: `节点不存在：${node}` });
           return;
         }
@@ -861,7 +959,7 @@ export async function startHubHttpServer({
         const tasks = await bus.listRecords(bus.tables.tasks);
         const openTasks = tasks.filter((t) => f1(t, "Target_Node") === node && !TERMINAL_STATUSES.has(f1(t, "Status"))).length;
         if (cards.length) onWake();
-        sendJson(res, 200, { ok: true, node, cardsRemoved: cards.length, tokenRevoked, openTasks });
+        sendJson(res, 200, { ok: true, node, cardsRemoved: cards.length, tokenRevoked, webhookRemoved, openTasks });
         return;
       }
 
@@ -872,12 +970,14 @@ export async function startHubHttpServer({
         );
         const access = validateAccess(reqUrl.searchParams.get("access"));
         const role = validateRole(reqUrl.searchParams.get("role"));
+        const receive = access === "http" ? validateReceive(reqUrl.searchParams.get("receive")) : "poll";
         const onboarding = buildOnboarding({
           hubUrl: requestHubUrl(req),
           node,
           access,
           role,
           authRequired: Boolean(apiToken) || Boolean(tokenStore?.hasAny()),
+          receive,
         });
         sendJson(res, 200, { onboarding });
         return;
@@ -920,6 +1020,53 @@ export async function startHubHttpServer({
         }
         sendJson(res, 200, { ok: true });
         return;
+      }
+
+      if (pathname === "/api/v1/admin/webhooks" || pathname.startsWith("/api/v1/admin/webhooks/")) {
+        if (!webhooks) throw httpError(500, "未配置 configDir，无法管理 Webhook");
+        if (method === "GET" && pathname === "/api/v1/admin/webhooks") {
+          sendJson(res, 200, { webhooks: webhooks.store.listPublic() });
+          return;
+        }
+        const webhookTestMatch = pathname.match(/^\/api\/v1\/admin\/webhooks\/([^/]+)\/test$/);
+        if (method === "POST" && webhookTestMatch) {
+          const node = validateNodeName(decodeParam(webhookTestMatch[1]));
+          const result = await webhooks.ping(node);
+          if (result.missing) {
+            sendJson(res, 404, { error: `节点 ${node} 没有 Webhook` });
+            return;
+          }
+          sendJson(res, 200, { ok: result.ok, status: result.status, error: result.error });
+          return;
+        }
+        const webhookNodeMatch = pathname.match(/^\/api\/v1\/admin\/webhooks\/([^/]+)$/);
+        if (webhookNodeMatch && method === "DELETE") {
+          const node = validateNodeName(decodeParam(webhookNodeMatch[1]));
+          if (!webhooks.store.remove(node)) {
+            sendJson(res, 404, { error: `节点 ${node} 没有 Webhook` });
+            return;
+          }
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+        if (webhookNodeMatch && method === "PUT") {
+          const node = validateNodeName(decodeParam(webhookNodeMatch[1]));
+          const body = await readJsonBodyBound();
+          if (!body || typeof body !== "object" || Array.isArray(body)) {
+            throw httpError(400, "请求体必须是 JSON 对象");
+          }
+          const url = validateWebhookUrl(body.url);
+          let rotate = false;
+          if (Object.hasOwn(body, "rotate_secret") && body.rotate_secret != null && body.rotate_secret !== false) {
+            if (body.rotate_secret !== true) throw httpError(400, "rotate_secret 必须是布尔值");
+            rotate = true;
+          }
+          const saved = webhooks.store.put({ node, url, rotate });
+          const webhook = { node, url: saved.hook.url };
+          if (saved.secret) webhook.secret = saved.secret;
+          sendJson(res, 200, { ok: true, webhook });
+          return;
+        }
       }
 
       sendJson(res, 404, { error: "Not Found" });
