@@ -11,6 +11,7 @@ import { acceptanceFromParts, parseCriteria } from "../acceptance.mjs";
 import { pickSignedDecision, publicKeyOf } from "../approval-sign.mjs";
 import { f1 } from "../bus/tables.mjs";
 import { capIdOf } from "../config.mjs";
+import { admissionOf, httpError, validateNodeName } from "../hub/admission.mjs";
 import { submitAgentReceipt } from "../inbox.mjs";
 import { DAEMON_VERSION } from "../kernel.mjs";
 
@@ -64,20 +65,6 @@ function nextSuffix(ids, re) {
     if (Number.isFinite(n) && n > max) max = n;
   }
   return max + 1;
-}
-
-function httpError(status, message) {
-  const err = new Error(message);
-  err.status = status;
-  return err;
-}
-
-function validateNodeName(raw) {
-  const node = String(raw ?? "").trim();
-  if (!node || node === "*" || node.length > 64 || !/^[A-Za-z0-9._-]+$/.test(node)) {
-    throw httpError(400, "node 名称不合法（只允许字母、数字、._-，且不能为空）");
-  }
-  return node;
 }
 
 function approvalVerifyKey(cfg, approval) {
@@ -668,6 +655,7 @@ export async function handleAgentGatewayRequest({
 
     const existingCards = await bus.listRecords(bus.tables.agentCards);
     const saved = [];
+    const admissionMap = {};
     for (const spec of capSpecs) {
       const skillId = String(spec?.skill_id ?? spec?.skill ?? "").trim();
       if (!skillId) throw httpError(400, "caps 每项必须包含 skill_id");
@@ -676,6 +664,7 @@ export async function handleAgentGatewayRequest({
       const capId = String(spec?.cap_id ?? "").trim()
         || capIdOf(capKey, { ...(specWorker ? { worker: specWorker, skill: skillId } : {}) }, capPrefix);
 
+      // 绝不从 register 写 Admission / Display_Name / Admin_Note，保持机主接纳权与备注不被 Agent 自报覆盖。
       const fields = {
         Cap_ID: capId,
         Node: node,
@@ -697,14 +686,19 @@ export async function handleAgentGatewayRequest({
 
       const match = existingCards.find((r) => f1(r, "Node") === node && f1(r, "Cap_ID") === capId);
       if (match) {
-        await bus.updateRecord(bus.tables.agentCards, match.record_id, fields);
+        const resUpd = await bus.updateRecord(bus.tables.agentCards, match.record_id, fields);
+        const current = resUpd?.record ?? match;
+        admissionMap[capId] = admissionOf(current);
         saved.push({ record_id: match.record_id, ...fields });
       } else {
         const resRec = await bus.createRecord(bus.tables.agentCards, fields);
-        saved.push({ record_id: resRec.record_id, ...fields });
+        const created = resRec?.record;
+        admissionMap[capId] = admissionOf(created ?? fields);
+        saved.push({ record_id: created?.record_id ?? resRec?.record_id ?? "", ...fields });
       }
     }
 
+    const pending = Object.values(admissionMap).some((v) => v !== "admitted");
     broker?.touchAgent?.(node, { remoteAddr, mode: receiveMode, kind, role });
     onWake();
     sendJson(res, 200, {
@@ -714,6 +708,8 @@ export async function handleAgentGatewayRequest({
       role,
       receive_mode: receiveMode,
       cards: saved,
+      admission: admissionMap,
+      pending,
     });
     return true;
   }
@@ -766,6 +762,7 @@ export async function handleAgentGatewayRequest({
         dispatchable: f1(c, "Dispatchable"),
         receive_mode: f1(c, "Receive_Mode"),
         zone: f1(c, "Zone"),
+        admission: admissionOf(c),
       });
     }
 

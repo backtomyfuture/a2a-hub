@@ -26,6 +26,7 @@ async function seedCard(mock, fields = {}) {
     Skill_ID: "agent",
     Dispatchable: "Yes",
     Availability: "online",
+    Admission: "admitted",
     ...fields,
   });
 }

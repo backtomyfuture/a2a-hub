@@ -185,6 +185,7 @@ async function seedCard(bus) {
     Skill_ID: "echo",
     Dispatchable: "Yes",
     Availability: "online",
+    Admission: "admitted",
   });
 }
 

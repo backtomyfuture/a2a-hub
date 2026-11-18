@@ -145,6 +145,16 @@ test("HTTP Agent 网关：发现 / 注册 / 问答闭环 / 长轮询 / ed25519 �
       });
       assert.equal(regGrok.status, 200);
       assert.equal(regGrok.data.cards.length, 1);
+      assert.equal(regGrok.data.pending, true);
+      assert.equal(regGrok.data.admission["CAP-grok-bot-research"], "pending");
+
+      const admitGrok = await apiJson(baseUrl, "/api/v1/admin/nodes/grok-bot/admission", {
+        method: "POST",
+        token: apiToken,
+        body: { admission: "admitted" },
+      });
+      assert.equal(admitGrok.status, 200);
+      assert.equal(admitGrok.data.updated, 1);
 
       const agentsRes = await apiJson(baseUrl, "/api/v1/agents", { token: apiToken });
       assert.equal(agentsRes.status, 200);
@@ -153,6 +163,7 @@ test("HTTP Agent 网关：发现 / 注册 / 问答闭环 / 长轮询 / ed25519 �
       assert.equal(byNode.get("muse")?.kind, "agent");
       assert.equal(byNode.get("grok-bot")?.caps.length, 1);
       assert.equal(byNode.get("grok-bot")?.caps[0].skill_id, "research");
+      assert.equal(byNode.get("grok-bot")?.caps[0].admission, "admitted");
 
       // Web 控制台主页可正常返回更新后的提示文案
       const htmlRes = await fetch(`${baseUrl}/`);

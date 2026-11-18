@@ -6,7 +6,17 @@ import http from "node:http";
 import path from "node:path";
 import { f1 } from "../bus/tables.mjs";
 import { resolveTableName } from "../bus/tables.mjs";
-import { resolveListenAddr } from "../config.mjs";
+import { capIdOf, resolveListenAddr } from "../config.mjs";
+import {
+  buildOnboarding,
+  formatAgentCard,
+  httpError,
+  validateAccess,
+  validateAdmission,
+  validateNodeName,
+  validateProfileFields,
+  validateRole,
+} from "../hub/admission.mjs";
 import { cancelTask } from "../hub/cancel.mjs";
 import { createTask } from "../hub/create.mjs";
 import { BUILTIN_LOOP_TEMPLATES, cancelLoop, createLoop } from "../hub/loop.mjs";
@@ -81,6 +91,20 @@ function parseJsonField(raw, fallback) {
   try { return JSON.parse(s); } catch { return fallback; }
 }
 
+function nowMinute() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function decodeParam(raw) {
+  try {
+    return decodeURIComponent(raw).trim();
+  } catch {
+    throw httpError(400, "路径参数编码不合法");
+  }
+}
+
 function formatTaskSummary(t) {
   return {
     record_id: t.record_id,
@@ -138,6 +162,15 @@ export async function startHubHttpServer({
   const { host, port } = resolveListenAddr(cfg?.listen ?? "0.0.0.0:8787");
   const apiToken = String(cfg?.apiToken ?? "").trim();
   const runtimePath = cfg?.configDir ? path.join(cfg.configDir, "hub_runtime.json") : "";
+  const connectHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
+  let activePort = port;
+  const publicUrl = String(cfg?.publicUrl ?? "").trim().replace(/\/+$/, "");
+  // 接入提示词要发给其他机器：优先用配置的对外地址，避免机主在 Hub 本机用 127.0.0.1 打开控制台时生成远端不可达的地址。
+  const requestHubUrl = (req) => {
+    if (publicUrl) return publicUrl;
+    const hostHdr = String(req.headers.host ?? "").trim();
+    return hostHdr ? `http://${hostHdr}` : `http://${connectHost}:${activePort}`;
+  };
 
   const server = http.createServer(async (req, res) => {
     const reqUrl = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
@@ -299,22 +332,7 @@ export async function startHubHttpServer({
           seq: broker?.latestSeq ?? 0,
           connectedNodes,
           tasks: tasks.map(formatTaskSummary).reverse(),
-          agentCards: cards.map((c) => ({
-            record_id: c.record_id,
-            cap_id: f1(c, "Cap_ID"),
-            node: f1(c, "Node"),
-            worker: f1(c, "Worker"),
-            skill_id: f1(c, "Skill_ID"),
-            skill_name: f1(c, "Skill_Name"),
-            description: f1(c, "Description"),
-            side_effect: f1(c, "Side_Effect"),
-            availability: f1(c, "Availability"),
-            dispatchable: f1(c, "Dispatchable"),
-            receive_mode: f1(c, "Receive_Mode"),
-            daemon_version: f1(c, "Daemon_Version"),
-            node_desc: f1(c, "Node_Desc"),
-            zone: f1(c, "Zone"),
-          })),
+          agentCards: cards.map(formatAgentCard),
           loops: loops.map(formatLoopSummary).reverse(),
           cards: typeof bus.listCards === "function" ? bus.listCards() : [],
         });
@@ -601,6 +619,132 @@ export async function startHubHttpServer({
         return;
       }
 
+      // 11) 名片接纳与 Agent 接入管理 API（需 Bearer 鉴权）
+      const cardAdmissionMatch = pathname.match(/^\/api\/v1\/admin\/cards\/([^/]+)\/admission$/);
+      if (method === "POST" && cardAdmissionMatch) {
+        const capId = decodeParam(cardAdmissionMatch[1]);
+        const body = await readJsonBody(req);
+        const admission = validateAdmission(body?.admission);
+        const cards = await bus.listRecords(bus.tables.agentCards);
+        const card = cards.find((c) => f1(c, "Cap_ID") === capId);
+        if (!card) {
+          sendJson(res, 404, { error: `名片不存在：${capId}` });
+          return;
+        }
+        const upd = await bus.updateRecord(bus.tables.agentCards, card.record_id, { Admission: admission });
+        onWake();
+        sendJson(res, 200, { ok: true, card: formatAgentCard(upd?.record ?? card) });
+        return;
+      }
+
+      const nodeAdmissionMatch = pathname.match(/^\/api\/v1\/admin\/nodes\/([^/]+)\/admission$/);
+      if (method === "POST" && nodeAdmissionMatch) {
+        const node = decodeParam(nodeAdmissionMatch[1]);
+        const body = await readJsonBody(req);
+        const admission = validateAdmission(body?.admission);
+        const cards = await bus.listRecords(bus.tables.agentCards);
+        const nodeCards = cards.filter((c) => f1(c, "Node") === node);
+        if (!nodeCards.length) {
+          sendJson(res, 404, { error: `节点没有名片：${node}` });
+          return;
+        }
+        for (const c of nodeCards) {
+          await bus.updateRecord(bus.tables.agentCards, c.record_id, { Admission: admission });
+        }
+        onWake();
+        sendJson(res, 200, { ok: true, node, updated: nodeCards.length });
+        return;
+      }
+
+      const cardProfileMatch = pathname.match(/^\/api\/v1\/admin\/cards\/([^/]+)\/profile$/);
+      if (method === "PATCH" && cardProfileMatch) {
+        const capId = decodeParam(cardProfileMatch[1]);
+        const body = await readJsonBody(req);
+        const patch = validateProfileFields(body);
+        const cards = await bus.listRecords(bus.tables.agentCards);
+        const card = cards.find((c) => f1(c, "Cap_ID") === capId);
+        if (!card) {
+          sendJson(res, 404, { error: `名片不存在：${capId}` });
+          return;
+        }
+        let latest = card;
+        if (Object.keys(patch).length > 0) {
+          const upd = await bus.updateRecord(bus.tables.agentCards, card.record_id, patch);
+          latest = upd?.record ?? card;
+          onWake();
+        }
+        sendJson(res, 200, { ok: true, card: formatAgentCard(latest) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/v1/admin/agents") {
+        const body = await readJsonBody(req);
+        const node = validateNodeName(body?.node);
+        const access = validateAccess(body?.access);
+        const role = validateRole(body?.role);
+        const profile = validateProfileFields(body);
+        const displayName = profile.Display_Name ?? "";
+        const adminNote = profile.Admin_Note ?? "";
+        const description = body?.description == null ? "" : String(body.description).trim();
+
+        let card = null;
+        if (access === "http" && (role === "worker" || role === "hybrid")) {
+          const capId = capIdOf("agent", {}, node);
+          const existing = await bus.listRecords(bus.tables.agentCards);
+          if (existing.some((r) => f1(r, "Cap_ID") === capId)) {
+            sendJson(res, 409, { error: `名片已存在：${capId}` });
+            return;
+          }
+          const created = await bus.createRecord(bus.tables.agentCards, {
+            Cap_ID: capId,
+            Node: node,
+            Worker: "",
+            Skill_ID: "agent",
+            Skill_Name: displayName || `${node} Agent`,
+            Description: description,
+            Side_Effect: "write",
+            Approval_Class: "auto",
+            Availability: "offline",
+            Dispatchable: "Yes",
+            Receive_Mode: "http-poll",
+            Zone: "cloud",
+            Daemon_Version: "http-agent",
+            Admission: "admitted",
+            Display_Name: displayName,
+            Admin_Note: adminNote,
+            Updated_At: nowMinute(),
+            Metadata: JSON.stringify({ kind: "agent", role, mode: "http-poll", preset: true }),
+          });
+          onWake();
+          card = formatAgentCard(created?.record);
+        }
+
+        const onboarding = buildOnboarding({
+          hubUrl: requestHubUrl(req),
+          node,
+          access,
+          role,
+          authRequired: Boolean(apiToken),
+        });
+        sendJson(res, 200, { ok: true, node, card, onboarding });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/api/v1/admin/onboarding") {
+        const node = validateNodeName(reqUrl.searchParams.get("node"));
+        const access = validateAccess(reqUrl.searchParams.get("access"));
+        const role = validateRole(reqUrl.searchParams.get("role"));
+        const onboarding = buildOnboarding({
+          hubUrl: requestHubUrl(req),
+          node,
+          access,
+          role,
+          authRequired: Boolean(apiToken),
+        });
+        sendJson(res, 200, { onboarding });
+        return;
+      }
+
       sendJson(res, 404, { error: "Not Found" });
     } catch (e) {
       const status = Number(e?.status) || 400;
@@ -618,7 +762,7 @@ export async function startHubHttpServer({
 
   const addr = server.address();
   const boundPort = typeof addr === "object" && addr ? addr.port : port;
-  const connectHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
+  activePort = boundPort;
   const localUrl = `http://${connectHost}:${boundPort}`;
 
   if (runtimePath) {

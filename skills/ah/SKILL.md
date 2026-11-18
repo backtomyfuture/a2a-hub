@@ -22,7 +22,7 @@ description: 操作与调度 a2a-hub (ah) 多 Agent 协作中台（控制端/调
 ah inventory [--json]
 ```
 
-如果开启了远程/云端 HTTP Agent（如 `grok-bot`、`muse`），也可以让用户输入或在 Hub Web 控制台 / `GET /api/v1/agents` 查看实时在线状态。
+如果开启了远程/云端 HTTP Agent（如 `grok-bot`、`muse`），也可以让用户输入或在 Hub Web 控制台 / `GET /api/v1/agents` 查看实时在线状态。只能向已接纳名片派单：`ah inventory` 每行有 `Admission=`，`GET /api/v1/agents` 看 `caps[].admission`，须为 `admitted`。
 
 ---
 

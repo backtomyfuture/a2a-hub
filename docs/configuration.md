@@ -351,7 +351,7 @@ api backoff reason=http-429 kind=list retry=1/3 wait=2s
 | `busType` | 全部 | 总线类型：`sqlite`（`role=hub` 默认）或 `http`（填写了 `hubUrl` 时的远端节点） |
 | `dbPath` | Hub (`sqlite`) | SQLite WAL 数据库文件路径，支持相对配置目录路径，默认 `hub.db` |
 | `listen` | Hub (`sqlite`) | HTTP API 与 Web 控制台绑定地址，格式 `<host>:<port>`，默认 `0.0.0.0:8787` |
-| `publicUrl` | Hub (`sqlite`) | 可选外部访问地址（如 `http://192.168.1.10:8787` 或 Tailscale 地址），用于生成外部通知跳转链接 |
+| `publicUrl` | Hub (`sqlite`) | 可选外部访问地址（如 `http://192.168.1.10:8787` 或 Tailscale 地址），用于生成外部通知跳转链接，以及控制台「添加 Agent」接入提示词里的 Hub 地址 |
 | `apiToken` | Hub / 远端 `http` 节点 | 接口鉴权 Bearer Token。建议放在 0600 权限的 `app.env` 环境变量 `AH_API_TOKEN` 中，不直接提交到代码库 |
 | `hubUrl` | 远端节点 (`http`) | 中台 HTTP 根地址，如 `http://192.168.1.10:8787` |
 | `longPollSec` | 全部模式 | 长轮询单次挂起秒数，默认 `25`（服务端安全夹紧在 5–60 秒） |
@@ -392,3 +392,31 @@ ah loop show <Loop_ID> [--config <dir>]
 # 取消闭环及当前在途子任务
 ah loop cancel <Loop_ID> [--text "说明"] [--config <dir>]
 ```
+
+### 7.4 名片接纳与添加 Agent
+
+自动注册或守护进程对账写上的名片先进「待接纳」池。机主在 Web 控制台接纳后，名片才上墙，也才能派单。`Admission` 三种状态：
+
+| 状态 | 含义 |
+|---|---|
+| `pending` | 待接纳。缺省、空或非法值都按此处理 |
+| `admitted` | 已接纳。还要 `Dispatchable=Yes` 才能派单 |
+| `rejected` | 已拒绝，不派单 |
+
+控制台名片墙分段为已接纳（默认）、待接纳（带数量徽标）、已拒绝。待接纳里可单卡接纳或拒绝，节点标题可整节点接纳。已接纳卡可编辑显示名与备注、移回待接纳或拒绝；`Dispatchable=Yes` 时可向该能力派单。已拒绝卡可恢复为待接纳或直接接纳。
+
+「+ 添加 Agent」填写节点名、接入方式（云端 HTTP / 宿主机 `ah join` / 本机独立 Agent inbox）、角色（执行方 `worker` / 派单方 `leader` / 两者 `hybrid`）、显示名与备注。仅云端 HTTP 且角色为 `worker` 或 `hybrid` 时预建一张已接纳的默认 `agent` 名片；其余组合不预建卡（宿主机与 inbox 由守护进程登记后进入待接纳；纯 leader 没有名片）。提交成功后展示步骤、协议 Skill 链接和可复制的接入提示词。提示词里的 Hub 地址优先取 `node.json` 的 `publicUrl`；未配置时取本次请求的 `Host` 头（`http://<Host>`），没有 `Host` 时回退本机监听地址。在 Hub 本机用 `127.0.0.1` 打开控制台时，务必配置 `publicUrl`，否则远端拿到的地址不可达。提示词里的 Token 只出现占位符 `<AH_API_TOKEN>`。
+
+管理 API（与其他 `/api/v1/*` 一样要 Bearer Token）：
+
+| 方法与路径 | 作用 |
+|---|---|
+| `POST /api/v1/admin/cards/:capId/admission` | 单卡设为 `admitted` / `pending` / `rejected` |
+| `POST /api/v1/admin/nodes/:node/admission` | 该节点全部名片设为同一状态 |
+| `PATCH /api/v1/admin/cards/:capId/profile` | 改 `display_name`（≤64）与 `admin_note`（≤500），只更新传入的键 |
+| `POST /api/v1/admin/agents` | 添加 Agent，返回名片（或 `null`）与 `onboarding` |
+| `GET /api/v1/admin/onboarding` | 只生成接入提示词，不写表 |
+
+协议 Skill 按接入方式对应，URL 为 `<Hub>/api/v1/skills/<name>`：云端 HTTP 的 `worker` → `a2a-worker`，`leader` → `a2a-leader`，`hybrid` → 两者；`inbox` → `ah-inbox`；宿主机 Worker 不需要协议 Skill（回执约定由内核写进调度指令）。领域技能放在各 Agent 自己的技能目录（如 `~/.claude/skills`、`~/.agents/skills`），中台不登记、不展示。
+
+升级后老名片没有 `Admission`，一律回到待接纳，要在控制台接纳后才能派单。

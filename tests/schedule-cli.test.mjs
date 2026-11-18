@@ -66,6 +66,7 @@ async function addCards(bus) {
     Node: "node-a",
     Dispatchable: "Yes",
     Availability: "online",
+    Admission: "admitted",
   });
   await bus.createRecord(TABLES.agentCards, {
     Cap_ID: "CAP-echo",
@@ -73,6 +74,7 @@ async function addCards(bus) {
     Node: "node-a",
     Dispatchable: "Yes",
     Availability: "online",
+    Admission: "admitted",
   });
 }
 

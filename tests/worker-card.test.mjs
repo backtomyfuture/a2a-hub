@@ -68,6 +68,12 @@ function cardByCap(cards, capId) {
   return cards.find((row) => f1(row, "Cap_ID") === capId);
 }
 
+async function admitAll(mock) {
+  for (const row of await mock.listRecords(TABLES.agentCards)) {
+    await mock.updateRecord(TABLES.agentCards, row.record_id, { Admission: "admitted" });
+  }
+}
+
 // 标准 v3.8 的四条判定，只看 Worker 与 Skill_ID（Node 用来核对「同节点」）。
 function classify(row) {
   const skill = String(f1(row, "Skill_ID") ?? "");
@@ -166,6 +172,7 @@ test("R2：本地计划引用 CAP-<前缀>-<Worker>-agent 能按期建单并由�
       },
     });
     await kernel.run({ once: true });
+    await admitAll(mock);
     // 不写内核默认识别的 schedules.json。建单用注入时钟，认领那一轮若再 tick 会按真实时钟多补一张。
     const schedulesPath = path.join(dir, "plan-r2.json");
     const statePath = path.join(dir, "plan-r2-state.json");
@@ -212,6 +219,7 @@ test("R3：Worker 通用任务到期的 LATER 复查单仍建得出来", async (
       },
     });
     await kernel.run({ once: true });
+    await admitAll(mock);
     await seedTask(mock, {
       Task_ID: "TASK-R3",
       Skill_ID: "agent",
@@ -254,6 +262,7 @@ test("R4：createTask 只给 to 时落到通用执行 agent，认领回填第一
       local: { command: ECHO, mode: "json", timeout_sec: 30 },
     });
     await kernel.run({ once: true });
+    await admitAll(mock);
     const taskId = await createTask({ bus: mock, to: "node-a", text: "x" });
     const drafted = await taskOf(mock, taskId);
     assert.equal(f1(drafted, "Skill_ID"), "agent");
@@ -275,6 +284,7 @@ test("R4 反例：自动挑选不会派给已停派的 Worker 名片", async () 
       local: { command: ECHO, mode: "json", timeout_sec: 30 },
     });
     await kernel.run({ once: true });
+    await admitAll(mock);
     const agentCard = cardByCap(await mock.listRecords(TABLES.agentCards), "CAP-test-alpha-agent");
     await mock.updateRecord(TABLES.agentCards, agentCard.record_id, { Dispatchable: "No" });
     // 锁现状：停派名片在打分前被丢掉。剩下的 review 与 local 同分，
@@ -295,6 +305,7 @@ test("R5：只登记 workers 的节点仍有 Worker 名片，createTask 的 --to
       },
     });
     await kernel.run({ once: true });
+    await admitAll(mock);
     const cards = await mock.listRecords(TABLES.agentCards);
     assert.equal(cards.length, 1);
     assert.equal(f1(cards[0], "Cap_ID"), "CAP-test-alpha-agent");
