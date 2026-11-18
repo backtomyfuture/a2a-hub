@@ -144,58 +144,159 @@ function roleSummary(role) {
   return "作为执行端（worker），负责轮询认领分配给本节点的任务、按要求回执进度与结果。";
 }
 
-// 绝不在引导里拼接任何真实 Token，只使用占位符或明确说明无需 Token，避免控制台输出泄露凭据。
-export function buildOnboarding({ hubUrl, node, access, role, authRequired = false }) {
+// token 有值时内嵌这一次明文；没有则只用占位符。host/inbox 的 join 用的是机主 Token，命令行仍写占位符，不把 Agent Token 写进去。
+function credentialOf(token, authRequired) {
+  const secret = String(token ?? "").trim();
+  if (secret) {
+    return {
+      mode: "token",
+      header: `Authorization: Bearer ${secret}`,
+      promptLine: `Bearer Token：${secret}（每次请求都带请求头 Authorization: Bearer ${secret}）`,
+    };
+  }
+  if (authRequired) {
+    return {
+      mode: "placeholder",
+      header: "Authorization: Bearer <AH_API_TOKEN>",
+      promptLine: "Bearer Token，占位符为 <AH_API_TOKEN>（请向机主索取真实 Token 后再请求）",
+    };
+  }
+  return {
+    mode: "none",
+    header: "",
+    promptLine: "无需 Token（免鉴权）",
+  };
+}
+
+function authBullet(cred) {
+  if (cred.mode === "none") return "当前 Hub 未开启鉴权，请求不带 Authorization 头。";
+  return `除 GET /.well-known/agent.json 与 GET /api/v1/health 外，所有 /api/*（含 /api/v1/skills/*）都要带请求头 ${cred.header}。不要把 Skill 地址当成免鉴权。`;
+}
+
+function workerSchedule(base, node, cred, role = "worker") {
+  const head = cred.mode === "none" ? "（当前免鉴权，不要加 Authorization）" : `请求头：${cred.header}`;
+  return [
+    `【定时指令】（每 10 分钟运行一次；每次都没有上一轮上下文，只按本段原文执行）`,
+    `你是节点 ${node} 的 ${role}（本段是取单与回执）。Hub：${base}。${head}`,
+    "只处理分配给自己的任务，不要认领或改别人的任务。",
+    `1. 报到：POST ${base}/api/v1/agents/register ，body {"node":"${node}","role":"${role}","kind":"agent","receive_mode":"http-poll"}`,
+    `2. 短轮询取单：GET ${base}/api/v1/agents/${node}/poll?timeout=0 （timeout=0，不要长轮询挂起）`,
+    `3. 对返回的每个任务：POST ${base}/api/v1/tasks/<task_id>/claim ，body {"node":"${node}"}`,
+    `4. 在本次运行内做完。若预计超过 10 分钟，处理期间 POST ${base}/api/v1/tasks/<task_id>/heartbeat ，body {"node":"${node}","text":"当前进度"}`,
+    `5. 成功：POST ${base}/api/v1/tasks/<task_id>/complete ，body {"node":"${node}","text":"结果摘要"}。失败：POST ${base}/api/v1/tasks/<task_id>/fail ，body {"node":"${node}","text":"失败原因"}`,
+    `6. 缺信息：POST ${base}/api/v1/tasks/<task_id>/ask ，body {"node":"${node}","text":"缺什么"}，然后停下该任务，不要猜。`,
+    `7. 敏感或有副作用、需要机主点头的动作：POST ${base}/api/v1/tasks/<task_id>/auth ，body {"node":"${node}","text":"要做什么、为什么需要批准"}，然后停下。不要自己批准，也不要调用 /api/v1/approvals。`,
+    "8. 没有任务就结束。",
+  ];
+}
+
+function leaderSchedule(base, node, cred, role = "leader") {
+  const head = cred.mode === "none" ? "（当前免鉴权，不要加 Authorization）" : `请求头：${cred.header}`;
+  return [
+    `【定时指令】（每 15 分钟运行一次；每次都没有上一轮上下文，只按本段原文执行）`,
+    `你是节点 ${node} 的 ${role}（本段是跟单与派单）。Hub：${base}。${head}`,
+    `1. 报到：POST ${base}/api/v1/agents/register ，body {"node":"${node}","role":"${role}","kind":"agent","receive_mode":"http-poll"}`,
+    `2. 拉取自上次以来的新动态：GET ${base}/api/v1/agents/${node}/updates?new=1`,
+    "3. 对 completed / failed / canceled / rejected：向机主或上游汇报终态结果（无事则静默，不要发空汇报）。",
+    `4. 对 input-required：在原任务上答复 POST ${base}/api/v1/tasks/<task_id>/reply ，body {"from":"${node}","text":"你的答复"}。`,
+    "5. 对 auth-required：只提醒机主去 Web 控制台审批。绝不以任何方式代批，不要调用 /api/v1/approvals。",
+    `6. 需要派单时 POST ${base}/api/v1/tasks ，body 里 from 必须是 "${node}"，idempotencyKey 用该事项的固定标识（同一事项每次相同，避免重复派单）。`,
+    "7. 没有新动态、也不需要派单，就静默结束。",
+  ];
+}
+
+function scheduledPrompt({ base, node, role, cred, skills }) {
+  const skillLines = skills.map((s) => `GET ${s.url}`);
+  const once = [
+    "【一次性接入】（只做一次）",
+    `Hub：${base}。节点名：${node}。角色：${role}。`,
+    authBullet(cred),
+    `读取并遵守协议 Skill：${skillLines.join(" ；")}`,
+    `然后注册：POST ${base}/api/v1/agents/register ，body {"node":"${node}","role":"${role}","kind":"agent","receive_mode":"http-poll"}`,
+  ];
+  let cadence;
+  let blocks;
+  if (role === "leader") {
+    cadence = "请为自己创建定时任务，每 15 分钟运行一次。每次把下面的【定时指令】当作全部任务说明（不要依赖记忆或上一轮对话）。";
+    blocks = leaderSchedule(base, node, cred, "leader");
+  } else if (role === "hybrid") {
+    cadence = "请为自己创建定时任务：每 10 分钟执行下面的 Worker 段，每 15 分钟执行 Leader 段（也可以每 10 分钟两段都做）。每次运行都没有上下文，两段原文都要带上地址、节点名和鉴权头。";
+    blocks = [
+      ...workerSchedule(base, node, cred, "hybrid"),
+      "",
+      ...leaderSchedule(base, node, cred, "hybrid"),
+    ];
+  } else {
+    cadence = "请为自己创建定时任务，每 10 分钟运行一次。每次把下面的【定时指令】当作全部任务说明（不要依赖记忆或上一轮对话）。";
+    blocks = workerSchedule(base, node, cred, "worker");
+  }
+  return [
+    "你是被定时唤醒的 HTTP Agent，每次运行都没有上一轮上下文。请接入 a2a-hub，并按下面两段执行。",
+    ...once,
+    "",
+    cadence,
+    ...blocks,
+  ].join("\n");
+}
+
+export function buildOnboarding({ hubUrl, node, access, role, authRequired = false, token = "" }) {
   const base = String(hubUrl ?? "").trim().replace(/\/+$/, "") || "http://127.0.0.1:8787";
   const skills = skillNamesFor(access, role).map((name) => ({
     name,
     url: `${base}/api/v1/skills/${name}`,
   }));
-  const authNote = authRequired
-    ? "携带请求头 Authorization: Bearer <AH_API_TOKEN>（请向机主获取真实 Token 替换占位符）"
-    : "当前 Hub 未开启鉴权，无需提供 Token";
+  const cred = credentialOf(token, authRequired);
+  const authNote = cred.mode === "none"
+    ? "当前 Hub 未开启鉴权，无需提供 Token"
+    : `携带请求头 ${cred.header}${cred.mode === "placeholder" ? "（请向机主获取真实 Token 替换占位符）" : ""}`;
+  // join 认证的是机主 Token，与本次签发的 Agent Token 不是同一把钥匙。
   const tokenFlag = authRequired ? " --api-token <AH_API_TOKEN>" : "";
 
   let steps;
+  let prompt;
   if (access === "host") {
     steps = [
       `若目标宿主机尚未安装 a2a-hub CLI，运行一行安装并接入：curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --join ${base} --node ${node}${tokenFlag}`,
       `若目标宿主机已安装 ah CLI，直接执行：ah join ${base} --node ${node}${tokenFlag} --service`,
       "宿主机守护进程上线并登记能力名片后会进入「待接纳」池，请到 Web 控制台「Agent 名片墙 → 待接纳」点击接纳后再派单。",
     ];
+    prompt = [
+      "请接入 a2a-hub 多 Agent 编排中台：",
+      `- Hub 地址：${base}`,
+      `- 你的节点名：${node}`,
+      `- 接入方式：${access}，角色：${role}`,
+      `- 鉴权要求：${cred.promptLine}`,
+      "- 本宿主机接入方式无需额外拉取协议 Skill，任务回执规范已内置于调度指令中。",
+      `- 职责说明：${roleSummary(role)}`,
+    ].join("\n");
   } else if (access === "inbox") {
     steps = [
       `若目标机器尚未安装 a2a-hub CLI，运行一行安装并接入（独立 Agent 模式）：curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --join ${base} --node ${node} --kind agent${tokenFlag}`,
       `若已安装 ah CLI，执行（将自动安装 ah-inbox 协议 Skill）：ah join ${base} --node ${node} --kind agent${tokenFlag} --service`,
       "名片上线后会进入「待接纳」池，请在 Web 控制台「Agent 名片墙 → 待接纳」中接纳该节点；随后 Agent 通过 ah inbox 接单并回执。",
     ];
-  } else if (role === "leader") {
-    steps = [
-      `先拉取协议 Skill（${authNote}）：${skills.map((s) => `GET ${s.url}`).join("、")}`,
-      `可选上报在线态：POST ${base}/api/v1/agents/register，body 为 {"node":"${node}","role":"leader","kind":"agent","receive_mode":"http-poll"}（Leader 无能力名片，无需等待接纳）`,
-      `通过 POST ${base}/api/v1/tasks 派单，并用 GET ${base}/api/v1/agents/${node}/updates?timeout=25 轮询任务进展与结果。`,
-    ];
+    prompt = [
+      "请接入 a2a-hub 多 Agent 编排中台：",
+      `- Hub 地址：${base}`,
+      `- 你的节点名：${node}`,
+      `- 接入方式：${access}，角色：${role}`,
+      `- 鉴权要求：${cred.promptLine}`,
+      `- 接入后请先拉取并阅读协议 Skill：${skills.map((s) => s.url).join(" ，")}`,
+      `- 职责说明：${roleSummary(role)}`,
+    ].join("\n");
   } else {
+    const scheduleHint = role === "leader"
+      ? "每 15 分钟按 prompt 里的【定时指令】跟单：updates?new=1、汇报终态、reply 答复 input-required、auth-required 只提醒机主去控制台审批。"
+      : role === "hybrid"
+        ? "每 10 分钟按 prompt 里的 Worker【定时指令】取单收尾，每 15 分钟按 Leader【定时指令】跟单与派单。"
+        : "每 10 分钟按 prompt 里的【定时指令】执行：register → poll?timeout=0 → claim → 本次运行内完成（超过 10 分钟发 heartbeat）→ complete/fail。";
     steps = [
-      `先拉取协议 Skill（${authNote}）：${skills.map((s) => `GET ${s.url}`).join("、")}`,
-      `调用 POST ${base}/api/v1/agents/register（body: {"node":"${node}","role":"${role}","kind":"agent","receive_mode":"http-poll"}）上线；默认 agent 名片已在添加时预建并接纳（若注册自定义 caps，需在「待接纳」中接纳后才可派单）。`,
-      `长轮询取单：GET ${base}/api/v1/agents/${node}/poll?timeout=25，取单后按 /claim、/complete、/fail、/ask、/auth 回执${role === "hybrid" ? `；派单与拉取结果使用 POST ${base}/api/v1/tasks 与 GET ${base}/api/v1/agents/${node}/updates` : ""}。`,
+      `一次性接入：拉取协议 Skill（${authNote}）：${skills.map((s) => `GET ${s.url}`).join("、")}。/api/v1/skills/* 需要鉴权，只有 /.well-known/agent.json 与 /api/v1/health 免鉴权。`,
+      `一次性注册：POST ${base}/api/v1/agents/register ，body {"node":"${node}","role":"${role}","kind":"agent","receive_mode":"http-poll"}`,
+      `为自己创建定时任务。${scheduleHint}完整原文在 prompt 的【定时指令】中，每次运行无上下文，地址、节点名和鉴权头都已写全。`,
     ];
+    prompt = scheduledPrompt({ base, node, role, cred, skills });
   }
-
-  const skillPromptLine = skills.length
-    ? `接入后请先拉取并阅读协议 Skill：${skills.map((s) => s.url).join(" ，")}`
-    : "本宿主机接入方式无需额外拉取协议 Skill，任务回执规范已内置于调度指令中。";
-
-  const prompt = [
-    `请接入 a2a-hub 多 Agent 编排中台：`,
-    `- Hub 地址：${base}`,
-    `- 你的节点名：${node}`,
-    `- 接入方式：${access}，角色：${role}`,
-    `- 鉴权要求：${authRequired ? "Bearer Token，占位符为 <AH_API_TOKEN>（请向机主索取真实 Token 后再请求）" : "无需 Token（免鉴权）"}`,
-    `- ${skillPromptLine}`,
-    `- 职责说明：${roleSummary(role)}`,
-  ].join("\n");
 
   return {
     access,
