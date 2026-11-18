@@ -575,7 +575,7 @@ export function renderWebConsoleHtml() {
       </div>
       <div class="form-row">
         <label>要做什么</label>
-        <textarea class="input" id="tfText" placeholder="用大白话描述您想让它完成什么事情、有什么背景要求..." required></textarea>
+        <textarea class="input" id="tfText" placeholder="用大白话描述您想让它完成什么事情、有什么背景要求..."></textarea>
       </div>
       <div class="form-row">
         <label>附件（可选，单个不超过 100 MB）</label>
@@ -1639,6 +1639,10 @@ function renderAttachmentItem(file) {
   const fileId = parseHubFileId(uri);
 
   if (fileId) {
+    // 详情接口已标出已清理的文件，直接按 410 展示，省掉一次注定失败的缩略图请求。
+    if (file && file.deleted === true && !state.filePreviewCache.has(fileId)) {
+      state.filePreviewCache.set(fileId, { status: "error", code: 410, errorText: "已过期清理" });
+    }
     const cached = state.filePreviewCache.get(fileId);
     const isImg = isInlineImageMime(mime);
     let previewHtml = "";
@@ -4157,6 +4161,9 @@ document.getElementById("taskForm").addEventListener("submit", async (e) => {
     if (!to && !cap) {
       document.getElementById("tfAdvanced").open = true;
       return showToast("请选择「交给谁」，或在高级选项中填写目标节点");
+    }
+    if (!text.trim() && !state.taskDraftFiles.length) {
+      return showToast("请填写任务描述，或至少附上一个文件");
     }
     const body = {
       to,

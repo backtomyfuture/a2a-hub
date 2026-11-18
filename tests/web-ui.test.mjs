@@ -620,6 +620,12 @@ test("控制台附件静态约束：包含上传控件与函数、不把 token �
   assert.equal(/<img[^>]*\/api\/v1\/files\//i.test(html), false);
   assert.equal(/<a[^>]*href=[^>]*\/api\/v1\/files\//i.test(html), false);
   assert.match(html, /rel="noopener noreferrer"/);
+
+  // 建单允许只带附件：描述框不再 required，提交时改为「文字或附件至少一个」
+  assert.equal(/id="tfText"[^>]*required/.test(html), false);
+  assert.ok(html.includes("请填写任务描述，或至少附上一个文件"));
+  // 详情接口标了 deleted 的文件直接按 410 展示
+  assert.ok(html.includes("file.deleted === true"));
 });
 
 test("控制台内嵌脚本：附件展示、Bearer 取图预览、SVG 走下载、410/404 提示、离开详情 revokeObjectURL", async () => {
