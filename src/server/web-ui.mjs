@@ -443,6 +443,40 @@ export function renderWebConsoleHtml() {
   .toast.show { display: block; }
   .steps { margin: 4px 0 12px; padding-left: 18px; line-height: 1.65; }
 
+  .att-list { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+  .msg-bubble .att-card { margin-top: 8px; }
+  .att-card {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+    padding: 9px 11px; border-radius: 8px; background: var(--surface); border: 1px solid var(--border);
+  }
+  .att-preview { flex-basis: 100%; }
+  .att-thumb {
+    max-height: 160px; max-width: 100%; border-radius: 7px; border: 1px solid var(--border);
+    cursor: zoom-in; object-fit: contain; display: block; background: var(--surface-2);
+  }
+  .att-loading {
+    padding: 12px; border-radius: 7px; border: 1px dashed var(--border-strong);
+    background: var(--surface-2); text-align: center;
+  }
+  .att-meta { min-width: 0; flex: 1; }
+  .att-name { font-size: 13px; font-weight: 550; word-break: break-word; }
+  .att-sub { font-size: 11px; color: var(--muted); word-break: break-all; margin-top: 2px; }
+  .att-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+  .att-draft-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+  .att-draft-item {
+    display: flex; flex-direction: column; gap: 5px; padding: 8px 10px;
+    border-radius: 8px; background: var(--surface-2); border: 1px solid var(--border); font-size: 12px;
+  }
+  .att-draft-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .att-prog { height: 4px; width: 100%; border-radius: 999px; background: var(--border); overflow: hidden; }
+  .att-prog-bar { height: 100%; background: var(--accent); transition: width .12s; }
+  .att-prog-bar.done { background: var(--green); }
+  .att-prog-bar.err { background: var(--red); }
+  .att-lightbox-img {
+    max-width: 100%; max-height: 75vh; object-fit: contain; display: block; margin: 0 auto;
+    border-radius: 8px; border: 1px solid var(--border); background: var(--surface-2);
+  }
+
   @media (max-width: 900px) {
     .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
     .sidebar { display: none; }
@@ -544,6 +578,12 @@ export function renderWebConsoleHtml() {
         <textarea class="input" id="tfText" placeholder="用大白话描述您想让它完成什么事情、有什么背景要求..." required></textarea>
       </div>
       <div class="form-row">
+        <label>附件（可选，单个不超过 100 MB）</label>
+        <input class="input" type="file" id="tfFiles" multiple />
+        <div id="tfFileErr" class="err-banner" style="display:none;margin-top:6px;margin-bottom:0;"></div>
+        <div id="tfFileList" class="att-draft-list"></div>
+      </div>
+      <div class="form-row">
         <label class="checkbox-row">
           <input type="checkbox" id="tfRequireApproval" />
           <span>
@@ -588,7 +628,7 @@ export function renderWebConsoleHtml() {
       </details>
       <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px;">
         <button type="button" class="btn" data-close-modal="taskModal">取消</button>
-        <button type="submit" class="btn primary">立即派发</button>
+        <button type="submit" class="btn primary" id="tfSubmitBtn">立即派发</button>
       </div>
     </form>
   </div>
@@ -967,6 +1007,22 @@ export function renderWebConsoleHtml() {
   </div>
 </div>
 
+<!-- 图片放大预览弹窗 -->
+<div class="modal-backdrop" id="imagePreviewModal">
+  <div class="modal" style="max-width:860px;">
+    <div class="modal-head">
+      <span id="imgPreviewTitle" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">图片预览</span>
+      <div style="display:flex;gap:8px;flex-shrink:0;">
+        <button type="button" class="btn sm" id="imgPreviewDownloadBtn" data-action="download-hub-file">下载原图</button>
+        <button type="button" class="btn sm" data-close-modal="imagePreviewModal">关闭</button>
+      </div>
+    </div>
+    <div>
+      <img id="imgPreviewImg" class="att-lightbox-img" alt="图片预览" />
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -985,6 +1041,12 @@ export function renderWebConsoleHtml() {
 
 const DISMISS_STORAGE_KEY = "a2a_hub_dismissed_alerts";
 const THEME_STORAGE_KEY = "a2a_hub_theme";
+const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024;
+const MAX_ATTACHMENTS_PER_MSG = 20;
+const HUB_FILE_URI_PREFIX = "hub://files/";
+// 仅对浏览器安全内嵌的光栅图白名单启用 inline 预览，刻意排除 image/svg+xml 防止 SVG 脚本执行。
+const INLINE_IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+let draftFileSeq = 0;
 
 function loadDismissedAlerts() {
   try {
@@ -1019,6 +1081,13 @@ const state = {
   wizardAccess: "http",
   wizardReceive: "poll",
   addCapTarget: { node: "", isHttp: true },
+  filePreviewCache: new Map(),
+  filePreviewTaskId: null,
+  taskDraftFiles: [],
+  taskSubmitting: false,
+  replyDraftFiles: [],
+  replyDraftTaskId: null,
+  replySubmitting: false,
 };
 
 const TASK_STATUS_META = {
@@ -1232,6 +1301,10 @@ function openModal(id) { document.getElementById(id).classList.add("open"); }
 function closeModal(id) {
   document.getElementById(id).classList.remove("open");
   if (id === "tokenManageModal") document.getElementById("tmBody").innerHTML = "";
+  if (id === "imagePreviewModal") {
+    const imgEl = document.getElementById("imgPreviewImg");
+    if (imgEl) imgEl.src = "";
+  }
 }
 
 function applyTheme(theme) {
@@ -1518,7 +1591,484 @@ async function refreshState() {
   }
 }
 
+function parseHubFileId(uri) {
+  const s = String(uri || "").trim();
+  if (!s.startsWith(HUB_FILE_URI_PREFIX)) return null;
+  const id = s.slice(HUB_FILE_URI_PREFIX.length).trim();
+  return id || null;
+}
+
+function isExternalHttpUrl(uri) {
+  return /^https?:\\/\\//i.test(String(uri || "").trim());
+}
+
+function isInlineImageMime(mime) {
+  const base = String(mime || "").split(";")[0].trim().toLowerCase();
+  return INLINE_IMAGE_MIMES.has(base);
+}
+
+function formatBytes(bytes) {
+  const n = Number(bytes);
+  if (!Number.isFinite(n) || n < 0) return "-";
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + " MB";
+  return (n / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+}
+
+function revokeAttachmentObjectUrls() {
+  for (const entry of state.filePreviewCache.values()) {
+    if (entry && entry.objectUrl && typeof URL !== "undefined" && typeof URL.revokeObjectURL === "function") {
+      try { URL.revokeObjectURL(entry.objectUrl); } catch {}
+    }
+  }
+  state.filePreviewCache.clear();
+  state.filePreviewTaskId = null;
+  const modal = document.getElementById("imagePreviewModal");
+  if (modal && modal.classList && modal.classList.contains("open")) {
+    closeModal("imagePreviewModal");
+  }
+}
+
+function renderAttachmentItem(file) {
+  const uri = String((file && (file.file_uri || file.uri)) || "").trim();
+  const name = String((file && (file.file_name || file.name)) || uri || "未命名文件").trim();
+  const mime = String((file && (file.mime_type || file.mime)) || "application/octet-stream").trim();
+  const rawSize = file && (file.size ?? file.file_size);
+  const sizeText = rawSize != null && rawSize !== "" ? (" · " + formatBytes(rawSize)) : "";
+  const fileId = parseHubFileId(uri);
+
+  if (fileId) {
+    const cached = state.filePreviewCache.get(fileId);
+    const isImg = isInlineImageMime(mime);
+    let previewHtml = "";
+    let statusHtml = "";
+    let actionHtml = '<button type="button" class="btn sm" data-action="download-hub-file" data-file-id="' + esc(fileId) + '" data-file-name="' + esc(name) + '">下载</button>';
+
+    if (cached && cached.status === "error") {
+      statusHtml = '<span class="badge red" data-hub-status-id="' + esc(fileId) + '">' + esc(cached.errorText || "无法访问") + '</span>';
+      if (cached.code === 410 || cached.code === 404 || cached.code === 403) {
+        actionHtml = "";
+      }
+    } else if (isImg) {
+      if (cached && cached.status === "ready" && cached.objectUrl) {
+        previewHtml = '<div class="att-preview" data-hub-preview-id="' + esc(fileId) + '" data-file-name="' + esc(name) + '">'
+          + '<img class="att-thumb" src="' + esc(cached.objectUrl) + '" alt="' + esc(name) + '" data-action="preview-image" data-file-id="' + esc(fileId) + '" data-file-name="' + esc(name) + '" />'
+          + '</div>';
+      } else {
+        previewHtml = '<div class="att-preview att-loading" data-hub-preview-id="' + esc(fileId) + '" data-file-name="' + esc(name) + '">'
+          + '<span class="hint">加载缩略图中...</span>'
+          + '</div>';
+      }
+    }
+
+    return '<div class="att-card" data-hub-file-card="' + esc(fileId) + '">'
+      + previewHtml
+      + '<div class="att-meta">'
+      + '<div class="att-name">' + esc(name) + '</div>'
+      + '<div class="att-sub mono">' + esc(mime) + esc(sizeText) + '</div>'
+      + '</div>'
+      + '<div class="att-actions">'
+      + statusHtml
+      + actionHtml
+      + '</div>'
+      + '</div>';
+  }
+
+  if (isExternalHttpUrl(uri)) {
+    return '<div class="att-card">'
+      + '<div class="att-meta">'
+      + '<div class="att-name">' + esc(name) + '</div>'
+      + '<div class="att-sub mono">' + esc(mime) + esc(sizeText) + ' · ' + esc(uri) + '</div>'
+      + '</div>'
+      + '<div class="att-actions">'
+      + '<a class="btn sm" href="' + esc(uri) + '" target="_blank" rel="noopener noreferrer">打开外链</a>'
+      + '</div>'
+      + '</div>';
+  }
+
+  return '<div class="att-card">'
+    + '<div class="att-meta">'
+    + '<div class="att-name">' + esc(name) + '</div>'
+    + '<div class="att-sub mono">' + esc(mime) + esc(sizeText) + (uri ? ' · ' + esc(uri) : '') + '</div>'
+    + '</div>'
+    + '</div>';
+}
+
+function updateHubFileCardDom(fileId) {
+  const cached = state.filePreviewCache.get(fileId);
+  if (!cached) return;
+  const cards = Array.from(document.querySelectorAll("[data-hub-file-card]") || [])
+    .filter((el) => el.dataset && el.dataset.hubFileCard === fileId);
+  for (const card of cards) {
+    const previewEl = card.querySelector ? card.querySelector("[data-hub-preview-id]") : null;
+    const actionsEl = card.querySelector ? card.querySelector(".att-actions") : null;
+    if (cached.status === "ready" && cached.objectUrl && previewEl) {
+      const name = (previewEl.dataset && previewEl.dataset.fileName) || "image";
+      previewEl.classList.remove("att-loading");
+      previewEl.innerHTML = '<img class="att-thumb" src="' + esc(cached.objectUrl) + '" alt="' + esc(name) + '" data-action="preview-image" data-file-id="' + esc(fileId) + '" data-file-name="' + esc(name) + '" />';
+    } else if (cached.status === "error") {
+      if (previewEl && typeof previewEl.remove === "function") previewEl.remove();
+      if (actionsEl) {
+        const hideDownload = cached.code === 410 || cached.code === 404 || cached.code === 403;
+        const dlBtn = actionsEl.querySelector ? actionsEl.querySelector('[data-action="download-hub-file"]') : null;
+        if (hideDownload && dlBtn && typeof dlBtn.remove === "function") dlBtn.remove();
+        const existingBadge = actionsEl.querySelector ? actionsEl.querySelector("[data-hub-status-id]") : null;
+        if (existingBadge) {
+          existingBadge.textContent = cached.errorText || "无法访问";
+        } else if (typeof actionsEl.insertAdjacentHTML === "function") {
+          actionsEl.insertAdjacentHTML("afterbegin", '<span class="badge red" data-hub-status-id="' + esc(fileId) + '">' + esc(cached.errorText || "无法访问") + '</span>');
+        }
+      }
+    }
+  }
+}
+
+async function fetchHubImagePreview(fileId) {
+  const taskIdAtStart = state.filePreviewTaskId;
+  if (!fileId || !taskIdAtStart) return;
+  const existing = state.filePreviewCache.get(fileId);
+  if (existing) return;
+  state.filePreviewCache.set(fileId, { status: "loading" });
+
+  try {
+    const headers = {};
+    if (state.token) headers.Authorization = "Bearer " + state.token;
+    // Token 仅通过 Authorization 请求头传递，绝不拼入 URL。
+    const r = await fetch("/api/v1/files/" + encodeURIComponent(fileId) + "?inline=1", { headers });
+    if (state.view !== "tasks" || state.filePreviewTaskId !== taskIdAtStart) return;
+
+    if (r.status === 410) {
+      state.filePreviewCache.set(fileId, { status: "error", code: 410, errorText: "已过期清理" });
+      updateHubFileCardDom(fileId);
+      return;
+    }
+    if (r.status === 404 || r.status === 403) {
+      state.filePreviewCache.set(fileId, { status: "error", code: r.status, errorText: "无法访问" });
+      updateHubFileCardDom(fileId);
+      return;
+    }
+    if (r.status === 401) {
+      state.filePreviewCache.set(fileId, { status: "error", code: 401, errorText: "需要密钥" });
+      updateHubFileCardDom(fileId);
+      return;
+    }
+    if (!r.ok) {
+      state.filePreviewCache.set(fileId, { status: "error", code: r.status, errorText: "加载失败 (HTTP " + r.status + ")" });
+      updateHubFileCardDom(fileId);
+      return;
+    }
+
+    const blob = await r.blob();
+    if (state.view !== "tasks" || state.filePreviewTaskId !== taskIdAtStart) return;
+    if (typeof URL === "undefined" || typeof URL.createObjectURL !== "function") return;
+    const objectUrl = URL.createObjectURL(blob);
+    state.filePreviewCache.set(fileId, { status: "ready", objectUrl });
+    updateHubFileCardDom(fileId);
+  } catch {
+    if (state.view !== "tasks" || state.filePreviewTaskId !== taskIdAtStart) return;
+    state.filePreviewCache.set(fileId, { status: "error", errorText: "预览加载失败" });
+    updateHubFileCardDom(fileId);
+  }
+}
+
+function hydrateTaskAttachmentPreviews() {
+  if (state.view !== "tasks" || !state.selectedTaskDetail || !state.selectedTaskDetail.task) return;
+  const els = Array.from(document.querySelectorAll("[data-hub-preview-id]") || []);
+  const seen = new Set();
+  for (const el of els) {
+    const fileId = el.dataset && el.dataset.hubPreviewId;
+    if (!fileId || seen.has(fileId)) continue;
+    seen.add(fileId);
+    if (!state.filePreviewCache.has(fileId)) {
+      fetchHubImagePreview(fileId);
+    }
+  }
+}
+
+function openImagePreviewModal(fileId, fileName) {
+  const cached = state.filePreviewCache.get(fileId);
+  if (!cached || cached.status !== "ready" || !cached.objectUrl) return;
+  const titleEl = document.getElementById("imgPreviewTitle");
+  const imgEl = document.getElementById("imgPreviewImg");
+  const dlBtn = document.getElementById("imgPreviewDownloadBtn");
+  if (titleEl) titleEl.textContent = fileName || "图片预览";
+  if (imgEl) {
+    imgEl.src = cached.objectUrl;
+    imgEl.alt = fileName || "图片预览";
+  }
+  if (dlBtn) {
+    dlBtn.dataset.fileId = fileId;
+    dlBtn.dataset.fileName = fileName || "image";
+  }
+  openModal("imagePreviewModal");
+}
+
+async function downloadHubFile(fileId, fileName) {
+  if (!fileId) return;
+  try {
+    const headers = {};
+    if (state.token) headers.Authorization = "Bearer " + state.token;
+    // 下载走 fetch + Bearer 头取 blob 后触发临时 <a download>，不把 Token 放进 URL。
+    const r = await fetch("/api/v1/files/" + encodeURIComponent(fileId), { headers });
+    if (r.status === 401) {
+      const tokEl = document.getElementById("tokenInput");
+      if (tokEl) tokEl.value = state.token;
+      openModal("tokenModal");
+      return showToast("需要有效的管理密钥 (API Token)");
+    }
+    if (r.status === 410) {
+      state.filePreviewCache.set(fileId, { status: "error", code: 410, errorText: "已过期清理" });
+      updateHubFileCardDom(fileId);
+      return showToast("文件已过期清理");
+    }
+    if (r.status === 404 || r.status === 403) {
+      state.filePreviewCache.set(fileId, { status: "error", code: r.status, errorText: "无法访问" });
+      updateHubFileCardDom(fileId);
+      return showToast("文件无法访问");
+    }
+    if (!r.ok) {
+      const d = await r.json().catch(() => null);
+      return showToast("下载失败: " + ((d && d.error) || ("HTTP " + r.status)));
+    }
+    const blob = await r.blob();
+    if (typeof URL === "undefined" || typeof URL.createObjectURL !== "function") {
+      return showToast("当前环境不支持 Blob 下载");
+    }
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = fileName || fileId;
+    a.style.display = "none";
+    if (document.body && typeof document.body.appendChild === "function") {
+      document.body.appendChild(a);
+    }
+    if (typeof a.click === "function") a.click();
+    if (typeof a.remove === "function") a.remove();
+    else if (document.body && typeof document.body.removeChild === "function") {
+      try { document.body.removeChild(a); } catch {}
+    }
+    setTimeout(() => {
+      if (typeof URL.revokeObjectURL === "function") {
+        try { URL.revokeObjectURL(blobUrl); } catch {}
+      }
+    }, 1000);
+  } catch (e) {
+    showToast("下载失败: " + e.message);
+  }
+}
+
+function setFormFileError(errBoxId, msg) {
+  const el = document.getElementById(errBoxId);
+  if (!el) return;
+  if (!msg) {
+    el.style.display = "none";
+    el.textContent = "";
+  } else {
+    el.textContent = msg;
+    el.style.display = "block";
+  }
+}
+
+function renderDraftFileList(containerId, items, targetType, isSubmitting = false) {
+  const box = document.getElementById(containerId);
+  if (!box) return;
+  if (!items || !items.length) {
+    box.innerHTML = "";
+    return;
+  }
+  let html = "";
+  for (const item of items) {
+    let statusBadge = '<span class="badge">待上传</span>';
+    let barCls = "";
+    let pct = Number(item.progress || 0);
+    if (item.status === "uploading") {
+      statusBadge = '<span class="badge indigo">上传中 ' + esc(pct) + '%</span>';
+    } else if (item.status === "uploaded") {
+      statusBadge = '<span class="badge green">已上传</span>';
+      barCls = " done";
+      pct = 100;
+    } else if (item.status === "error") {
+      statusBadge = '<span class="badge red">' + esc(item.error || "上传失败") + '</span>';
+      barCls = " err";
+    }
+    html += '<div class="att-draft-item">'
+      + '<div class="att-draft-row">'
+      + '<div style="min-width:0;flex:1;">'
+      + '<div class="att-name">' + esc(item.name) + '</div>'
+      + '<div class="att-sub mono">' + esc(formatBytes(item.size)) + ' · ' + esc(item.mime || "application/octet-stream") + '</div>'
+      + '</div>'
+      + '<div class="att-actions">'
+      + statusBadge
+      + '<button type="button" class="btn sm ghost" data-action="remove-draft-file" data-draft-target="' + esc(targetType) + '" data-draft-id="' + esc(item.id) + '"' + (isSubmitting ? ' disabled' : '') + '>移除</button>'
+      + '</div>'
+      + '</div>'
+      + '<div class="att-prog"><div class="att-prog-bar' + barCls + '" style="width:' + esc(pct) + '%;"></div></div>'
+      + '</div>';
+  }
+  box.innerHTML = html;
+}
+
+function addDraftFiles(targetType, fileList) {
+  const isTask = targetType === "task";
+  const items = isTask ? state.taskDraftFiles : state.replyDraftFiles;
+  const errBoxId = isTask ? "tfFileErr" : "replyFileErr";
+  const listId = isTask ? "tfFileList" : "replyFileList";
+  const isSubmitting = isTask ? state.taskSubmitting : state.replySubmitting;
+  if (isSubmitting) return;
+
+  setFormFileError(errBoxId, "");
+  const errors = [];
+  for (const file of Array.from(fileList || [])) {
+    if (!file) continue;
+    const size = Number(file.size || 0);
+    if (size > MAX_ATTACHMENT_BYTES) {
+      errors.push("文件「" + (file.name || "未命名") + "」超过 100 MB 上限（" + formatBytes(size) + "），已拦截");
+      continue;
+    }
+    if (items.length >= MAX_ATTACHMENTS_PER_MSG) {
+      errors.push("单条消息最多附加 " + MAX_ATTACHMENTS_PER_MSG + " 个文件");
+      break;
+    }
+    items.push({
+      id: "att-" + (++draftFileSeq),
+      file,
+      name: file.name || "file",
+      size,
+      mime: file.type || "application/octet-stream",
+      progress: 0,
+      status: "pending",
+      error: "",
+      fileId: "",
+    });
+  }
+  if (errors.length) {
+    const msg = errors.join("；");
+    setFormFileError(errBoxId, msg);
+    showToast(errors[0]);
+  }
+  renderDraftFileList(listId, items, targetType, false);
+}
+
+function removeDraftFile(targetType, draftId) {
+  const isTask = targetType === "task";
+  const isSubmitting = isTask ? state.taskSubmitting : state.replySubmitting;
+  if (isSubmitting) return;
+  if (isTask) {
+    state.taskDraftFiles = state.taskDraftFiles.filter((it) => it.id !== draftId);
+    renderDraftFileList("tfFileList", state.taskDraftFiles, "task", false);
+    setFormFileError("tfFileErr", "");
+  } else {
+    state.replyDraftFiles = state.replyDraftFiles.filter((it) => it.id !== draftId);
+    renderDraftFileList("replyFileList", state.replyDraftFiles, "reply", false);
+    setFormFileError("replyFileErr", "");
+  }
+}
+
+function uploadHubFile(item, onProgress) {
+  return new Promise((resolve, reject) => {
+    if (!item || !item.file) return reject(new Error("缺少文件对象"));
+    const size = Number(item.size || item.file.size || 0);
+    if (size > MAX_ATTACHMENT_BYTES) {
+      return reject(new Error("文件超过 100 MB 大小限制"));
+    }
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/v1/files", true);
+    if (state.token) {
+      xhr.setRequestHeader("Authorization", "Bearer " + state.token);
+    }
+    xhr.setRequestHeader("Content-Type", item.mime || "application/octet-stream");
+    xhr.setRequestHeader("X-File-Name", encodeURIComponent(item.name || "file"));
+
+    if (xhr.upload && typeof onProgress === "function") {
+      xhr.upload.onprogress = (ev) => {
+        if (ev && ev.lengthComputable && ev.total > 0) {
+          const pct = Math.min(100, Math.max(0, Math.round((ev.loaded / ev.total) * 100)));
+          onProgress(pct);
+        }
+      };
+    }
+
+    xhr.onload = () => {
+      let parsed = null;
+      try { parsed = JSON.parse(xhr.responseText || "{}"); } catch {}
+      if (xhr.status >= 200 && xhr.status < 300 && parsed && parsed.file_id) {
+        if (typeof onProgress === "function") onProgress(100);
+        resolve(parsed);
+        return;
+      }
+      if (xhr.status === 401) {
+        const tokEl = document.getElementById("tokenInput");
+        if (tokEl) tokEl.value = state.token;
+        openModal("tokenModal");
+        reject(new Error("需要有效的管理密钥 (API Token)"));
+        return;
+      }
+      if (xhr.status === 413) {
+        reject(new Error((parsed && parsed.error) || "文件超过服务端大小上限 (HTTP 413)"));
+        return;
+      }
+      reject(new Error((parsed && parsed.error) || ("上传失败 (HTTP " + xhr.status + ")")));
+    };
+
+    xhr.onerror = () => reject(new Error("网络错误，文件上传中断"));
+    xhr.onabort = () => reject(new Error("文件上传已取消"));
+    xhr.send(item.file);
+  });
+}
+
+async function uploadDraftFilesSequentially(items, renderFn, errBoxId) {
+  setFormFileError(errBoxId, "");
+  const out = [];
+  for (const item of items) {
+    if (item.status === "uploaded" && item.fileId) {
+      out.push({ file_id: item.fileId });
+      continue;
+    }
+    if (Number(item.size || 0) > MAX_ATTACHMENT_BYTES) {
+      item.status = "error";
+      item.error = "超过 100 MB 上限";
+      renderFn();
+      const msg = "文件「" + item.name + "」超过 100 MB 上限，无法上传";
+      setFormFileError(errBoxId, msg);
+      throw new Error(msg);
+    }
+    item.status = "uploading";
+    item.error = "";
+    item.progress = 0;
+    renderFn();
+    try {
+      const meta = await uploadHubFile(item, (pct) => {
+        item.progress = pct;
+        renderFn();
+      });
+      item.status = "uploaded";
+      item.progress = 100;
+      item.fileId = meta.file_id;
+      renderFn();
+      out.push({ file_id: meta.file_id });
+    } catch (err) {
+      item.status = "error";
+      item.error = err.message || "上传失败";
+      renderFn();
+      const msg = "文件「" + item.name + "」上传失败: " + item.error;
+      setFormFileError(errBoxId, msg);
+      throw new Error(msg);
+    }
+  }
+  return out;
+}
+
 async function loadTaskDetail(taskId, silent = false) {
+  if (state.filePreviewTaskId && state.filePreviewTaskId !== taskId) {
+    revokeAttachmentObjectUrls();
+  }
+  if (state.replyDraftTaskId && state.replyDraftTaskId !== taskId) {
+    state.replyDraftFiles = [];
+    state.replyDraftTaskId = taskId;
+  } else if (!state.replyDraftTaskId) {
+    state.replyDraftTaskId = taskId;
+  }
   state.selectedTaskId = taskId;
   try {
     const detail = await api("/api/v1/tasks/" + encodeURIComponent(taskId));
@@ -1543,18 +2093,50 @@ async function decideApproval(taskId, decision) {
 }
 
 async function replyTask(taskId) {
+  if (state.replySubmitting) return;
   const input = document.getElementById("replyTextBox");
   const text = input ? input.value.trim() : "";
-  if (!text) return showToast("请输入要回复的内容");
+  const files = state.replyDraftTaskId === taskId ? state.replyDraftFiles : [];
+  if (!text && !files.length) return showToast("请输入要回复的内容，或添加附件");
+
+  const btn = document.getElementById("replySubmitBtn");
+  state.replySubmitting = true;
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = files.length ? "上传附件并发送中..." : "发送中...";
+  }
+  renderDraftFileList("replyFileList", files, "reply", true);
+
   try {
+    let attachments = [];
+    if (files.length) {
+      attachments = await uploadDraftFilesSequentially(
+        files,
+        () => renderDraftFileList("replyFileList", state.replyDraftFiles, "reply", state.replySubmitting),
+        "replyFileErr",
+      );
+    }
+    const body = { text };
+    if (attachments.length) body.attachments = attachments;
     await api("/api/v1/tasks/" + encodeURIComponent(taskId) + "/reply", {
       method: "POST",
-      body: JSON.stringify({ text }),
+      body: JSON.stringify(body),
     });
+    state.replyDraftFiles = [];
+    if (input) input.value = "";
+    setFormFileError("replyFileErr", "");
     showToast("回复已发送，Agent 即将继续执行");
     await refreshState();
   } catch (e) {
     showToast("发送答复失败: " + e.message);
+  } finally {
+    state.replySubmitting = false;
+    const curBtn = document.getElementById("replySubmitBtn");
+    if (curBtn) {
+      curBtn.disabled = false;
+      curBtn.textContent = "发送答复并继续";
+    }
+    renderDraftFileList("replyFileList", state.replyDraftFiles, "reply", false);
   }
 }
 
@@ -2817,9 +3399,18 @@ function renderTasks(d) {
   let detailHtml = '<div class="task-detail-col">';
   const det = state.selectedTaskDetail;
   if (!det || !det.task) {
+    if (state.filePreviewTaskId) revokeAttachmentObjectUrls();
     detailHtml += '<div class="muted" style="margin:auto;text-align:center;">请从左侧选择一条任务<br/><span style="font-size:12px;">可查看执行对话、审批请求与交付产物</span></div>';
   } else {
     const t = det.task;
+    if (state.filePreviewTaskId !== t.task_id) {
+      if (state.filePreviewTaskId) revokeAttachmentObjectUrls();
+      state.filePreviewTaskId = t.task_id;
+    }
+    if (state.replyDraftTaskId !== t.task_id) {
+      state.replyDraftFiles = [];
+      state.replyDraftTaskId = t.task_id;
+    }
     const isTerminal = ["completed", "failed", "canceled", "rejected"].includes(t.status);
     detailHtml += '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;border-bottom:1px solid var(--border);padding-bottom:14px;flex-wrap:wrap;">'
       + '<div style="min-width:0;flex:1;">'
@@ -2845,9 +3436,15 @@ function renderTasks(d) {
     if (t.status === "input-required") {
       detailHtml += '<div class="action-banner ask">'
         + '<div style="font-weight:650;">Agent 正在等待您的补充答复</div>'
-        + '<textarea class="input" id="replyTextBox" placeholder="输入您的回答或补充说明，提交后 Agent 将继续执行..."></textarea>'
+        + '<textarea class="input" id="replyTextBox" data-task-id="' + esc(t.task_id) + '" placeholder="输入您的回答或补充说明（有附件时可留空），提交后 Agent 将继续执行..."></textarea>'
+        + '<div>'
+        + '<label style="display:block;font-size:12px;color:var(--text-2);margin-bottom:5px;">附加文件（可选，单个不超过 100 MB）</label>'
+        + '<input class="input" type="file" id="replyFiles" multiple />'
+        + '<div id="replyFileErr" class="err-banner" style="display:none;margin-top:6px;margin-bottom:0;"></div>'
+        + '<div id="replyFileList" class="att-draft-list"></div>'
+        + '</div>'
         + '<div style="display:flex;justify-content:flex-end;">'
-        + '<button class="btn primary" data-action="reply-task" data-task-id="' + esc(t.task_id) + '">发送答复并继续</button>'
+        + '<button class="btn primary" id="replySubmitBtn" data-action="reply-task" data-task-id="' + esc(t.task_id) + '">发送答复并继续</button>'
         + '</div></div>';
     }
 
@@ -2862,7 +3459,7 @@ function renderTasks(d) {
         if (p.kind === "text" && p.text) {
           detailHtml += '<div class="msg-body">' + esc(p.text) + '</div>';
         } else if (p.kind === "file") {
-          detailHtml += '<div class="data-box">附件：' + esc(p.file_name || p.file_uri) + ' (' + esc(p.file_uri) + ')</div>';
+          detailHtml += renderAttachmentItem(p);
         } else if (p.kind === "data" && p.data) {
           detailHtml += '<div class="data-box">' + esc(p.data) + '</div>';
         }
@@ -2877,7 +3474,9 @@ function renderTasks(d) {
         detailHtml += '<div class="card" style="padding:12px;">'
           + '<div><strong>' + esc(a.name || "交付产物") + '</strong></div>'
           + (a.description ? '<div class="hint" style="margin-top:3px;">' + esc(a.description) + '</div>' : '')
-          + (a.files || []).map((f) => '<div class="mono" style="margin-top:4px;">' + esc(f.file_name || f.file_uri) + ' · ' + esc(f.file_uri) + '</div>').join("")
+          + ((a.files && a.files.length)
+            ? '<div class="att-list">' + a.files.map((f) => renderAttachmentItem(f)).join("") + '</div>'
+            : '')
           + '</div>';
       }
     }
@@ -3061,10 +3660,24 @@ function render() {
     el.innerHTML = '<div class="page-wrap"><div class="card muted">正在连接 Hub 中台...</div></div>';
     return;
   }
+  if (state.view !== "tasks" && state.filePreviewTaskId) {
+    revokeAttachmentObjectUrls();
+  }
   if (state.view === "overview") el.innerHTML = renderOverview(d);
   else if (state.view === "agents") el.innerHTML = renderAgents(d);
   else if (state.view === "tasks") {
+    const prevReplyEl = document.getElementById("replyTextBox");
+    const prevReplyTaskId = prevReplyEl && prevReplyEl.dataset ? prevReplyEl.dataset.taskId : "";
+    const prevReplyVal = prevReplyEl ? prevReplyEl.value : "";
     el.innerHTML = renderTasks(d);
+    const nextReplyEl = document.getElementById("replyTextBox");
+    if (nextReplyEl && prevReplyTaskId && nextReplyEl.dataset && nextReplyEl.dataset.taskId === prevReplyTaskId && prevReplyVal) {
+      nextReplyEl.value = prevReplyVal;
+    }
+    if (state.selectedTaskDetail && state.selectedTaskDetail.task && state.replyDraftTaskId === state.selectedTaskDetail.task.task_id) {
+      renderDraftFileList("replyFileList", state.replyDraftFiles, "reply", state.replySubmitting);
+    }
+    hydrateTaskAttachmentPreviews();
     const si = document.getElementById("taskSearchInput");
     if (si) {
       si.addEventListener("input", (e) => {
@@ -3115,6 +3728,8 @@ function openNewTaskModal() {
   fillDispatchCandidates();
   const critWrap = document.getElementById("criteriaRows");
   if (critWrap && !critWrap.children.length) critWrap.innerHTML = "";
+  setFormFileError("tfFileErr", "");
+  renderDraftFileList("tfFileList", state.taskDraftFiles, "task", state.taskSubmitting);
   openModal("taskModal");
 }
 
@@ -3225,7 +3840,25 @@ document.addEventListener("click", (e) => {
     const box = document.getElementById("rotatedPromptBox");
     copyText(box ? box.value : "", "已复制接入提示词");
   }
+  else if (act === "preview-image") openImagePreviewModal(actEl.dataset.fileId, actEl.dataset.fileName);
+  else if (act === "download-hub-file") downloadHubFile(actEl.dataset.fileId, actEl.dataset.fileName);
+  else if (act === "remove-draft-file") removeDraftFile(actEl.dataset.draftTarget, actEl.dataset.draftId);
 });
+
+document.addEventListener("change", (e) => {
+  if (!e.target) return;
+  if (e.target.id === "tfFiles") {
+    addDraftFiles("task", e.target.files);
+    e.target.value = "";
+  } else if (e.target.id === "replyFiles") {
+    addDraftFiles("reply", e.target.files);
+    e.target.value = "";
+  }
+});
+
+if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+  window.addEventListener("beforeunload", revokeAttachmentObjectUrls);
+}
 
 document.getElementById("btnRefresh").addEventListener("click", refreshState);
 document.getElementById("btnNewTask").addEventListener("click", openNewTaskModal);
@@ -3514,6 +4147,8 @@ document.getElementById("profileForm").addEventListener("submit", async (e) => {
 
 document.getElementById("taskForm").addEventListener("submit", async (e) => {
   e.preventDefault();
+  if (state.taskSubmitting) return;
+  const submitBtn = document.getElementById("tfSubmitBtn");
   try {
     const to = document.getElementById("tfTo").value.trim();
     const cap = document.getElementById("tfCap").value.trim();
@@ -3542,15 +4177,40 @@ document.getElementById("taskForm").addEventListener("submit", async (e) => {
     }
     if (criteria.length) body.criteria = criteria;
 
+    state.taskSubmitting = true;
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.textContent = state.taskDraftFiles.length ? "上传附件并派发中..." : "派发中...";
+    }
+    renderDraftFileList("tfFileList", state.taskDraftFiles, "task", true);
+
+    if (state.taskDraftFiles.length) {
+      body.attachments = await uploadDraftFilesSequentially(
+        state.taskDraftFiles,
+        () => renderDraftFileList("tfFileList", state.taskDraftFiles, "task", state.taskSubmitting),
+        "tfFileErr",
+      );
+    }
+
     const res = await api("/api/v1/tasks", { method: "POST", body: JSON.stringify(body) });
+    state.taskDraftFiles = [];
+    setFormFileError("tfFileErr", "");
     document.getElementById("taskForm").reset();
     document.getElementById("criteriaRows").innerHTML = "";
+    renderDraftFileList("tfFileList", [], "task", false);
     closeModal("taskModal");
     showToast("任务已派发");
     await refreshState();
     jumpToTask(res.task_id);
   } catch (err) {
     showToast("派发失败: " + err.message);
+  } finally {
+    state.taskSubmitting = false;
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = "立即派发";
+    }
+    renderDraftFileList("tfFileList", state.taskDraftFiles, "task", false);
   }
 });
 
