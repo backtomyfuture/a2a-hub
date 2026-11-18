@@ -40,6 +40,7 @@ POST /api/v1/agents/register
 }
 ```
 - 如若写高风险能力，可设 `"side_effect": "write", "approval_class": "approve"`。
+- 新注册的名片要等机主在 Web 控制台接纳后才会收单。响应里的 `admission` 按 `cap_id` 给出状态，`pending` 为真表示仍有未接纳名片。
 
 ---
 

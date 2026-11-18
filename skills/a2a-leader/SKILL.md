@@ -35,7 +35,7 @@ POST /api/v1/agents/register
 ```http
 GET /api/v1/agents
 ```
-从返回的 `agents[]` 中查看每个节点（如办公主机 `office-pc`、云端 `grok-bot`）的 `online`、`mode`、以及 `caps[]` 下的 `worker`、`skill_id`、`cap_id`、`side_effect`、`dispatchable`。
+从返回的 `agents[]` 中查看每个节点（如办公主机 `office-pc`、云端 `grok-bot`）的 `online`、`mode`、以及 `caps[]` 下的 `worker`、`skill_id`、`cap_id`、`side_effect`、`dispatchable`、`admission`。只能向 `caps[].admission` 为 `admitted` 的名片派单。
 
 ---
 
