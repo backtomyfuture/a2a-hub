@@ -129,6 +129,14 @@ export function renderWebConsoleHtml() {
   .modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; font-size: 16px; font-weight: 700; }
   .toast { position: fixed; right: 20px; bottom: 20px; z-index: 80; padding: 10px 14px; border-radius: 10px; background: #1e293b; border: 1px solid var(--border-strong); box-shadow: 0 10px 25px rgba(0,0,0,0.4); display: none; }
   .toast.show { display: block; }
+  .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+  .seg { display: flex; flex-wrap: wrap; gap: 6px; }
+  .card-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; align-items: center; margin-top: auto; }
+  .note { font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+  .steps { margin: 4px 0 12px; padding-left: 18px; line-height: 1.65; }
+  .ref-table { width: 100%; border-collapse: collapse; }
+  .ref-table th, .ref-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .ref-table th { color: var(--muted); font-size: 12px; font-weight: 600; }
   @media (max-width: 900px) {
     .app { grid-template-columns: 1fr; }
     .sidebar { display: none; }
@@ -198,8 +206,15 @@ export function renderWebConsoleHtml() {
     </div>
     <form id="taskForm">
       <div class="form-row">
+        <label>从已接纳名片选择</label>
+        <select class="input" id="tfTargetPick">
+          <option value="">手动填写下方目标</option>
+        </select>
+      </div>
+      <div class="form-row">
         <label>目标节点 (--to)</label>
-        <input class="input" name="to" id="tfTo" placeholder="例如 mac-mini / laptop" required />
+        <input class="input" name="to" id="tfTo" list="admittedNodes" placeholder="例如 mac-mini / laptop" required />
+        <datalist id="admittedNodes"></datalist>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
         <div class="form-row">
@@ -304,6 +319,81 @@ export function renderWebConsoleHtml() {
   </div>
 </div>
 
+<!-- 添加 Agent：提交后在同一弹窗展示 onboarding，方便复制提示词 -->
+<div class="modal-backdrop" id="agentModal">
+  <div class="modal" style="max-width:680px;">
+    <div class="modal-head">
+      <span>添加 Agent</span>
+      <button class="btn sm" onclick="closeModal('agentModal')">关闭</button>
+    </div>
+    <form id="agentForm">
+      <div class="form-row">
+        <label>节点名</label>
+        <input class="input mono" id="afNode" placeholder="例如 grok-bot" required />
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+        <div class="form-row">
+          <label>接入方式</label>
+          <select class="input" id="afAccess">
+            <option value="http">云端 HTTP</option>
+            <option value="host">宿主机 ah join</option>
+            <option value="inbox">本机独立 Agent inbox</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label>角色</label>
+          <select class="input" id="afRole">
+            <option value="worker">执行方</option>
+            <option value="leader">派单方</option>
+            <option value="hybrid">两者</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-row">
+        <label>显示名（可选，≤64）</label>
+        <input class="input" id="afName" maxlength="64" placeholder="机主看到的名字" />
+      </div>
+      <div class="form-row">
+        <label>备注（可选，≤500）</label>
+        <textarea class="input" id="afNote" maxlength="500" placeholder="只给机主看的备注"></textarea>
+      </div>
+      <div class="form-row">
+        <label>能力说明（可选，仅预建名片时写入）</label>
+        <input class="input" id="afDesc" placeholder="留给执行方名片的 Description" />
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;">
+        <button type="button" class="btn" onclick="closeModal('agentModal')">取消</button>
+        <button type="submit" class="btn primary">添加并生成接入步骤</button>
+      </div>
+    </form>
+    <div id="onboardBox"></div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="profileModal">
+  <div class="modal" style="max-width:480px;">
+    <div class="modal-head">
+      <span>编辑名片</span>
+      <button class="btn sm" onclick="closeModal('profileModal')">关闭</button>
+    </div>
+    <form id="profileForm">
+      <input type="hidden" id="pfCap" />
+      <div class="form-row">
+        <label>显示名（≤64，留空则名片墙回退到技能名）</label>
+        <input class="input" id="pfName" maxlength="64" />
+      </div>
+      <div class="form-row">
+        <label>备注（≤500）</label>
+        <textarea class="input" id="pfNote" maxlength="500"></textarea>
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;">
+        <button type="button" class="btn" onclick="closeModal('profileModal')">取消</button>
+        <button type="submit" class="btn primary">保存</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -327,6 +417,7 @@ const state = {
   selectedTaskDetail: null,
   statusFilter: "ALL",
   search: "",
+  cardFilter: "admitted",
   cursor: 0,
   token: localStorage.getItem("a2a_hub_token") || localStorage.getItem("lobe_a2a_token") || "",
   templates: [],
@@ -334,6 +425,17 @@ const state = {
 
 function esc(s) {
   return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+
+// 与服务端同口径：缺省、空、未知值都按 pending，旧名片不会被当成已上墙。
+function admissionOf(card) {
+  const v = String(card && card.admission != null ? card.admission : "").trim();
+  return v === "admitted" || v === "pending" || v === "rejected" ? v : "pending";
+}
+
+// onclick 用单引号包动态值；只做 HTML esc 挡不住引号把属性截断。
+function attrArg(s) {
+  return esc(s).replace(/\\\\/g, "\\\\\\\\").replace(/'/g, "\\\\'");
 }
 
 function showToast(msg) {
@@ -376,7 +478,14 @@ async function refreshState() {
     document.getElementById("seqText").textContent = "seq: " + (d.seq ?? 0);
     const online = (d.connectedNodes || []).filter((n) => n.online).length;
     document.getElementById("navOnlineCount").textContent = String(online);
-    document.getElementById("navAgentCount").textContent = String((d.agentCards || []).length);
+    const allCards = d.agentCards || [];
+    const admittedN = allCards.filter((c) => admissionOf(c) === "admitted").length;
+    const pendingN = allCards.filter((c) => admissionOf(c) === "pending").length;
+    const navAgents = document.getElementById("navAgentCount");
+    navAgents.textContent = pendingN > 0 ? (admittedN + " · 待" + pendingN) : String(admittedN);
+    navAgents.classList.toggle("amber", pendingN > 0);
+    navAgents.title = pendingN > 0 ? ("已接纳 " + admittedN + "，待接纳 " + pendingN) : ("已接纳 " + admittedN);
+    fillDispatchCandidates();
     const needAction = (d.tasks || []).filter((t) => t.status === "auth-required" || t.status === "input-required").length;
     document.getElementById("navActionCount").textContent = String(needAction);
     document.getElementById("navLoopCount").textContent = String((d.loops || []).filter((l) => l.status === "running").length);
@@ -462,15 +571,184 @@ function jumpToTask(taskId) {
   loadTaskDetail(taskId);
 }
 
-function openDispatchFor(node, worker, skill) {
+function openDispatchFor(node, worker, skill, capId) {
+  fillDispatchCandidates();
   document.getElementById("tfTo").value = node || "";
   document.getElementById("tfWorker").value = worker || "";
   document.getElementById("tfCap").value = skill || "agent";
+  const pick = document.getElementById("tfTargetPick");
+  if (pick) {
+    const wanted = capId || "";
+    pick.value = [...pick.options].some((o) => o.value === wanted) ? wanted : "";
+  }
   openModal("taskModal");
+}
+
+function fillDispatchCandidates() {
+  const pick = document.getElementById("tfTargetPick");
+  const list = document.getElementById("admittedNodes");
+  const cards = ((state.data && state.data.agentCards) || []).filter((c) => admissionOf(c) === "admitted");
+  if (pick) {
+    const prev = pick.value;
+    let html = '<option value="">手动填写下方目标</option>';
+    for (const c of cards) {
+      const title = (c.display_name && String(c.display_name).trim()) || c.skill_name || c.skill_id || c.cap_id || "";
+      const label = title + " · " + (c.node || "") + (c.worker ? "/" + c.worker : "") + "/" + (c.skill_id || "")
+        + (c.dispatchable === "Yes" ? "" : "（已停派）");
+      html += '<option value="' + esc(c.cap_id) + '">' + esc(label) + '</option>';
+    }
+    pick.innerHTML = html;
+    if ([...pick.options].some((o) => o.value === prev)) pick.value = prev;
+  }
+  if (list) {
+    const nodes = [...new Set(cards.map((c) => c.node).filter(Boolean))];
+    list.innerHTML = nodes.map((n) => '<option value="' + esc(n) + '"></option>').join("");
+  }
+}
+
+function applyDispatchPick() {
+  const id = document.getElementById("tfTargetPick").value;
+  if (!id) return;
+  const c = ((state.data && state.data.agentCards) || []).find((x) => x.cap_id === id && admissionOf(x) === "admitted");
+  if (!c) {
+    showToast("该名片已不在已接纳列表");
+    return;
+  }
+  document.getElementById("tfTo").value = c.node || "";
+  document.getElementById("tfCap").value = c.skill_id || "";
+  document.getElementById("tfWorker").value = c.worker || "";
+}
+
+async function setCardAdmission(capId, admission) {
+  try {
+    const res = await api("/api/v1/admin/cards/" + encodeURIComponent(capId) + "/admission", {
+      method: "POST",
+      body: JSON.stringify({ admission }),
+    });
+    if (!res || res.ok !== true || !res.card) {
+      showToast("更新接纳状态失败: 响应不完整");
+      return;
+    }
+    const labels = { admitted: "已接纳", pending: "已移回待接纳", rejected: "已拒绝" };
+    showToast((labels[admission] || "已更新") + " " + capId);
+    await refreshState();
+  } catch (e) {
+    showToast("更新接纳状态失败: " + e.message);
+  }
+}
+
+async function admitNode(node) {
+  try {
+    const res = await api("/api/v1/admin/nodes/" + encodeURIComponent(node) + "/admission", {
+      method: "POST",
+      body: JSON.stringify({ admission: "admitted" }),
+    });
+    if (!res || res.ok !== true || res.updated == null) {
+      showToast("整节点接纳失败: 响应不完整");
+      return;
+    }
+    showToast("已接纳节点 " + node + " 的 " + res.updated + " 张名片");
+    state.cardFilter = "admitted";
+    await refreshState();
+  } catch (e) {
+    showToast("整节点接纳失败: " + e.message);
+  }
+}
+
+function openProfileEditor(capId) {
+  const c = ((state.data && state.data.agentCards) || []).find((x) => x.cap_id === capId);
+  if (!c) {
+    showToast("找不到名片 " + capId);
+    return;
+  }
+  document.getElementById("pfCap").value = c.cap_id || "";
+  document.getElementById("pfName").value = c.display_name || "";
+  document.getElementById("pfNote").value = c.admin_note || "";
+  openModal("profileModal");
+}
+
+function openAgentModal() {
+  const form = document.getElementById("agentForm");
+  if (form) form.reset();
+  const box = document.getElementById("onboardBox");
+  if (box) box.innerHTML = "";
+  openModal("agentModal");
+}
+
+function renderOnboarding(ob, card) {
+  const steps = Array.isArray(ob.steps) ? ob.steps : [];
+  const skills = Array.isArray(ob.skills) ? ob.skills : [];
+  let html = '<div class="section-title"><span>接入结果</span></div>';
+  if (card && card.cap_id) {
+    html += '<div class="muted" style="margin-bottom:8px;">已预建并接纳名片 <span class="mono">' + esc(card.cap_id) + '</span></div>';
+  } else if (ob.access === "http" && ob.role === "leader") {
+    html += '<div class="muted" style="margin-bottom:8px;">派单方没有名片。上线后出现在「在线连接（无名片）」。</div>';
+  } else {
+    html += '<div class="muted" style="margin-bottom:8px;">未预建名片。守护进程登记后进入「待接纳」，接纳后才能派单。</div>';
+  }
+  html += '<div class="section-title"><span>步骤</span></div><ol class="steps">';
+  if (!steps.length) html += '<li class="muted">服务端没有返回步骤</li>';
+  for (const s of steps) html += "<li>" + esc(s) + "</li>";
+  html += '</ol><div class="section-title"><span>协议 Skill</span></div>';
+  if (!skills.length) {
+    html += '<div class="muted">此接入方式没有对应的协议 Skill。</div>';
+  } else {
+    html += '<ul class="steps">';
+    for (const sk of skills) {
+      const name = sk && sk.name ? sk.name : "";
+      const url = sk && sk.url ? sk.url : "";
+      const httpUrl = url.indexOf("http://") === 0 || url.indexOf("https://") === 0;
+      if (httpUrl) {
+        html += '<li><a href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(name || url) + "</a></li>";
+      } else {
+        html += "<li>" + esc(name || "未命名 Skill") + (url ? ' <span class="mono">' + esc(url) + "</span>" : "") + "</li>";
+      }
+    }
+    html += "</ul>";
+  }
+  html += '<div class="form-row"><label>接入提示词</label><textarea class="input mono" id="onboardPrompt" readonly>' + esc(ob.prompt || "") + '</textarea></div>';
+  html += '<div style="display:flex;justify-content:flex-end;"><button type="button" class="btn sm" id="copyPromptBtn">复制提示词</button></div>';
+  return html;
+}
+
+async function copyOnboardingPrompt() {
+  const el = document.getElementById("onboardPrompt");
+  const text = el ? el.value : "";
+  if (!text) {
+    showToast("没有可复制的提示词");
+    return;
+  }
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      showToast("已复制接入提示词");
+      return;
+    }
+  } catch { /* 非安全上下文没有 clipboard，改走选中复制 */ }
+  try {
+    el.focus();
+    el.select();
+    const ok = document.execCommand("copy");
+    showToast(ok ? "已复制接入提示词" : "复制失败，请手动选择提示词");
+  } catch (e) {
+    showToast("复制失败: " + e.message);
+  }
+}
+
+function setCardFilter(f) {
+  if (f !== "admitted" && f !== "pending" && f !== "rejected") return;
+  state.cardFilter = f;
+  render();
 }
 
 function renderOverview(d) {
   const tasks = d.tasks || [];
+  const admittedCards = (d.agentCards || []).filter((c) => admissionOf(c) === "admitted");
+  const admittedByNode = new Map();
+  for (const c of admittedCards) {
+    const key = c.node || "";
+    admittedByNode.set(key, (admittedByNode.get(key) || 0) + 1);
+  }
   const active = tasks.filter((t) => t.status === "submitted" || t.status === "working").length;
   const authList = tasks.filter((t) => t.status === "auth-required");
   const askList = tasks.filter((t) => t.status === "input-required");
@@ -484,6 +762,7 @@ function renderOverview(d) {
     + '<div class="card"><div class="stat-label">待补充答复</div><div class="stat-val" style="color:#c084fc">' + askList.length + '</div></div>'
     + '<div class="card"><div class="stat-label">长轮询在线终端</div><div class="stat-val" style="color:#34d399">' + nodes.filter((n) => n.online).length + ' / ' + nodes.length + '</div></div>'
     + '<div class="card"><div class="stat-label">已完成总单数</div><div class="stat-val">' + completed + '</div></div>'
+    + '<div class="card"><div class="stat-label">已接纳名片</div><div class="stat-val">' + admittedCards.length + '</div></div>'
     + '</div>';
 
   if (authList.length || askList.length) {
@@ -526,7 +805,8 @@ function renderOverview(d) {
         + (roleLabel ? '<span class="badge">' + esc(roleLabel) + '</span>' : '')
         + '<span class="badge ' + (n.online ? 'green' : 'red') + '">' + statusText + '</span>'
         + '</div>'
-        + '</div><div class="muted mono" style="margin-top:8px;">mode: ' + esc(n.mode || 'longpoll') + ' · addr: ' + esc(n.remoteAddr || '-') + ' · cursor: ' + esc(n.cursor) + ' · ' + ago + 's 前</div></div>';
+        + '</div><div class="muted mono" style="margin-top:8px;">mode: ' + esc(n.mode || 'longpoll') + ' · addr: ' + esc(n.remoteAddr || '-') + ' · cursor: ' + esc(n.cursor) + ' · ' + ago + 's 前</div>'
+        + '<div class="muted" style="margin-top:6px;">已接纳名片 ' + (admittedByNode.get(n.node) || 0) + '</div></div>';
     }
     html += '</div>';
   }
@@ -540,91 +820,132 @@ function renderOverview(d) {
   return html;
 }
 
+function cardActionBar(c, filter) {
+  const id = c.cap_id || "";
+  let html = '<div class="card-actions">';
+  if (filter === "admitted") {
+    if (c.dispatchable === "Yes") {
+      html += '<button class="btn sm primary" onclick="openDispatchFor(\\'' + attrArg(c.node) + '\\',\\'' + attrArg(c.worker) + '\\',\\'' + attrArg(c.skill_id) + '\\',\\'' + attrArg(id) + '\\')">向此能力派单</button>';
+    } else {
+      html += '<span class="muted" style="font-size:12px;margin-right:auto;">已停派 (Dispatchable=No)</span>';
+    }
+    html += '<button class="btn sm" onclick="openProfileEditor(\\'' + attrArg(id) + '\\')">编辑</button>';
+    html += '<button class="btn sm" onclick="setCardAdmission(\\'' + attrArg(id) + '\\', \\'pending\\')">移回待接纳</button>';
+    html += '<button class="btn sm danger" onclick="setCardAdmission(\\'' + attrArg(id) + '\\', \\'rejected\\')">拒绝</button>';
+  } else if (filter === "pending") {
+    html += '<button class="btn sm success" onclick="setCardAdmission(\\'' + attrArg(id) + '\\', \\'admitted\\')">接纳</button>';
+    html += '<button class="btn sm danger" onclick="setCardAdmission(\\'' + attrArg(id) + '\\', \\'rejected\\')">拒绝</button>';
+  } else {
+    html += '<button class="btn sm" onclick="setCardAdmission(\\'' + attrArg(id) + '\\', \\'pending\\')">恢复为待接纳</button>';
+    html += '<button class="btn sm success" onclick="setCardAdmission(\\'' + attrArg(id) + '\\', \\'admitted\\')">接纳</button>';
+  }
+  html += "</div>";
+  return html;
+}
+
 function renderAgents(d) {
   const cards = d.agentCards || [];
   const nodes = d.connectedNodes || [];
   const connByNode = new Map(nodes.map((n) => [n.node, n]));
-  const cardNodes = new Set(cards.map((c) => c.node || 'unknown'));
+  const cardNodes = new Set(cards.map((c) => c.node || "unknown"));
   const leaderOrUnlisted = nodes.filter((n) => !cardNodes.has(n.node));
+  const filter = state.cardFilter === "pending" || state.cardFilter === "rejected" ? state.cardFilter : "admitted";
+  const pending = cards.filter((c) => admissionOf(c) === "pending");
+  const visible = cards.filter((c) => admissionOf(c) === filter);
 
-  let html = '';
-  if (leaderOrUnlisted.length) {
-    html += '<div class="section-title"><span>纯协调者 / 外部 HTTP Agent（无本地技能名片）</span><span class="muted mono">' + leaderOrUnlisted.length + ' 个连接</span></div>';
+  let html = '<div class="toolbar"><div class="seg">'
+    + '<button class="chip' + (filter === "admitted" ? " active" : "") + '" onclick="setCardFilter(\\'admitted\\')">已接纳</button>'
+    + '<button class="chip' + (filter === "pending" ? " active" : "") + '" onclick="setCardFilter(\\'pending\\')">待接纳 <span class="badge' + (pending.length ? " amber" : "") + '">' + pending.length + '</span></button>'
+    + '<button class="chip' + (filter === "rejected" ? " active" : "") + '" onclick="setCardFilter(\\'rejected\\')">已拒绝</button>'
+    + '</div><button class="btn sm primary" onclick="openAgentModal()">+ 添加 Agent</button></div>';
+
+  if (!visible.length) {
+    if (filter === "admitted") {
+      html += '<div class="card muted">名片墙为空：点「添加 Agent」，或到「待接纳」接纳已发现的 Agent</div>';
+    } else if (filter === "pending") {
+      html += '<div class="card muted">待接纳池是空的。</div>';
+    } else {
+      html += '<div class="card muted">没有已拒绝的名片。</div>';
+    }
+  } else {
+    const byNode = new Map();
+    for (const c of visible) {
+      const n = c.node || "unknown";
+      if (!byNode.has(n)) byNode.set(n, []);
+      byNode.get(n).push(c);
+    }
+    for (const [node, list] of byNode.entries()) {
+      const nodeDesc = list.find((x) => x.node_desc)?.node_desc || "";
+      const ver = list.find((x) => x.daemon_version)?.daemon_version || "";
+      const conn = connByNode.get(node);
+      const connBadge = conn
+        ? ' <span class="badge ' + (conn.online ? "green" : "red") + '">' + (conn.polling ? "长轮询" : (conn.online ? (conn.mode || "在线") : "离线")) + "</span>"
+        : "";
+      html += '<div class="section-title"><span>节点：' + esc(node) + connBadge + ' <span class="muted" style="font-weight:400;margin-left:8px;">' + esc(nodeDesc) + '</span></span>'
+        + '<span style="display:flex;align-items:center;gap:8px;"><span class="mono muted">' + esc(ver) + " · " + list.length + " 项</span>"
+        + (filter === "pending" ? '<button class="btn sm success" onclick="admitNode(\\'' + attrArg(node) + '\\')">整节点接纳</button>' : "")
+        + "</span></div>";
+      html += '<div class="agent-grid">';
+      for (const c of list) {
+        const online = String(c.availability || "").toLowerCase() !== "offline";
+        const title = (c.display_name && String(c.display_name).trim()) || c.skill_name || c.skill_id || "未命名能力";
+        const note = c.admin_note && String(c.admin_note).trim();
+        html += '<div class="agent-card">'
+          + '<div class="agent-head">'
+          + '<div><div class="agent-name">' + esc(title) + '</div><div class="mono muted">' + esc(c.cap_id) + '</div></div>'
+          + '<span class="badge ' + (online ? "green" : "red") + '">' + esc(c.availability || "unknown") + '</span>'
+          + '</div>'
+          + (c.description ? '<div class="muted">' + esc(c.description) + '</div>' : '')
+          + (note ? '<div class="note">备注：' + esc(note) + '</div>' : '')
+          + '<div style="display:flex;flex-wrap:wrap;gap:6px;">'
+          + (c.worker ? '<span class="badge indigo">Worker: ' + esc(c.worker) + '</span>' : '<span class="badge">节点本尊</span>')
+          + '<span class="badge">Skill: ' + esc(c.skill_id) + '</span>'
+          + (c.role ? '<span class="badge">' + esc(c.role) + '</span>' : '')
+          + (c.kind ? '<span class="badge">' + esc(c.kind) + '</span>' : '')
+          + '<span class="badge">SideEffect: ' + esc(c.side_effect || "-") + '</span>'
+          + '<span class="badge">' + esc(c.receive_mode || "http-poll") + '</span>'
+          + '</div>'
+          + cardActionBar(c, filter)
+          + '</div>';
+      }
+      html += '</div>';
+    }
+  }
+
+  if (filter === "admitted" && leaderOrUnlisted.length) {
+    html += '<div class="section-title"><span>在线连接（无名片）</span><span class="muted mono">' + leaderOrUnlisted.length + ' 个连接</span></div>';
+    html += '<div class="muted" style="margin:-2px 0 10px;">纯协调者 / 外部 HTTP Agent（无本地技能名片），不参与派单。</div>';
     html += '<div class="agent-grid">';
     for (const n of leaderOrUnlisted) {
       const ago = Math.max(0, Math.round((Date.now() - n.lastSeenAt) / 1000));
-      const roleLabel = n.role === 'leader' ? 'Leader（只派单/跟单）' : (n.role || 'HTTP Agent');
+      const roleLabel = n.role === "leader" ? "Leader（只派单/跟单）" : (n.role || "HTTP Agent");
       html += '<div class="agent-card">'
         + '<div class="agent-head">'
         + '<div><div class="agent-name">' + esc(n.node) + '</div><div class="mono muted">' + esc(roleLabel) + '</div></div>'
-        + '<span class="badge ' + (n.online ? 'green' : 'red') + '">' + (n.online ? (n.mode === 'http-poll' ? 'HTTP 在线' : '在线') : '离线') + '</span>'
+        + '<span class="badge ' + (n.online ? "green" : "red") + '">' + (n.online ? (n.mode === "http-poll" ? "HTTP 在线" : "在线") : "离线") + '</span>'
         + '</div>'
         + '<div class="muted">通过 HTTP 接入中台，可调用 <span class="mono">/api/v1/tasks</span> 派单并监听 <span class="mono">/api/v1/agents/' + esc(n.node) + '/updates</span>。</div>'
         + '<div style="display:flex;flex-wrap:wrap;gap:6px;">'
-        + '<span class="badge indigo">' + (n.kind === 'agent' ? 'HTTP Agent' : '宿主节点') + '</span>'
-        + '<span class="badge">' + esc(n.mode || 'http-poll') + '</span>'
+        + '<span class="badge indigo">' + (n.kind === "agent" ? "HTTP Agent" : "宿主节点") + '</span>'
+        + '<span class="badge">' + esc(n.mode || "http-poll") + '</span>'
         + '<span class="badge">' + ago + 's 前活跃</span>'
         + '</div></div>';
     }
     html += '</div>';
   }
 
-  if (!cards.length && !leaderOrUnlisted.length) {
-    html += '<div class="card muted">尚未登记任何 Agent 名片或外部 Agent。启动 Hub、执行 <span class="mono">ah join</span>，或让外部 Agent 调用 <span class="mono">POST /api/v1/agents/register</span> 即可上线。</div>';
-  } else if (cards.length) {
-    const byNode = new Map();
-    for (const c of cards) {
-      const n = c.node || 'unknown';
-      if (!byNode.has(n)) byNode.set(n, []);
-      byNode.get(n).push(c);
-    }
-    for (const [node, list] of byNode.entries()) {
-      const nodeDesc = list.find((x) => x.node_desc)?.node_desc || '';
-      const ver = list.find((x) => x.daemon_version)?.daemon_version || '';
-      const conn = connByNode.get(node);
-      const connBadge = conn
-        ? ' <span class="badge ' + (conn.online ? 'green' : 'red') + '">' + (conn.polling ? '长轮询' : (conn.online ? (conn.mode || '在线') : '离线')) + '</span>'
-        : '';
-      html += '<div class="section-title"><span>节点：' + esc(node) + connBadge + ' <span class="muted" style="font-weight:400;margin-left:8px;">' + esc(nodeDesc) + '</span></span>'
-        + '<span class="mono muted">' + esc(ver) + ' · ' + list.length + ' 项能力</span></div>';
-      html += '<div class="agent-grid">';
-      for (const c of list) {
-        const online = String(c.availability || '').toLowerCase() !== 'offline';
-        const dispatchable = c.dispatchable === 'Yes';
-        html += '<div class="agent-card">'
-          + '<div class="agent-head">'
-          + '<div><div class="agent-name">' + esc(c.skill_name || c.skill_id) + '</div><div class="mono muted">' + esc(c.cap_id) + '</div></div>'
-          + '<span class="badge ' + (online ? 'green' : 'red') + '">' + esc(c.availability || 'unknown') + '</span>'
-          + '</div>'
-          + '<div class="muted" style="min-height:34px;">' + esc(c.description || '无说明') + '</div>'
-          + '<div style="display:flex;flex-wrap:wrap;gap:6px;">'
-          + (c.worker ? '<span class="badge indigo">Worker: ' + esc(c.worker) + '</span>' : '<span class="badge">节点本尊</span>')
-          + '<span class="badge">Skill: ' + esc(c.skill_id) + '</span>'
-          + '<span class="badge">SideEffect: ' + esc(c.side_effect || '-') + '</span>'
-          + '<span class="badge">' + esc(c.receive_mode || 'http-poll') + '</span>'
-          + '</div>'
-          + '<div style="display:flex;justify-content:flex-end;margin-top:auto;">'
-          + (dispatchable
-            ? '<button class="btn sm primary" onclick="openDispatchFor(\\'' + esc(c.node) + '\\',\\'' + esc(c.worker) + '\\',\\'' + esc(c.skill_id) + '\\')">向此能力派单</button>'
-            : '<span class="muted" style="font-size:12px;">已停派 (Dispatchable=No)</span>')
-          + '</div></div>';
-      }
-      html += '</div>';
-    }
-  }
-
-  html += '<div class="section-title"><span>统一接入参考（宿主守护进程 &amp; 云端 Agent &amp; 4 类 Skill）</span><span class="mono muted">GET /.well-known/agent.json</span></div>';
-  html += '<div class="card"><div class="muted" style="line-height:1.7;">'
-    + '<div><strong>1. 固定电脑 / 本地 Agent 宿主：</strong><span class="mono">ah join http://&lt;hub-ip&gt;:8787</span>（长轮询常驻，零入站端口）。</div>'
-    + '<div><strong>2. 云端 / 定时 Agent（如 Muse、Grok Bot）：</strong></div>'
-    + '<div class="mono" style="margin-top:4px;">POST /api/v1/agents/register · GET /api/v1/agents/{node}/poll · GET /api/v1/agents/{node}/updates</div>'
-    + '<div class="mono">POST /api/v1/tasks · POST /api/v1/tasks/{id}/claim|heartbeat|ask|auth|complete|fail</div>'
-    + '<div style="margin-top:8px;"><strong>3. 2×2 四类 Agent Skill 分工</strong>（可通过 <span class="mono">GET /api/v1/skills</span> 或 <span class="mono">GET /api/v1/skills/{name}</span> 拉取）：</div>'
-    + '<div class="mono" style="margin-top:4px;">· ah（控制端 + CLI）：Hub / 工作机主控终端派单与闭环编排</div>'
-    + '<div class="mono">· ah-inbox（执行端 + CLI）：本机独立 Agent 消费 inbox（kind=agent）</div>'
-    + '<div class="mono">· a2a-leader（控制端 + 纯 HTTP）：云端 Muse Leader 派单与验收</div>'
-    + '<div class="mono">· a2a-worker（执行端 + 纯 HTTP）：云端 Grok Bot 轮询认领与回执</div>'
-    + '</div></div>';
+  html += '<div class="section-title"><span>接入参考</span><span class="mono muted">GET /.well-known/agent.json</span></div>';
+  html += '<div class="card" style="overflow-x:auto;">'
+    + '<table class="ref-table"><thead><tr><th>接入方式</th><th>协议 Skill</th><th>作用</th></tr></thead><tbody>'
+    + '<tr><td>云端 HTTP · 执行方</td><td class="mono">a2a-worker</td><td>默认行为提示词：轮询认领与回执</td></tr>'
+    + '<tr><td>云端 HTTP · 派单方</td><td class="mono">a2a-leader</td><td>默认行为提示词：派单与验收</td></tr>'
+    + '<tr><td>云端 HTTP · 两者</td><td class="mono">a2a-worker + a2a-leader</td><td>默认行为提示词：既能派单也能执行</td></tr>'
+    + '<tr><td>本机独立 Agent inbox</td><td class="mono">ah-inbox</td><td>默认行为提示词：消费本机收件箱（kind=agent）</td></tr>'
+    + '<tr><td>宿主机 ah join</td><td class="mono">—</td><td>不另发协议 Skill；回执约定由内核写进提示词</td></tr>'
+    + '</tbody></table>'
+    + '<div class="muted" style="margin-top:10px;line-height:1.7;">协议 Skill 可通过 <span class="mono">GET /api/v1/skills</span> 或 <span class="mono">GET /api/v1/skills/{name}</span> 拉取，内容是默认行为提示词。领域技能不在中台登记。</div>'
+    + '<div class="mono muted" style="margin-top:6px;">· ah（控制端 + CLI）：Hub / 工作机主控终端派单与闭环编排，不按接入方式下发。</div>'
+    + '</div>';
   return html;
 }
 
@@ -855,7 +1176,77 @@ document.querySelectorAll(".nav-btn").forEach((b) => {
 });
 
 document.getElementById("btnRefresh").addEventListener("click", refreshState);
-document.getElementById("btnNewTask").addEventListener("click", () => openModal("taskModal"));
+document.getElementById("btnNewTask").addEventListener("click", () => {
+  fillDispatchCandidates();
+  openModal("taskModal");
+});
+document.getElementById("tfTargetPick").addEventListener("change", applyDispatchPick);
+document.getElementById("agentModal").addEventListener("click", (e) => {
+  if (e.target && e.target.id === "copyPromptBtn") copyOnboardingPrompt();
+});
+document.getElementById("agentForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const node = document.getElementById("afNode").value.trim();
+  const access = document.getElementById("afAccess").value;
+  const role = document.getElementById("afRole").value;
+  const displayName = document.getElementById("afName").value.trim();
+  const adminNote = document.getElementById("afNote").value.trim();
+  const description = document.getElementById("afDesc").value.trim();
+  if (!node) { showToast("请填写节点名"); return; }
+  if (displayName.length > 64) { showToast("显示名不能超过 64 个字符"); return; }
+  if (adminNote.length > 500) { showToast("备注不能超过 500 个字符"); return; }
+  if (access !== "http" && access !== "host" && access !== "inbox") { showToast("接入方式不合法"); return; }
+  if (role !== "worker" && role !== "leader" && role !== "hybrid") { showToast("角色不合法"); return; }
+  const body = { node, access, role };
+  if (displayName) body.display_name = displayName;
+  if (adminNote) body.admin_note = adminNote;
+  if (description) body.description = description;
+  try {
+    const res = await api("/api/v1/admin/agents", { method: "POST", body: JSON.stringify(body) });
+    if (!res || res.ok !== true) {
+      showToast("添加 Agent 失败: 响应不是 ok");
+      return;
+    }
+    const ob = res.onboarding;
+    const box = document.getElementById("onboardBox");
+    const complete = ob && Array.isArray(ob.steps) && Array.isArray(ob.skills) && typeof ob.prompt === "string";
+    if (!complete) {
+      if (box) box.innerHTML = "";
+      showToast("Agent 已提交，但 onboarding 结构不完整");
+    } else if (box) {
+      box.innerHTML = renderOnboarding(ob, res.card || null);
+      showToast("已添加 Agent " + (res.node || node));
+    }
+    if (res.card) state.cardFilter = "admitted";
+    await refreshState();
+  } catch (err) {
+    showToast("添加 Agent 失败: " + err.message);
+  }
+});
+document.getElementById("profileForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const capId = document.getElementById("pfCap").value;
+  const displayName = document.getElementById("pfName").value.trim();
+  const adminNote = document.getElementById("pfNote").value.trim();
+  if (!capId) { showToast("缺少名片 Cap_ID"); return; }
+  if (displayName.length > 64) { showToast("显示名不能超过 64 个字符"); return; }
+  if (adminNote.length > 500) { showToast("备注不能超过 500 个字符"); return; }
+  try {
+    const res = await api("/api/v1/admin/cards/" + encodeURIComponent(capId) + "/profile", {
+      method: "PATCH",
+      body: JSON.stringify({ display_name: displayName, admin_note: adminNote }),
+    });
+    if (!res || res.ok !== true || !res.card) {
+      showToast("保存名片资料失败: 响应不完整");
+      return;
+    }
+    closeModal("profileModal");
+    showToast("已更新名片资料");
+    await refreshState();
+  } catch (err) {
+    showToast("保存名片资料失败: " + err.message);
+  }
+});
 document.getElementById("btnNewLoop").addEventListener("click", openLoopModal);
 document.getElementById("btnToken").addEventListener("click", () => {
   document.getElementById("tokenInput").value = state.token;
