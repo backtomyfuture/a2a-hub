@@ -8,6 +8,14 @@ const DEFAULT_STALE_NODE_MS = 90_000;
 export const NODE_EXPIRE_MS = 24 * 60 * 60 * 1000;
 // 检查脚本大约 2～5 分钟碰一次；没有脚本时大约 10～15 分钟。无名片且超过 30 分钟没活动，视为幽灵，不进名册。
 export const ROSTER_IDLE_MS = 30 * 60 * 1000;
+// 定时唤醒的 HTTP Agent 两次报到之间本来就隔几分钟，不能套用长轮询守护进程的 90 秒判离线。
+// 一次运行里会连发 check / poll / claim 等请求，间隔短于这个值的视为同一轮，不计入唤醒周期。
+const RUN_BURST_MS = 30_000;
+// 还没观测到周期时（如 Hub 刚重启），按最慢的回退频率 15 分钟留余量。
+const DEFAULT_AGENT_WINDOW_MS = 16 * 60 * 1000;
+const MIN_AGENT_WINDOW_MS = 3 * 60 * 1000;
+// 错过两次左右唤醒才算离线。
+const AGENT_WINDOW_FACTOR = 2.5;
 
 // 有名片的节点离线也要留在名册里。没有名片时，只保留 30 分钟内活动过的在线记录。
 export function rosterNodeVisible(info, hasCard, now = Date.now()) {
@@ -121,9 +129,20 @@ export class LongPollBroker {
       mode: "longpoll",
       role: "",
     };
+    const now = Date.now();
+    let intervalMs = prev.intervalMs || 0;
+    let runStartAt = prev.runStartAt || now;
+    if (this._nodes.has(key) && now - (Number(prev.lastSeenAt) || now) >= RUN_BURST_MS) {
+      // 周期按两轮的首个请求相减，一轮里请求多少不影响结果；再取平滑，偶尔晚到不会让窗口大起大落。
+      const gap = now - (Number(prev.runStartAt) || Number(prev.lastSeenAt) || now);
+      intervalMs = intervalMs ? Math.round((intervalMs + gap) / 2) : gap;
+      runStartAt = now;
+    }
     const next = {
       ...prev,
-      lastSeenAt: Date.now(),
+      intervalMs,
+      runStartAt,
+      lastSeenAt: now,
       lastPollAt: Date.now(),
       cursor: Number.isFinite(Number(cursor)) ? Number(cursor) : prev.cursor,
       remoteAddr: remoteAddr || prev.remoteAddr,
@@ -205,12 +224,19 @@ export class LongPollBroker {
     });
   }
 
+  // 长轮询节点断线就该立刻显示离线；定时 HTTP Agent 按观测到的唤醒周期放宽，上限与名册保留期一致。
+  onlineWindowMs(info) {
+    if ((info?.mode || "longpoll") !== "http-poll") return this.staleNodeMs;
+    const base = info.intervalMs ? info.intervalMs * AGENT_WINDOW_FACTOR : DEFAULT_AGENT_WINDOW_MS;
+    return Math.min(ROSTER_IDLE_MS, Math.max(this.staleNodeMs, MIN_AGENT_WINDOW_MS, base));
+  }
+
   connectedNodes(now = Date.now()) {
     this._purgeExpiredNodes(now);
     const out = [];
     for (const info of this._nodes.values()) {
       const polling = info.activeWaiters > 0;
-      const online = polling || (now - info.lastSeenAt) <= this.staleNodeMs;
+      const online = polling || (now - info.lastSeenAt) <= this.onlineWindowMs(info);
       out.push({
         node: info.node,
         online,
@@ -223,6 +249,7 @@ export class LongPollBroker {
         kind: info.kind || "host",
         mode: info.mode || "longpoll",
         role: info.role || "",
+        intervalSec: info.intervalMs ? Math.round(info.intervalMs / 1000) : null,
       });
     }
     return out.sort((a, b) => a.node.localeCompare(b.node));
