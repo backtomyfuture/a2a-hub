@@ -8,6 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { acceptanceFromParts, parseCriteria } from "../acceptance.mjs";
+import { attachmentsView, normalizeAttachments } from "../attachments.mjs";
 import { pickSignedDecision, publicKeyOf } from "../approval-sign.mjs";
 import { f1 } from "../bus/tables.mjs";
 import { capIdOf } from "../config.mjs";
@@ -290,7 +291,13 @@ function preflightAuthRequest(taskMsgs, partsByParent) {
   return null;
 }
 
-function buildTaskBrief(task, taskMsgs, partsByParent, artsByTask) {
+// 附件视图要带 hubUrl（拼下载地址）与 fileStore（取 size / deleted），都可缺省。
+function attachmentsOfMsg(msgId, partsByParent, view) {
+  if (!msgId) return [];
+  return attachmentsView(partsByParent.get(msgId) ?? [], view?.hubUrl ?? "", view?.fileStore ?? null);
+}
+
+function buildTaskBrief(task, taskMsgs, partsByParent, artsByTask, view = {}) {
   const taskId = f1(task, "Task_ID");
   const instr = instructionOfTask(taskMsgs, partsByParent);
   const fromNode = instr.fromNode || String(f1(task, "Source") ?? "").trim();
@@ -307,6 +314,7 @@ function buildTaskBrief(task, taskMsgs, partsByParent, artsByTask) {
 
   const resultMsg = latestOf("result");
   const questionMsg = latestOf("question");
+  const answerMsg = latestOf("answer");
   const authReqMsg = latestOf("auth_request");
   const noticeMsg = latestOf("notice");
   const metadata = parseJson(f1(task, "Metadata"), {});
@@ -322,13 +330,7 @@ function buildTaskBrief(task, taskMsgs, partsByParent, artsByTask) {
 
   const artifacts = (artsByTask.get(taskId) ?? []).map((a) => {
     const artId = f1(a, "Artifact_ID");
-    const files = (partsByParent.get(artId) ?? [])
-      .filter((p) => f1(p, "Kind") === "file")
-      .map((p) => ({
-        file_uri: f1(p, "File_URI"),
-        file_name: f1(p, "File_Name"),
-        mime_type: f1(p, "Mime_Type"),
-      }));
+    const files = attachmentsOfMsg(artId, partsByParent, view);
     return {
       artifact_id: artId,
       name: f1(a, "Name"),
@@ -354,11 +356,15 @@ function buildTaskBrief(task, taskMsgs, partsByParent, artsByTask) {
     status_msg: f1(task, "Status_Msg"),
     latest_run: f1(task, "Latest_Run"),
     instruction: instr.text,
+    instruction_attachments: attachmentsOfMsg(instr.msgId, partsByParent, view),
     params: instr.params,
     criteria: instr.criteria,
     result_text: resultMsg?.text || "",
     question_text: questionMsg?.text || "",
     auth_text: authReqMsg?.text || "",
+    question_attachments: attachmentsOfMsg(questionMsg?.msg_id, partsByParent, view),
+    answer_attachments: attachmentsOfMsg(answerMsg?.msg_id, partsByParent, view),
+    auth_attachments: attachmentsOfMsg(authReqMsg?.msg_id, partsByParent, view),
     notice_text: noticeMsg?.text || "",
     acceptance,
     artifacts,
@@ -421,7 +427,7 @@ async function ensurePreflightAuth({ bus, task, taskMsgs, partsByParent, verifyK
   return { ready: false, pending: true, requestId: reqId };
 }
 
-async function claimTaskForNode({ bus, node, taskId, worker = "", verifyKey, onWake }) {
+async function claimTaskForNode({ bus, node, taskId, worker = "", verifyKey, onWake, view = {} }) {
   const [tasks, messages, parts] = await Promise.all([
     bus.listRecords(bus.tables.tasks),
     bus.listRecords(bus.tables.messages),
@@ -447,6 +453,7 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", verifyKey, onW
       status: "working",
       run_id: f1(task, "Latest_Run"),
       instruction: instr.text,
+      instruction_attachments: attachmentsOfMsg(instr.msgId, partsByParent, view),
       params: instr.params,
       criteria: instr.criteria,
     };
@@ -491,6 +498,7 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", verifyKey, onW
       status: "working",
       run_id: runId,
       instruction: instr.text,
+      instruction_attachments: attachmentsOfMsg(instr.msgId, partsByParent, view),
       params: instr.params,
       criteria: instr.criteria,
     };
@@ -506,6 +514,7 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", verifyKey, onW
         from_node: f1(m, "From_Node"),
         created_at: f1(m, "Created_At"),
         ...messageTextAndData(f1(m, "Msg_ID"), partsByParent),
+        attachments: attachmentsOfMsg(f1(m, "Msg_ID"), partsByParent, view),
       }));
     if (!answers.length) throw httpError(409, "任务处于 input-required，尚无新答复");
 
@@ -523,6 +532,7 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", verifyKey, onW
       status: "working",
       run_id: f1(task, "Latest_Run"),
       instruction: instr.text,
+      instruction_attachments: attachmentsOfMsg(instr.msgId, partsByParent, view),
       params: instr.params,
       criteria: instr.criteria,
       answers,
@@ -550,6 +560,7 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", verifyKey, onW
       status: "working",
       run_id: f1(task, "Latest_Run"),
       instruction: instr.text,
+      instruction_attachments: attachmentsOfMsg(instr.msgId, partsByParent, view),
       params: instr.params,
       criteria: instr.criteria,
     };
@@ -558,7 +569,7 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", verifyKey, onW
   throw httpError(409, `任务当前状态为 ${st}，不可认领`);
 }
 
-async function collectAgentMailbox({ bus, node, verifyKey, onWake, includeUpdates = true, touchPreflight = false }) {
+async function collectAgentMailbox({ bus, node, verifyKey, onWake, includeUpdates = true, touchPreflight = false, view = {} }) {
   const [tasks, messages, parts, artifacts] = await Promise.all([
     bus.listRecords(bus.tables.tasks),
     bus.listRecords(bus.tables.messages),
@@ -586,12 +597,12 @@ async function collectAgentMailbox({ bus, node, verifyKey, onWake, includeUpdate
           const reqId = reqMsg ? f1(reqMsg, "Msg_ID") : "";
           const decision = reqId ? signedDecisionFor(taskId, taskMsgs, partsByParent, reqId, verifyKey) : null;
           if (decision === "approve") {
-            actionable.push({ action: "execute", ...buildTaskBrief(task, taskMsgs, partsByParent, artsByTask) });
+            actionable.push({ action: "execute", ...buildTaskBrief(task, taskMsgs, partsByParent, artsByTask, view) });
           } else if (touchPreflight && decision !== "reject" && decision !== "deny") {
             await ensurePreflightAuth({ bus, task, taskMsgs, partsByParent, verifyKey, onWake });
           }
         } else {
-          actionable.push({ action: "execute", ...buildTaskBrief(task, taskMsgs, partsByParent, artsByTask) });
+          actionable.push({ action: "execute", ...buildTaskBrief(task, taskMsgs, partsByParent, artsByTask, view) });
         }
       } else if (st === "input-required" && claimed === node) {
         const statusMsg = String(f1(task, "Status_Msg") ?? "").trim();
@@ -602,13 +613,14 @@ async function collectAgentMailbox({ bus, node, verifyKey, onWake, includeUpdate
             from_node: f1(m, "From_Node"),
             created_at: f1(m, "Created_At"),
             ...messageTextAndData(f1(m, "Msg_ID"), partsByParent),
+            attachments: attachmentsOfMsg(f1(m, "Msg_ID"), partsByParent, view),
           }));
         if (answers.length) {
           actionable.push({
             action: "resume",
             resume_reason: "answer",
             answers,
-            ...buildTaskBrief(task, taskMsgs, partsByParent, artsByTask),
+            ...buildTaskBrief(task, taskMsgs, partsByParent, artsByTask, view),
           });
         }
       } else if (st === "auth-required" && claimed === node) {
@@ -619,7 +631,7 @@ async function collectAgentMailbox({ bus, node, verifyKey, onWake, includeUpdate
             action: "resume",
             resume_reason: "auth_decision",
             decision,
-            ...buildTaskBrief(task, taskMsgs, partsByParent, artsByTask),
+            ...buildTaskBrief(task, taskMsgs, partsByParent, artsByTask, view),
           });
         }
       }
@@ -633,7 +645,7 @@ async function collectAgentMailbox({ bus, node, verifyKey, onWake, includeUpdate
       const instr = instructionOfTask(taskMsgs, partsByParent);
       const initiator = instr.fromNode || f1(task, "Source");
       if (initiator === node) {
-        updates.push(buildTaskBrief(task, taskMsgs, partsByParent, artsByTask));
+        updates.push(buildTaskBrief(task, taskMsgs, partsByParent, artsByTask, view));
       }
     }
   }
@@ -642,7 +654,7 @@ async function collectAgentMailbox({ bus, node, verifyKey, onWake, includeUpdate
 }
 
 // 与 GET updates 同一口径，含仍待处理的 input-required / auth-required。调用方决定要不要写水位。
-async function listSelectableLeaderUpdates(bus, node, { wantedStatuses = LEADER_UPDATE_STATUSES, threshold = null } = {}) {
+async function listSelectableLeaderUpdates(bus, node, { wantedStatuses = LEADER_UPDATE_STATUSES, threshold = null, view = {} } = {}) {
   const [tasks, messages, parts, artifacts] = await Promise.all([
     bus.listRecords(bus.tables.tasks),
     bus.listRecords(bus.tables.messages),
@@ -658,7 +670,7 @@ async function listSelectableLeaderUpdates(bus, node, { wantedStatuses = LEADER_
     const instr = instructionOfTask(taskMsgs, partsByParent);
     const initiator = instr.fromNode || f1(task, "Source");
     if (initiator !== node) continue;
-    const brief = buildTaskBrief(task, taskMsgs, partsByParent, artsByTask);
+    const brief = buildTaskBrief(task, taskMsgs, partsByParent, artsByTask, view);
     // 只取任务行和它的消息行。Parts 是另一张表，不能把无关写入算进这条任务的变更。
     out.push({ ...brief, changed_seq: changedSeqOf(task, taskMsgs) });
   }
@@ -702,8 +714,12 @@ export async function handleAgentGatewayRequest({
   discoverOnly = false,
   principal = null,
   webhookStore = null,
+  hubUrl = "",
+  fileStore = null,
 } = {}) {
   const remoteAddr = req.socket?.remoteAddress || "";
+  // 任务视图里的附件要拼下载地址、取大小与过期标记。
+  const view = { hubUrl, fileStore };
   const verifyKey = approvalVerifyKey(cfg, approval);
 
   // 0) A2A Hub 元数据发现端点（免鉴权只读，不泄露密钥与任务内容）
@@ -1036,6 +1052,7 @@ export async function handleAgentGatewayRequest({
         onWake,
         includeUpdates: false,
         touchPreflight: false,
+        view,
       });
       payload.tasks = mailbox.actionable.map((item) => item.task_id);
       payload.working = mailbox.working;
@@ -1043,7 +1060,7 @@ export async function handleAgentGatewayRequest({
     }
     if (scope.leader) {
       const watermark = await readUpdatesWatermark(bus, node);
-      const updates = await listSelectableLeaderUpdates(bus, node, { threshold: watermark });
+      const updates = await listSelectableLeaderUpdates(bus, node, { threshold: watermark, view });
       payload.updates = updates.length;
       if (payload.updates > 0) payload.work = true;
     }
@@ -1081,6 +1098,7 @@ export async function handleAgentGatewayRequest({
       onWake,
       includeUpdates,
       touchPreflight: true,
+      view,
     });
     let wake = mailbox.actionable.length > 0 || (includeUpdates && mailbox.updates.length > 0);
     let nextCursor = broker?.latestSeq ?? cursor;
@@ -1100,6 +1118,7 @@ export async function handleAgentGatewayRequest({
             onWake,
             includeUpdates,
             touchPreflight: true,
+            view,
           });
           wake = true;
         }
@@ -1121,6 +1140,7 @@ export async function handleAgentGatewayRequest({
             worker: body.worker || "http-agent",
             verifyKey,
             onWake,
+            view,
           });
           claimed.push({ ...t, ...resClaim, claimed: true });
         } catch {
@@ -1177,7 +1197,7 @@ export async function handleAgentGatewayRequest({
       role: "leader",
     });
 
-    const queryUpdates = () => listSelectableLeaderUpdates(bus, node, { wantedStatuses, threshold });
+    const queryUpdates = () => listSelectableLeaderUpdates(bus, node, { wantedStatuses, threshold, view });
 
     let list = await queryUpdates();
     let wake = list.length > 0;
@@ -1248,7 +1268,7 @@ export async function handleAgentGatewayRequest({
       if (status && f1(task, "Status") !== status) continue;
       if (contextId && f1(task, "Context_ID") !== contextId) continue;
       const taskMsgs = msgByTask.get(f1(task, "Task_ID")) ?? [];
-      const brief = buildTaskBrief(task, taskMsgs, partsByParent, artsByTask);
+      const brief = buildTaskBrief(task, taskMsgs, partsByParent, artsByTask, view);
       if (from && brief.from_node !== from && brief.source !== from) continue;
       // Agent 身份看不见与自己无关的任务；机主列表保持全量。
       if (!agentCanSeeTask(principal, brief.from_node, brief.source, brief.target_node)) continue;
@@ -1276,6 +1296,7 @@ export async function handleAgentGatewayRequest({
         worker: String(body.worker ?? "").trim(),
         verifyKey,
         onWake,
+        view,
       });
       sendJson(res, 200, result);
       return true;
@@ -1330,6 +1351,18 @@ export async function handleAgentGatewayRequest({
       throw httpError(400, `${action} 必须提供非空 text`);
     }
     const checks = op === "done" ? normalizeChecksInput(body.checks) : undefined;
+    // ask / auth 的附件挂在 question / auth_request 消息上；complete / fail 的交付物走 artifacts。
+    let attachments = [];
+    if (op === "ask" || op === "auth") {
+      attachments = normalizeAttachments(body.attachments, { fileStore });
+    } else if (body.attachments !== undefined && body.attachments !== null) {
+      throw httpError(400, `${action} 不接收 attachments，请用 artifacts 交付文件`);
+    }
+    // 新字段 artifacts 逐项校验；旧字段 artifact 字符串保持原样兼容（等价于一个元素，可能是本地路径）。
+    let artifacts = [];
+    if (op === "done" || op === "fail") {
+      artifacts = normalizeAttachments(body.artifacts, { fileStore });
+    }
     try {
       const receipt = await submitAgentReceipt({
         bus,
@@ -1337,6 +1370,8 @@ export async function handleAgentGatewayRequest({
         taskId,
         text,
         artifact: String(body.artifact ?? "").trim(),
+        artifacts,
+        attachments,
         op,
         checks,
       });

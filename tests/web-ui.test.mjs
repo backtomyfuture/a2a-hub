@@ -99,7 +99,7 @@ test("控制台包含新术语结构、接收方式、添加能力、闭环分�
 });
 
 // 构造轻量模拟 DOM/fetch 沙箱运行内嵌脚本，直接验证表单提交 payload、节点分层渲染与定时任务页逻辑。
-function runInlineConsole(fetchHandler) {
+function runInlineConsole(fetchHandler, extra = {}) {
   const html = renderWebConsoleHtml();
   const scriptMatch = html.match(/<script>([\s\S]*?)<\/script>/);
   assert.ok(scriptMatch);
@@ -111,6 +111,7 @@ function runInlineConsole(fetchHandler) {
       this.value = "";
       this.checked = false;
       this.open = false;
+      this.disabled = false;
       this.style = {};
       this.dataset = {};
       this._innerHTML = "";
@@ -161,6 +162,8 @@ function runInlineConsole(fetchHandler) {
     querySelector() { return null; }
     closest() { return null; }
     appendChild(c) { this.children.push(c); }
+    removeChild(c) { this.children = this.children.filter((x) => x !== c); }
+    click() { if (typeof extra.onAnchorClick === "function") extra.onAnchorClick(this); }
     reset() { this.value = ""; }
   }
 
@@ -191,6 +194,7 @@ function runInlineConsole(fetchHandler) {
   const docListeners = new Map();
   const fakeDoc = {
     documentElement: new FakeElement("html"),
+    body: new FakeElement("body"),
     getElementById: (id) => getEl(id),
     querySelectorAll: (sel) => {
       if (sel === "#lfStageBindings .stage-bind-row") {
@@ -210,6 +214,16 @@ function runInlineConsole(fetchHandler) {
         }
         return rows;
       }
+      if (sel === "[data-hub-preview-id]") {
+        const contentHtml = getEl("content").innerHTML;
+        const found = [];
+        const re = /data-hub-preview-id="([^"]+)"/g;
+        let m;
+        while ((m = re.exec(contentHtml)) !== null) {
+          found.push({ dataset: { hubPreviewId: m[1] } });
+        }
+        return found;
+      }
       return [];
     },
     createElement: (tag) => new FakeElement(tag),
@@ -219,6 +233,7 @@ function runInlineConsole(fetchHandler) {
     },
   };
   const store = new Map();
+  if (extra.token) store.set("a2a_hub_token", extra.token);
   const sandbox = {
     console,
     Date,
@@ -232,6 +247,7 @@ function runInlineConsole(fetchHandler) {
     Map,
     JSON,
     Promise,
+    Error,
     URLSearchParams,
     encodeURIComponent,
     decodeURIComponent,
@@ -251,6 +267,7 @@ function runInlineConsole(fetchHandler) {
       }
       return fetchHandler(url, opts);
     },
+    ...(extra.globals || {}),
   };
   // 屏蔽脚本尾部自动 startLongPoll 的死循环挂起，改为暴露内部方法供测试直接调用
   const patchedScript = scriptMatch[1].replace("startLongPoll();", "");
@@ -563,4 +580,333 @@ test("startHubHttpServer GET / 返回可用控制台 HTML", async () => {
       bus.close();
     }
   });
+});
+
+test("控制台附件静态约束：包含上传控件与函数、不把 token 拼进文件 URL、svg 不在内嵌白名单", () => {
+  const html = renderWebConsoleHtml();
+
+  // 建单与答复上传控件、图片预览弹窗
+  assert.match(html, /id="tfFiles"[^>]*multiple/);
+  assert.match(html, /id="tfFileList"/);
+  assert.match(html, /id="replyFiles"[^>]*multiple/);
+  assert.match(html, /id="replyFileList"/);
+  assert.match(html, /id="imagePreviewModal"/);
+  assert.match(html, /max-height:\s*160px/);
+
+  // 关键附件辅助函数存在
+  for (const fn of [
+    "parseHubFileId",
+    "isInlineImageMime",
+    "renderAttachmentItem",
+    "fetchHubImagePreview",
+    "downloadHubFile",
+    "uploadHubFile",
+    "uploadDraftFilesSequentially",
+    "revokeAttachmentObjectUrls",
+  ]) {
+    assert.ok(html.includes(`function ${fn}`), `缺少函数 ${fn}`);
+  }
+
+  // svg 绝不能进入内嵌白名单
+  const whitelistMatch = html.match(/const INLINE_IMAGE_MIMES = new Set\(\[([^\]]+)\]\)/);
+  assert.ok(whitelistMatch, "应定义 INLINE_IMAGE_MIMES 白名单");
+  assert.equal(/svg/i.test(whitelistMatch[1]), false, "SVG 不应在内嵌白名单中");
+  for (const mime of ["image/png", "image/jpeg", "image/gif", "image/webp"]) {
+    assert.ok(whitelistMatch[1].includes(mime), `白名单应包含 ${mime}`);
+  }
+
+  // 安全：不把 token 拼入文件 URL，也不直接把 /api/v1/files 填进 img src 或 a href
+  assert.equal(/\/api\/v1\/files\/[^'"`\n]*[?&]token=/i.test(html), false);
+  assert.equal(/<img[^>]*\/api\/v1\/files\//i.test(html), false);
+  assert.equal(/<a[^>]*href=[^>]*\/api\/v1\/files\//i.test(html), false);
+  assert.match(html, /rel="noopener noreferrer"/);
+
+  // 建单允许只带附件：描述框不再 required，提交时改为「文字或附件至少一个」
+  assert.equal(/id="tfText"[^>]*required/.test(html), false);
+  assert.ok(html.includes("请填写任务描述，或至少附上一个文件"));
+  // 详情接口标了 deleted 的文件直接按 410 展示
+  assert.ok(html.includes("file.deleted === true"));
+});
+
+test("控制台内嵌脚本：附件展示、Bearer 取图预览、SVG 走下载、410/404 提示、离开详情 revokeObjectURL", async () => {
+  const fetchCalls = [];
+  const createdUrls = [];
+  const revokedUrls = [];
+  const clickedAnchors = [];
+  let blobSeq = 0;
+
+  const sampleState = {
+    hubNode: "mac-hub",
+    seq: 1,
+    connectedNodes: [],
+    agentCards: [],
+    tasks: [
+      { task_id: "TASK-ATT-1", title: "附件展示测试", target_node: "worker-1", skill_id: "agent", status: "input-required" },
+      { task_id: "TASK-ATT-2", title: "另一任务", target_node: "worker-1", skill_id: "agent", status: "completed" },
+    ],
+    loops: [],
+  };
+
+  const detail1 = {
+    task: sampleState.tasks[0],
+    messages: [
+      {
+        msg_id: "MSG-1",
+        kind: "instruction",
+        role: "user",
+        from_node: "mac-hub",
+        to_node: "worker-1",
+        created_at: "2026-11-18 10:00",
+        parts: [
+          { kind: "text", text: "请看附图" },
+          { kind: "file", file_uri: "hub://files/F-img1", file_name: 'pic"><img src=x>.png', mime_type: "image/png" },
+          { kind: "file", file_uri: "hub://files/F-svg1", file_name: "vector.svg", mime_type: "image/svg+xml" },
+          { kind: "file", file_uri: "hub://files/F-gone", file_name: "expired.png", mime_type: "image/png" },
+          { kind: "file", file_uri: "hub://files/F-miss", file_name: "denied.jpg", mime_type: "image/jpeg" },
+        ],
+      },
+    ],
+    artifacts: [
+      {
+        artifact_id: "ART-1",
+        name: "交付物",
+        description: "含托管与外链",
+        files: [
+          { file_uri: "hub://files/F-pdf1", file_name: "report.pdf", mime_type: "application/pdf" },
+          { file_uri: "https://example.com/spec.txt", file_name: "spec.txt", mime_type: "text/plain" },
+          { file_uri: "javascript:alert(1)", file_name: "bad.js", mime_type: "text/javascript" },
+        ],
+      },
+    ],
+    runs: [],
+  };
+
+  const { sandbox, getEl } = runInlineConsole(
+    async (url, opts = {}) => {
+      fetchCalls.push({ url, opts });
+      const headers = opts.headers || {};
+      const jsonRes = (status, data) => ({ status, ok: status >= 200 && status < 300, json: async () => data });
+      if (url === "/api/v1/state") return jsonRes(200, sampleState);
+      if (url === "/api/v1/admin/tokens") return jsonRes(404, {});
+      if (url === "/api/v1/admin/webhooks") return jsonRes(404, {});
+      if (url === "/api/v1/schedules") return jsonRes(404, {});
+      if (url === "/api/v1/tasks/TASK-ATT-1") return jsonRes(200, detail1);
+      if (url === "/api/v1/tasks/TASK-ATT-2") {
+        return jsonRes(200, { task: sampleState.tasks[1], messages: [], artifacts: [], runs: [] });
+      }
+      if (url === "/api/v1/files/F-img1?inline=1") {
+        assert.equal(headers.Authorization, "Bearer tok_secret_ui");
+        return { status: 200, ok: true, blob: async () => ({ type: "image/png", size: 128 }) };
+      }
+      if (url === "/api/v1/files/F-gone?inline=1") {
+        return jsonRes(410, { error: "文件已过期清理" });
+      }
+      if (url === "/api/v1/files/F-miss?inline=1") {
+        return jsonRes(404, { error: "Not Found" });
+      }
+      if (url === "/api/v1/files/F-pdf1") {
+        assert.equal(headers.Authorization, "Bearer tok_secret_ui");
+        return { status: 200, ok: true, blob: async () => ({ type: "application/pdf", size: 256 }) };
+      }
+      return jsonRes(404, { error: "Not Found" });
+    },
+    {
+      token: "tok_secret_ui",
+      onAnchorClick: (a) => clickedAnchors.push({ href: a.href, download: a.download }),
+      globals: {
+        URL: {
+          createObjectURL: (blob) => {
+            const u = `blob:mock/${++blobSeq}`;
+            createdUrls.push({ url: u, blob });
+            return u;
+          },
+          revokeObjectURL: (u) => revokedUrls.push(u),
+        },
+      },
+    },
+  );
+
+  await vm.runInContext("refreshState()", sandbox);
+  await vm.runInContext('jumpToTask("TASK-ATT-1")', sandbox);
+  // 等待微任务队列让 fetchHubImagePreview 完成
+  await new Promise((r) => setTimeout(r, 20));
+  await vm.runInContext("render()", sandbox);
+
+  const taskHtml = getEl("content").innerHTML;
+  // XSS 转义：文件名中的 "><img src=x> 必须被 esc() 转义
+  assert.equal(taskHtml.includes('"><img src=x>'), false);
+  assert.match(taskHtml, /pic&quot;&gt;&lt;img src=x&gt;\.png/);
+  // 白名单图片使用 blob objectUrl 渲染缩略图
+  assert.match(taskHtml, /<img class="att-thumb" src="blob:mock\/1"/);
+  // SVG 不在内嵌白名单中，仅显示下载按钮，不渲染 <img>
+  assert.equal(sandbox.isInlineImageMime("image/svg+xml"), false);
+  assert.match(taskHtml, /vector\.svg/);
+  assert.match(taskHtml, /data-action="download-hub-file" data-file-id="F-svg1"/);
+  // 410 / 404 状态文本
+  assert.match(taskHtml, /已过期清理/);
+  assert.match(taskHtml, /无法访问/);
+  // 外链带 rel="noopener noreferrer" 且 target="_blank"；javascript: 链接绝不生成 <a>
+  assert.match(taskHtml, /<a[^>]*href="https:\/\/example\.com\/spec\.txt"[^>]*target="_blank"[^>]*rel="noopener noreferrer"/);
+  assert.equal(taskHtml.includes('href="javascript:alert(1)"'), false);
+  // 所有文件请求 URL 均不含 token
+  for (const c of fetchCalls) {
+    assert.equal(String(c.url).includes("tok_secret_ui"), false);
+  }
+
+  // 非图片下载：fetch + blob + 临时 <a download>
+  await vm.runInContext('downloadHubFile("F-pdf1", "report.pdf")', sandbox);
+  assert.equal(clickedAnchors.length, 1);
+  assert.equal(clickedAnchors[0].download, "report.pdf");
+  assert.match(clickedAnchors[0].href, /^blob:mock\//);
+
+  // 离开任务详情（切换视图）应 revokeObjectURL
+  await vm.runInContext('state.view = "overview"; render();', sandbox);
+  assert.ok(revokedUrls.includes("blob:mock/1"), "离开详情时应释放图片 preview objectUrl");
+});
+
+test("控制台内嵌脚本：建单与答复多选文件上传（超 100MB 拦截、进度上传、失败阻断、空文本带附件答复）", async () => {
+  const xhrCalls = [];
+  const fetchCalls = [];
+  let xhrBehavior = "ok";
+  let fileSeq = 0;
+
+  class MockXHR {
+    constructor() {
+      this.headers = {};
+      this.upload = {};
+      this.status = 0;
+      this.responseText = "";
+    }
+    open(method, url) {
+      this.method = method;
+      this.url = url;
+    }
+    setRequestHeader(k, v) {
+      this.headers[k] = v;
+    }
+    send(body) {
+      xhrCalls.push({ method: this.method, url: this.url, headers: { ...this.headers }, body });
+      if (typeof this.upload.onprogress === "function") {
+        this.upload.onprogress({ lengthComputable: true, loaded: 50, total: 100 });
+      }
+      if (xhrBehavior === "fail-on-second" && xhrCalls.length === 2) {
+        this.status = 413;
+        this.responseText = JSON.stringify({ error: "超过服务端大小上限" });
+        this.onload();
+        return;
+      }
+      if (xhrBehavior === "fail-reply") {
+        this.status = 500;
+        this.responseText = JSON.stringify({ error: "存储不可用" });
+        this.onload();
+        return;
+      }
+      const id = `F-${++fileSeq}`;
+      this.status = 201;
+      this.responseText = JSON.stringify({
+        file_id: id,
+        uri: `hub://files/${id}`,
+        name: body.name,
+        mime: body.type || "application/octet-stream",
+        size: body.size,
+      });
+      this.onload();
+    }
+  }
+
+  const sampleState = {
+    hubNode: "mac-hub",
+    seq: 2,
+    connectedNodes: [],
+    agentCards: [
+      {
+        cap_id: "CAP-w1", node: "worker-1", worker: "", skill_id: "agent",
+        skill_name: "Worker", admission: "admitted", dispatchable: "Yes",
+      },
+    ],
+    tasks: [
+      { task_id: "TASK-Q-1", title: "待答复任务", target_node: "worker-1", skill_id: "agent", status: "input-required" },
+    ],
+    loops: [],
+  };
+
+  const { sandbox, getEl } = runInlineConsole(
+    async (url, opts = {}) => {
+      const method = (opts.method || "GET").toUpperCase();
+      const body = opts.body ? JSON.parse(opts.body) : null;
+      fetchCalls.push({ url, method, body });
+      const jsonRes = (status, data) => ({ status, ok: status >= 200 && status < 300, json: async () => data });
+      if (url === "/api/v1/state") return jsonRes(200, sampleState);
+      if (url === "/api/v1/admin/tokens") return jsonRes(404, {});
+      if (url === "/api/v1/admin/webhooks") return jsonRes(404, {});
+      if (url === "/api/v1/schedules") return jsonRes(404, {});
+      if (url === "/api/v1/tasks/TASK-Q-1") {
+        return jsonRes(200, { task: sampleState.tasks[0], messages: [], artifacts: [], runs: [] });
+      }
+      if (url === "/api/v1/tasks" && method === "POST") return jsonRes(201, { task_id: "TASK-NEW-1" });
+      if (url === "/api/v1/tasks/TASK-Q-1/reply" && method === "POST") return jsonRes(200, { msg_id: "MSG-2" });
+      return jsonRes(404, { error: "Not Found" });
+    },
+    {
+      token: "tok_upload_1",
+      globals: { XMLHttpRequest: MockXHR },
+    },
+  );
+
+  await vm.runInContext("refreshState()", sandbox);
+
+  // 1) 超过 100MB 前端直接拦截
+  sandbox.__bigFile = { name: "huge.bin", size: 100 * 1024 * 1024 + 1, type: "application/octet-stream" };
+  await vm.runInContext('addDraftFiles("task", [__bigFile])', sandbox);
+  assert.equal(vm.runInContext("state.taskDraftFiles.length", sandbox), 0);
+  assert.match(getEl("tfFileErr").textContent, /100 MB/);
+
+  // 2) 上传失败阻断派发提交
+  sandbox.__f1 = { name: "notes 1.txt", size: 120, type: "text/plain" };
+  sandbox.__f2 = { name: "bad.bin", size: 240, type: "application/octet-stream" };
+  await vm.runInContext('addDraftFiles("task", [__f1, __f2])', sandbox);
+  assert.equal(vm.runInContext("state.taskDraftFiles.length", sandbox), 2);
+  getEl("tfTo").value = "worker-1";
+  getEl("tfCap").value = "agent";
+  getEl("tfText").value = "带附件派单";
+  xhrBehavior = "fail-on-second";
+  await getEl("taskForm").dispatch("submit");
+  assert.equal(fetchCalls.some((c) => c.url === "/api/v1/tasks" && c.method === "POST"), false, "任一上传失败不得提交任务");
+  assert.match(getEl("tfFileErr").textContent, /bad\.bin/);
+
+  // 移除失败文件后再重新添加一个合法文件并提交
+  const failedId = vm.runInContext("state.taskDraftFiles[1].id", sandbox);
+  await vm.runInContext(`removeDraftFile("task", ${JSON.stringify(failedId)})`, sandbox);
+  sandbox.__f3 = { name: "图.png", size: 300, type: "image/png" };
+  await vm.runInContext('addDraftFiles("task", [__f3])', sandbox);
+  xhrBehavior = "ok";
+  await getEl("taskForm").dispatch("submit");
+
+  const taskPost = fetchCalls.find((c) => c.url === "/api/v1/tasks" && c.method === "POST");
+  assert.ok(taskPost, "全部上传成功后应提交 POST /api/v1/tasks");
+  assert.deepEqual(taskPost.body.attachments, [{ file_id: "F-1" }, { file_id: "F-2" }]);
+  // 验证 X-File-Name URL 编码、Content-Type 与 Bearer 头
+  assert.equal(xhrCalls[0].headers["X-File-Name"], encodeURIComponent("notes 1.txt"));
+  assert.equal(xhrCalls[0].headers["Content-Type"], "text/plain");
+  assert.equal(xhrCalls[0].headers.Authorization, "Bearer tok_upload_1");
+  assert.equal(xhrCalls[2].headers["X-File-Name"], encodeURIComponent("图.png"));
+
+  // 3) 答复表单：上传失败不提交；有附件时允许 text 为空
+  await vm.runInContext('jumpToTask("TASK-Q-1")', sandbox);
+  await new Promise((r) => setTimeout(r, 10));
+  sandbox.__rf = { name: "reply.pdf", size: 512, type: "application/pdf" };
+  await vm.runInContext('addDraftFiles("reply", [__rf])', sandbox);
+  getEl("replyTextBox").value = "";
+
+  xhrBehavior = "fail-reply";
+  await vm.runInContext('replyTask("TASK-Q-1")', sandbox);
+  assert.equal(fetchCalls.some((c) => c.url === "/api/v1/tasks/TASK-Q-1/reply"), false);
+  assert.match(getEl("replyFileErr").textContent, /存储不可用/);
+
+  xhrBehavior = "ok";
+  await vm.runInContext('replyTask("TASK-Q-1")', sandbox);
+  const replyPost = fetchCalls.find((c) => c.url === "/api/v1/tasks/TASK-Q-1/reply" && c.method === "POST");
+  assert.ok(replyPost, "答复附件上传成功后应允许空文本提交");
+  assert.equal(replyPost.body.text, "");
+  assert.deepEqual(replyPost.body.attachments, [{ file_id: "F-3" }]);
 });

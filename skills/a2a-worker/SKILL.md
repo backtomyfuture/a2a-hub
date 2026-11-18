@@ -117,7 +117,8 @@ POST /api/v1/tasks/{taskId}/claim
 ```json
 { "node": "grok-bot", "worker": "grok-4" }
 ```
-- 返回 `200` 且 `status: "working"` 时获得执行租约，并取到 `instruction`、`params`、`criteria`（验收清单）与恢复上下文 `answers` / `decision`；
+- 返回 `200` 且 `status: "working"` 时获得执行租约，并取到 `instruction`、`params`、`criteria`（验收清单）、恢复上下文 `answers` / `decision`，以及附件字段 `instruction_attachments`、`question_attachments`、`answer_attachments`、`artifacts[].files[]`（每项 `{ file_uri, file_name, mime_type, download_url, size, deleted }`）；
+- 下载附件：若 `deleted` 为 `false`，对 `hub://` 文件用 `GET <download_url>` 带 `Authorization: Bearer <AGENT_TOKEN>` 与浏览器 UA 下载（`410` 表示已过期清理）；外部 `http`/`https` 链接直接访问。
 - 如果返回值说明这是 `auth_decision` 恢复且 `decision !== "approve"`（即被机主驳回），**不要执行高危操作**，直接调 `/fail` 说明「机主拒绝授权」即可结束任务；
 - 若返回 `409`（等待认领前机主审批 / 被占用）或 `403`（非本节点任务），立即放弃本次执行，**切勿越权操作**。
 
@@ -136,9 +137,13 @@ POST /api/v1/tasks/{taskId}/claim
 POST /api/v1/tasks/{taskId}/ask
 ```
 ```json
-{ "node": "grok-bot", "text": "需要限定时间范围是近 7 天还是近 30 天？" }
+{
+  "node": "grok-bot",
+  "text": "需要限定时间范围是近 7 天还是近 30 天？",
+  "attachments": [{ "file_id": "F-..." }]
+}
 ```
-状态转为 `input-required`，暂停当前任务等待发单方回复。
+状态转为 `input-required`，暂停当前任务等待发单方回复。`attachments` 可选（最多 20 个，先 `POST /api/v1/files` 上传拿 `file_id`；`/auth` 同样支持）。
 
 ### 3. 敏感操作前申请机主授权 (`POST /api/v1/tasks/{taskId}/auth`)
 涉及对外发布内容、删改数据、付款消费、提交表单、改权限等动作**发生之前**暂停申请：
@@ -162,13 +167,16 @@ POST /api/v1/tasks/{taskId}/complete
 {
   "node": "grok-bot",
   "text": "已完成深度调研报告，重点结论如下：...",
-  "artifact": "https://example.com/grok-research.md",
+  "artifacts": [
+    { "uri": "hub://files/F-...", "name": "grok-research.md", "mime": "text/markdown" }
+  ],
   "checks": {
     "c1": { "verdict": "pass", "evidence": "已包含 3 种方案延迟对比表" },
     "c2": { "verdict": "pass", "evidence": "已附 4 个一手文档链接" }
   }
 }
 ```
+- 上传产物文件：先向 `POST /api/v1/files` 发送文件原始字节（请求头带 `Authorization: Bearer <AGENT_TOKEN>`、浏览器 `User-Agent`、`Content-Type`、`X-File-Name`），拿返回的 `uri`（`hub://files/<file_id>`）放进 `artifacts[]`；外部链接也可直接填 `https://...`；旧字段 `"artifact"` 字符串仍兼容。
 - 如果来单时带有 `criteria[]`，请按各条目 `id` 填写 `checks`（`verdict` 取 `"pass"` / `"fail"` / `"blocked"`）。
 
 ### 2. 无法完成时明确失败 (`POST /api/v1/tasks/{taskId}/fail`)
@@ -178,4 +186,4 @@ POST /api/v1/tasks/{taskId}/fail
 ```json
 { "node": "grok-bot", "text": "目标数据源鉴权失效，无法读取所需上下文" }
 ```
-- 注意：一旦进入 `completed` / `failed` / `canceled` / `rejected` 终态，严禁再次修改该任务。
+- 同样支持可选 `artifacts[]`。注意：一旦进入 `completed` / `failed` / `canceled` / `rejected` 终态，严禁再次修改该任务。

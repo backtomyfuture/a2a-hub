@@ -35,7 +35,9 @@ import {
   nodeStoredReceiveMode,
 } from "../hub/capabilities.mjs";
 import { cancelTask } from "../hub/cancel.mjs";
+import { appendFileParts, attachmentsView, normalizeAttachments } from "../attachments.mjs";
 import { createTask } from "../hub/create.mjs";
+import { FileStore, findFileRefs, normalizeMime, sanitizeFileName } from "../hub/files.mjs";
 import { initiatorOf } from "../inbox.mjs";
 import { TERMINAL_STATUSES } from "../kernel-util.mjs";
 import { BUILTIN_LOOP_TEMPLATES, cancelLoop, createLoop } from "../hub/loop.mjs";
@@ -45,6 +47,14 @@ import { rosterNodeVisible } from "./longpoll-broker.mjs";
 import { renderWebConsoleHtml } from "./web-ui.mjs";
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
+const INLINE_IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+
+function encodeRFC5987(str) {
+  return encodeURIComponent(String(str ?? "file")).replace(
+    /['()*!]/g,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+}
 
 function sendJson(res, status, data) {
   const body = JSON.stringify(data);
@@ -52,7 +62,7 @@ function sendJson(res, status, data) {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type, X-A2A-Node, X-Api-Token",
+    "Access-Control-Allow-Headers": "Authorization, Content-Type, X-A2A-Node, X-Api-Token, X-File-Name",
     "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
   });
   res.end(body);
@@ -171,11 +181,39 @@ function formatLoopSummary(r) {
   };
 }
 
+async function canPrincipalSeeFile({ principal, meta, bus, fileId }) {
+  if (principal?.kind !== "agent") {
+    return { visible: true, refs: null };
+  }
+  if (meta.uploaded_by === principal.node) {
+    return { visible: true, refs: null };
+  }
+  const rawRefs = await findFileRefs(bus, fileId);
+  const taskIds = [...new Set(rawRefs.map((r) => r.task_id).filter(Boolean))];
+  if (!taskIds.length || !bus?.tables?.tasks) {
+    return { visible: false, refs: taskIds };
+  }
+  const [tasks, messages] = await Promise.all([
+    bus.listRecords(bus.tables.tasks),
+    bus.tables.messages ? bus.listRecords(bus.tables.messages) : Promise.resolve([]),
+  ]);
+  for (const tid of taskIds) {
+    const task = tasks.find((t) => f1(t, "Task_ID") === tid);
+    if (!task) continue;
+    const taskMsgs = messages.filter((m) => f1(m, "Task_ID") === tid);
+    if (agentCanSeeTask(principal, initiatorOf(task, taskMsgs), f1(task, "Source"), f1(task, "Target_Node"))) {
+      return { visible: true, refs: taskIds };
+    }
+  }
+  return { visible: false, refs: taskIds };
+}
+
 export async function startHubHttpServer({
   cfg,
   bus,
   broker,
   approval,
+  fileStore = null,
   log = () => {},
   onWake = () => {},
   webhookDispatcher = null,
@@ -183,6 +221,15 @@ export async function startHubHttpServer({
   const { host, port } = resolveListenAddr(cfg?.listen ?? "0.0.0.0:8787");
   const apiToken = String(cfg?.apiToken ?? "").trim();
   const tokenStore = cfg?.configDir ? new AgentTokenStore(cfg.configDir) : null;
+  const ownFileStore = !fileStore && cfg?.configDir
+    ? new FileStore({
+      configDir: cfg.configDir,
+      ...(Number.isFinite(Number(cfg?.maxFileBytes)) && Number(cfg.maxFileBytes) > 0
+        ? { maxBytes: Number(cfg.maxFileBytes) }
+        : {}),
+    })
+    : null;
+  const activeFileStore = fileStore ?? ownFileStore;
   const webhooks = webhookDispatcher
     ?? (cfg?.configDir
       ? new WebhookDispatcher({
@@ -245,7 +292,7 @@ export async function startHubHttpServer({
     if (method === "OPTIONS") {
       res.writeHead(204, {
         "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "Authorization, Content-Type, X-A2A-Node, X-Api-Token",
+        "Access-Control-Allow-Headers": "Authorization, Content-Type, X-A2A-Node, X-Api-Token, X-File-Name",
         "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
       });
       res.end();
@@ -302,7 +349,127 @@ export async function startHubHttpServer({
         sendJson,
         principal,
         webhookStore: webhooks?.store ?? null,
+        hubUrl: requestHubUrl(req),
+        fileStore: activeFileStore,
       })) {
+        return;
+      }
+
+      // 0) 附件上传与下载（§3：流式上传不走 readJsonBody，agent 无权或不存在统一 404）
+      if (method === "POST" && pathname === "/api/v1/files") {
+        if (!activeFileStore) {
+          sendJson(res, 503, { error: "文件存储未配置" });
+          return;
+        }
+        const clRaw = req.headers["content-length"];
+        if (clRaw !== undefined) {
+          const cl = Number(clRaw);
+          if (Number.isFinite(cl) && cl > activeFileStore.maxBytes) {
+            if (!req.readableEnded) res.setHeader("Connection", "close");
+            sendJson(res, 413, { error: `文件大小超过上限（${activeFileStore.maxBytes} 字节）` });
+            return;
+          }
+        }
+        let fileName = "file";
+        const rawName = req.headers["x-file-name"];
+        if (rawName !== undefined && String(rawName).trim() !== "") {
+          let decoded;
+          try {
+            decoded = decodeURIComponent(String(rawName));
+          } catch {
+            throw httpError(400, "X-File-Name 编码不合法");
+          }
+          fileName = sanitizeFileName(decoded, "file");
+        }
+        const mime = normalizeMime(req.headers["content-type"]);
+        const uploadedBy = principal.kind === "agent"
+          ? principal.node
+          : (principal.kind === "owner" ? "owner" : "open");
+        const meta = await activeFileStore.putStream(req, { name: fileName, mime, uploadedBy });
+        sendJson(res, 201, {
+          file_id: meta.file_id,
+          uri: meta.uri,
+          name: meta.name,
+          mime: meta.mime,
+          size: meta.size,
+          sha256: meta.sha256,
+        });
+        return;
+      }
+
+      const fileMetaMatch = pathname.match(/^\/api\/v1\/files\/([^/]+)\/meta$/);
+      if (method === "GET" && fileMetaMatch) {
+        if (!activeFileStore) {
+          sendJson(res, 503, { error: "文件存储未配置" });
+          return;
+        }
+        const fileId = decodeParam(fileMetaMatch[1]);
+        const meta = activeFileStore.get(fileId);
+        if (!meta) {
+          sendJson(res, 404, { error: "文件不存在" });
+          return;
+        }
+        const { visible, refs: checkedRefs } = await canPrincipalSeeFile({ principal, meta, bus, fileId });
+        if (!visible) {
+          sendJson(res, 404, { error: "文件不存在" });
+          return;
+        }
+        if (meta.deleted_at) {
+          sendJson(res, 410, {
+            error: "文件已过期清理",
+            deleted_at: meta.deleted_at,
+            reason: activeFileStore.getReason(fileId) || "expired",
+          });
+          return;
+        }
+        const refs = checkedRefs ?? [...new Set((await findFileRefs(bus, fileId)).map((r) => r.task_id).filter(Boolean))];
+        sendJson(res, 200, { meta, refs });
+        return;
+      }
+
+      const fileDownloadMatch = pathname.match(/^\/api\/v1\/files\/([^/]+)$/);
+      if (method === "GET" && fileDownloadMatch) {
+        if (!activeFileStore) {
+          sendJson(res, 503, { error: "文件存储未配置" });
+          return;
+        }
+        const fileId = decodeParam(fileDownloadMatch[1]);
+        const meta = activeFileStore.get(fileId);
+        if (!meta) {
+          sendJson(res, 404, { error: "文件不存在" });
+          return;
+        }
+        const { visible } = await canPrincipalSeeFile({ principal, meta, bus, fileId });
+        if (!visible) {
+          sendJson(res, 404, { error: "文件不存在" });
+          return;
+        }
+        if (meta.deleted_at) {
+          sendJson(res, 410, {
+            error: "文件已过期清理",
+            deleted_at: meta.deleted_at,
+            reason: activeFileStore.getReason(fileId) || "expired",
+          });
+          return;
+        }
+        const stream = activeFileStore.openReadStream(fileId);
+        const baseMime = normalizeMime(meta.mime);
+        const wantsInline = reqUrl.searchParams.get("inline") === "1" && INLINE_IMAGE_MIMES.has(baseMime);
+        const disposition = wantsInline ? "inline" : "attachment";
+        res.writeHead(200, {
+          "Content-Type": meta.mime || "application/octet-stream",
+          "Content-Length": String(meta.size),
+          "X-Content-Type-Options": "nosniff",
+          "Cache-Control": "private, max-age=0",
+          "Content-Disposition": `${disposition}; filename*=UTF-8''${encodeRFC5987(meta.name)}`,
+          "Access-Control-Allow-Origin": "*",
+        });
+        const cleanup = () => { if (!stream.destroyed) stream.destroy(); };
+        res.on("close", cleanup);
+        stream.on("error", () => {
+          if (!res.writableEnded) res.destroy();
+        });
+        stream.pipe(res);
         return;
       }
 
@@ -452,16 +619,24 @@ export async function startHubHttpServer({
             const msgParts = parts
               .filter((p) => f1(p, "Parent_Type") === "message" && f1(p, "Parent_ID") === msgId)
               .sort((a, b) => (Number(f1(a, "Seq")) || 0) - (Number(f1(b, "Seq")) || 0))
-              .map((p) => ({
-                part_id: f1(p, "Part_ID"),
-                seq: Number(f1(p, "Seq")) || 0,
-                kind: f1(p, "Kind"),
-                text: f1(p, "Text"),
-                file_uri: f1(p, "File_URI"),
-                file_name: f1(p, "File_Name"),
-                mime_type: f1(p, "Mime_Type"),
-                data: f1(p, "Data"),
-              }));
+              .map((p) => {
+                const base = {
+                  part_id: f1(p, "Part_ID"),
+                  seq: Number(f1(p, "Seq")) || 0,
+                  kind: f1(p, "Kind"),
+                  text: f1(p, "Text"),
+                  file_uri: f1(p, "File_URI"),
+                  file_name: f1(p, "File_Name"),
+                  mime_type: f1(p, "Mime_Type"),
+                  data: f1(p, "Data"),
+                };
+                // 文件块补下载地址、大小与过期标记（docs/attachments.md §7）。
+                if (base.kind === "file") {
+                  const [view] = attachmentsView([p], requestHubUrl(req), activeFileStore);
+                  Object.assign(base, { download_url: view.download_url, size: view.size, deleted: view.deleted });
+                }
+                return base;
+              });
             return {
               msg_id: msgId,
               kind: f1(m, "Kind"),
@@ -488,13 +663,11 @@ export async function startHubHttpServer({
           .filter((a) => f1(a, "Task_ID") === taskId)
           .map((a) => {
             const artId = f1(a, "Artifact_ID");
-            const files = parts
-              .filter((p) => f1(p, "Parent_Type") === "artifact" && f1(p, "Parent_ID") === artId)
-              .map((p) => ({
-                file_uri: f1(p, "File_URI"),
-                file_name: f1(p, "File_Name"),
-                mime_type: f1(p, "Mime_Type"),
-              }));
+            const files = attachmentsView(
+              parts.filter((p) => f1(p, "Parent_Type") === "artifact" && f1(p, "Parent_ID") === artId),
+              requestHubUrl(req),
+              activeFileStore,
+            );
             return {
               artifact_id: artId,
               name: f1(a, "Name"),
@@ -522,6 +695,12 @@ export async function startHubHttpServer({
       // 6) 创建任务
       if (method === "POST" && pathname === "/api/v1/tasks") {
         const body = await readJsonBodyBound();
+        const attachments = normalizeAttachments(body.attachments, { fileStore: activeFileStore });
+        // 有附件时 text 可以为空，但两者不能同时为空。
+        if (!String(body.text ?? "").trim() && !attachments.length) {
+          sendJson(res, 400, { error: "text 与 attachments 不能同时为空" });
+          return;
+        }
         const taskId = await createTask({
           bus,
           from: body.from || cfg?.node || "hub",
@@ -537,6 +716,8 @@ export async function startHubHttpServer({
           approval: body.approval || "",
           idempotencyKey: body.idempotencyKey || "",
           validateTarget: body.validateTarget !== false,
+          attachments,
+          fileStore: activeFileStore,
         });
         onWake();
         sendJson(res, 201, { task_id: taskId });
@@ -549,8 +730,9 @@ export async function startHubHttpServer({
         const taskId = decodeURIComponent(replyMatch[1]);
         const body = await readJsonBodyBound();
         const text = String(body.text ?? "").trim();
-        if (!text) {
-          sendJson(res, 400, { error: "答复内容 text 不能为空" });
+        const attachments = normalizeAttachments(body.attachments, { fileStore: activeFileStore });
+        if (!text && !attachments.length) {
+          sendJson(res, 400, { error: "答复内容 text 与 attachments 不能同时为空" });
           return;
         }
         const tasks = await bus.listRecords(bus.tables.tasks);
@@ -581,14 +763,20 @@ export async function startHubHttpServer({
         const p = (n) => String(n).padStart(2, "0");
         const nowMinute = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 
-        await bus.createRecord(bus.tables.parts, {
-          Part_ID: `${msgId}-P1`,
-          Parent_ID: msgId,
-          Parent_Type: "message",
-          Seq: 1,
-          Kind: "text",
-          Text: text.slice(0, 4000),
-        });
+        // 没有文字就不写 text 块，文件块从 Seq 1 开始。
+        let nextSeq = 1;
+        if (text) {
+          await bus.createRecord(bus.tables.parts, {
+            Part_ID: `${msgId}-P1`,
+            Parent_ID: msgId,
+            Parent_Type: "message",
+            Seq: 1,
+            Kind: "text",
+            Text: text.slice(0, 4000),
+          });
+          nextSeq = 2;
+        }
+        await appendFileParts(bus, msgId, nextSeq, attachments);
         await bus.createRecord(bus.tables.messages, {
           Msg_ID: msgId,
           Task_ID: taskId,
@@ -1093,7 +1281,10 @@ export async function startHubHttpServer({
       sendJson(res, 404, { error: "Not Found" });
     } catch (e) {
       const status = Number(e?.status) || 400;
-      if (!res.writableEnded) sendJson(res, status, { error: e?.message ?? String(e) });
+      if (!res.writableEnded) {
+        if (status === 413 && !req.readableEnded) res.setHeader("Connection", "close");
+        sendJson(res, status, { error: e?.message ?? String(e) });
+      }
     }
   });
 
@@ -1131,6 +1322,7 @@ export async function startHubHttpServer({
     host,
     port: boundPort,
     localUrl,
+    fileStore: activeFileStore,
     close: async () => {
       if (runtimePath) {
         try {
@@ -1142,6 +1334,7 @@ export async function startHubHttpServer({
         server.close(() => resolve());
         server.closeAllConnections?.();
       });
+      ownFileStore?.close?.();
     },
   };
 }

@@ -4,6 +4,8 @@
 
 ## 未发布
 
+- **附件能力（`hub://files/<file_id>`）**：新增中台文件存储（`<configDir>/files/blobs` + `files.db`，目录 `0700`、文件 `0600`；`node.json` 可配 `maxFileBytes`，默认 100MB）与 `/api/v1/files` 上传、流式下载和元数据接口，按上传者与引用任务可见性鉴权。
+- **附件写入、执行与清理**：CLI（`task create`/`reply`、`inbox ask`/`auth` 支持 `--file`，`inbox done` 支持可重复 `--artifact`）与 HTTP 网关（`attachments` / `artifacts`）支持附件；执行器自动下载 `hub://` 文件至 `runs/<Task_ID>/files/` 并写入 `input.json.files[]`；控制台支持图片缩略图与安全下载；`FileRetentionService` 自动清理 24 小时未引用或满 30 天且引用任务均已终态的文件（下载返回 410，Parts 不动）。
 - **控制台接收方式**：HTTP 节点卡片副标题带上接收方式。所有节点只留一行「接收方式」。Webhook 的地址、请求头、密钥掩码、最近投递、最近错误和 30 分钟兜底说明收进这一行的「管理」弹窗，可改 URL、密钥（留空不变）和请求头，并可测试。卡片上不再单独渲染 Webhook 管理框。
 - **Webhook 在线判定**：中台不探测回调地址。2xx 投递（含机主测试）记一次活动，但不计入唤醒周期；失败投递不记活动。名片 `Receive_Mode=webhook` 且尚未观测到周期时，在线窗口是 30 分钟兜底 × 2.5 = 75 分钟，上限也是 75 分钟，不再被名册闲置的 30 分钟截断。最近一次投递失败且之后没有检查或成功投递时，控制台圆点用警示色；在线或离线仍按窗口计算。
 - **角色收成两种**：对外 HTTP Agent 只有 `worker`（只接单）和 `leader`（派单并接单）。`leader` 拥有原先 `hybrid` 的全部路由（poll、inbox、任务生命周期，以及派单、updates、loops）。旧 Token、`register` 与名片里的 `hybrid` 仍接受，一律按 `leader` 处理；新签发与显式轮换不再写出 `hybrid`。Leader 的身份名片可派单：`CAP-<node>-agent`、`Skill_ID=agent`、`Dispatchable=Yes`、`Admission=admitted`、`role=leader`。控制台添加 leader、leader 不报能力的 `register`，以及 Hub 启动时给 `agent_tokens.json` 里还没有名片的 leader / hybrid 补建，都走这张名片。补建只在该节点一张名片都没有时发生，不覆盖已有 `Admission`。接入提示词与 `a2a-leader` 同时包含接单和跟单。
