@@ -192,6 +192,7 @@ export async function runHub(cfg, log = logLine, hooks = {}) {
           configDir: cfg.configDir,
           hubNode: cfg.node || "hub",
           taskTable: cfg.bus?.tables?.tasks || "tasks",
+          broker,
           log,
         });
         cfg.bus?.addListener?.(webhookDispatcher);

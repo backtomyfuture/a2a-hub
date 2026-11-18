@@ -4,8 +4,10 @@
 
 ## 未发布
 
+- **控制台接收方式**：HTTP 节点卡片副标题带上接收方式。所有节点只留一行「接收方式」。Webhook 的地址、请求头、密钥掩码、最近投递、最近错误和 30 分钟兜底说明收进这一行的「管理」弹窗，可改 URL、密钥（留空不变）和请求头，并可测试。卡片上不再单独渲染 Webhook 管理框。
+- **Webhook 在线判定**：中台不探测回调地址。2xx 投递（含机主测试）记一次活动，但不计入唤醒周期；失败投递不记活动。名片 `Receive_Mode=webhook` 且尚未观测到周期时，在线窗口是 30 分钟兜底 × 2.5 = 75 分钟，上限也是 75 分钟，不再被名册闲置的 30 分钟截断。最近一次投递失败且之后没有检查或成功投递时，控制台圆点用警示色；在线或离线仍按窗口计算。
 - **角色收成两种**：对外 HTTP Agent 只有 `worker`（只接单）和 `leader`（派单并接单）。`leader` 拥有原先 `hybrid` 的全部路由（poll、inbox、任务生命周期，以及派单、updates、loops）。旧 Token、`register` 与名片里的 `hybrid` 仍接受，一律按 `leader` 处理；新签发与显式轮换不再写出 `hybrid`。Leader 的身份名片可派单：`CAP-<node>-agent`、`Skill_ID=agent`、`Dispatchable=Yes`、`Admission=admitted`、`role=leader`。控制台添加 leader、leader 不报能力的 `register`，以及 Hub 启动时给 `agent_tokens.json` 里还没有名片的 leader / hybrid 补建，都走这张名片。补建只在该节点一张名片都没有时发生，不覆盖已有 `Admission`。接入提示词与 `a2a-leader` 同时包含接单和跟单。
-- **检查间隔统一为 5 分钟**：worker 与 leader 的检查脚本，以及跑不了脚本时的回退，都是每 5 分钟。未知唤醒周期的在线窗口改为 6 分钟。Webhook 的 30 分钟兜底、宿主 `ah daemon` 的长轮询与 15 分钟对账不变。
+- **检查间隔统一为 5 分钟**：worker 与 leader 的检查脚本，以及跑不了脚本时的回退，都是每 5 分钟。未知唤醒周期的在线窗口为 5 分钟 × 2.5 = 12.5 分钟。Webhook 的 30 分钟兜底、宿主 `ah daemon` 的长轮询与 15 分钟对账不变。
 - **Webhook 密钥改由接收端提供**：机主登记 URL，并填写对方给出的密钥和可选请求头（默认 `Authorization: Bearer <密钥>`，自定义头名则值为密钥原文）。中台不再签发 `whsec_`，响应也不再返回一次性明文；列表只给掩码和头名。出站同时带这枚请求头和原来的 `X-A2A-Signature`（同一把密钥）。只有旧版 HMAC、没有 `header` 字段的记录保持只签名、不附加 `Authorization`；只改头名不会拿旧密钥去填请求头。门铃正文增加一句 `text`，不含指令。`rotate_secret` 忽略。
 - **去掉切换接收方式**：删除 `POST /api/v1/admin/nodes/:node/receive`。接收方式只在添加 Agent 时选定；选 Webhook 时向导同时收集 URL、密钥和可选请求头。非 Webhook 节点登记推送返回 409「该节点的接收方式不是 Webhook，不能登记推送」。`DELETE` Webhook 仍把名片改回 `http-poll`。
 

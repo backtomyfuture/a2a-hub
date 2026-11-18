@@ -41,7 +41,7 @@
 |---|---|---|---|
 | **宿主守护进程型**（`kind: host`） | 办公电脑、Mac mini、Linux 工作站、GPU 服务器 | `ah daemon` 出站长轮询（`/api/v1/poll`），按 `commands.json` 拉起本机 CLI/脚本 | 守护内核强制租约、心跳、单并发账本、退避与验收 |
 | **本地独立 Agent 型**（`kind: agent`） | 同机常驻但自主消费任务的独立 Agent | `ah daemon` 认领后写入 `0600` `agent_inbox.jsonl` 并持续续心跳；本尊调 `ah inbox` 取单/交付 | 内核维护租约与 `inbox_timeout_sec`，`inbox` 出站计划保证防重与终态守卫 |
-| **纯 HTTP 外部 Agent** | 云端 Leader / Worker。角色两种：`worker` 只接单，`leader` 派单并接单（旧值 `hybrid` 等同 leader）。接收方式三选一 | 凭分 Agent Token 调 `agent-gateway`。定时检查（`http-poll`，默认）：每 5 分钟跑 `a2a_check.py`，`WORK` 后 `poll?timeout=0` 或 `updates?new=1`；跑不了脚本时也是每 5 分钟。常驻长轮询（`http-longpoll`）：循环 `poll?timeout=25`（Leader 每轮再拉 `updates?new=1`），断线 1/3/8/30 秒退避。Webhook（`webhook`）：Hub 向机主登记的 URL POST 门铃，用接收端提供的密钥做请求头和 HMAC，接收方回网关拉详情，每 30 分钟检查脚本兜底。Token 放 `A2A_HUB_TOKEN` | `agent-gateway` 在网关侧执行目标匹配、静态/动态审批门与状态守卫。`check` 不推进 Leader 水位。未知唤醒周期的在线窗口是 6 分钟。Webhook URL 与密钥只由机主配置 |
+| **纯 HTTP 外部 Agent** | 云端 Leader / Worker。角色两种：`worker` 只接单，`leader` 派单并接单（旧值 `hybrid` 等同 leader）。接收方式三选一 | 凭分 Agent Token 调 `agent-gateway`。定时检查（`http-poll`，默认）：每 5 分钟跑 `a2a_check.py`，`WORK` 后 `poll?timeout=0` 或 `updates?new=1`；跑不了脚本时也是每 5 分钟。常驻长轮询（`http-longpoll`）：循环 `poll?timeout=25`（Leader 每轮再拉 `updates?new=1`），断线 1/3/8/30 秒退避。Webhook（`webhook`）：Hub 向机主登记的 URL POST 门铃，用接收端提供的密钥做请求头和 HMAC，接收方回网关拉详情，每 30 分钟检查脚本兜底。Token 放 `A2A_HUB_TOKEN` | `agent-gateway` 在网关侧执行目标匹配、静态/动态审批门与状态守卫。`check` 不推进 Leader 水位。未知唤醒周期的在线窗口：定时检查 12.5 分钟，Webhook 75 分钟。Webhook URL 与密钥只由机主配置 |
 
 ## 6. executor × context 抽象
 

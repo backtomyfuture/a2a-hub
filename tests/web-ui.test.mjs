@@ -322,8 +322,21 @@ test("控制台内嵌脚本：节点分层渲染、stageBindings 闭环提交、
     if (url === "/api/v1/admin/tokens") return jsonRes(200, { tokens: [{ node: "cloud-bot", prefix: "a2a_xx", last_used_at: null }] });
     if (url === "/api/v1/admin/webhooks") {
       return jsonRes(200, {
-        webhooks: [{ node: "cloud-bot", url: "https://bot.example/hook", last_status: 200, last_error: "", last_delivered_at: new Date().toISOString() }],
+        webhooks: [{
+          node: "cloud-bot",
+          url: "https://bot.example/hook",
+          header: "Authorization",
+          secret_mask: "secre…",
+          legacy: false,
+          last_status: 200,
+          last_error: "",
+          last_delivered_at: new Date().toISOString(),
+          last_attempt_at: new Date().toISOString(),
+        }],
       });
+    }
+    if (url === "/api/v1/admin/webhooks/cloud-bot/test" && method === "POST") {
+      return jsonRes(200, { ok: true, status: 204, error: "" });
     }
     if (url === "/api/v1/schedules") {
       return jsonRes(200, {
@@ -380,26 +393,70 @@ test("控制台内嵌脚本：节点分层渲染、stageBindings 闭环提交、
   assert.match(nodesHtml, /Code Review/);
   assert.match(nodesHtml, /节点直属能力/);
   assert.match(nodesHtml, /Echo/);
-  assert.match(nodesHtml, /https:\/\/bot\.example\/hook/);
-  assert.match(nodesHtml, /最近投递 HTTP 200/);
   assert.match(nodesHtml, /\+ 添加能力/);
   const nodeCards = nodesHtml.split('class="node-card"').slice(1);
   const macCard = nodeCards.find((html) => html.includes("mac-worker"));
   const cloudCard = nodeCards.find((html) => html.includes("cloud-bot"));
   const pollCard = nodeCards.find((html) => html.includes("poll-bot"));
   assert.ok(macCard && cloudCard && pollCard);
+  assert.match(macCard, /工作机节点 · 执行方 \(Worker\)/);
   assert.match(macCard, /接收方式：常驻长连接（ah daemon）/);
+  assert.equal(macCard.includes("Webhook 推送"), false);
   assert.equal(macCard.includes("切换接收方式"), false);
   assert.equal(macCard.includes("data-action=\"edit-webhook\""), false);
+  assert.match(cloudCard, /云端 HTTP 节点 · Webhook 推送 · 执行方 \(Worker\)/);
   assert.match(cloudCard, /接收方式：Webhook 推送/);
+  assert.match(cloudCard, /最近投递成功/);
+  assert.match(cloudCard, /data-action="edit-webhook"[^>]*>管理/);
   assert.equal(cloudCard.includes("切换接收方式"), false);
-  assert.match(cloudCard, /这不是第二种接收方式/);
+  assert.equal(cloudCard.includes("这不是第二种接收方式"), false);
+  assert.equal(cloudCard.includes("https://bot.example/hook"), false);
   assert.equal(cloudCard.includes("data-action=\"delete-webhook\""), false);
+  assert.equal(cloudCard.includes("data-action=\"test-webhook\""), false);
+  assert.match(pollCard, /云端 HTTP 节点 · 定时检查 · 执行方 \(Worker\)/);
   assert.match(pollCard, /接收方式：定时检查/);
   assert.equal(pollCard.includes("切换接收方式"), false);
   assert.equal(pollCard.includes("data-action=\"edit-webhook\""), false);
   assert.equal(pollCard.includes("data-action=\"test-webhook\""), false);
+  assert.equal(pollCard.includes(">管理<"), false);
   assert.equal(pollCard.includes("https://bot.example/hook"), false);
+
+  await vm.runInContext('openWebhookModal("cloud-bot")', sandbox);
+  assert.equal(getEl("whUrl").value, "https://bot.example/hook");
+  assert.equal(getEl("whHeader").value, "Authorization");
+  assert.equal(getEl("whKey").value, "");
+  const whStatus = getEl("whStatus").innerHTML;
+  assert.match(whStatus, /https:\/\/bot\.example\/hook/);
+  assert.match(whStatus, /请求头 Authorization/);
+  assert.match(whStatus, /密钥掩码 secre…/);
+  assert.match(whStatus, /最近投递成功/);
+  assert.match(whStatus, /Agent 每 30 分钟用检查脚本兜底一次，防止漏推，这不是第二种接收方式/);
+  assert.equal(getEl("whTestBtn").dataset.node, "cloud-bot");
+
+  await vm.runInContext(`
+    state.webhooksByNode.set("cloud-bot", {
+      node: "cloud-bot", url: "https://bot.example/hook", header: "X-Api-Key", secret_mask: "secre…",
+      legacy: false, last_status: "500", last_error: "HTTP 500", last_delivered_at: "",
+      last_attempt_at: new Date(Date.now() + 60000).toISOString()
+    });
+    render();
+  `, sandbox);
+  const failedHtml = getEl("content").innerHTML;
+  const failedCard = failedHtml.split('class="node-card"').slice(1).find((html) => html.includes("cloud-bot"));
+  assert.match(failedCard, /投递失败/);
+  assert.match(failedCard, /class="dot warn"/);
+  assert.match(failedCard, /在线/);
+
+  await vm.runInContext(`
+    state.webhooksByNode.set("cloud-bot", {
+      node: "cloud-bot", url: "https://bot.example/hook", legacy: true, secret_mask: "oldsec…",
+      last_status: "", last_error: "", last_delivered_at: "", last_attempt_at: ""
+    });
+    render();
+  `, sandbox);
+  const legacyCard = getEl("content").innerHTML.split('class="node-card"').slice(1).find((html) => html.includes("cloud-bot"));
+  assert.match(legacyCard, /需补填密钥/);
+  assert.equal(legacyCard.includes('class="dot warn"'), false);
 
   // 2) 闭环页卡片每个阶段显示派给了谁；新建闭环弹窗提交 stageBindings
   await vm.runInContext('state.view = "loops"; render();', sandbox);

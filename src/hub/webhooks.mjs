@@ -98,6 +98,7 @@ function publicHook(hook) {
     last_status: hook.last_status ?? "",
     last_error: hook.last_error ?? "",
     last_delivered_at: hook.last_delivered_at ?? "",
+    last_attempt_at: hook.last_attempt_at ?? "",
   };
 }
 
@@ -207,7 +208,7 @@ export class AgentWebhookStore {
     return true;
   }
 
-  markDelivery(node, { last_status, last_error, last_delivered_at } = {}) {
+  markDelivery(node, { last_status, last_error, last_delivered_at, last_attempt_at } = {}) {
     const name = String(node ?? "").trim();
     const data = this.#load();
     const idx = data.hooks.findIndex((h) => h.node === name);
@@ -218,6 +219,8 @@ export class AgentWebhookStore {
       last_status: String(last_status ?? ""),
       last_error: String(last_error ?? ""),
       last_delivered_at: last_delivered_at == null ? (prev.last_delivered_at ?? "") : String(last_delivered_at),
+      // 失败也要留下时间，控制台才能判断这次失败之后还有没有检查或成功投递。
+      last_attempt_at: last_attempt_at == null ? (prev.last_attempt_at ?? "") : String(last_attempt_at),
     };
     data.hooks[idx] = next;
     this.#save(data.hooks);
@@ -237,8 +240,10 @@ export class WebhookDispatcher {
     sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     retryDelays = RETRY_DELAYS_MS,
     timeoutMs = TIMEOUT_MS,
+    broker = null,
   } = {}) {
     this.store = store ?? new AgentWebhookStore(configDir, { now: () => new Date(now()) });
+    this.broker = broker;
     this.hubNode = String(hubNode || "hub");
     this.taskTable = String(taskTable || "tasks");
     this.fetch = fetchImpl ?? globalThis.fetch;
@@ -344,7 +349,10 @@ export class WebhookDispatcher {
             last_status: String(lastStatus),
             last_error: "",
             last_delivered_at: deliveredAt,
+            last_attempt_at: deliveredAt,
           });
+          // 只有 2xx 算活动。noteDelivery 不计入唤醒周期，避免测试和门铃把 intervalMs 拉短。
+          this.broker?.noteDelivery?.(hook.node);
           this.log(`webhook ${hook.node} ${payload.event} ok ${lastStatus}`);
           return { ok: true, status: lastStatus, error: "" };
         }
@@ -357,6 +365,7 @@ export class WebhookDispatcher {
     this.store.markDelivery(hook.node, {
       last_status: lastStatus ? String(lastStatus) : "error",
       last_error: lastError,
+      last_attempt_at: new Date(this.now()).toISOString(),
     });
     this.log(`webhook ${hook.node} ${payload.event} fail ${lastError}`);
     return { ok: false, status: lastStatus, error: lastError };

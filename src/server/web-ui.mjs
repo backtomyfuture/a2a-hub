@@ -171,6 +171,7 @@ export function renderWebConsoleHtml() {
   }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
   .dot.on { background: var(--green); box-shadow: 0 0 0 3px var(--green-soft); }
+  .dot.warn { background: var(--amber); box-shadow: 0 0 0 3px var(--amber-soft); }
   .dot.err { background: var(--red); }
 
   .main { display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
@@ -938,6 +939,7 @@ export function renderWebConsoleHtml() {
       <button class="btn sm" type="button" data-close-modal="webhookModal">关闭</button>
     </div>
     <div id="whErrBox" class="err-banner" style="display:none;"></div>
+    <div id="whStatus" style="margin-bottom:12px;"></div>
     <form id="webhookForm">
       <input type="hidden" id="whNode" />
       <div class="form-row">
@@ -954,9 +956,12 @@ export function renderWebConsoleHtml() {
         <label>请求头名（可选，默认 Authorization）</label>
         <input class="input mono" id="whHeader" maxlength="64" placeholder="Authorization" />
       </div>
-      <div style="display:flex;justify-content:flex-end;gap:8px;">
-        <button type="button" class="btn" data-close-modal="webhookModal">取消</button>
-        <button type="submit" class="btn primary">保存 Webhook</button>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+        <button type="button" class="btn" id="whTestBtn" data-action="test-webhook">测试</button>
+        <div style="display:flex;gap:8px;">
+          <button type="button" class="btn" data-close-modal="webhookModal">取消</button>
+          <button type="submit" class="btn primary">保存</button>
+        </div>
       </div>
     </form>
   </div>
@@ -1161,6 +1166,58 @@ function agentTypeSummary(kind, role, mode) {
   const k = kindLabelZh(kind, mode);
   const r = roleLabelZh(role);
   return r ? (k + " · " + r) : k;
+}
+
+// 卡片副标题要把接收方式写出来。宿主节点没有这档选择，仍用原来的类型加角色。
+function nodeCardSubtitle(g) {
+  if (!isHttpNodeGroup(g)) return agentTypeSummary(g.kind, g.role, g.mode);
+  const mode = httpReceiveModeOf(g) || "http-poll";
+  const receive = receiveModeLabelZh(mode) || "定时检查";
+  const role = roleLabelZh(g.role);
+  const head = "云端 HTTP 节点 · " + receive;
+  return role ? (head + " · " + role) : head;
+}
+
+function webhookRecord(node) {
+  return state.webhooksByNode.get(node) || null;
+}
+
+function webhookDeliveryCode(wh) {
+  if (!wh || wh.last_status == null || String(wh.last_status) === "") return null;
+  const code = Number(wh.last_status);
+  return Number.isFinite(code) ? code : null;
+}
+
+function webhookRowBadge(wh) {
+  if (!wh) return '<span class="badge">待投递</span>';
+  if (wh.legacy) return '<span class="badge amber">需补填密钥</span>';
+  const raw = wh.last_status != null ? String(wh.last_status) : "";
+  if (!raw && !wh.last_error) return '<span class="badge">待投递</span>';
+  const code = webhookDeliveryCode(wh);
+  if (code != null && code >= 200 && code < 300) return '<span class="badge green">最近投递成功</span>';
+  return '<span class="badge red">投递失败</span>';
+}
+
+// 最近一次不是 2xx（含网络错误），且这次尝试之后没有检查或成功投递。成功投递会把 lastSeenAt 推到尝试时间之后。
+function deliveryUnacked(g) {
+  if (!g || httpReceiveModeOf(g) !== "webhook") return false;
+  const wh = webhookRecord(g.node);
+  if (!wh || wh.legacy) return false;
+  const raw = wh.last_status != null ? String(wh.last_status) : "";
+  if (!raw && !wh.last_error) return false;
+  const code = webhookDeliveryCode(wh);
+  if (code != null && code >= 200 && code < 300) return false;
+  const attempt = parseTs(wh.last_attempt_at);
+  const seen = parseTs(g.lastSeenAt);
+  if (attempt == null || seen == null) return true;
+  return seen < attempt;
+}
+
+function nodeOnlineDotClass(g) {
+  if (!g || !g.online) return "";
+  // 窗口内仍算在线，但门铃没送到且之后没有活动时用警示色，避免和普通离线混成一种灰点。
+  if (deliveryUnacked(g)) return "warn";
+  return "on";
 }
 
 function showToast(msg) {
@@ -2126,9 +2183,34 @@ async function doDeleteCard(capId) {
   }
 }
 
+function fillWebhookStatus(node) {
+  const existing = webhookRecord(node);
+  const status = document.getElementById("whStatus");
+  if (!status) return;
+  if (!existing) {
+    status.innerHTML = '<div class="hint">还没有登记投递记录。</div>'
+      + '<div class="hint">Agent 每 30 分钟用检查脚本兜底一次，防止漏推，这不是第二种接收方式。中台不会为了判在线去探测这个地址。</div>';
+    return;
+  }
+  const headerName = existing.legacy ? "（未设置，只签名）" : (existing.header || "Authorization");
+  const delivered = existing.last_delivered_at ? formatRelativeTime(existing.last_delivered_at) : "暂无成功投递";
+  const attempted = existing.last_attempt_at ? formatRelativeTime(existing.last_attempt_at) : "暂无";
+  const code = webhookDeliveryCode(existing);
+  status.innerHTML = '<div style="display:flex;flex-direction:column;gap:4px;">'
+    + '<div>' + webhookRowBadge(existing) + (code != null ? ' <span class="hint">HTTP ' + esc(code) + '</span>' : '') + '</div>'
+    + '<div class="mono" style="word-break:break-all;">' + esc(existing.url || "") + '</div>'
+    + '<div class="hint">请求头 ' + esc(headerName)
+    + (existing.secret_mask ? ' · 密钥掩码 ' + esc(existing.secret_mask) : '') + '</div>'
+    + '<div class="hint">最近投递：' + esc(delivered) + ' · 最近尝试：' + esc(attempted) + '</div>'
+    + (existing.last_error ? '<div class="hint" style="color:var(--red-text);">最近错误：' + esc(existing.last_error) + '</div>' : '')
+    + (existing.legacy ? '<div class="hint">请填写对方提供的密钥。当前只做签名，不会带 Authorization。</div>' : '')
+    + '<div class="hint">Agent 每 30 分钟用检查脚本兜底一次，防止漏推，这不是第二种接收方式。中台不会为了判在线去探测这个地址。</div>'
+    + '</div>';
+}
+
 function openWebhookModal(node) {
-  const existing = state.webhooksByNode.get(node) || null;
-  document.getElementById("whTitle").textContent = (existing ? "修改 Webhook · " : "配置 Webhook · ") + node;
+  const existing = webhookRecord(node);
+  document.getElementById("whTitle").textContent = "接收方式 · " + node;
   document.getElementById("whNode").value = node;
   document.getElementById("whUrl").value = existing ? (existing.url || "") : "";
   document.getElementById("whKey").value = "";
@@ -2139,6 +2221,9 @@ function openWebhookModal(node) {
     else if (existing && existing.secret_mask) hint.textContent = "当前掩码 " + existing.secret_mask + "。留空表示不改密钥。";
     else hint.textContent = "填写接收端提供的密钥。留空表示不改已保存的密钥。";
   }
+  const testBtn = document.getElementById("whTestBtn");
+  if (testBtn) testBtn.dataset.node = node;
+  fillWebhookStatus(node);
   const errBox = document.getElementById("whErrBox");
   errBox.style.display = "none";
   errBox.textContent = "";
@@ -2157,6 +2242,7 @@ async function testWebhookAction(node) {
       showToast("Webhook 测试失败: " + ((res && res.error) || ("HTTP " + (res && res.status ? res.status : "未知"))));
     }
     await refreshWebhooks();
+    if (document.getElementById("webhookModal").classList.contains("open")) fillWebhookStatus(node);
     render();
   } catch (e) {
     showToast("测试 Webhook 失败: " + e.message);
@@ -2334,7 +2420,7 @@ function renderOverview(d) {
         + '<td><div style="font-weight:600;">' + esc(g.displayName) + '</div>'
         + (g.displayName !== g.node ? '<div class="mono muted" style="font-size:11px;">' + esc(g.node) + '</div>' : '')
         + '</td>'
-        + '<td><span class="badge ' + (g.online ? "green" : "") + '"><span class="dot ' + (g.online ? "on" : "") + '" style="width:6px;height:6px;"></span>'
+        + '<td><span class="badge ' + (g.online ? (deliveryUnacked(g) ? "amber" : "green") : "") + '"><span class="dot ' + nodeOnlineDotClass(g) + '" style="width:6px;height:6px;"></span>'
         + (g.online ? "在线" : "离线") + '</span></td>'
         + '<td class="muted">' + esc(formatRelativeTime(g.lastSeenAt)) + '</td>'
         + '<td class="muted">' + esc(agentTypeSummary(g.kind, g.role, g.mode)) + '</td>'
@@ -2434,39 +2520,22 @@ function renderReceiveBox(g) {
   }
   const mode = httpReceiveModeOf(g) || "http-poll";
   const label = receiveModeLabelZh(mode) || "定时检查";
-  return '<div class="token-box"><strong>接收方式：' + esc(label) + '</strong></div>';
-}
-
-function renderWebhookManageBox(g) {
-  // 接收方式不是 webhook 时不渲染这块，避免看起来可以和轮询并行叠加。
-  if (httpReceiveModeOf(g) !== "webhook") return "";
+  if (mode !== "webhook") {
+    return '<div class="token-box"><strong>接收方式：' + esc(label) + '</strong></div>';
+  }
+  // 和定时检查、宿主节点同一行。地址和密钥放进弹窗，卡片上不再单独开一块 Webhook 管理框。
+  const wh = webhookRecord(g.node);
+  let side = "";
   if (!state.webhooksApiAvailable) {
-    return '<div class="token-box"><span class="hint">Webhook 管理接口尚未启用（HTTP 404）</span></div>';
+    side = '<span class="hint">管理接口尚未启用</span>';
+  } else {
+    side = webhookRowBadge(wh)
+      + '<button class="btn sm" data-action="edit-webhook" data-node="' + esc(g.node) + '">管理</button>';
   }
-  const wh = state.webhooksByNode.get(g.node) || null;
-  let statusBadge = '<span class="badge">待投递</span>';
-  if (wh && wh.last_status != null && wh.last_status !== "") {
-    const code = Number(wh.last_status);
-    statusBadge = (code >= 200 && code < 300)
-      ? '<span class="badge green">最近投递 HTTP ' + esc(code) + '</span>'
-      : '<span class="badge red">投递失败 HTTP ' + esc(code) + '</span>';
-  } else if (wh && wh.last_error) {
-    statusBadge = '<span class="badge red">投递异常</span>';
-  }
-  const deliveredText = wh && wh.last_delivered_at ? formatRelativeTime(wh.last_delivered_at) : "暂无投递";
   return '<div class="token-box">'
     + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">'
-    + '<div><strong>Webhook 推送</strong> ' + statusBadge + '</div>'
-    + '<span class="muted">最近投递：' + esc(deliveredText) + '</span>'
-    + '</div>'
-    + '<div class="mono muted" style="word-break:break-all;">' + esc((wh && wh.url) || "") + '</div>'
-    + (wh && wh.legacy ? '<div class="hint">请填写对方提供的密钥。当前只做签名，不会带 Authorization。</div>' : '')
-    + (wh && wh.secret_mask ? '<div class="hint">密钥掩码 ' + esc(wh.secret_mask) + (wh.header ? ' · 请求头 ' + esc(wh.header) : '') + '</div>' : '')
-    + (wh && wh.last_error ? '<div class="hint" style="color:var(--red-text);">最近错误：' + esc(wh.last_error) + '</div>' : '')
-    + '<div class="hint">Agent 每 30 分钟用检查脚本兜底一次，防止漏推，这不是第二种接收方式。</div>'
-    + '<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">'
-    + '<button class="btn sm" data-action="edit-webhook" data-node="' + esc(g.node) + '">修改</button>'
-    + '<button class="btn sm" data-action="test-webhook" data-node="' + esc(g.node) + '">测试</button>'
+    + '<strong>接收方式：' + esc(label) + '</strong>'
+    + '<span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">' + side + '</span>'
     + '</div></div>';
 }
 
@@ -2612,12 +2681,12 @@ function renderAgents(d) {
         html += '<div class="node-card">'
           + '<div class="node-head">'
           + '<div>'
-          + '<div class="node-name"><span class="dot ' + (g.online ? "on" : "") + '"></span>' + esc(g.displayName)
+          + '<div class="node-name"><span class="dot ' + nodeOnlineDotClass(g) + '"></span>' + esc(g.displayName)
           + (g.displayName !== g.node ? ' <span class="mono muted" style="font-size:12px;font-weight:400;">(' + esc(g.node) + ')</span>' : '')
           + '</div>'
-          + '<div class="hint" style="margin-top:4px;">' + esc(agentTypeSummary(g.kind, g.role, g.mode)) + ' · 最近活动：' + esc(formatRelativeTime(g.lastSeenAt)) + '</div>'
+          + '<div class="hint" style="margin-top:4px;">' + esc(nodeCardSubtitle(g)) + ' · 最近活动：' + esc(formatRelativeTime(g.lastSeenAt)) + '</div>'
           + '</div>'
-          + '<span class="badge ' + (g.online ? "green" : "") + '">' + (g.online ? "在线" : "离线") + '</span>'
+          + '<span class="badge ' + (g.online ? (deliveryUnacked(g) ? "amber" : "green") : "") + '">' + (g.online ? "在线" : "离线") + '</span>'
           + '</div>';
 
         if (g.nodeDesc || g.adminNote) {
@@ -2632,7 +2701,6 @@ function renderAgents(d) {
 
         html += renderTokenManageBox(g.node, g.kind);
         html += renderReceiveBox(g);
-        html += renderWebhookManageBox(g);
 
         html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:auto;">';
         if (dispatchable) {
