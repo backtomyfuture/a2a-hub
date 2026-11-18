@@ -77,7 +77,7 @@ Content-Type: application/json
 }
 ```
 - 省略 `caps`（或给空数组）时，中台补一张可派单的身份名片：`CAP-<node>-agent`，`Skill_ID=agent`，`Dispatchable=Yes`，新建时 `Admission=admitted`，Metadata `role=leader`。别人因此可以把任务派给这个 Leader。再次注册不覆盖已有 `Admission`。显式 `caps` 按申报的能力登记，不另造这张名片。
-- 没有名片且超过 30 分钟无活动的在线记录不进 `GET /api/v1/agents` 名册。内存里的在线记录超过 24 小时无活动会清除，已入库的名片不受影响。未知唤醒周期时，距上次报到 6 分钟内算在线。
+- 没有名片且超过 30 分钟无活动的在线记录不进 `GET /api/v1/agents` 名册。内存里的在线记录超过 24 小时无活动会清除，已入库的名片不受影响。未知唤醒周期时，距上次报到 12.5 分钟内算在线。
 - 常驻长轮询把 `receive_mode` 写成 `"http-longpoll"`。Webhook 写成 `"webhook"`。控制台按添加时的接收方式预写；自行 `register` 时请与机主选的方式一致。节点已有机主 Webhook 时强制为 `webhook`。自报 `webhook` 但机主未配置时写成 `http-poll`，并警告「Webhook 需机主在控制台开启」。
 
 查询全网在线节点与外部 Agent：`GET /api/v1/agents`

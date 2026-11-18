@@ -38,13 +38,13 @@ test("每 5 分钟检查一次的 Agent 在两次检查之间保持在线，错�
   });
 });
 
-test("刚重启只见过一次的 Agent 用 6 分钟默认窗口；窗口不超过名册保留期", () => {
+test("刚重启只见过一次的 Agent 用 12.5 分钟默认窗口；窗口不超过名册保留期", () => {
   withClock(({ advance, now }) => {
     const broker = new LongPollBroker();
     broker.touchAgent("grok-bot", { role: "worker" });
-    advance(5 * MIN);
+    advance(12 * MIN);
     assert.equal(onlineOf(broker, "grok-bot", now()), true);
-    advance(2 * MIN);
+    advance(1 * MIN);
     assert.equal(onlineOf(broker, "grok-bot", now()), false);
 
     broker.touchAgent("slow", {});
