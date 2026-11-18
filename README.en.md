@@ -71,12 +71,6 @@ Tasks progress strictly across the eight A2A states: `submitted` â†’ `working` â
 curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --hub
 ```
 
-If this machine still runs the old lark-a2a-hub install under `~/.hub-node`, do not overwrite it. Use a separate directory:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | HUB_NODE_HOME="$HOME/.a2a-hub" sh -s -- --hub
-```
-
 This generates an ed25519 approval keypair + random `apiToken`, configures SQLite WAL, registers user-level autostart (add `--no-service` to run foreground-only), and prints:
 - A one-click Web Console URL `http://<LAN_IP>:8787/?token=...` (saved to `localStorage` and scrubbed from the address bar on load)
 - A copy-paste 1-line join command for worker machines.
@@ -85,10 +79,10 @@ This generates an ed25519 approval keypair + random `apiToken`, configures SQLit
 
 ```bash
 # macOS / Linux:
-curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --join "http://<HUB_API_TOKEN>@<HUB_IP>:8787"
+curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --join "http://<AH_API_TOKEN>@<HUB_IP>:8787"
 
 # Windows PowerShell:
-$env:AH_JOIN = "http://<HUB_API_TOKEN>@<HUB_IP>:8787"; irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex
+$env:AH_JOIN = "http://<AH_API_TOKEN>@<HUB_IP>:8787"; irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex
 ```
 
 `--join` extracts the embedded token into mode-600 `app.env` (never written to `node.json`), fetches `hubPublicKey` from `GET /api/v1/health`, and starts the outbound long-polling daemon/service.
@@ -98,14 +92,14 @@ $env:AH_JOIN = "http://<HUB_API_TOKEN>@<HUB_IP>:8787"; irm https://raw.githubuse
 ```bash
 git clone https://github.com/backtomyfuture/a2a-hub.git
 cd a2a-hub
-# Optional: expose `ah` / `a2a-hub` / `ahub` / `lah` / `hub-node` globally
+# Optional: expose `ah` / `a2a-hub` / `ahub` globally
 npm link
 
 # 1) Start the Hub in one line (add --service to register autostart):
 node bin/ah.mjs up
 
 # 2) Join from any worker machine (add --service for autostart):
-node bin/ah.mjs join http://<HUB_API_TOKEN>@<HUB_IP>:8787
+node bin/ah.mjs join http://<AH_API_TOKEN>@<HUB_IP>:8787
 ```
 
 ### Option C: Connect Pure HTTP External Agents (Muse / Grok Bot, No Daemon)
@@ -115,27 +109,27 @@ Cloud or cron-driven Agents connect directly with standard HTTP + Bearer Token (
 ```bash
 # 1) Register a Leader (e.g. Muse) or Worker (e.g. Grok Bot)
 curl -X POST http://<HUB_IP>:8787/api/v1/agents/register \
-  -H "Authorization: Bearer <HUB_API_TOKEN>" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <AH_API_TOKEN>" -H "Content-Type: application/json" \
   -d '{"node":"muse","role":"leader","kind":"agent","receive_mode":"http-poll"}'
 
 curl -X POST http://<HUB_IP>:8787/api/v1/agents/register \
-  -H "Authorization: Bearer <HUB_API_TOKEN>" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <AH_API_TOKEN>" -H "Content-Type: application/json" \
   -d '{"node":"grok-bot","role":"worker","kind":"agent","receive_mode":"http-poll","caps":[{"skill_id":"research","skill_name":"Grok Research"}]}'
 
 # 2) Muse dispatches a task and polls /updates (supports short-poll or ?timeout=25 long-poll)
 curl -X POST http://<HUB_IP>:8787/api/v1/tasks \
-  -H "Authorization: Bearer <HUB_API_TOKEN>" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <AH_API_TOKEN>" -H "Content-Type: application/json" \
   -d '{"from":"muse","to":"grok-bot","cap":"research","text":"Compare HTTP poll vs long-poll"}'
-curl -H "Authorization: Bearer <HUB_API_TOKEN>" \
+curl -H "Authorization: Bearer <AH_API_TOKEN>" \
   "http://<HUB_IP>:8787/api/v1/agents/muse/updates?timeout=25"
 
 # 3) Grok Bot polls -> claims -> reports ask / auth / complete / fail
-curl -H "Authorization: Bearer <HUB_API_TOKEN>" \
+curl -H "Authorization: Bearer <AH_API_TOKEN>" \
   "http://<HUB_IP>:8787/api/v1/agents/grok-bot/poll?timeout=25"
 curl -X POST "http://<HUB_IP>:8787/api/v1/tasks/<TASK_ID>/claim" \
-  -H "Authorization: Bearer <HUB_API_TOKEN>" -H "Content-Type: application/json" -d '{"node":"grok-bot"}'
+  -H "Authorization: Bearer <AH_API_TOKEN>" -H "Content-Type: application/json" -d '{"node":"grok-bot"}'
 curl -X POST "http://<HUB_IP>:8787/api/v1/tasks/<TASK_ID>/complete" \
-  -H "Authorization: Bearer <HUB_API_TOKEN>" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <AH_API_TOKEN>" -H "Content-Type: application/json" \
   -d '{"node":"grok-bot","text":"Comparison report ready","artifact":"https://example.com/report.md"}'
 ```
 
@@ -170,7 +164,7 @@ node bin/ah.mjs setup \
   --role node \
   --bus http \
   --hub-url http://<HUB_IP>:8787 \
-  --api-token "<HUB_API_TOKEN>" \
+  --api-token "<AH_API_TOKEN>" \
   --hub-key "<HUB_ED25519_PUBLIC_KEY>" \
   --node edge-node-1 \
   --zone office \
@@ -196,9 +190,9 @@ Skills are separated along **Leader vs. Worker** and **CLI (`ah`) vs. Pure HTTP*
 
 ---
 
-## Common Commands (`ah`, aliases: `a2a-hub` / `ahub` / `lah` / `hub-node`)
+## Common Commands (`ah`, aliases: `a2a-hub` / `ahub`)
 
-Configuration defaults to `~/.hub-node` (override with `--config <dir>` or `HUB_NODE_HOME`). See [Configuration & CLI](docs/configuration.md) for the complete reference.
+Configuration defaults to `~/.a2a-hub` (app installed under `~/.a2a-hub/app/`, override with `--config <dir>` or `AH_HOME`). See [Configuration & CLI](docs/configuration.md) for the complete reference.
 
 | Area | Command | Purpose |
 |---|---|---|

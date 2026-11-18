@@ -70,13 +70,13 @@ flowchart TB
 ## 角色与传输（标准 §10）
 
 - **hub 是逻辑角色，且为 node 的单进程超集。** 中台只有 node 与 hub 两个角色；
-  hub 角色是 node 角色的单进程超集，由 `ah daemon --role node|hub`（CLI 简称 `ah`，亦支持 `a2a-hub`、`ahub`、`lah` 与 `hub-node` 别名）承载。
+  hub 角色是 node 角色的单进程超集，由 `ah daemon --role node|hub`（CLI 简称 `ah`，别名 `a2a-hub` / `ahub`）承载。
   省略 `--role` 时读该配置目录 `node.json` 的 `role`，缺省 node。单进程单配置目录即可搞定，无需拆两个进程。
   `role=hub` 既像普通节点一样读取 `commands.json` 登记能力接单干活，又负责建单（入口 `ah task create`、Web 控制台与 HTTP API）、审批签名、结果呈递、陈旧任务告警与 LoopForge 多阶段 SOP 闭环推进（`LoopService`）。
   node 角色从不写 `auth_decision` 与 `canceled`，hub 角色是唯一写方。
   Hub 单进程启动本地 HTTP 网关（`src/server/http-server.mjs`，默认 `0.0.0.0:8787`），集中托管 `SqliteBus`（`src/bus/sqlite-bus.mjs`）、`LongPollBroker`（`src/server/longpoll-broker.mjs`）、`agent-gateway`（`src/server/agent-gateway.mjs`）、内置 Web 控制台（`src/server/web-ui.mjs`）与可选外部通知器（`src/hub/notifier.mjs`）。
   hub 逻辑代码主要在 `src/hub/` 与 `src/server/`。
-- **鉴权与审批身份。** 通过 `LAH_API_TOKEN`（Bearer Token）保护 Hub HTTP API，通过 `approval_key.pem` / `hubPublicKey`（ed25519 签名）校验审批真实性；远端宿主节点配置 `busType: "http"` 仅出站拉取总线并接受长轮询唤醒，外部纯 Agent 则经 Bearer Token 直接访问网关 REST 接口。
+- **鉴权与审批身份。** 通过 `AH_API_TOKEN`（Bearer Token）保护 Hub HTTP API，通过 `approval_key.pem` / `hubPublicKey`（ed25519 签名）校验审批真实性；远端宿主节点配置 `busType: "http"` 仅出站拉取总线并接受长轮询唤醒，外部纯 Agent 则经 Bearer Token 直接访问网关 REST 接口。
 - **传输与门铃方式**，长轮询本身仍只是通知机制，任务与消息内容均按统一表模型校验读写：
 
   | 方式 | 机制 | 适用 |
@@ -112,8 +112,8 @@ flowchart TB
   同 `Context_ID` 新开任务并引用前任。
 - **陈旧回收**：`working` 任务 20 分钟无心跳视为节点放弃，可被重新认领；
   `direct` 执行账本 `runs/<Task_ID>/entry.json` 保障守护重启后不误杀也不双跑。
-- **呈递与告警通道**：回执落入发起方本地 `present_queue.jsonl`（由 `ah present` 取走）；同时 `ExternalNotifier` 可向飞书群自定义机器人、Bark、Telegram 或通用 Webhook 推送待批、提问、终态与陈旧任务提醒。
-- **端边解耦**：边缘节点临时离线或重启时，任务安全停留在 SQLite/总线上等待重连，上线后长轮询 `since` 序号自动对齐（`resync`）并继续消费。
+- **呈递与告警通道**：回执落入发起方本地 `present_queue.jsonl`（由 `ah present` 取走）；同时 `ExternalNotifier` 可向飞书群机器人 Webhook（可选通知渠道）、Bark、Telegram 或通用 Webhook 推送待批、提问、终态与陈旧任务提醒。
+- **端边解耦**：边缘节点临时离线或重启时，任务安全停留在 SQLite/总线上等待重连，上线后长轮询 `cursor` 序号自动对齐（`resync`）并继续消费。
 
 ## 非目标
 

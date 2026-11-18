@@ -11,7 +11,7 @@
 - **协议发现（免鉴权）**：`GET http://<HUB_HOST>:8787/.well-known/agent.json`
   返回中台名称、版本、长/短轮询能力、`authentication.type`（`bearer` / `none`）及全量 REST 端点模板。
 - **鉴权头**：除 `GET /`、`GET /api/v1/health` 与 `GET /.well-known/agent.json` 外，所有 `/api/*` 请求均需携带：
-  `Authorization: Bearer <LAH_API_TOKEN>`
+  `Authorization: Bearer <AH_API_TOKEN>`
 - **配套 Skill 模板拉取**：认证后可调用 `GET /api/v1/skills` 查看目录，或按角色直接拉取对应提示词模板：
   - Leader 控制端（如 Muse）：`GET /api/v1/skills/a2a-leader`（对应仓库 `skills/a2a-leader/SKILL.md`）
   - Worker 执行端（如 Grok Bot）：`GET /api/v1/skills/a2a-worker`（对应仓库 `skills/a2a-worker/SKILL.md`）
