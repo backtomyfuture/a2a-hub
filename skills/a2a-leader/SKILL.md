@@ -25,7 +25,7 @@ description: A2A-Hub 纯 HTTP 控制端 / Leader Agent 接入协议（无 CLI �
 - 下载：`GET <HUB_URL>/api/v1/kit/a2a_check.py`（没有 python3 则 `a2a_check.sh`）。脚本通用，不含 Token。运行：`python3 <保存路径>/a2a_check.py --hub <HUB_URL> --node <节点名>`。
 - Token 优先放进平台安全密钥空间，名称 `A2A_HUB_TOKEN`（环境变量或引用）。没有这种机制才用 `--token-file` 或 `--token` 明文。不要把明文写进定时指令、日志或回复。
 - 脚本 stdout：`IDLE` 立即结束，不回复、不调用其它接口。`ERROR ...` 结束，不重试，也不要改用别的方式猜。`WORK` 再按本 Skill 跟单。平台若支持「脚本有输出才唤醒模型」，加上 `--silent-idle`。
-- 频率：leader 每 5 分钟。请求带浏览器 User-Agent，超时 15 秒。
+- 频率：leader 每 5 分钟。请求带浏览器 User-Agent，超时 25 秒。
 
 ---
 

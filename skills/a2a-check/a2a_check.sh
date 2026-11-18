@@ -66,12 +66,12 @@ ERR="/tmp/a2a_check.$$.err"
 trap 'rm -f "$BODY" "$ERR"' EXIT INT TERM
 
 if [ -n "$TOKEN" ]; then
-  if ! CODE=$(curl -sS --max-time 15 -A "$UA" -H "Authorization: Bearer ${TOKEN}" -H "Accept: application/json" -o "$BODY" -w "%{http_code}" -- "$URL" 2>"$ERR"); then
+  if ! CODE=$(curl -sS --max-time 25 -A "$UA" -H "Authorization: Bearer ${TOKEN}" -H "Accept: application/json" -o "$BODY" -w "%{http_code}" -- "$URL" 2>"$ERR"); then
     echo "ERROR 请求失败"
     exit 2
   fi
 else
-  if ! CODE=$(curl -sS --max-time 15 -A "$UA" -H "Accept: application/json" -o "$BODY" -w "%{http_code}" -- "$URL" 2>"$ERR"); then
+  if ! CODE=$(curl -sS --max-time 25 -A "$UA" -H "Accept: application/json" -o "$BODY" -w "%{http_code}" -- "$URL" 2>"$ERR"); then
     echo "ERROR 请求失败"
     exit 2
   fi
