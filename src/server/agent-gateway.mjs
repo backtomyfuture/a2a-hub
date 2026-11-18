@@ -11,6 +11,7 @@ import { acceptanceFromParts, parseCriteria } from "../acceptance.mjs";
 import { pickSignedDecision, publicKeyOf } from "../approval-sign.mjs";
 import { f1 } from "../bus/tables.mjs";
 import { capIdOf } from "../config.mjs";
+import { agentCanSeeTask, assertAgentRoute } from "../hub/agent-access.mjs";
 import { admissionOf, httpError, validateNodeName } from "../hub/admission.mjs";
 import { rosterNodeVisible } from "./longpoll-broker.mjs";
 import { submitAgentReceipt } from "../inbox.mjs";
@@ -598,6 +599,7 @@ export async function handleAgentGatewayRequest({
   readJsonBody,
   sendJson,
   discoverOnly = false,
+  principal = null,
 } = {}) {
   const remoteAddr = req.socket?.remoteAddress || "";
   const verifyKey = approvalVerifyKey(cfg, approval);
@@ -639,6 +641,16 @@ export async function handleAgentGatewayRequest({
     return true;
   }
   if (discoverOnly) return false;
+
+  // 路由矩阵与路径/查询/头里的节点身份。body 里的 node/from 由 http-server 读 body 时绑定。
+  if (principal?.kind === "agent") {
+    assertAgentRoute(principal, {
+      method,
+      pathname,
+      searchParams: reqUrl.searchParams,
+      headers: req.headers,
+    });
+  }
 
   // 0.5) 只读 Skill 模板分发（白名单校验，便于无 CLI 的云端 HTTP Agent 直接按角色拉取 SKILL.md）
   if (method === "GET" && pathname === "/api/v1/skills") {
@@ -1039,6 +1051,8 @@ export async function handleAgentGatewayRequest({
       const taskMsgs = msgByTask.get(f1(task, "Task_ID")) ?? [];
       const brief = buildTaskBrief(task, taskMsgs, partsByParent, artsByTask);
       if (from && brief.from_node !== from && brief.source !== from) continue;
+      // Agent 身份看不见与自己无关的任务；机主列表保持全量。
+      if (!agentCanSeeTask(principal, brief.from_node, brief.source, brief.target_node)) continue;
       out.push(brief);
       if (out.length >= limit) break;
     }
