@@ -166,6 +166,10 @@ test("名册隐藏无名片且 30 分钟无活动的节点，有名片的离线�
       assert.equal(connected.includes("probe-agent"), false);
       assert.equal(connected.includes("fresh-probe"), true);
       assert.equal(connected.includes("card-node"), true);
+      // Hub 自身不经 HTTP 轮询，仍要有在线记录和最近活动时间。
+      const self = state.data.connectedNodes.find((n) => n.node === "mac-mini-hub");
+      assert.equal(self.online, true);
+      assert.ok(Date.now() - self.lastSeenAt < 5000);
       assert.equal(state.data.agentCards.some((c) => c.node === "offline-card"), true);
     } finally {
       await httpHandle.close();

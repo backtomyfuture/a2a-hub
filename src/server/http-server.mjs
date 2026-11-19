@@ -579,6 +579,26 @@ export async function startHubHttpServer({
         // 无名片且 30 分钟内没活动的在线记录不进总览。有名片的离线节点仍留在 agentCards 里。
         const connectedNodes = (broker ? broker.connectedNodes() : [])
           .filter((n) => rosterNodeVisible(n, cardNodes.has(n.node)));
+        // Hub 自己的工作内核在进程内直连 Broker，从不经 HTTP 轮询，Broker 里没有它的连接记录。
+        // 能响应本请求就说明它在线，不补的话控制台「最近活动」永远是「暂无记录」。
+        const selfNode = cfg?.node || "";
+        if (selfNode && !connectedNodes.some((n) => n.node === selfNode)) {
+          connectedNodes.push({
+            node: selfNode,
+            online: true,
+            polling: true,
+            activeWaiters: 0,
+            cursor: broker?.latestSeq ?? 0,
+            remoteAddr: "",
+            lastSeenAt: Date.now(),
+            firstSeenAt: Date.now(),
+            kind: "host",
+            mode: "longpoll",
+            role: "",
+            intervalSec: null,
+            lastDeliveredAt: null,
+          });
+        }
         sendJson(res, 200, {
           hubNode: cfg?.node || "hub",
           hubPublicKey: cfg?.hubPublicKey || "",
