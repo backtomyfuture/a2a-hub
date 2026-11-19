@@ -528,7 +528,6 @@ export function renderWebConsoleHtml() {
         <span class="dot" id="pollDot"></span>
         <div style="min-width:0;">
           <div id="pollText" style="color:var(--text);font-weight:500;">连接中...</div>
-          <div id="seqText" class="mono muted" style="font-size:11px;">同步序号: -</div>
         </div>
       </div>
       <div style="display:flex;gap:6px;">
@@ -1553,7 +1552,6 @@ async function refreshState() {
     state.data = d;
     if (d.seq != null && d.seq > state.cursor) state.cursor = d.seq;
     document.getElementById("hubNodeLabel").textContent = "中台节点: " + (d.hubNode || "hub");
-    document.getElementById("seqText").textContent = "同步序号: " + (d.seq ?? 0);
 
     const todos = computeTodos(d);
     const navTodo = document.getElementById("navTodoCount");
@@ -3776,7 +3774,6 @@ async function startLongPoll() {
       dot.className = "dot on";
       txt.textContent = "已实时连接";
       if (d.cursor != null) state.cursor = d.cursor;
-      document.getElementById("seqText").textContent = "同步序号: " + state.cursor;
       if (d.wake) await refreshState();
     } catch {
       dot.className = "dot err";
