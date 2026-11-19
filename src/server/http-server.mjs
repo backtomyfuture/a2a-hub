@@ -16,6 +16,7 @@ import {
   formatAgentCard,
   httpError,
   issuedRole,
+  parseCardMetadata,
   presetHttpCardFields,
   receiveModeFor,
   validateAccess,
@@ -1199,9 +1200,26 @@ export async function startHubHttpServer({
         const node = validateNodeName(decodeParam(rotateTokenMatch[1]));
         const body = await readJsonBodyBound();
         const existing = tokenStore.get(node);
-        const role = Object.hasOwn(body, "role") ? body.role : existing?.role;
+        const cards = bus?.tables?.agentCards ? await bus.listRecords(bus.tables.agentCards) : [];
+        let role = Object.hasOwn(body, "role") ? body.role : existing?.role;
+        // 吊销后再点「生成密钥」或历史节点首次签发时，若调用方未显式传 role，则从该节点已有名片的 Metadata.role 推导。
+        if (!role) {
+          let inferred = "";
+          for (const card of cards) {
+            if (f1(card, "Node") !== node) continue;
+            const cardRole = parseCardMetadata(card).role;
+            if (cardRole === "leader" || cardRole === "hybrid") {
+              inferred = "leader";
+              break;
+            }
+            if (cardRole === "worker") inferred = "worker";
+          }
+          if (inferred) role = inferred;
+        }
         const scopes = Object.hasOwn(body, "scopes") ? body.scopes : undefined;
         const issued = tokenStore.rotate({ node, role, scopes });
+        const storedReceive = nodeStoredReceiveMode(cards, node);
+        const receive = storedReceive === "http-longpoll" ? "longpoll" : (storedReceive === "webhook" ? "webhook" : "poll");
         const onboarding = buildOnboarding({
           hubUrl: requestHubUrl(req),
           node,
@@ -1209,6 +1227,7 @@ export async function startHubHttpServer({
           role: issued.role,
           authRequired: true,
           token: issued.token,
+          receive,
         });
         sendJson(res, 200, { token: issued.token, onboarding });
         return;

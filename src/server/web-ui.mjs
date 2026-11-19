@@ -2565,14 +2565,33 @@ function renderOnboardingResult(res) {
   return html;
 }
 
+function inferNodeCardRole(node) {
+  let inferred = "worker";
+  for (const c of (state.cards || [])) {
+    if (c.node !== node) continue;
+    if (c.role === "leader" || c.role === "hybrid") return "leader";
+    if (c.role === "worker") inferred = "worker";
+  }
+  return inferred;
+}
+
 function openTokenRotateConfirm(node) {
   const hasExisting = state.tokensByNode.has(node);
+  const defaultRole = inferNodeCardRole(node);
   document.getElementById("tmTitle").textContent = hasExisting ? ("重新生成密钥 · " + node) : ("生成密钥 · " + node);
   document.getElementById("tmBody").innerHTML = '<div style="margin-bottom:14px;line-height:1.6;">'
     + (hasExisting
       ? '重新生成后，节点 <strong>' + esc(node) + '</strong> 原先的旧密钥将<strong>立即失效</strong>，需要把新密钥更新给该 Agent。'
       : '将为节点 <strong>' + esc(node) + '</strong> 签发一枚专属访问密钥。')
     + '</div>'
+    + (hasExisting ? '' : (
+      '<div class="form-row" style="margin-bottom:14px;">'
+      + '<label for="tmRole">密钥角色</label>'
+      + '<select class="input" id="tmRole">'
+      + '<option value="worker"' + (defaultRole === "worker" ? ' selected' : '') + '>worker（执行端：仅认领与回执自己的任务）</option>'
+      + '<option value="leader"' + (defaultRole === "leader" ? ' selected' : '') + '>leader（调度控制端：可派单、跟单、答复及接单）</option>'
+      + '</select></div>'
+    ))
     + '<div style="display:flex;justify-content:flex-end;gap:8px;">'
     + '<button type="button" class="btn" data-close-modal="tokenManageModal">取消</button>'
     + '<button type="button" class="btn primary" data-action="do-rotate-token" data-node="' + esc(node) + '">'
@@ -2583,9 +2602,11 @@ function openTokenRotateConfirm(node) {
 
 async function doRotateToken(node) {
   try {
+    const roleEl = document.getElementById("tmRole");
+    const payload = roleEl && roleEl.value ? { role: roleEl.value } : {};
     const res = await api("/api/v1/admin/tokens/" + encodeURIComponent(node) + "/rotate", {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify(payload),
     });
     const token = res.token || "";
     const prompt = (res.onboarding && res.onboarding.prompt) || "";

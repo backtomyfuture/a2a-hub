@@ -452,6 +452,24 @@ test("HTTP：机主不受影响，Agent 按角色隔离，冒充与撤单受绑�
     const used = (await apiJson(baseUrl, "/api/v1/admin/tokens", { token: apiToken }))
       .data.tokens.find((t) => t.node === "new-leader");
     assert.equal(typeof used.last_used_at, "string");
+
+    // 吊销已有 leader 节点的 Token 后再调用 /rotate 且不传 role：应从已有名片推导 leader 并保留 longpoll 接入提示。
+    const addedLp = await apiJson(baseUrl, "/api/v1/admin/agents", {
+      method: "POST",
+      token: apiToken,
+      body: { node: "muse-lp", access: "http", role: "leader", receive: "longpoll" },
+    });
+    assert.equal(addedLp.status, 200);
+    assert.equal((await apiJson(baseUrl, "/api/v1/admin/tokens/muse-lp", { method: "DELETE", token: apiToken })).status, 200);
+    const reissued = await apiJson(baseUrl, "/api/v1/admin/tokens/muse-lp/rotate", {
+      method: "POST",
+      token: apiToken,
+      body: {},
+    });
+    assert.equal(reissued.status, 200);
+    assert.match(reissued.data.token, /^aht_/);
+    assert.match(reissued.data.onboarding.prompt, /ah service --system/);
+    assert.equal((await apiJson(baseUrl, "/api/v1/agents/muse-lp/updates?timeout=0", { token: reissued.data.token })).status, 200);
   });
 });
 
