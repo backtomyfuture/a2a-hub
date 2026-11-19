@@ -1,7 +1,8 @@
-// 节点配置、执行控制键拒收与超时夹紧。凭据只从本机 node.json / env 文件读取。
+// 节点配置、执行控制键拒收与超时夹紧。凭据只从本机 node.json、tokenFile 或 env 文件读取。
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { AgentGatewayClient } from "./bus/agent-client.mjs";
 import { SqliteBus } from "./bus/sqlite-bus.mjs";
 import { HttpBus } from "./bus/http-bus.mjs";
 import { normalizeTables } from "./bus/tables.mjs";
@@ -191,6 +192,56 @@ export function readEnvFile(p) {
   return kv;
 }
 
+function expandHome(raw) {
+  const s = String(raw ?? "").trim();
+  if (s === "~") return os.homedir();
+  if (s.startsWith("~/")) return path.join(os.homedir(), s.slice(2));
+  return s;
+}
+
+export function resolveTokenFilePath(configDir, raw) {
+  const expanded = expandHome(raw);
+  if (!expanded) return "";
+  return path.isAbsolute(expanded) ? expanded : path.resolve(configDir, expanded);
+}
+
+function unquote(value) {
+  const v = String(value ?? "").trim();
+  if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) return v.slice(1, -1);
+  return v;
+}
+
+// tokenFile 可以是一行 Token，也可以是 KEY=VALUE（忽略空行和 # 注释）。错误信息只含路径，绝不回显文件内容。
+export function readTokenFile(rawPath, configDir) {
+  const trimmed = String(rawPath ?? "").trim();
+  if (!trimmed) {
+    throw new Error("tokenFile 路径不能为空");
+  }
+  const file = resolveTokenFilePath(configDir || process.cwd(), trimmed);
+  let text;
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch (e) {
+    const err = new Error(`无法读取 tokenFile（${file}）：${e?.code || "读取失败"}`);
+    err.code = e?.code;
+    throw err;
+  }
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith("#"));
+  const prefer = ["AH_API_TOKEN", "A2A_HUB_TOKEN"];
+  const kv = new Map();
+  const bare = [];
+  for (const line of lines) {
+    const eq = line.indexOf("=");
+    if (eq > 0) kv.set(line.slice(0, eq).trim(), unquote(line.slice(eq + 1)));
+    else bare.push(unquote(line));
+  }
+  for (const key of prefer) {
+    if (kv.get(key)) return kv.get(key);
+  }
+  if (bare[0]) return bare[0];
+  throw new Error(`tokenFile 未包含有效 Token（${file}）`);
+}
+
 export function resolveListenAddr(raw = "0.0.0.0:8787") {
   const s = String(raw ?? "").trim() || "0.0.0.0:8787";
   if (/^\d+$/.test(s)) return { host: "0.0.0.0", port: Number(s) };
@@ -229,14 +280,22 @@ export function loadConfig(configDir, opts = {}) {
     try {
       kv = readEnvFile(cfg.appEnv.replace(/^~/, os.homedir()));
     } catch (e) {
-      if (!cfg.hubUrl && !cfg.dbPath && cfg.busType !== "sqlite" && cfg.busType !== "http" && cfg.role !== "hub") {
+      if (!cfg.hubUrl && !cfg.dbPath && cfg.busType !== "sqlite" && cfg.busType !== "http" && cfg.busType !== "agent" && cfg.role !== "hub") {
         throw e;
       }
     }
   }
 
   const hubUrl = String(cfg.hubUrl ?? kv.HUB_URL ?? process.env.HUB_URL ?? "").trim();
-  const apiToken = String(cfg.apiToken ?? kv.AH_API_TOKEN ?? process.env.AH_API_TOKEN ?? "").trim();
+  const tokenFileRaw = String(cfg.tokenFile ?? cfg.token_file ?? "").trim();
+  let apiToken = String(cfg.apiToken ?? "").trim();
+  if (!apiToken && tokenFileRaw) {
+    // 显式 tokenFile 优先于环境变量，避免临时 VM 上残留的 AH_API_TOKEN / A2A_HUB_TOKEN 盖住 0600 凭据。
+    apiToken = readTokenFile(tokenFileRaw, configDir);
+  }
+  if (!apiToken) {
+    apiToken = String(kv.AH_API_TOKEN ?? kv.A2A_HUB_TOKEN ?? process.env.AH_API_TOKEN ?? process.env.A2A_HUB_TOKEN ?? "").trim();
+  }
 
   let busType = String(cfg.busType ?? "").trim().toLowerCase();
   if (!busType) {
@@ -277,14 +336,21 @@ export function loadConfig(configDir, opts = {}) {
         tables,
       });
     }
+  } else if (busType === "agent") {
+    if (!effectiveHubUrl) throw new Error("node.json 缺少 hubUrl：busType=agent 需要 Hub 地址");
+    bus = null;
   } else {
-    throw new Error(`不支持的 busType: ${busType}（仅支持 sqlite / http）`);
+    throw new Error(`不支持的 busType: ${busType}（仅支持 sqlite / http / agent）`);
   }
+
+  const agentRoleRaw = String(cfg.agentRole ?? cfg.agent_role ?? "worker").trim().toLowerCase() || "worker";
+  const agentRole = agentRoleRaw === "hybrid" ? "leader" : agentRoleRaw;
+  const receiveMode = String(cfg.receiveMode ?? cfg.receive_mode ?? "").trim();
 
   const out = {
     node: cfg.node,
-    role: cfg.role,
-    kind: cfg.kind || "host",
+    role: cfg.role || (busType === "agent" ? "node" : cfg.role),
+    kind: busType === "agent" ? "agent" : (cfg.kind || "host"),
     zone: cfg.zone ?? "",
     nodeDesc: cfg.nodeDesc ?? "",
     pollSec: cfg.pollSec ?? 45,
@@ -301,7 +367,21 @@ export function loadConfig(configDir, opts = {}) {
     bus,
     configDir,
   };
-  if (busType === "http" && effectiveHubUrl) out.hubUrl = effectiveHubUrl;
+  if ((busType === "http" || busType === "agent") && effectiveHubUrl) out.hubUrl = effectiveHubUrl;
+  if (busType === "agent") {
+    out.agentRole = agentRole;
+    out.receiveMode = receiveMode || "http-longpoll";
+    if (tokenFileRaw) out.tokenFile = resolveTokenFilePath(configDir, tokenFileRaw);
+    out.agentClient = new AgentGatewayClient({
+      hubUrl: effectiveHubUrl,
+      apiToken,
+      node: cfg.node,
+      agentRole: out.agentRole,
+      receiveMode: out.receiveMode,
+      nodeDesc: cfg.nodeDesc ?? "",
+      longPollSec: cfg.longPollSec ?? 25,
+    });
+  }
   if (busType === "sqlite") {
     out.dbPath = resolvedDbPath;
     out.listen = cfg.listen ?? "0.0.0.0:8787";

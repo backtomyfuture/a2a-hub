@@ -389,6 +389,23 @@ function longpollLeaderLoop(base, node, cred) {
   ];
 }
 
+// Muse 一类临时 VM 换机后 /etc 和 /tmp 会清空，仅家目录持久化留存。探针只在命令成功时落下，失败下一轮再收敛。
+function officialAhVmLines(node) {
+  const home = `~/.a2a-hub-${node}`;
+  const probe = `/tmp/a2a-hub-${node}.ready`;
+  return [
+    "【Linux VM 官方 ah（推荐，Node >= 24，如 Muse 临时机）】",
+    "用官方 install.sh 装到家目录（~/.a2a-hub/app，软链 ~/.local/bin/ah）。家目录跨换机持久留存，不要装到会随换机清空的 /etc 或 /tmp。",
+    `配置目录用 ${home}：先将分 Agent Token 写入 0600 凭据文件（如 ${home}/agent.token），再用 ah join <HUB_URL> --agent --node ${node} --config ${home} --token-file ${home}/agent.token --no-daemon 初始化（或在 node.json 写 busType="agent" 与 tokenFile）。Token 绝不写进命令行、node.json、systemd unit 或日志。`,
+    `安装或重建系统级服务用一条幂等命令：ah service --system --config ${home}`,
+    "这条命令会按当前环境把代理变量与 NODE_USE_ENV_PROXY=1 写入 0600 的 service.env 并重启服务，仅 is-active 为 active 时返回 0，输出不泄露凭据。",
+    "【临时 VM 换机自愈】",
+    "把 ah、配置、tokenFile 和恢复脚本放在家目录（例如 ~/.local/state/）。换机后 /etc/systemd/system 与 /tmp 会清空。",
+    `开机探针是 ${probe}（换机必空）。runtime hook 每 5 秒检查一次，探针缺失时执行单入口幂等命令：ah service --system --config ${home} && touch ${probe}`,
+    "只有退出码为 0 才落探针；失败不 touch，5 秒后自动重试直到收敛。",
+  ];
+}
+
 function longpollPrompt({ base, node, role, cred, skills }) {
   const shown = promptRole(role);
   const skillLines = skills.map((s) => `GET ${s.url}`);
@@ -409,6 +426,8 @@ function longpollPrompt({ base, node, role, cred, skills }) {
     ...once,
     "",
     ...loops,
+    "",
+    ...officialAhVmLines(node),
   ].join("\n");
 }
 
@@ -598,6 +617,7 @@ export function buildOnboarding({
       `一次性接入：把 Token 存进平台安全密钥空间，名称 A2A_HUB_TOKEN（没有任何安全存储时才写明文）。拉取协议 Skill（${authNoteHttp}；${UA_HEADER}）：${skills.map((s) => `GET ${s.url}`).join("、")}。不要创建定时任务，不要下载 a2a_check.py。`,
       `一次性注册：POST ${base}/api/v1/agents/register ，body {"node":"${node}","role":"${shown}","kind":"agent","receive_mode":"http-longpoll"}`,
       `${loopHint}断线按 1 秒、3 秒、8 秒、30 秒退避后重连。`,
+      ...officialAhVmLines(node),
     ];
     prompt = longpollPrompt({ base, node, role, cred, skills });
   } else if (receiveMode === "webhook") {

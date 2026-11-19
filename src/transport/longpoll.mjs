@@ -7,7 +7,7 @@
 import fs from "node:fs";
 
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
-const RECONNECT_DELAYS_MS = [1000, 2000, 5000, 15_000];
+const RECONNECT_DELAYS_MS = [1000, 3000, 8000, 30_000];
 
 export function createLongPollWaker(cfg, opts = {}) {
   return new LongPollWaker(cfg, opts);

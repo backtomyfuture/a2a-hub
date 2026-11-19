@@ -5,16 +5,21 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline/promises";
+import { AgentGatewayClient } from "./bus/agent-client.mjs";
 import { HttpBus } from "./bus/http-bus.mjs";
 import { SqliteBus } from "./bus/sqlite-bus.mjs";
 import { normalizeTables } from "./bus/tables.mjs";
-import { normalizeCommands, readEnvFile, resolveListenAddr } from "./config.mjs";
+import { normalizeCommands, readEnvFile, readTokenFile, resolveListenAddr } from "./config.mjs";
 import { isHubPublicKey, loadOrCreateHubKey } from "./approval-sign.mjs";
 import { doctor } from "./doctor.mjs";
 import { service } from "./service.mjs";
 
 // 按角色与宿主形态决定本机应安装的本地 CLI Skill，避免把打工接单指令混进普通 host 子进程全局目录。
-export function resolveSkillsForHost({ role = "node", kind = "host" } = {}) {
+export function resolveSkillsForHost({ role = "node", kind = "host", agentRole = "" } = {}) {
+  // agentRole 只在官方 Gateway 客户端（busType=agent）传入。不传时保持原来的 role × kind 矩阵。
+  const gatewayRole = String(agentRole ?? "").trim().toLowerCase();
+  if (gatewayRole === "leader" || gatewayRole === "hybrid") return ["ah", "ah-inbox"];
+  if (gatewayRole === "worker") return ["ah-inbox"];
   const isAgent = String(kind).trim().toLowerCase() === "agent";
   const isHub = String(role).trim().toLowerCase() === "hub";
   if (isAgent) {
@@ -26,6 +31,7 @@ export function resolveSkillsForHost({ role = "node", kind = "host" } = {}) {
 export function installLocalSkills(appDir, {
   role = "node",
   kind = "host",
+  agentRole = "",
   skipSkill = false,
   skillsRoot = path.join(os.homedir(), ".agents", "skills"),
   log = console.log,
@@ -34,7 +40,7 @@ export function installLocalSkills(appDir, {
     log("  · 跳过安装本机 Skill（--skip-skill）");
     return [];
   }
-  const names = resolveSkillsForHost({ role, kind });
+  const names = resolveSkillsForHost({ role, kind, agentRole });
   const installed = [];
   for (const name of names) {
     const skillSrc = path.join(appDir, "skills", name, "SKILL.md");
@@ -78,6 +84,15 @@ export function parseFlags(argv) {
     else if (a.startsWith("--role=")) f.role = a.slice("--role=".length);
     else if (a === "--kind") f.kind = argv[++i] || "host";
     else if (a.startsWith("--kind=")) f.kind = a.slice("--kind=".length);
+    else if (a === "--agent") {
+      f.agent = true;
+      f.bus = "agent";
+      if (!f.kind) f.kind = "agent";
+    }
+    else if (a === "--agent-role") f.agentRole = argv[++i] || "";
+    else if (a.startsWith("--agent-role=")) f.agentRole = a.slice("--agent-role=".length);
+    else if (a === "--token-file") f.tokenFile = argv[++i] || "";
+    else if (a.startsWith("--token-file=")) f.tokenFile = a.slice("--token-file=".length);
     else if (a === "--hub-key") f.hubKey = argv[++i];
     else if (a.startsWith("--hub-key=")) f.hubKey = a.slice("--hub-key=".length);
     else if (a === "--node") f.node = argv[++i];
@@ -384,7 +399,7 @@ export function setupHelpText() {
   return `用法：
   # 0. 一键启动独立中台 / 一键接入远端节点（推荐）
   ah up   [--node mac-mini] [--listen 0.0.0.0:8787] [--service]
-  ah join http://[<token>@]<hub-ip>:8787 [--node worker-1] [--service]
+  ah join http://[<token>@]<hub-ip>:8787 [--node worker-1] [--agent] [--agent-role worker|leader] [--token-file <path>] [--service]
 
   # 1. 独立自建主枢纽（Mac mini / SQLite + HTTP 长轮询 + Web 控制台）
   ah setup --hub [--node mac-mini] [--listen 0.0.0.0:8787] [--api-token <token>]
@@ -394,7 +409,10 @@ export function setupHelpText() {
   ah setup --join http://[<token>@]<hub-ip>:8787 [--node worker-1]
            [--api-token <token>] [--hub-key <hub 审批公钥>] [--kind host|agent] [--yes]
 
-  --bus         显式指定总线模式：sqlite（独立 Hub）或 http（远程长轮询节点）
+  --bus         显式指定总线模式：sqlite（独立 Hub）、http（远程长轮询节点）或 agent（官方 Agent Gateway 客户端）
+  --agent       快捷等价于 --bus agent --kind agent。配合 --agent-role worker|leader 与 --token-file
+  --agent-role  busType=agent 时的网关角色：worker（只接单）或 leader（派单并接单）
+  --token-file  0600 凭据文件路径。只把路径写入 node.json，明文 Token 不进 node.json / app.env
   --hub         快捷等价于 --role hub --bus sqlite --auto-token
   --join        快捷接入地址（支持内嵌 token：http://<token>@<host>:8787），自动拉取公钥
   --auto-token  若未传口令，自动生成高强度随机 API Token
@@ -461,8 +479,34 @@ async function selectKind(flags, interactive, ask) {
   return /agent/i.test(kind) ? "agent" : "host";
 }
 
-async function finalizeSetup({ configDir, appDir, role, kind, node, prefix, bus, tables, flags, interactive, ask }) {
+async function finalizeSetup({ configDir, appDir, role, kind, node, prefix, bus, tables, flags, interactive, ask, busType = "", agentRole = "" }) {
   const cmdPath = path.join(configDir, "commands.json");
+  if (busType === "agent") {
+    // 官方 Gateway 客户端的能力在 Hub 名片上，本机不维护 commands.json，也不扫 PATH。
+    console.log("  · busType=agent：能力由 Hub 名片登记，本机不写 commands.json");
+    console.log("  ✓ 已写入 node.json");
+    try { bus?.close?.(); } catch {}
+    const shouldSkipSkill = flags.skipSkill || ["1", "true"].includes(String(process.env.AH_SKIP_SKILL || "").toLowerCase());
+    try {
+      installLocalSkills(appDir, { role, kind, agentRole, skipSkill: shouldSkipSkill });
+    } catch {}
+    let dc = await doctor(configDir, appDir, { role });
+    if (dc !== 0) {
+      console.error("  ✗ 自检未全过，按上面清单修完后运行 `ah doctor` 复查。");
+      return dc;
+    }
+    let wantService = flags.service;
+    if (!wantService && interactive) wantService = /^y/i.test(await ask("现在注册开机自启并启动守护？(Y/n)", "Y"));
+    if (wantService) {
+      const sc = await service(configDir, { role }, appDir);
+      if (sc !== 0) { console.error("  ✗ 自启注册失败，看上面输出。"); return sc; }
+      console.log("  ✓ 自启已注册、守护已启动。");
+    } else {
+      console.log(`  · 未注册自启；手动运行守护：ah daemon --config ${configDir}`);
+    }
+    console.log(`setup 完成：Agent Gateway 节点 ${node}（${agentRole || "worker"}）就绪，可通过 ah daemon 常驻。`);
+    return 0;
+  }
   const cmdExisted = fs.existsSync(cmdPath);
   let existingCmds = {};
   let isExample = false;
@@ -561,7 +605,7 @@ async function finalizeSetup({ configDir, appDir, role, kind, node, prefix, bus,
   // 按本机角色/形态自动安装对应 CLI Skill（支持 --skip-skill 或 AH_SKIP_SKILL=1 跳过）
   const shouldSkipSkill = flags.skipSkill || ["1", "true"].includes(String(process.env.AH_SKIP_SKILL || "").toLowerCase());
   try {
-    installLocalSkills(appDir, { role, kind, skipSkill: shouldSkipSkill });
+    installLocalSkills(appDir, { role, kind, agentRole, skipSkill: shouldSkipSkill });
   } catch {}
 
   // 自检
@@ -640,8 +684,8 @@ export async function runSetup(configDir, argv, appDir) {
     }
 
     const busFlag = String(flags.bus ?? "").trim().toLowerCase();
-    if (busFlag && !["sqlite", "http"].includes(busFlag)) {
-      console.error(`  ✗ --bus 只能是 sqlite 或 http，收到：${busFlag}`);
+    if (busFlag && !["sqlite", "http", "agent"].includes(busFlag)) {
+      console.error(`  ✗ --bus 只能是 sqlite、http 或 agent，收到：${busFlag}`);
       return 2;
     }
     const envHubUrl = String(process.env.HUB_URL ?? "").trim();
@@ -653,7 +697,7 @@ export async function runSetup(configDir, argv, appDir) {
     if (!setupBus) {
       if (explicitHubUrl || envHubUrl) setupBus = "http";
       else if (flags.listen || flags.dbPath || role === "hub") setupBus = "sqlite";
-      else if (existingRaw && !isUnfinishedExample(existingRaw) && (existingRaw.busType === "sqlite" || existingRaw.busType === "http")) {
+      else if (existingRaw && !isUnfinishedExample(existingRaw) && (existingRaw.busType === "sqlite" || existingRaw.busType === "http" || existingRaw.busType === "agent")) {
         setupBus = existingRaw.busType;
       } else if (existingRaw?.hubUrl) {
         setupBus = "http";
@@ -665,8 +709,21 @@ export async function runSetup(configDir, argv, appDir) {
       }
     }
 
-    console.log(`  ✓ 总线模式：${setupBus === "sqlite" ? "独立主枢纽（SQLite + HTTP 长轮询服务端 + Web 控制台）" : "远程节点（HTTP 长轮询接入独立 Hub）"}`);
-    const kind = await selectKind(flags, interactive, ask);
+    if (setupBus === "agent" && role === "hub") {
+      console.error("  ✗ busType=agent 的 role 必须是 node。网关里的 worker / leader 用 --agent-role 指定");
+      return 2;
+    }
+    let agentRole = "";
+    if (setupBus === "agent") {
+      agentRole = String(flags.agentRole || "worker").trim().toLowerCase() || "worker";
+      if (agentRole === "hybrid") agentRole = "leader";
+      if (agentRole !== "worker" && agentRole !== "leader") {
+        console.error(`  ✗ --agent-role 只能是 worker 或 leader，收到：${flags.agentRole}`);
+        return 2;
+      }
+    }
+    console.log(`  ✓ 总线模式：${setupBus === "sqlite" ? "独立主枢纽（SQLite + HTTP 长轮询服务端 + Web 控制台）" : setupBus === "agent" ? "官方 Agent Gateway 客户端（分 Agent Token，只出站）" : "远程节点（HTTP 长轮询接入独立 Hub）"}`);
+    const kind = setupBus === "agent" ? "agent" : await selectKind(flags, interactive, ask);
     const hostDefault = os.hostname().split(".")[0].toLowerCase().replace(/[^a-z0-9-]/g, "-") || (role === "hub" ? "mac-mini" : "node");
     const nodeDefault = role === "hub" ? (flags.node || hostDefault || "hub") : (flags.node || hostDefault);
     const node = flags.node || (interactive ? await ask("给当前节点起个名字（中台按此名称派单）", nodeDefault) : nodeDefault);
@@ -683,7 +740,7 @@ export async function runSetup(configDir, argv, appDir) {
 
     let resolvedHubUrl = "";
     let embeddedToken = "";
-    if (setupBus === "http") {
+    if (setupBus === "http" || setupBus === "agent") {
       const rawUrl = explicitHubUrl || envHubUrl || existingRaw?.hubUrl || await ask("输入独立 Hub 的访问地址（例如 http://192.168.1.10:8787 或 http://<token>@192.168.1.10:8787）");
       const parsedJoin = parseJoinHubUrl(rawUrl);
       resolvedHubUrl = parsedJoin.hubUrl;
@@ -726,7 +783,8 @@ export async function runSetup(configDir, argv, appDir) {
       tables,
     };
 
-    if (apiToken) {
+    // tokenFile 只记路径。明文留在那份 0600 文件里，不复制进 node.json 或 app.env。
+    if (apiToken && !(setupBus === "agent" && flags.tokenFile)) {
       const appEnvPath = writeLockedAppEnvVars(configDir, {
         AH_API_TOKEN: apiToken,
       });
@@ -746,6 +804,41 @@ export async function runSetup(configDir, argv, appDir) {
       nodeJson.dbPath = dbPath;
       if (publicUrl) nodeJson.publicUrl = publicUrl;
       bus = new SqliteBus({ dbPath, tables });
+    } else if (setupBus === "agent") {
+      nodeJson.hubUrl = resolvedHubUrl;
+      nodeJson.kind = "agent";
+      nodeJson.agentRole = agentRole;
+      nodeJson.receiveMode = "http-longpoll";
+      if (flags.tokenFile) nodeJson.tokenFile = flags.tokenFile;
+      if (hubPublicKey) nodeJson.hubPublicKey = hubPublicKey;
+      let probeToken = "";
+      if (flags.tokenFile) {
+        try { probeToken = readTokenFile(flags.tokenFile, configDir); }
+        catch (e) { console.log(`  · ${e.message}，探活将不带凭据`); }
+      } else {
+        probeToken = apiToken;
+      }
+      const client = new AgentGatewayClient({
+        hubUrl: resolvedHubUrl,
+        apiToken: probeToken,
+        node,
+        agentRole,
+        receiveMode: "http-longpoll",
+        nodeDesc,
+      });
+      try {
+        const health = await client.health();
+        console.log(`  ✓ 远程 Hub 在线（${health?.node ?? resolvedHubUrl}，seq=${health?.seq ?? 0}）`);
+        if (!hubPublicKey && health?.hubPublicKey && isHubPublicKey(health.hubPublicKey)) {
+          hubPublicKey = health.hubPublicKey;
+          nodeJson.hubPublicKey = hubPublicKey;
+          console.log("  ✓ 已从远程 Hub 自动同步 ed25519 审批公钥");
+        }
+        const check = await client.check();
+        console.log(`  ✓ Agent Gateway /check 可达（work=${check?.work ? "yes" : "no"}）`);
+      } catch (e) {
+        console.log(`  · 暂未连上 Agent Gateway（${e.message}），将继续写入本地配置`);
+      }
     } else {
       nodeJson.hubUrl = resolvedHubUrl;
       if (role !== "hub" && hubPublicKey) nodeJson.hubPublicKey = hubPublicKey;
@@ -782,7 +875,7 @@ export async function runSetup(configDir, argv, appDir) {
       console.log("  · 未配置 hubPublicKey：Hub 在线时执行 ah join 或 ah setup --hub-key <公钥> 可开启 ed25519 审批验签。");
     }
 
-    return await finalizeSetup({ configDir, appDir, role, kind, node, prefix, bus, tables, flags, interactive, ask });
+    return await finalizeSetup({ configDir, appDir, role, kind, node, prefix, bus, tables, flags, interactive, ask, busType: setupBus, agentRole });
   } finally {
     if (rl) {
       try { rl.close(); } catch {}

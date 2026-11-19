@@ -26,10 +26,13 @@
 
 ## 2. node.json
 
-节点身份（`node` / `zone`）、总线模式（`busType`: `sqlite` 或 `http`）、访问口令来源（`appEnv` 指向 `0600` 的 `AH_API_TOKEN`）、长轮询与对账周期。
+节点身份（`node` / `zone`）、总线模式（`busType`: `sqlite`、`http` 或 `agent`）、访问口令来源（`appEnv` 指向 `0600` 的 `AH_API_TOKEN`，或 `tokenFile` 指向另一份 `0600` 凭据）、长轮询与对账周期。
 
-- `role`：`node` 或 `hub`，缺省 `node`。`ah daemon`、`doctor`、`service` 省略 `--role` 时读它。
-- `busType`：`sqlite`（Hub 主中枢）或 `http`（远端长轮询节点）。
+- `role`：`node` 或 `hub`，缺省 `node`。`ah daemon`、`doctor`、`service` 省略 `--role` 时读它。`busType=agent` 时 `role` 仍写 `node`。
+- `busType`：`sqlite`（Hub 主中枢）、`http`（远端长轮询节点，机主 Token）或 `agent`（官方 Agent Gateway 客户端，只用分 Agent Token `aht_...`）。
+- `tokenFile`：`busType=agent` 时推荐。指向 `0600` 凭据文件（一行 Token，或 `AH_API_TOKEN=` / `A2A_HUB_TOKEN=`）。明文不进 `node.json`、systemd unit 或日志。该文件优先于环境变量里的 `AH_API_TOKEN`。
+- `agentRole`：`worker` 或 `leader`（旧值 `hybrid` 按 `leader`）。只在 `busType=agent` 下表示网关角色。
+- `receiveMode`：`busType=agent` 缺省 `http-longpoll`。
 - `longPollSec`：长轮询单次挂起秒数（默认 `25`）；`pollSec`（默认 `45`）是 `poll` 模式的定时轮询间隔；`sweepSec`（默认 `900`，即 15 分钟）是对账兜底。
 - `hubPublicKey`：hub 的审批签名公钥（base64）。`ah join` 会从 `GET /api/v1/health` 自动拉取写入；配了它，本节点只认 hub 私钥签过的 `auth_decision`。hub 自己私钥在配置目录 `approval_key.pem`（600，首次启动自动生成），公钥由私钥推出。详见 [SECURITY.md](../SECURITY.md)。
 - `tz`：IANA 时区名，缺省 `Asia/Shanghai`。决定本地定时调度的 cron 墙钟与期次键偏移，与宿主机时区及系统 `TZ` 环境变量无关。
@@ -39,7 +42,8 @@
 `ah setup [--kind host|agent]` 的向导支持：
 
 - **`kind: host`（电脑宿主，默认）**：扫描识别本机已装的 Agent（Claude Code、Codex、agy、Paseo、Grok CLI 等），把它们登记为 `commands.json` 里的 Worker；守护进程认领任务后拉起本机命令干活。
-- **`kind: agent`（本机独立 Agent，有守护进程壳）**：Agent 自己就是干活的人。setup 不扫描 PATH、不注册外部 CLI，只登记一张本尊 Worker 名片 `agent`（`mode: inbox`）。守护进程认领任务后写入本地 `agent_inbox.jsonl` 并刷新心跳，由本尊调 `ah inbox` 接单、办完回执。
+- **`kind: agent`（本机独立 Agent，有守护进程壳）**：Agent 自己就是干活的人。`busType=http` 时 setup 不扫描 PATH、不注册外部 CLI，只登记一张本尊 Worker 名片 `agent`（`mode: inbox`）。守护进程认领任务后写入本地 `agent_inbox.jsonl` 并刷新心跳，由本尊调 `ah inbox` 接单、办完回执。
+- **`busType: agent`（官方 Agent Gateway 客户端）**：云端 VM 只用最小权限的分 Agent Token。`ah daemon` 不开监听端口，走 `/api/v1/agents/*` 与 `/api/v1/tasks/*`。不要求本机 `commands.json`。`agentRole=worker` 安装 `ah-inbox`；`leader` 安装 `ah` 与 `ah-inbox`。Leader 把终态和追问追加到 `present_queue.jsonl`，用 `ah present` 消费。
 
 > [!IMPORTANT]
 > **Skill 自动匹配安装**：`ah setup` / `ah update` 会按当前节点 `role` 与 `kind` 向 `~/.agents/skills/` 精确写入本地 CLI Skill（`kind=host` 仅安装主控端 `ah`；`role=node, kind=agent` 仅安装执行端 `ah-inbox`；`role=hub, kind=agent` 两者都装）。云端定时唤醒、无法运行守护进程的外部 Agent（如 **Muse Leader**、**Grok Bot**）无需跑 `ah setup`。机主在控制台签发分 Agent Token 后，Agent 用它访问网关（`GET /.well-known/agent.json` 免鉴权；`GET /api/v1/skills/a2a-leader|a2a-worker` 需要鉴权）。详见 [外部 HTTP Agent 运行手册](protocol-node-runbook.md)。
@@ -290,10 +294,10 @@ ah task begin --schedule <id> [--period <期次键>] [--cap <cap_id>] [--text <�
 | 命令 | 作用 |
 |---|---|
 | `ah up` / `ah join <url>` | 一键初始化 SQLite Hub 或接入远端 HTTP 节点，自动配置 Token、公钥与自启 |
-| `ah setup [--role node\|hub] [--bus sqlite\|http] [--kind host\|agent] [--wake longpoll\|poll] [--skip-skill]` | 交互/非交互初始化：写 `app.env` 与 `node.json`、生成 `commands.json`、自检、可选注册自启（也可用 `AH_SKIP_SKILL=1` 跳过 Skill 安装） |
+| `ah setup [--role node\|hub] [--bus sqlite\|http\|agent] [--kind host\|agent] [--agent] [--agent-role worker\|leader] [--token-file <path>] [--wake longpoll\|poll] [--skip-skill]` | 交互/非交互初始化。`bus=agent` 时把凭据路径写入 `tokenFile`，不把明文 Token 写入 `node.json` 或 `app.env`，也不生成 `commands.json` |
 | `ah daemon [--role node\|hub]` | 常驻守护进程 |
 | `ah doctor [--role node\|hub]` | 只读自检：配置合法性、连通性、能力登记、本地计划 |
-| `ah service [--role node\|hub] [--remove]` | 注册（或卸载）开机自启：macOS launchd `ah-<role>.<node>` / Linux systemd `ah-<role>-<node>.service` / Windows 任务计划 `ah-<role>-<node>`（非默认配置目录追加配置路径 SHA-256 前 8 位摘要；登录时启动，无需管理员）。日志在配置目录 `daemon.log` |
+| `ah service [--role node\|hub] [--system\|--user] [--name <unit>] [--remove]` | 注册（或卸载）开机自启：macOS launchd `ah-<role>.<node>` / Linux systemd `ah-<role>-<node>.service` / Windows 任务计划 `ah-<role>-<node>`（非默认配置目录追加配置路径 SHA-256 前 8 位摘要）。`--user` 为用户级；`--system` 为系统级（Linux VM 换机自愈用这一条，并带上当前代理环境与 `NODE_USE_ENV_PROXY=1`）。`--name` 指定 unit 名。日志在配置目录 `daemon.log`。失败返回非 0，输出不含凭据 |
 | `ah update [--check] [--skip-skill]` | 自更新程序本体：git pull、依赖重装、入口与 Skill 补齐；不碰配置目录。`--check` 只看远端有没有新版本。tarball 安装请重跑 install.sh（Windows 为 install.ps1） |
 | `ah reconcile` | 单次回表认领与对账后退出 |
 | `ah inventory` | 只读盘点本节点名片与任务 |
@@ -351,12 +355,15 @@ api backoff reason=http-429 kind=list retry=1/3 wait=2s
 
 | 字段 | 适用角色 | 说明 |
 |---|---|---|
-| `busType` | 全部 | 总线类型：`sqlite`（`role=hub` 默认）或 `http`（填写了 `hubUrl` 时的远端节点） |
+| `busType` | 全部 | 总线类型：`sqlite`（`role=hub` 默认）、`http`（填写了 `hubUrl` 的远端节点，机主 Token）或 `agent`（官方 Agent Gateway 客户端，分 Agent Token） |
 | `dbPath` | Hub (`sqlite`) | SQLite WAL 数据库文件路径，支持相对配置目录路径，默认 `hub.db` |
 | `listen` | Hub (`sqlite`) | HTTP API 与 Web 控制台绑定地址，格式 `<host>:<port>`，默认 `0.0.0.0:8787` |
 | `publicUrl` | Hub (`sqlite`) | 可选外部访问地址（如 `http://192.168.1.10:8787` 或 Tailscale 地址），用于生成外部通知跳转链接，以及控制台「添加 Agent」接入提示词里的 Hub 地址 |
 | `apiToken` | Hub / 远端 `http` 节点 | 机主（owner）Bearer Token，权限覆盖全部接口。建议放在 0600 权限的 `app.env` 环境变量 `AH_API_TOKEN` 中。外部 HTTP Agent 不要用这把钥匙，用 §7.5 的分 Agent Token |
-| `hubUrl` | 远端节点 (`http`) | 中台 HTTP 根地址，如 `http://192.168.1.10:8787` |
+| `hubUrl` | 远端节点 (`http` / `agent`) | 中台 HTTP 根地址，如 `http://192.168.1.10:8787` |
+| `tokenFile` | `busType=agent` | `0600` 凭据文件路径。一行 Token，或 `AH_API_TOKEN=` / `A2A_HUB_TOKEN=`。优先于环境变量。明文不进 `node.json` |
+| `agentRole` | `busType=agent` | `worker` 或 `leader`。`role` 字段仍是 `node` |
+| `receiveMode` | `busType=agent` | 缺省 `http-longpoll` |
 | `longPollSec` | 全部模式 | 长轮询单次挂起秒数，默认 `25`（服务端安全夹紧在 5–60 秒） |
 | `notifications` | Hub (`sqlite`) | 可选外部提醒配置对象：`feishuWebhookUrl`（飞书群机器人 Webhook，可选通知渠道）、`barkUrl`、`telegramBotToken`、`telegramChatId`、`webhookUrl`、`events`（默认 `auth-required`、`input-required`、`completed`、`failed`、`rejected`，另可加 `stale`） |
 
@@ -364,9 +371,17 @@ api backoff reason=http-429 kind=list retry=1/3 wait=2s
 
 - 一键启动主中台 Hub：`ah up [--listen 0.0.0.0:8787] [--service]`（自动生成 SQLite 库、`app.env` 随机口令与 `approval_key.pem` ed25519 密钥对）
 - 一键接入远端电脑：`ah join http://<TOKEN>@<HUB>:8787 [--service]`（自动抽离口令至 `app.env`、拉取 `hubPublicKey` 并启动只出站长轮询守护）
+- 官方 Agent Gateway 客户端（云端 VM，只用分 Agent Token）：
+  ```bash
+  ah join http://<HUB>:8787 --agent --agent-role worker --token-file ~/.a2a-hub-worker/token --node worker-1 --config ~/.a2a-hub-worker-1
+  ah service --system --config ~/.a2a-hub-worker-1
+  ```
+  `node.json` 只写 `tokenFile` 路径。`ah daemon` / `ah inbox` / `ah task` / `ah present` / `ah doctor` / `ah reconcile` 都走 Agent Gateway，不访问 `/api/v1/tables/*` 或 `/api/v1/poll`。
+- 临时 VM 换机自愈：把 `ah`、配置和恢复脚本放在家目录（例如 `~/.local/state/`）。开机探针用 `/tmp/a2a-hub-<node>.ready`（换机后 `/tmp` 为空）。runtime hook 每 5 秒检查探针；缺失时执行 `ah service --system --config ~/.a2a-hub-<node> && touch /tmp/a2a-hub-<node>.ready`。只有退出码 0 才写探针，失败下一轮再收敛。命令会带上当前环境的代理变量和 `NODE_USE_ENV_PROXY=1`，输出不含凭据。
 - 手动非交互配置：
   - `ah setup --role hub --bus sqlite [--listen 0.0.0.0:8787] [--db-path ./hub.db] [--public-url http://...] [--api-token <token>] [--yes]`
   - `ah setup --role node --bus http --hub-url http://<HUB>:8787 --api-token <token> [--hub-key <pubkey>] [--yes]`
+  - `ah setup --bus agent --agent-role leader --hub-url http://<HUB>:8787 --token-file ~/.a2a-hub-leader/token --node leader-1 --config ~/.a2a-hub-leader-1 --yes`
 - **纯 HTTP 外部 Agent（Muse Leader / Grok Bot 等无守护进程 Agent）**：在控制台添加并复制分 Agent Token，存进平台安全密钥空间 `A2A_HUB_TOKEN`。角色是 `worker`（只接单）或 `leader`（派单并接单）。`hybrid` 为旧值，等同 `leader`；新签发不再写出 `hybrid`。`access=http` 时选一种接收方式：定时检查（默认，`receive=poll`，名片 `Receive_Mode=http-poll`）、常驻长轮询（`longpoll` → `http-longpoll`）或 Webhook 门铃（`webhook`，必填对方的 URL 与密钥）。定时检查是每 5 分钟跑 `a2a_check.py`；输出 `IDLE` 就结束，输出 `WORK` 再按【处理流程】执行 `poll?timeout=0` 或 `updates?new=1`。跑不了脚本时也是每 5 分钟。常驻长轮询不跑检查脚本。Webhook 由接收端验签后再拉详情，另每 30 分钟跑一次检查脚本兜底。无需安装本地 `ah` 进程。控制台的在线判定按 Hub 观测到的唤醒周期放宽：距上次报到不超过周期的 2.5 倍算在线（下限 3 分钟）。定时检查未观测到周期时按 5 分钟 × 2.5 = 12.5 分钟，上限 30 分钟。Webhook 不探测回调地址：检查脚本报到或 2xx 投递（含机主点测试）算活动，失败投递不算；成功投递不计入唤醒周期。未观测到周期时按 30 分钟兜底 × 2.5 = 75 分钟，上限也是 75 分钟，避免被名册 30 分钟闲置期限截断。最近一次投递失败且之后没有这些活动时，节点圆点用警示色，在线文字仍按窗口显示。长轮询的宿主节点仍是 90 秒。三种方式怎么选、门铃怎么验签，见 [外部 HTTP Agent 手册](protocol-node-runbook.md)。
 
 ### 7.3 LoopForge SOP 多阶段闭环 CLI（`ah loop`）

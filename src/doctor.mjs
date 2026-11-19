@@ -8,7 +8,7 @@ import path from "node:path";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { loadConfig, DAEMON_VERSION } from "./kernel.mjs";
-import { capIdOf, capIdsOf, normalizeCommands, resolveListenAddr } from "./config.mjs";
+import { capIdOf, capIdsOf, normalizeCommands, resolveListenAddr, resolveTokenFilePath } from "./config.mjs";
 import { isHubPublicKey, readHubPublicKey } from "./approval-sign.mjs";
 import { resolveScheduleTz } from "./hub/schedule.mjs";
 import { LocalScheduleService } from "./local-schedule.mjs";
@@ -514,7 +514,7 @@ export async function doctor(configDir, appDir, opts = {}) {
           if (placeholder(v)) { bad(`node.json 的 tables.${k} 仍是示例占位符`); problems++; }
         }
       }
-    } else if (busType === "http") {
+    } else if (busType === "http" || busType === "agent") {
       const effectiveHubUrl = String(raw.hubUrl ?? process.env.HUB_URL ?? "").trim();
       if (!effectiveHubUrl || placeholder(effectiveHubUrl)) {
         bad("node.json 的 hubUrl 未填");
@@ -528,8 +528,23 @@ export async function doctor(configDir, appDir, opts = {}) {
           problems++;
         }
       }
+      if (busType === "agent") {
+        const tokenFile = String(raw.tokenFile ?? raw.token_file ?? "").trim();
+        if (tokenFile) {
+          const file = resolveTokenFilePath(configDir, tokenFile);
+          if (file && fs.existsSync(file)) ok("tokenFile 凭据文件存在（内容不回显）");
+          else { bad("tokenFile 不存在或不可读"); problems++; }
+        } else if (!raw.apiToken && !raw.appEnv && !process.env.AH_API_TOKEN) {
+          info("未配置 tokenFile / app.env / AH_API_TOKEN：仅适用于未开启鉴权的 Hub");
+        }
+        const agentRole = String(raw.agentRole ?? raw.agent_role ?? "worker").trim().toLowerCase();
+        if (agentRole && agentRole !== "worker" && agentRole !== "leader" && agentRole !== "hybrid") {
+          bad(`node.json 的 agentRole 只能是 worker 或 leader（收到 ${JSON.stringify(raw.agentRole ?? raw.agent_role)}）`);
+          problems++;
+        }
+      }
     } else {
-      bad(`node.json 的 busType 非法（${JSON.stringify(raw.busType)}，仅支持 sqlite / http）`);
+      bad(`node.json 的 busType 非法（${JSON.stringify(raw.busType)}，仅支持 sqlite / http / agent）`);
       problems++;
     }
     // 只核取值，不回显其它字段：node.json 里可能直接写着 appSecret。
@@ -604,8 +619,10 @@ export async function doctor(configDir, appDir, opts = {}) {
       for (const [key, entry] of Object.entries(flat)) if (!entry?.worker) templates[key] = entry;
       for (const name of workerNames) templates[`worker:${name}`] = cmds.workers[name];
       problems += await auditAgentTemplates(templates);
-    } else if (role === "hub") {
-      info("未配置 commands.json（hub 仍可承担审批/呈递，但不会认领干活任务）");
+    } else if (role === "hub" || busType === "agent") {
+      info(busType === "agent"
+        ? "未配置 commands.json（busType=agent 的能力在 Hub 名片上，本机不需要命令表）"
+        : "未配置 commands.json（hub 仍可承担审批/呈递，但不会认领干活任务）");
     } else {
       bad("commands.json 不存在");
       problems++;
@@ -627,6 +644,8 @@ export async function doctor(configDir, appDir, opts = {}) {
     cfg.role = role;
     if (cfg.busType === "sqlite") {
       ok(`独立 SQLite 总线可读（${cfg.dbPath}，监听 ${cfg.listen}）`);
+    } else if (cfg.busType === "agent") {
+      ok(`Agent Gateway 已配置（节点 ${cfg.node} -> ${cfg.hubUrl}，角色 ${cfg.agentRole}）`);
     } else {
       ok(`远程 Hub 连接已配置（节点 ${cfg.node} -> ${cfg.hubUrl}）`);
     }
@@ -662,6 +681,17 @@ export async function doctor(configDir, appDir, opts = {}) {
       problems++;
     }
     info(`唤醒方式：HTTP 长轮询（longpoll，超时 ${cfg.longPollSec}s）＋ ${cfg.sweepSec}s 对账扫表`);
+  } else if (cfg && cfg.busType === "agent") {
+    try {
+      const health = await cfg.agentClient.health();
+      ok(`远程 Hub /api/v1/health 可达（hub=${health?.node ?? "-"}，seq=${health?.seq ?? 0}）`);
+      const check = await cfg.agentClient.check();
+      ok(`Agent Gateway /check 可达（work=${check?.work ? "yes" : "no"}）`);
+    } catch (e) {
+      bad(`连接 Agent Gateway 失败：${e.message}`);
+      problems++;
+    }
+    info(`唤醒方式：Agent Gateway 长轮询（${cfg.receiveMode}，超时 ${cfg.longPollSec}s），不开监听端口`);
   }
 
   // 7. 自启状态（只报告，不动手）
@@ -676,9 +706,11 @@ export async function doctor(configDir, appDir, opts = {}) {
       else info(`未发现 launchd 自启 ${label}（可用 ah service 安装）`);
     } else if (process.platform === "linux") {
       const unit = expected("systemd");
-      const listed = fs.existsSync(path.join(os.homedir(), ".config/systemd/user", unit));
-      if (listed) ok(`systemd 用户单元在册：${unit}`);
-      else info(`未发现 systemd 用户单元 ${unit}（可用 ah service 安装）`);
+      const userListed = fs.existsSync(path.join(os.homedir(), ".config/systemd/user", unit));
+      const sysListed = fs.existsSync(path.join("/etc/systemd/system", unit));
+      if (userListed) ok(`systemd 用户单元在册：${unit}`);
+      else if (sysListed) ok(`systemd 系统单元在册：${unit}`);
+      else info(`未发现 systemd 用户单元或系统单元 ${unit}（可用 ah service 安装）`);
     } else if (process.platform === "win32") {
       try {
         const out = execFileSync("schtasks", ["/Query", "/FO", "LIST"], { encoding: "utf8" });

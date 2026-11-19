@@ -1,6 +1,6 @@
 // service —— 把守护进程注册为开机自启（M3）。
 //   macOS：写 LaunchAgent 并 launchctl bootstrap（用户级，无需 sudo）
-//   Linux：写 systemd 用户单元并 enable --now（用户级，无需 sudo）
+//   Linux：写 systemd 单元（支持 --user / --system / auto）并 restart + active 校验
 //   Windows：写当前用户的任务计划程序任务（登录触发，无需管理员）
 // --remove 反向卸载。
 
@@ -8,11 +8,13 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn as defaultSpawn } from "node:child_process";
 
-function nodeNameOf(configDir) {
+const defaultSleep = (ms) => new Promise((res) => setTimeout(res, ms));
+
+function nodeNameOf(configDir, fsImpl = fs) {
   try {
-    const raw = JSON.parse(fs.readFileSync(path.join(configDir, "node.json"), "utf8"));
+    const raw = JSON.parse(fsImpl.readFileSync(path.join(configDir, "node.json"), "utf8"));
     return String(raw.node || "default").replace(/[^A-Za-z0-9_.-]/g, "-");
   } catch {
     return "default";
@@ -20,7 +22,7 @@ function nodeNameOf(configDir) {
 }
 
 // 自启名字带角色和节点名。两份配置如果节点名相同，后装的会覆盖先装的。
-// 默认目录 ~/.a2a-hub 用稳定名字；其它目录在名字后加配置路径 sha256 前 8 位，避免互相覆盖。
+// 默认目录 ~/.a2a-hub 用稳定名字；macOS/Windows 其它目录在名字后加配置路径 sha256 前 8 位，避免互相覆盖。
 export function isDefaultHubConfigDir(configDir, homeDir = os.homedir()) {
   return path.resolve(configDir) === path.resolve(homeDir, ".a2a-hub");
 }
@@ -33,16 +35,33 @@ export function launchdLabel(role, node) {
   return `ah-${role}.${node}`;
 }
 
+// 2B 统一 Linux systemd 短命名：hub 用 ah-hub-<node>.service，其余角色统一为 ah-<node>.service。
 export function systemdUnitName(role, node) {
-  return `ah-${role}-${node}.service`;
+  return role === "hub" ? `ah-hub-${node}.service` : `ah-${node}.service`;
+}
+
+function escapeRegExp(s) {
+  return String(s ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function textContainsConfigPath(raw, target) {
+  if (!target) return false;
+  let idx = raw.indexOf(target);
+  while (idx !== -1) {
+    const next = raw[idx + target.length];
+    // 边界检查防止 ~/.a2a-hub 误匹配 ~/.a2a-hub-muse
+    if (!next || /[\s"'<>\\/]/.test(next)) return true;
+    idx = raw.indexOf(target, idx + 1);
+  }
+  return false;
 }
 
 // plist / unit 正文里带有 --config 的目录时，说明这个历史名字已经属于本次安装。
 export function unitTextTargetsConfig(text, configDir) {
   const raw = String(text ?? "");
-  if (!raw) return false;
+  if (!raw || !configDir) return false;
   const resolved = path.resolve(configDir);
-  return raw.includes(resolved) || raw.includes(configDir);
+  return textContainsConfigPath(raw, resolved) || textContainsConfigPath(raw, configDir);
 }
 
 export function selectAutostartName({
@@ -51,18 +70,64 @@ export function selectAutostartName({
   configDir,
   homeDir = os.homedir(),
   kind = "launchd",
+  name = "",
 }) {
-  const tag = configDir && !isDefaultHubConfigDir(configDir, homeDir) ? configDirTag(configDir) : "";
-  if (kind === "systemd") {
-    return tag ? `ah-${role}-${node}-${tag}.service` : systemdUnitName(role, node);
+  const rawName = String(name ?? "").trim();
+  if (rawName) {
+    const sanitized = rawName.replace(/[^A-Za-z0-9_.@-]/g, "-");
+    if (kind === "systemd") {
+      return sanitized.endsWith(".service") ? sanitized : `${sanitized}.service`;
+    }
+    return sanitized;
   }
+  if (kind === "systemd") {
+    return systemdUnitName(role, node);
+  }
+  const tag = configDir && !isDefaultHubConfigDir(configDir, homeDir) ? configDirTag(configDir) : "";
   if (kind === "task") {
     return tag ? `ah-${role}-${node}-${tag}` : `ah-${role}-${node}`;
   }
   return tag ? `ah-${role}.${node}.${tag}` : launchdLabel(role, node);
 }
 
-function roleOf(configDir, opts = {}) {
+// 扫描旧命名单元（ah-node-<node>.service 或带 8 位 hash 的历史单元），只选指向同一 configDir 的文件以便升级清理。
+export function findLegacySystemdUnits({
+  dir,
+  role = "node",
+  node,
+  configDir,
+  currentUnit = "",
+  fsImpl = fs,
+}) {
+  if (!dir || !node || !configDir) return [];
+  let entries;
+  try {
+    entries = fsImpl.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const escNode = escapeRegExp(node);
+  const legacyRe = role === "hub"
+    ? new RegExp(`^ah-hub-${escNode}-[0-9a-f]{8}\\.service$`)
+    : new RegExp(`^ah-node-${escNode}(?:-[0-9a-f]{8})?\\.service$`);
+  const found = [];
+  for (const entry of entries) {
+    const file = typeof entry === "string" ? entry : entry?.name;
+    if (!file || file === currentUnit) continue;
+    if (!legacyRe.test(file)) continue;
+    try {
+      const text = fsImpl.readFileSync(path.join(dir, file), "utf8");
+      if (unitTextTargetsConfig(text, configDir)) {
+        found.push(file);
+      }
+    } catch {
+      // 跳过不可读条目或目录
+    }
+  }
+  return found.sort();
+}
+
+function roleOf(configDir, opts = {}, fsImpl = fs) {
   if (opts?.role === "node" || opts?.role === "hub") return opts.role;
   for (let i = 0; i < process.argv.length; i++) {
     const a = process.argv[i];
@@ -75,10 +140,36 @@ function roleOf(configDir, opts = {}) {
     }
   }
   try {
-    const raw = JSON.parse(fs.readFileSync(path.join(configDir, "node.json"), "utf8"));
+    const raw = JSON.parse(fsImpl.readFileSync(path.join(configDir, "node.json"), "utf8"));
     if (raw.role === "hub" || raw.role === "node") return raw.role;
   } catch {}
   return "node";
+}
+
+function parseServiceCliOverrides(opts = {}) {
+  let scope = opts.scope;
+  let name = opts.name;
+  // 仅当由 ah service CLI 直接调用且未显式传入时，从 argv 补读 --system/--user/--name，避免影响测试框架参数。
+  const isAhServiceCli = path.basename(process.argv[1] || "") === "ah.mjs" && process.argv[2] === "service";
+  if (isAhServiceCli) {
+    const argv = process.argv.slice(3);
+    if (scope === undefined) {
+      const hasSystem = argv.includes("--system");
+      const hasUser = argv.includes("--user");
+      if (hasSystem && hasUser) {
+        return { error: "不能同时指定 --system 与 --user" };
+      }
+      if (hasSystem) scope = "system";
+      else if (hasUser) scope = "user";
+    }
+    if (name === undefined) {
+      for (let i = 0; i < argv.length; i++) {
+        if (argv[i] === "--name") name = argv[i + 1] ?? "";
+        else if (argv[i].startsWith("--name=")) name = argv[i].slice("--name=".length);
+      }
+    }
+  }
+  return { scope: scope ?? "auto", name: name ?? "" };
 }
 
 const PROXY_ENV_KEYS = [
@@ -93,6 +184,75 @@ const PROXY_ENV_KEYS = [
   "NODE_EXTRA_CA_CERTS",
 ];
 
+const PROXY_TRIGGER_KEYS = new Set([
+  "HTTPS_PROXY",
+  "https_proxy",
+  "HTTP_PROXY",
+  "http_proxy",
+  "ALL_PROXY",
+  "all_proxy",
+]);
+
+// 收集需要继承给后台服务的环境（PATH/HOME/代理）；存在 *_PROXY 时自动补 NODE_USE_ENV_PROXY=1，否则 Node 24 fetch 不走代理。
+export function collectServiceEnv(env = process.env, { includePath = false, pathValue = "", home = "" } = {}) {
+  const out = {};
+  if (home) {
+    out.HOME = String(home);
+  }
+  if (includePath) {
+    const p = pathValue || env?.PATH || "";
+    if (p) out.PATH = String(p);
+  }
+  let hasProxy = false;
+  for (const k of PROXY_ENV_KEYS) {
+    const raw = env?.[k];
+    if (raw == null) continue;
+    const v = String(raw);
+    if (!v) continue;
+    out[k] = v;
+    if (PROXY_TRIGGER_KEYS.has(k)) hasProxy = true;
+  }
+  if (hasProxy) {
+    out.NODE_USE_ENV_PROXY = "1";
+  }
+  return out;
+}
+
+function formatEnvValue(val) {
+  // 剔除换行防止代理变量向 systemd EnvironmentFile 注入额外指令行。
+  const clean = String(val ?? "").replace(/[\r\n]+/g, "");
+  if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(clean)) {
+    return clean;
+  }
+  return '"' + clean.replaceAll("\\", "\\\\").replaceAll('"', '\\"') + '"';
+}
+
+function renderServiceEnv(envObj) {
+  const lines = [];
+  for (const [k, v] of Object.entries(envObj || {})) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) continue;
+    if (v == null || v === "") continue;
+    lines.push(`${k}=${formatEnvValue(v)}`);
+  }
+  return lines.length ? `${lines.join("\n")}\n` : "";
+}
+
+function writeServiceEnvFile(configDir, envObj, fsImpl = fs) {
+  const envPath = path.join(configDir, "service.env");
+  const tmpPath = path.join(configDir, `.service.env.${process.pid}.${Date.now()}.tmp`);
+  const content = renderServiceEnv(envObj);
+  fsImpl.mkdirSync(configDir, { recursive: true });
+  try {
+    fsImpl.writeFileSync(tmpPath, content, { mode: 0o600 });
+    fsImpl.chmodSync(tmpPath, 0o600);
+    fsImpl.renameSync(tmpPath, envPath);
+  } catch (e) {
+    try { fsImpl.unlinkSync(tmpPath); } catch {}
+    throw e;
+  }
+  return envPath;
+}
+
 function xmlEscape(s) {
   return s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
@@ -103,35 +263,58 @@ function systemdArg(value) {
   return '"' + String(value ?? "").replaceAll("\\", "\\\\").replaceAll('"', '\\"') + '"';
 }
 
-function run(cmd, args, { ignore = false } = {}) {
+function runWith(execFn, cmd, args, { ignore = false } = {}) {
   try {
-    return execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    return execFn(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   } catch (e) {
     if (ignore) return "";
     throw new Error(`${cmd} ${args.join(" ")} 失败：${(e.stderr || e.message || "").toString().slice(0, 300)}`);
   }
 }
 
-async function checkSystemdActive(unit, isUser = true) {
-  await new Promise((res) => setTimeout(res, 800));
+export async function checkSystemdActive(
+  unit,
+  isUser = true,
+  { execFileSync: exec = execFileSync, sleep = defaultSleep } = {},
+) {
   const args = isUser ? ["--user", "is-active", unit] : ["is-active", unit];
-  try {
-    const out = execFileSync("systemctl", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
-    if (out === "active" || out === "activating") {
-      return { ok: true, status: out };
-    }
-    return { ok: false, status: out };
-  } catch (e) {
-    const statusOut = (e.stdout || e.stderr || "").toString().trim();
-    let detail = "";
+  const maxWaitMs = 3000;
+  const intervalMs = 500;
+  let elapsed = 0;
+  let lastStatus = "";
+
+  // Type=simple 在 restart 后会瞬间报 active；先短暂沉降，防止启动即崩（配置/tokenFile 错）误判成功。
+  await sleep(800);
+
+  while (true) {
+    let out = "";
     try {
-      const statusArgs = isUser ? ["--user", "status", unit, "-n", "10", "--no-pager"] : ["status", unit, "-n", "10", "--no-pager"];
-      detail = execFileSync("systemctl", statusArgs, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
-    } catch (err) {
-      detail = (err.stdout || err.stderr || err.message || "").toString().trim();
+      out = String(exec("systemctl", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }) ?? "").trim();
+    } catch (e) {
+      const stdout = e?.stdout && String(e.stdout).trim() ? e.stdout : "";
+      out = String(stdout || e?.stderr || "").trim();
     }
-    return { ok: false, status: statusOut || "failed", detail };
+    lastStatus = out;
+    if (out === "active") {
+      return { ok: true, status: "active" };
+    }
+    // systemd 刚 restart 时可能短暂处于 activating，短等重试到明确 active 才放行。
+    if (out === "activating" && elapsed < maxWaitMs) {
+      await sleep(intervalMs);
+      elapsed += intervalMs;
+      continue;
+    }
+    break;
   }
+
+  let detail = "";
+  try {
+    const statusArgs = isUser ? ["--user", "status", unit, "-n", "10", "--no-pager"] : ["status", unit, "-n", "10", "--no-pager"];
+    detail = String(exec("systemctl", statusArgs, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }) ?? "").trim();
+  } catch (err) {
+    detail = String(err?.stdout || err?.stderr || err?.message || "").trim();
+  }
+  return { ok: false, status: lastStatus || "failed", detail };
 }
 
 export function renderPlist({ label, appBin, configDir, role, logPath }) {
@@ -141,10 +324,9 @@ export function renderPlist({ label, appBin, configDir, role, logPath }) {
   const uniquePath = [...new Set(pathVal.split(":").filter(Boolean))].join(":");
   envEntries.push(`<key>PATH</key><string>${xmlEscape(uniquePath)}</string>`);
 
-  for (const k of PROXY_ENV_KEYS) {
-    if (process.env[k]) {
-      envEntries.push(`<key>${xmlEscape(k)}</key><string>${xmlEscape(process.env[k])}</string>`);
-    }
+  const collected = collectServiceEnv(process.env);
+  for (const [k, v] of Object.entries(collected)) {
+    envEntries.push(`<key>${xmlEscape(k)}</key><string>${xmlEscape(v)}</string>`);
   }
 
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -172,33 +354,34 @@ ${envEntries.join("\n")}
 `;
 }
 
-export function renderSystemdUnit({ role, node, appBin, configDir, isSystem = false, user = "", home = "" }) {
-  const serviceLines = [
-    `ExecStart=${systemdArg(process.execPath)} ${systemdArg(appBin)} daemon --config ${systemdArg(configDir)} --role ${systemdArg(role)}`,
-    `WorkingDirectory=${configDir}`,
-    `Restart=on-failure`,
-    `RestartSec=5`,
-  ];
+// 凭据和代理通过 EnvironmentFile 引用 0600 service.env，unit 正文绝不落任何敏感明文。
+export function renderSystemdUnit({
+  role,
+  node,
+  appBin,
+  configDir,
+  isSystem = false,
+  user = "",
+  home = "",
+  nodeExec = process.execPath,
+  envFile = path.join(configDir, "service.env"),
+}) {
+  void home;
+  const serviceLines = [];
   if (isSystem && user) {
-    serviceLines.unshift(`User=${user}`);
+    serviceLines.push(`User=${user}`);
   }
-
-  const envLines = [];
-  if (isSystem && home) {
-    envLines.push(`Environment=${systemdArg(`HOME=${home}`)}`);
+  if (envFile) {
+    // systemd EnvironmentFile= 按原路径读取且不剥离 - 后的引号；带引号会被当成相对路径而静默跳过。
+    const cleanEnvFile = String(envFile).replace(/[\r\n]+/g, "");
+    serviceLines.push(`EnvironmentFile=-${cleanEnvFile}`);
   }
-  if (process.env.PATH) {
-    envLines.push(`Environment=${systemdArg(`PATH=${process.env.PATH}`)}`);
-  }
-  for (const k of PROXY_ENV_KEYS) {
-    if (process.env[k]) {
-      envLines.push(`Environment=${systemdArg(`${k}=${process.env[k]}`)}`);
-    }
-  }
-
-  if (envLines.length) {
-    serviceLines.splice(isSystem && user ? 1 : 0, 0, ...envLines);
-  }
+  serviceLines.push(
+    `ExecStart=${systemdArg(nodeExec)} ${systemdArg(appBin)} daemon --config ${systemdArg(configDir)} --role ${systemdArg(role)}`,
+    `WorkingDirectory=${configDir}`,
+    `Restart=always`,
+    `RestartSec=5`,
+  );
 
   return `[Unit]
 Description=a2a-hub daemon (${role}: ${node})
@@ -361,23 +544,23 @@ function stopLockedDaemon(configDir) {
     return;
   }
   if (!isAhDaemonCommandLine(commandLine)) return;
-  run("taskkill", ["/PID", String(pid), "/F"], { ignore: true });
+  runWith(execFileSync, "taskkill", ["/PID", String(pid), "/F"], { ignore: true });
 }
 
 // 先停用再结束再删除：进程自己退出（非 0）会触发重启，卸载时不能让它马上被拉起来。
 async function stopWindowsTask(taskName) {
-  run("schtasks", ["/Change", "/TN", taskName, "/DISABLE"], { ignore: true });
-  const ended = run("schtasks", ["/End", "/TN", taskName], { ignore: true });
-  run("schtasks", ["/Delete", "/F", "/TN", taskName], { ignore: true });
+  runWith(execFileSync, "schtasks", ["/Change", "/TN", taskName, "/DISABLE"], { ignore: true });
+  const ended = runWith(execFileSync, "schtasks", ["/End", "/TN", taskName], { ignore: true });
+  runWith(execFileSync, "schtasks", ["/Delete", "/F", "/TN", taskName], { ignore: true });
   if (ended.trim()) await new Promise((resolve) => setTimeout(resolve, 400));
 }
 
-function removeFile(file) {
-  if (fs.existsSync(file)) fs.unlinkSync(file);
+function removeFile(file, fsImpl = fs) {
+  if (fsImpl.existsSync(file)) fsImpl.unlinkSync(file);
 }
 
-async function registerWindowsService({ configDir, role, node, appBin, logPath, remove }) {
-  const taskName = windowsTaskName(role, node, configDir);
+async function registerWindowsService({ configDir, role, node, appBin, logPath, remove, name = "" }) {
+  const taskName = selectAutostartName({ role, node, configDir, kind: "task", name });
   const launcher = windowsLauncherPath(configDir, role, node);
   const starter = windowsStarterPath(configDir, role, node);
 
@@ -393,10 +576,10 @@ async function registerWindowsService({ configDir, role, node, appBin, logPath, 
   stopLockedDaemon(configDir);
 
   const nodeExe = nodeBinary();
-  const env = { PATH: windowsServicePath(configDir, process.env.PATH, nodeExe) };
-  for (const key of PROXY_ENV_KEYS) {
-    if (process.env[key]) env[key] = process.env[key];
-  }
+  const env = {
+    PATH: windowsServicePath(configDir, process.env.PATH, nodeExe),
+    ...collectServiceEnv(process.env),
+  };
   fs.mkdirSync(path.dirname(launcher), { recursive: true });
   fs.writeFileSync(launcher, renderWindowsLauncher({
     node: nodeExe,
@@ -420,11 +603,11 @@ async function registerWindowsService({ configDir, role, node, appBin, logPath, 
   const xmlPath = path.join(os.tmpdir(), `ah-task-${process.pid}-${role}-${node}.xml`);
   try {
     fs.writeFileSync(xmlPath, windowsTaskXmlBuffer(xml));
-    run("schtasks", ["/Create", "/F", "/TN", taskName, "/XML", xmlPath]);
+    runWith(execFileSync, "schtasks", ["/Create", "/F", "/TN", taskName, "/XML", xmlPath]);
   } finally {
     try { fs.unlinkSync(xmlPath); } catch { /* 临时 XML 删不掉不影响任务 */ }
   }
-  run("schtasks", ["/Run", "/TN", taskName]);
+  runWith(execFileSync, "schtasks", ["/Run", "/TN", taskName]);
   console.log(`自启已安装并启动：${taskName}（role: ${role}）`);
   console.log(`  任务：任务计划程序库 ${taskName}`);
   console.log(`  启动器：${launcher}`);
@@ -433,36 +616,91 @@ async function registerWindowsService({ configDir, role, node, appBin, logPath, 
   return 0;
 }
 
-export async function service(configDir, { remove = false, role: explicitRole } = {}, appDir) {
-  const role = roleOf(configDir, { role: explicitRole });
-  const node = nodeNameOf(configDir);
+function isNoSystemdError(err) {
+  if (!err) return false;
+  if (err.code === "ENOENT") return true;
+  const msg = `${err.stderr ?? ""} ${err.message ?? ""}`;
+  return /System has not been booted with systemd|not been booted with systemd|Failed to connect to bus|No such file or directory/i.test(msg);
+}
+
+function cleanupLegacyUnitsInDir({ dir, role, node, configDir, currentUnit, isUser, isRoot, exec, fsImpl }) {
+  const legacyUnits = findLegacySystemdUnits({ dir, role, node, configDir, currentUnit, fsImpl });
+  for (const oldUnit of legacyUnits) {
+    const oldPath = path.join(dir, oldUnit);
+    if (isUser) {
+      runWith(exec, "systemctl", ["--user", "disable", "--now", oldUnit], { ignore: true });
+      try { removeFile(oldPath, fsImpl); } catch {}
+    } else if (isRoot) {
+      runWith(exec, "systemctl", ["disable", "--now", oldUnit], { ignore: true });
+      try { removeFile(oldPath, fsImpl); } catch {}
+    } else {
+      try { exec("sudo", ["systemctl", "disable", "--now", oldUnit], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }); } catch {}
+      try { exec("sudo", ["rm", "-f", oldPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }); } catch {}
+    }
+  }
+}
+
+export async function service(
+  configDir,
+  { remove = false, role: explicitRole, scope: explicitScope, name: explicitName } = {},
+  appDir,
+  _deps = {},
+) {
+  const exec = _deps.execFileSync ?? execFileSync;
+  const spawnFn = _deps.spawn ?? defaultSpawn;
+  const platform = _deps.platform ?? process.platform;
+  const getuid = _deps.getuid ?? (() => (typeof process.getuid === "function" ? process.getuid() : -1));
+  const homedirFn = _deps.homedir ?? (() => os.homedir());
+  const userInfoFn = _deps.userInfo ?? (() => os.userInfo());
+  const sleep = _deps.sleep ?? defaultSleep;
+  const env = _deps.env ?? process.env;
+  const fsImpl = _deps.fsImpl ?? fs;
+  const systemUnitDir = _deps.systemUnitDir ?? "/etc/systemd/system";
+  const execPath = _deps.execPath ?? process.execPath;
+
+  const parsedOverrides = parseServiceCliOverrides({ scope: explicitScope, name: explicitName });
+  if (parsedOverrides.error) {
+    console.error(`✗ ${parsedOverrides.error}`);
+    return 1;
+  }
+  const scope = String(parsedOverrides.scope || "auto").trim();
+  const name = parsedOverrides.name ?? "";
+  if (scope !== "auto" && scope !== "system" && scope !== "user") {
+    console.error(`✗ 非法 scope：${scope}（仅支持 auto | system | user）`);
+    return 1;
+  }
+
+  const role = roleOf(configDir, { role: explicitRole }, fsImpl);
+  const node = nodeNameOf(configDir, fsImpl);
   const appBin = path.join(appDir, "bin", "ah.mjs");
   const logPath = path.join(configDir, "daemon.log");
+  const homeDir = homedirFn();
 
-  if (process.platform === "darwin") {
-    const agentsDir = path.join(os.homedir(), "Library", "LaunchAgents");
-    const label = selectAutostartName({ role, node, configDir, kind: "launchd" });
+  if (platform === "darwin") {
+    const agentsDir = path.join(homeDir, "Library", "LaunchAgents");
+    const label = selectAutostartName({ role, node, configDir, homeDir, kind: "launchd", name });
     const plistPath = path.join(agentsDir, `${label}.plist`);
-    const uid = String(process.getuid());
+    const uid = String(getuid());
     if (remove) {
-      run("launchctl", ["bootout", `gui/${uid}/${label}`], { ignore: true });
-      if (fs.existsSync(plistPath)) fs.unlinkSync(plistPath);
+      runWith(exec, "launchctl", ["bootout", `gui/${uid}/${label}`], { ignore: true });
+      removeFile(plistPath, fsImpl);
       console.log(`已卸载自启：${label}`);
       return 0;
     }
     const plist = renderPlist({ label, appBin, configDir, role, logPath });
-    fs.mkdirSync(path.dirname(plistPath), { recursive: true });
-    fs.writeFileSync(plistPath, plist);
-    run("launchctl", ["bootout", `gui/${uid}/${label}`], { ignore: true });
+    fsImpl.mkdirSync(path.dirname(plistPath), { recursive: true });
+    fsImpl.writeFileSync(plistPath, plist, { mode: 0o600 });
+    try { fsImpl.chmodSync(plistPath, 0o600); } catch {}
+    runWith(exec, "launchctl", ["bootout", `gui/${uid}/${label}`], { ignore: true });
     // bootout 是异步卸载：旧进程还在退出时立刻 bootstrap 会报 5: Input/output error，
     // 服务就停在已卸载状态。等几秒重试，最后一次仍失败才抛出。
     for (let attempt = 1; ; attempt++) {
       try {
-        run("launchctl", ["bootstrap", `gui/${uid}`, plistPath]);
+        runWith(exec, "launchctl", ["bootstrap", `gui/${uid}`, plistPath]);
         break;
       } catch (e) {
         if (attempt >= 5) throw e;
-        await new Promise((res) => setTimeout(res, 1000));
+        await sleep(1000);
       }
     }
     console.log(`自启已安装并启动：${label}（role: ${role}）`);
@@ -472,148 +710,245 @@ export async function service(configDir, { remove = false, role: explicitRole } 
     return 0;
   }
 
-  if (process.platform === "linux") {
-    const userUnitDir = path.join(os.homedir(), ".config", "systemd", "user");
-    const unit = selectAutostartName({ role, node, configDir, kind: "systemd" });
+  if (platform === "linux") {
+    const userUnitDir = path.join(homeDir, ".config", "systemd", "user");
+    const unit = selectAutostartName({ role, node, configDir, homeDir, kind: "systemd", name });
     const unitPath = path.join(userUnitDir, unit);
-    const sysUnitPath = `/etc/systemd/system/${unit}`;
-    const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
-    let hasSudo = false;
-    if (!isRoot) {
+    const sysUnitPath = path.join(systemUnitDir, unit);
+    const serviceEnvPath = path.join(configDir, "service.env");
+    const isRoot = getuid() === 0;
+
+    let sudoChecked = false;
+    let sudoAvailable = false;
+    const checkHasSudo = () => {
+      if (isRoot) return false;
+      if (sudoChecked) return sudoAvailable;
+      sudoChecked = true;
       try {
-        execFileSync("sudo", ["-n", "true"], { stdio: "ignore" });
-        hasSudo = true;
-      } catch {}
-    }
+        exec("sudo", ["-n", "true"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+        sudoAvailable = true;
+      } catch {
+        sudoAvailable = false;
+      }
+      return sudoAvailable;
+    };
 
     if (remove) {
-      run("systemctl", ["--user", "disable", "--now", unit], { ignore: true });
-      if (fs.existsSync(unitPath)) fs.unlinkSync(unitPath);
-      run("systemctl", ["--user", "daemon-reload"], { ignore: true });
-
-      if (isRoot) {
-        run("systemctl", ["disable", "--now", unit], { ignore: true });
-        if (fs.existsSync(sysUnitPath)) fs.unlinkSync(sysUnitPath);
-        run("systemctl", ["daemon-reload"], { ignore: true });
-      } else if (hasSudo) {
-        try {
-          execFileSync("sudo", ["systemctl", "disable", "--now", unit], { stdio: "ignore" });
-          execFileSync("sudo", ["rm", "-f", sysUnitPath], { stdio: "ignore" });
-          execFileSync("sudo", ["systemctl", "daemon-reload"], { stdio: "ignore" });
-        } catch {}
+      if (scope === "system" && !isRoot && !checkHasSudo()) {
+        console.error("✗ 卸载系统级 systemd 服务需要 root 或免密 sudo 权限");
+        return 1;
       }
-
+      if (scope === "auto" || scope === "user") {
+        runWith(exec, "systemctl", ["--user", "disable", "--now", unit], { ignore: true });
+        try { removeFile(unitPath, fsImpl); } catch {}
+        cleanupLegacyUnitsInDir({
+          dir: userUnitDir, role, node, configDir, currentUnit: unit, isUser: true, isRoot, exec, fsImpl,
+        });
+        runWith(exec, "systemctl", ["--user", "daemon-reload"], { ignore: true });
+      }
+      if (scope === "auto" || scope === "system") {
+        if (isRoot) {
+          runWith(exec, "systemctl", ["disable", "--now", unit], { ignore: true });
+          try { removeFile(sysUnitPath, fsImpl); } catch {}
+          cleanupLegacyUnitsInDir({
+            dir: systemUnitDir, role, node, configDir, currentUnit: unit, isUser: false, isRoot: true, exec, fsImpl,
+          });
+          runWith(exec, "systemctl", ["daemon-reload"], { ignore: true });
+        } else if (checkHasSudo()) {
+          try { exec("sudo", ["systemctl", "disable", "--now", unit], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }); } catch {}
+          try { exec("sudo", ["rm", "-f", sysUnitPath], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }); } catch {}
+          cleanupLegacyUnitsInDir({
+            dir: systemUnitDir, role, node, configDir, currentUnit: unit, isUser: false, isRoot: false, exec, fsImpl,
+          });
+          try { exec("sudo", ["systemctl", "daemon-reload"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }); } catch {}
+        }
+      }
+      // 仅当 user 与 system 目录中都不再有 unit 引用这份 service.env 时才删除，避免误伤同目录其它 unit。
+      const stillReferenced = [userUnitDir, systemUnitDir].some((dir) => {
+        try {
+          return fsImpl.readdirSync(dir).some((entry) => {
+            const file = typeof entry === "string" ? entry : entry?.name;
+            if (!file || !file.endsWith(".service")) return false;
+            try {
+              const text = fsImpl.readFileSync(path.join(dir, file), "utf8");
+              return text.includes(serviceEnvPath);
+            } catch {
+              return false;
+            }
+          });
+        } catch {
+          return false;
+        }
+      });
+      if (!stillReferenced) {
+        try { removeFile(serviceEnvPath, fsImpl); } catch {}
+      }
       console.log(`已卸载自启：${unit}`);
       return 0;
     }
 
-    // 检查 systemctl --user 是否真正可用
-    let hasUserSession = false;
-    try {
-      execFileSync("systemctl", ["--user", "daemon-reload"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-      hasUserSession = true;
-    } catch {
-      hasUserSession = false;
+    const installUserUnit = async () => {
+      try {
+        const envObj = collectServiceEnv(env, { includePath: true });
+        writeServiceEnvFile(configDir, envObj, fsImpl);
+        const text = renderSystemdUnit({
+          role,
+          node,
+          appBin,
+          configDir,
+          isSystem: false,
+          nodeExec: execPath,
+          envFile: serviceEnvPath,
+        });
+        fsImpl.mkdirSync(userUnitDir, { recursive: true });
+        fsImpl.writeFileSync(unitPath, text);
+        cleanupLegacyUnitsInDir({
+          dir: userUnitDir, role, node, configDir, currentUnit: unit, isUser: true, isRoot, exec, fsImpl,
+        });
+        runWith(exec, "systemctl", ["--user", "daemon-reload"]);
+        runWith(exec, "systemctl", ["--user", "enable", unit]);
+        // 必须 restart 而非 enable --now：服务已运行且 service.env 轮换了代理凭据时，restart 才会重载环境。
+        runWith(exec, "systemctl", ["--user", "restart", unit]);
+
+        const activeCheck = await checkSystemdActive(unit, true, { execFileSync: exec, sleep });
+        if (!activeCheck.ok) {
+          console.error(`✗ systemd 用户服务 ${unit} 启动后未能处于 active 状态（状态：${activeCheck.status}）`);
+          return 1;
+        }
+        console.log(`ok: ${unit} active (user, config=${configDir})`);
+        return 0;
+      } catch (e) {
+        console.error(`✗ 安装 systemd 用户服务 ${unit} 失败：${e?.message || e}`);
+        return 1;
+      }
+    };
+
+    const installSystemUnit = async () => {
+      if (!isRoot && !checkHasSudo()) {
+        console.error("✗ 安装系统级 systemd 服务需要 root 或免密 sudo 权限");
+        return 1;
+      }
+      const info = userInfoFn();
+      const curUser = info?.username || "";
+      const envObj = collectServiceEnv(env, { includePath: true, home: homeDir });
+      try {
+        writeServiceEnvFile(configDir, envObj, fsImpl);
+        const text = renderSystemdUnit({
+          role,
+          node,
+          appBin,
+          configDir,
+          isSystem: true,
+          user: curUser,
+          home: homeDir,
+          nodeExec: execPath,
+          envFile: serviceEnvPath,
+        });
+        if (isRoot) {
+          fsImpl.mkdirSync(systemUnitDir, { recursive: true });
+          fsImpl.writeFileSync(sysUnitPath, text);
+          cleanupLegacyUnitsInDir({
+            dir: systemUnitDir, role, node, configDir, currentUnit: unit, isUser: false, isRoot: true, exec, fsImpl,
+          });
+          runWith(exec, "systemctl", ["daemon-reload"]);
+          runWith(exec, "systemctl", ["enable", unit]);
+          runWith(exec, "systemctl", ["restart", unit]);
+        } else {
+          // 临时文件放在 configDir 下并设 0600，绝不向 /tmp 写文件。
+          const tmpUnit = path.join(configDir, `.${unit}.${process.pid}.${Date.now()}.tmp`);
+          fsImpl.mkdirSync(configDir, { recursive: true });
+          fsImpl.writeFileSync(tmpUnit, text, { mode: 0o600 });
+          fsImpl.chmodSync(tmpUnit, 0o600);
+          try {
+            runWith(exec, "sudo", ["cp", tmpUnit, sysUnitPath]);
+            // unit 正文不含凭据（凭据隔离在 0600 service.env），设 0644 避免 systemd 告警及非 root 巡检不可读。
+            runWith(exec, "sudo", ["chmod", "0644", sysUnitPath], { ignore: true });
+          } finally {
+            try { fsImpl.unlinkSync(tmpUnit); } catch {}
+          }
+          cleanupLegacyUnitsInDir({
+            dir: systemUnitDir, role, node, configDir, currentUnit: unit, isUser: false, isRoot: false, exec, fsImpl,
+          });
+          runWith(exec, "sudo", ["systemctl", "daemon-reload"]);
+          runWith(exec, "sudo", ["systemctl", "enable", unit]);
+          runWith(exec, "sudo", ["systemctl", "restart", unit]);
+        }
+
+        const activeCheck = await checkSystemdActive(unit, false, { execFileSync: exec, sleep });
+        if (!activeCheck.ok) {
+          console.error(`✗ systemd 系统服务 ${unit} 启动后未能处于 active 状态（状态：${activeCheck.status}）`);
+          return 1;
+        }
+        console.log(`ok: ${unit} active (system, config=${configDir})`);
+        return 0;
+      } catch (e) {
+        console.error(`✗ 安装 systemd 系统服务 ${unit} 失败：${e?.message || e}`);
+        return 1;
+      }
+    };
+
+    if (scope === "user") {
+      return installUserUnit();
+    }
+    if (scope === "system") {
+      return installSystemUnit();
     }
 
-    if (hasUserSession) {
+    // scope === "auto"：非 root 先探测 user session；否则探测 system；仅完全无 systemd 环境时才退回后台 spawn。
+    let hasUserSession = false;
+    if (!isRoot) {
       try {
-        const text = renderSystemdUnit({ role, node, appBin, configDir });
-        fs.mkdirSync(path.dirname(unitPath), { recursive: true });
-        fs.writeFileSync(unitPath, text);
-        run("systemctl", ["--user", "daemon-reload"]);
-        run("systemctl", ["--user", "enable", "--now", unit]);
-
-        const activeCheck = await checkSystemdActive(unit, true);
-        if (!activeCheck.ok) {
-          console.warn(`  ! systemd 用户服务 ${unit} 启动后未能处于 active 状态（状态：${activeCheck.status}）`);
-          if (activeCheck.detail) {
-            console.warn(`    ${activeCheck.detail.split("\n").slice(-6).join("\n    ")}`);
-          }
-          run("systemctl", ["--user", "disable", "--now", unit], { ignore: true });
-          hasUserSession = false;
-        } else {
-          console.log(`自启已安装并启动：${unit}（role: ${role}）`);
-          console.log(`  单元：${unitPath}`);
-          console.log(`  日志：journalctl --user -u ${unit}`);
-          console.log(`  卸载：ah service --remove --role ${role} --config ${configDir}`);
-          return 0;
-        }
-      } catch (e) {
+        exec("systemctl", ["--user", "daemon-reload"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+        hasUserSession = true;
+      } catch {
         hasUserSession = false;
       }
     }
-
-    // 回退路径 1：若具有 root 或免密 sudo 权限，写入系统级 systemd
-    const curUser = os.userInfo().username;
-    const curHome = os.homedir();
-    if (isRoot || hasSudo) {
-      try {
-        const text = renderSystemdUnit({ role, node, appBin, configDir, isSystem: true, user: curUser, home: curHome });
-        if (isRoot) {
-          fs.writeFileSync(sysUnitPath, text);
-          run("systemctl", ["daemon-reload"]);
-          run("systemctl", ["enable", "--now", unit]);
-        } else {
-          const tmpUnit = path.join(os.tmpdir(), unit);
-          fs.writeFileSync(tmpUnit, text);
-          execFileSync("sudo", ["cp", tmpUnit, sysUnitPath]);
-          fs.unlinkSync(tmpUnit);
-          execFileSync("sudo", ["systemctl", "daemon-reload"]);
-          execFileSync("sudo", ["systemctl", "enable", "--now", unit]);
-        }
-
-        const activeCheck = await checkSystemdActive(unit, false);
-        if (!activeCheck.ok) {
-          console.warn(`  ! systemd 系统服务 ${unit} 启动后未能处于 active 状态（状态：${activeCheck.status}）`);
-          if (activeCheck.detail) {
-            console.warn(`    ${activeCheck.detail.split("\n").slice(-6).join("\n    ")}`);
-          }
-          if (isRoot) {
-            run("systemctl", ["disable", "--now", unit], { ignore: true });
-          } else {
-            try { execFileSync("sudo", ["systemctl", "disable", "--now", unit], { stdio: "ignore" }); } catch {}
-          }
-        } else {
-          console.log(`自启已作为系统服务安装并启动：${unit}（role: ${role}）`);
-          console.log(`  单元：${sysUnitPath}`);
-          console.log(`  日志：journalctl -u ${unit}`);
-          console.log(`  卸载：sudo systemctl disable --now ${unit} && sudo rm -f ${sysUnitPath}`);
-          return 0;
-        }
-      } catch {}
+    if (hasUserSession) {
+      return installUserUnit();
     }
 
-    // 回退路径 2：无 systemd user session 且无系统级权限时，以后台进程方式拉起守护，不抛错阻断 setup
+    if (isRoot || checkHasSudo()) {
+      let hasSystemd = true;
+      try {
+        if (isRoot) {
+          exec("systemctl", ["daemon-reload"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+        } else {
+          exec("sudo", ["systemctl", "daemon-reload"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+        }
+      } catch (e) {
+        if (isNoSystemdError(e)) hasSystemd = false;
+      }
+      if (hasSystemd) {
+        return installSystemUnit();
+      }
+    }
+
+    // 兜底：无可用 systemd 运行环境时后台拉起守护进程（绝不向 stdout 打印任何 unit 内容或环境变量）。
     try {
-      const { spawn } = await import("node:child_process");
-      fs.mkdirSync(configDir, { recursive: true });
-      const outFd = fs.openSync(logPath, "a");
-      const child = spawn(process.execPath, [appBin, "daemon", "--config", configDir, "--role", role], {
+      fsImpl.mkdirSync(configDir, { recursive: true });
+      const outFd = fsImpl.openSync(logPath, "a");
+      const extraEnv = collectServiceEnv(env);
+      const child = spawnFn(execPath, [appBin, "daemon", "--config", configDir, "--role", role], {
         detached: true,
         stdio: ["ignore", outFd, outFd],
         cwd: configDir,
+        env: { ...env, ...extraEnv },
       });
       child.unref();
-      console.log(`· 当前环境未提供 systemd user session，已后台拉起守护进程（PID: ${child.pid}）`);
-      console.log(`  日志：${logPath}`);
-      console.log(`  提示：若需开机自启，请由管理员以 root 权限写入 /etc/systemd/system/：`);
-      console.log(`        sudo tee ${sysUnitPath} << 'EOF'`);
-      console.log(renderSystemdUnit({ role, node, appBin, configDir, isSystem: true, user: curUser, home: curHome }));
-      console.log(`EOF`);
-      console.log(`        sudo systemctl daemon-reload && sudo systemctl enable --now ${unit}`);
+      console.log(`· 当前环境未提供可用 systemd，已后台拉起守护进程（PID: ${child.pid}，日志：${logPath}）`);
       return 0;
     } catch (e) {
-      console.error(`  ✗ 后台拉起守护进程失败：${e.message}`);
+      console.error(`✗ 后台拉起守护进程失败：${e.message}`);
       return 1;
     }
   }
 
-  if (process.platform === "win32") {
-    return registerWindowsService({ configDir, role, node, appBin, logPath, remove });
+  if (platform === "win32") {
+    return registerWindowsService({ configDir, role, node, appBin, logPath, remove, name });
   }
 
-  console.log(`暂不支持在 ${process.platform} 上自动注册自启；请用任务计划程序手动安排：`);
-  console.log(`  ${process.execPath} ${appBin} daemon --config ${configDir} --role ${role}`);
+  console.log(`暂不支持在 ${platform} 上自动注册自启；请用任务计划程序手动安排：`);
+  console.log(`  ${execPath} ${appBin} daemon --config ${configDir} --role ${role}`);
   return 1;
 }

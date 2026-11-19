@@ -78,7 +78,7 @@ export function refreshSkill(
     const cfgFile = configDir ? path.join(configDir, "node.json") : "";
     if (cfgFile && fs.existsSync(cfgFile)) {
       const cfg = JSON.parse(fs.readFileSync(cfgFile, "utf8"));
-      for (const name of resolveSkillsForHost({ role: cfg.role, kind: cfg.kind })) {
+      for (const name of resolveSkillsForHost({ role: cfg.role, kind: cfg.kind, agentRole: cfg.agentRole ?? cfg.agent_role })) {
         wanted.add(name);
       }
     }

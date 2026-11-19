@@ -147,6 +147,7 @@ async function runDaemonLoop(configDir, role) {
   let release;
   let kernel = null;
   let hubRuntime = null;
+  let agentDaemon = null;
   let signalCode;
   const onSignal = (signal) => {
     const code = signal === "SIGINT" ? 130 : 143;
@@ -156,6 +157,11 @@ async function runDaemonLoop(configDir, role) {
       process.exit(code);
     }
     signalCode = code;
+    if (agentDaemon) {
+      console.error(`${ts} 收到 ${signal}，正在停止 Agent Gateway 守护进程`);
+      agentDaemon.requestStop();
+      return;
+    }
     if (kernel) {
       console.error(`${ts} 收到 ${signal}，正在停止并标记 offline`);
       kernel.requestStop();
@@ -188,7 +194,12 @@ async function runDaemonLoop(configDir, role) {
       process.exitCode = 1;
       return;
     }
-    if (cfg && role === "hub") {
+    if (cfg?.busType === "agent") {
+      const { AgentDaemon } = await import("../src/agent-daemon.mjs");
+      agentDaemon = new AgentDaemon(cfg);
+      await agentDaemon.run();
+      if (signalCode != null) process.exitCode = signalCode;
+    } else if (cfg && role === "hub") {
       const { runHub } = await import("../src/hub/index.mjs");
       await runHub(cfg, undefined, { onRuntime(rt) { hubRuntime = rt; } });
       if (signalCode != null) process.exitCode = signalCode;
@@ -214,6 +225,7 @@ function parseJoinCliArgs(rest) {
   const valueFlags = new Set([
     "--config", "--node", "--zone", "--prefix", "--desc", "--kind",
     "--api-token", "--hub-key", "--hub-url", "--join",
+    "--agent-role", "--token-file",
   ]);
   let joinTarget = "";
   const forwarded = [];
@@ -246,16 +258,50 @@ function parseJoinCliArgs(rest) {
   return { joinTarget: String(joinTarget).trim(), forwarded };
 }
 
+function serviceOptions(rest, role) {
+  let hasSystem = false;
+  let hasUser = false;
+  let name;
+  let seenName = false;
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a === "--system") hasSystem = true;
+    else if (a === "--user") hasUser = true;
+    else if (a === "--name") {
+      seenName = true;
+      const next = rest[i + 1];
+      if (!next || next.startsWith("-")) {
+        throw new Error("--name 需要指定单元名称");
+      }
+      name = rest[++i];
+    } else if (a.startsWith("--name=")) {
+      seenName = true;
+      name = a.slice("--name=".length);
+      if (!name.trim()) {
+        throw new Error("--name 不能为空");
+      }
+    }
+  }
+  if (hasSystem && hasUser) {
+    throw new Error("不能同时指定 --system 与 --user");
+  }
+  const opts = { remove: rest.includes("--remove"), role };
+  if (hasSystem) opts.scope = "system";
+  else if (hasUser) opts.scope = "user";
+  if (seenName) opts.name = name ?? "";
+  return opts;
+}
+
 // 总用法表。printUsage 按子命令筛行，所以每行都以「  ah <子命令> 」开头。
 const USAGE_LINES = [
   "  ah up      [--listen 0.0.0.0:8787] [--node mac-mini] [--service]  一行初始化并启动独立中台 Hub",
-  "  ah join    http://[<token>@]<hub-ip>:8787 [--node worker-1] [--service]  一行接入远端 Hub 并启动长轮询",
-  "  ah setup   [--config <dir>] [--role node|hub] [--kind host|agent] [--hub] [--join <url>] [--skip-skill]  一键配置向导（独立 SQLite Hub / 长轮询 Node）",
+  "  ah join    http://[<token>@]<hub-ip>:8787 [--node worker-1] [--agent] [--agent-role worker|leader] [--token-file <path>] [--service]  一行接入远端 Hub；--agent 走 Agent Gateway",
+  "  ah setup   [--config <dir>] [--role node|hub] [--bus sqlite|http|agent] [--kind host|agent] [--agent] [--agent-role worker|leader] [--token-file <path>] [--hub] [--join <url>] [--skip-skill]  一键配置向导",
   "  ah daemon  [--config <dir>] [--role node|hub]  常驻守护进程（省略 --role 时读 node.json，缺省 node）",
   "  ah reconcile [--config <dir>]  单次回表认领/对账后退出（不长驻；不停派、不改写命令表外的手工名片）",
   "  ah inventory [--config <dir>]  只读盘点本节点名片与任务，不写入",
   "  ah doctor  [--config <dir>] [--role node|hub]  本机自检",
-  "  ah service [--config <dir>] [--role node|hub]  注册开机自启（--remove 卸载）",
+  "  ah service [--config <dir>] [--role node|hub] [--system|--user] [--name <unit>]  注册开机自启（--remove 卸载）",
   "  ah update  [--check] [--skip-skill] [--config <dir>]  自更新程序本体（git pull + 依赖重装 + 软链/Skill 补齐）",
   "  ah inbox   [--pop] [--json]    读取专属 Agent 收件箱（--pop 提取并标为 acked）",
   "  ah inbox done --task <Task_ID> --text <处理结果> [--artifact <路径或URL>]... [--check <id>=<pass|fail|blocked>[:<证据>]]",
@@ -322,14 +368,16 @@ if (wantsHelp) {
     const configDir = path.resolve(configDirFrom(rest));
     const { runSetup } = await import("../src/setup.mjs");
     // join 的语义就是「接入或重新接入这个 Hub」，重复执行要能刷新地址、Token 与公钥，所以总是覆盖 node.json。
+    const agentJoin = rest.includes("--agent");
     const setupArgs = [
       "--role", "node",
-      "--bus", "http",
       "--join", joinTarget,
       "--yes",
       "--force",
       ...forwarded,
+      "--bus", agentJoin ? "agent" : "http",
     ];
+    if (agentJoin) setupArgs.push("--agent");
     const setupCode = await runSetup(configDir, setupArgs, APP_DIR);
     if (setupCode !== 0) {
       process.exitCode = setupCode;
@@ -353,7 +401,12 @@ if (wantsHelp) {
     process.exitCode = 2;
   } else if (role) try {
     const cfg = loadConfig(path.resolve(configDirFrom(rest)));
-    await new Kernel(cfg).run({ once: true });
+    if (cfg.busType === "agent") {
+      const { AgentDaemon } = await import("../src/agent-daemon.mjs");
+      await new AgentDaemon(cfg).run({ once: true });
+    } else {
+      await new Kernel(cfg).run({ once: true });
+    }
   } catch (e) {
     console.error("reconcile 失败：" + e.message);
     process.exitCode = 1;
@@ -401,15 +454,17 @@ if (wantsHelp) {
   process.exitCode = 1;
 } else if (cmd === "service") {
   let role;
+  let opts;
   try {
     role = roleForTool(rest);
+    opts = serviceOptions(rest, role);
   } catch (e) {
     console.error(e.message);
     process.exitCode = 1;
   }
-  if (role) {
+  if (role && opts) {
     const { service } = await import("../src/service.mjs");
-    process.exitCode = await service(configDirFrom(rest), { remove: rest.includes("--remove"), role }, APP_DIR);
+    process.exitCode = await service(configDirFrom(rest), opts, APP_DIR);
   }
 } else if (cmd === "task") {
   const sub = rest[0];
@@ -418,13 +473,18 @@ if (wantsHelp) {
       const { parseCreateArgv, parseParams, parseCriteriaInput, createTask } = await import("../src/hub/create.mjs");
       const args = parseCreateArgv(rest.slice(1));
       const parsedParams = parseParams(args.paramsRaw);
-      parseCriteriaInput(args.criteriaRaw);
+      const parsedCriteria = parseCriteriaInput(args.criteriaRaw);
       if (parsedParams && Object.prototype.hasOwnProperty.call(parsedParams, "acceptance")) {
         const { parseCriteria } = await import("../src/acceptance.mjs");
         const check = parseCriteria(parsedParams);
         if (!check.ok) throw new Error("拒绝建单：" + check.error);
       }
       const cfg = loadConfig(args.configDir || configDirFrom(rest), { forCli: true });
+      if (cfg.busType === "agent") {
+        const { agentTaskCreate } = await import("../src/agent-cli.mjs");
+        const taskId = await agentTaskCreate(cfg, args, { params: parsedParams, criteria: parsedCriteria });
+        console.log(taskId);
+      } else {
       // --file 先经文件客户端上传，再把 hub:// 放进 attachments；上传失败在建单前就停。
       let attachments;
       if (args.files.length) {
@@ -451,6 +511,7 @@ if (wantsHelp) {
         attachments,
       });
       console.log(taskId);
+      }
     } catch (e) {
       console.error(e?.message ?? e);
       process.exitCode = 1;
@@ -477,8 +538,13 @@ if (wantsHelp) {
       process.exitCode = 1;
     } else {
       try {
-        const { f1 } = await import("../src/bus/tables.mjs");
         const cfg = loadConfig(configDir || configDirFrom(rest), { forCli: true });
+        if (cfg.busType === "agent") {
+          const { agentTaskReply } = await import("../src/agent-cli.mjs");
+          const res = await agentTaskReply(cfg, { taskId, text, files: replyFiles.filter(Boolean) });
+          console.log(`已答复：${res?.msg_id || ""}`);
+        } else {
+        const { f1 } = await import("../src/bus/tables.mjs");
         const tasks = await cfg.bus.listRecords(cfg.bus.tables.tasks);
         const task = tasks.find((t) => f1(t, "Task_ID") === taskId);
         if (!task) throw new Error(`任务不存在：${taskId}`);
@@ -538,6 +604,7 @@ if (wantsHelp) {
           Created_At: nowMinute,
         });
         console.log(`已答复：${msgId}`);
+        }
       } catch (e) {
         console.error(e?.message ?? e);
         process.exitCode = 1;
@@ -558,9 +625,13 @@ if (wantsHelp) {
       process.exitCode = 1;
     } else {
       try {
+        const cfg = loadConfig(configDir || configDirFrom(rest), { forCli: true });
+        if (cfg.busType === "agent") {
+          const { agentTaskShow } = await import("../src/agent-cli.mjs");
+          console.log(JSON.stringify(await agentTaskShow(cfg, taskId), null, 2));
+        } else {
         const { f1 } = await import("../src/bus/tables.mjs");
         const { messageText } = await import("../src/hub/cards.mjs");
-        const cfg = loadConfig(configDir || configDirFrom(rest), { forCli: true });
         const tasks = await cfg.bus.listRecords(cfg.bus.tables.tasks);
         const task = tasks.find((t) => f1(t, "Task_ID") === taskId);
         if (!task) throw new Error(`任务不存在：${taskId}`);
@@ -599,6 +670,7 @@ if (wantsHelp) {
           })),
         };
         console.log(JSON.stringify(out, null, 2));
+        }
       } catch (e) {
         console.error(e?.message ?? e);
         process.exitCode = 1;
@@ -652,8 +724,14 @@ if (wantsHelp) {
       process.exitCode = 1;
     } else {
       try {
-        const { cancelTask } = await import("../src/hub/cancel.mjs");
         const cfg = loadConfig(configDir || configDirFrom(rest), { forCli: true });
+        if (cfg.busType === "agent") {
+          const { agentTaskCancel } = await import("../src/agent-cli.mjs");
+          const result = await agentTaskCancel(cfg, { taskId, text });
+          console.log(`已取消：${result.taskId}`);
+          if (result.workingHint) console.log(result.workingHint);
+        } else {
+        const { cancelTask } = await import("../src/hub/cancel.mjs");
         // 角色只认 node.json。命令行 --role 不能把 node 提升成可撤任意单的 hub。
         const result = await cancelTask({
           bus: cfg.bus,
@@ -664,6 +742,7 @@ if (wantsHelp) {
         });
         console.log(`已取消：${result.taskId}`);
         if (result.workingHint) console.log(result.workingHint);
+        }
       } catch (e) {
         console.error(e?.message ?? e);
         process.exitCode = 1;
@@ -702,18 +781,23 @@ if (wantsHelp) {
       try {
         const { parseCheckFlag } = await import("../src/acceptance.mjs");
         const checks = rawChecks.map((raw) => parseCheckFlag(raw));
-        const { handleInboxDone } = await import("../src/inbox.mjs");
-        const { createFileClient } = await import("../src/files-client.mjs");
         const cfg = loadConfig(cfgDir || configDir, { forCli: true });
-        // 本地存在的产物在提交阶段上传成 hub://；文件客户端懒创建，没有本地文件时不碰 FileStore。
-        let client = null;
-        try {
-          await handleInboxDone({
-            configDir: cfgDir || configDir, bus: cfg.bus, node: cfg.node, taskId, text,
-            artifacts: artifacts.filter(Boolean), checks,
-            getFileClient: () => (client ??= createFileClient(cfg)),
-          });
-        } finally { client?.close?.(); }
+        if (cfg.busType === "agent") {
+          const { agentInboxCommand } = await import("../src/agent-cli.mjs");
+          await agentInboxCommand(cfg, { op: "done", taskId, text, files: artifacts.filter(Boolean), checks });
+        } else {
+          const { handleInboxDone } = await import("../src/inbox.mjs");
+          const { createFileClient } = await import("../src/files-client.mjs");
+          // 本地存在的产物在提交阶段上传成 hub://；文件客户端懒创建，没有本地文件时不碰 FileStore。
+          let client = null;
+          try {
+            await handleInboxDone({
+              configDir: cfgDir || configDir, bus: cfg.bus, node: cfg.node, taskId, text,
+              artifacts: artifacts.filter(Boolean), checks,
+              getFileClient: () => (client ??= createFileClient(cfg)),
+            });
+          } finally { client?.close?.(); }
+        }
         console.log(`✓ 任务 ${taskId} 已完成并上报总线`);
       } catch (e) {
         console.error(e?.message ?? e);
@@ -739,16 +823,21 @@ if (wantsHelp) {
       process.exitCode = 1;
     } else {
       try {
-        const { handleInboxAsk } = await import("../src/inbox.mjs");
-        const { createFileClient } = await import("../src/files-client.mjs");
         const cfg = loadConfig(cfgDir || configDir, { forCli: true });
-        let client = null;
-        try {
-          await handleInboxAsk({
-            configDir: cfgDir || configDir, bus: cfg.bus, node: cfg.node, taskId, text,
-            files: askFiles.filter(Boolean), getFileClient: () => (client ??= createFileClient(cfg)),
-          });
-        } finally { client?.close?.(); }
+        if (cfg.busType === "agent") {
+          const { agentInboxCommand } = await import("../src/agent-cli.mjs");
+          await agentInboxCommand(cfg, { op: "ask", taskId, text, files: askFiles.filter(Boolean) });
+        } else {
+          const { handleInboxAsk } = await import("../src/inbox.mjs");
+          const { createFileClient } = await import("../src/files-client.mjs");
+          let client = null;
+          try {
+            await handleInboxAsk({
+              configDir: cfgDir || configDir, bus: cfg.bus, node: cfg.node, taskId, text,
+              files: askFiles.filter(Boolean), getFileClient: () => (client ??= createFileClient(cfg)),
+            });
+          } finally { client?.close?.(); }
+        }
         console.log(`✓ 任务 ${taskId} 已转入 input-required 并向发起方提问`);
       } catch (e) {
         console.error(e?.message ?? e);
@@ -774,16 +863,21 @@ if (wantsHelp) {
       process.exitCode = 1;
     } else {
       try {
-        const { handleInboxAuth } = await import("../src/inbox.mjs");
-        const { createFileClient } = await import("../src/files-client.mjs");
         const cfg = loadConfig(cfgDir || configDir, { forCli: true });
-        let client = null;
-        try {
-          await handleInboxAuth({
-            configDir: cfgDir || configDir, bus: cfg.bus, node: cfg.node, taskId, text,
-            files: authFiles.filter(Boolean), getFileClient: () => (client ??= createFileClient(cfg)),
-          });
-        } finally { client?.close?.(); }
+        if (cfg.busType === "agent") {
+          const { agentInboxCommand } = await import("../src/agent-cli.mjs");
+          await agentInboxCommand(cfg, { op: "auth", taskId, text, files: authFiles.filter(Boolean) });
+        } else {
+          const { handleInboxAuth } = await import("../src/inbox.mjs");
+          const { createFileClient } = await import("../src/files-client.mjs");
+          let client = null;
+          try {
+            await handleInboxAuth({
+              configDir: cfgDir || configDir, bus: cfg.bus, node: cfg.node, taskId, text,
+              files: authFiles.filter(Boolean), getFileClient: () => (client ??= createFileClient(cfg)),
+            });
+          } finally { client?.close?.(); }
+        }
         console.log(`✓ 任务 ${taskId} 已请求机主批准`);
       } catch (e) {
         console.error(e?.message ?? e);
@@ -795,10 +889,12 @@ if (wantsHelp) {
     let taskId = "";
     let text = "";
     let cfgDir = "";
+    const failFiles = [];
     for (let i = 0; i < argv.length; i++) {
       const flag = argv[i];
       if (flag === "--task") taskId = argv[++i] ?? "";
       else if (flag === "--text") text = argv[++i] ?? "";
+      else if (flag === "--file" || flag === "--artifact") failFiles.push(argv[++i] ?? "");
       else if (flag === "--config") cfgDir = argv[++i] ?? "";
       else if (!flag.startsWith("--") && !taskId) taskId = flag;
     }
@@ -807,9 +903,14 @@ if (wantsHelp) {
       process.exitCode = 1;
     } else {
       try {
-        const { handleInboxFail } = await import("../src/inbox.mjs");
         const cfg = loadConfig(cfgDir || configDir, { forCli: true });
-        await handleInboxFail({ configDir: cfgDir || configDir, bus: cfg.bus, node: cfg.node, taskId, text: text || "执行失败" });
+        if (cfg.busType === "agent") {
+          const { agentInboxCommand } = await import("../src/agent-cli.mjs");
+          await agentInboxCommand(cfg, { op: "fail", taskId, text: text || "执行失败", files: failFiles.filter(Boolean) });
+        } else {
+          const { handleInboxFail } = await import("../src/inbox.mjs");
+          await handleInboxFail({ configDir: cfgDir || configDir, bus: cfg.bus, node: cfg.node, taskId, text: text || "执行失败" });
+        }
         console.log(`✓ 任务 ${taskId} 已置 failed 并上报原因`);
       } catch (e) {
         console.error(e?.message ?? e);

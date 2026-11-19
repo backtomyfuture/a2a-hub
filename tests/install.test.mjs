@@ -84,10 +84,15 @@ test("默认配置目录的自启名不带摘要，其它目录带路径摘要",
     selectAutostartName({ role: "hub", node: "mac-mini", configDir: standard, homeDir: home, kind: "launchd" }),
     "ah-hub.mac-mini",
   );
-  assert.equal(systemdUnitName("node", "mac-mini"), "ah-node-mac-mini.service");
+  assert.equal(systemdUnitName("node", "mac-mini"), "ah-mac-mini.service");
+  assert.equal(systemdUnitName("hub", "mac-mini"), "ah-hub-mac-mini.service");
   assert.equal(
     selectAutostartName({ role: "node", node: "mac-mini", configDir: standard, homeDir: home, kind: "systemd" }),
-    "ah-node-mac-mini.service",
+    "ah-mac-mini.service",
+  );
+  assert.equal(
+    selectAutostartName({ role: "hub", node: "mac-mini", configDir: standard, homeDir: home, kind: "systemd" }),
+    "ah-hub-mac-mini.service",
   );
   assert.equal(windowsTaskName("hub", "mac-mini", standard, home), "ah-hub-mac-mini");
   assert.equal(windowsTaskName("hub", "desk"), "ah-hub-desk");
@@ -96,7 +101,9 @@ test("默认配置目录的自启名不带摘要，其它目录带路径摘要",
   assert.match(hubLabel, /^ah-hub\.mac-mini\.[0-9a-f]{8}$/);
   assert.notEqual(hubLabel, launchdLabel("hub", "mac-mini"));
   const unit = selectAutostartName({ role: "node", node: "mac-mini", configDir: custom, homeDir: home, kind: "systemd" });
-  assert.match(unit, /^ah-node-mac-mini-[0-9a-f]{8}\.service$/);
+  assert.equal(unit, "ah-mac-mini.service");
+  const hubUnit = selectAutostartName({ role: "hub", node: "mac-mini", configDir: custom, homeDir: home, kind: "systemd" });
+  assert.equal(hubUnit, "ah-hub-mac-mini.service");
   assert.match(windowsTaskName("hub", "mac-mini", custom, home), /^ah-hub-mac-mini-[0-9a-f]{8}$/);
 
   const plist = `<?xml version="1.0"?><string>${custom}</string>`;

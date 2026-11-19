@@ -308,7 +308,7 @@ export function createFileClient(cfg = {}) {
       maxBytes: cfg.maxFileBytes,
     });
   }
-  if (busType === "http") {
+  if (busType === "http" || busType === "agent") {
     return new HttpFileClient({
       hubUrl: cfg.hubUrl,
       apiToken: cfg.apiToken,
@@ -333,5 +333,5 @@ export function createFileClient(cfg = {}) {
       maxBytes: cfg.maxFileBytes,
     });
   }
-  throw new Error("createFileClient 需要 busType=sqlite（配 configDir）或 busType=http（配 hubUrl）");
+  throw new Error("createFileClient 需要 busType=sqlite（配 configDir）或 busType=http|agent（配 hubUrl）");
 }
