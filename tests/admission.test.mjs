@@ -1050,6 +1050,8 @@ test("节点模板 id 决定 Step 3 提示词；WorkBuddy 不与通用定时检�
     role: "worker",
     receive: "webhook",
     template: "grok-bot",
+    authRequired: true,
+    token: "aht_buddy_once",
     templateId: "workbuddy",
     pollIntervalMin: 30,
   });
@@ -1099,9 +1101,12 @@ test("节点模板 id 决定 Step 3 提示词；WorkBuddy 不与通用定时检�
   assert.equal(buddy.template, "generic");
   assert.match(buddy.prompt, /腾讯 WorkBuddy 的云端定时任务/);
   assert.match(buddy.prompt, /每 30 分钟/);
-  assert.match(buddy.prompt, /\/ags\/workbuddy-data\/token/);
+  assert.match(buddy.prompt, /新沙箱/);
+  assert.equal(buddy.prompt.includes("/ags/workbuddy-data"), false);
   assert.equal(buddy.prompt.includes("凭据缺失"), false);
-  assert.match(buddy.steps.join("\n"), /\/ags\/workbuddy-data\/token/);
+  assert.equal(buddy.prompt.split("aht_buddy_once").length - 1, 1);
+  assert.ok(buddy.prompt.indexOf("aht_buddy_once") > buddy.prompt.indexOf("【每次运行】"));
+  assert.match(buddy.steps.join("\n"), /不要另存文件/);
   assert.equal(buddy.prompt.includes("HMAC"), false);
   assert.notEqual(buddy.prompt, generic.prompt);
 
