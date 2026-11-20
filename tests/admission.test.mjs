@@ -16,6 +16,7 @@ import {
   isAdmitted,
   parseCardMetadata,
   presetHttpCardFields,
+  receiveForTemplate,
   validatePollIntervalMin,
 } from "../src/hub/admission.mjs";
 import { AgentTokenStore } from "../src/hub/agent-tokens.mjs";
@@ -135,20 +136,20 @@ test("纯函数：buildOnboarding 协议 Skill 映射、真实 join 参数与 To
   assert.match(noAuth.prompt, /无需 Token/);
   assert.equal(noAuth.prompt.includes("<AH_API_TOKEN>"), false);
 
-  // 云端 HTTP Agent 的提示词每段定时指令都要带浏览器 UA，否则 Cloudflare 会 403 / 1010。
+  // 云端 HTTP Agent 的提示词自包含：不要求下载脚本，也不要求伪装浏览器 UA（1010 由边缘放行解决）。
   for (const role of ["worker", "leader", "hybrid"]) {
     for (const authRequired of [true, false]) {
       const ob = buildOnboarding({ hubUrl: "https://hub.example", node: "n1", access: "http", role, authRequired });
-      const blocks = ob.prompt.split("（本段是").length - 1;
-      const uaHits = ob.prompt.split(`User-Agent: ${BROWSER_USER_AGENT}`).length - 1;
-      assert.ok(blocks >= 1);
-      assert.ok(uaHits >= blocks + 1, `${role}/${authRequired} 每段定时指令都要写 UA`);
-      assert.ok(ob.steps[0].includes("User-Agent: Mozilla/5.0"));
+      assert.equal(ob.prompt.includes(BROWSER_USER_AGENT), false);
+      assert.equal(ob.prompt.includes("a2a_check.py"), false);
+      assert.match(ob.prompt, /\/api\/v1\/agents\/n1\/check/);
+      assert.match(ob.prompt, /每 5 分钟/);
+      assert.equal(ob.template, "generic");
     }
   }
 });
 
-test("http 接入提示词改为脚本门控，host/inbox 仍是原来的句子", () => {
+test("http 通用模板提示词自包含，host/inbox 仍是原来的句子", () => {
   const secret = "aht_plain_once";
   const httpWorker = buildOnboarding({
     hubUrl: "https://hub.example",
@@ -158,19 +159,17 @@ test("http 接入提示词改为脚本门控，host/inbox 仍是原来的句子"
     authRequired: true,
     token: secret,
   });
-  assert.match(httpWorker.prompt, /A2A_HUB_TOKEN/);
-  assert.match(httpWorker.prompt, /安全密钥空间/);
-  assert.match(httpWorker.prompt, /https:\/\/hub\.example\/api\/v1\/kit\/a2a_check\.py/);
-  assert.match(httpWorker.prompt, /a2a_check\.sh/);
+  assert.match(httpWorker.prompt, /\/api\/v1\/agents\/grok-bot\/check/);
+  assert.match(httpWorker.prompt, /poll\?timeout=0/);
   assert.match(httpWorker.prompt, /每 5 分钟/);
-  assert.match(httpWorker.prompt, /IDLE 就立即结束/);
-  assert.match(httpWorker.prompt, /--silent-idle/);
-  assert.match(httpWorker.prompt, /【回退】/);
-  assert.match(httpWorker.prompt, /每 5 分钟直接执行上面的【处理流程】/);
-  assert.match(httpWorker.prompt, /\$A2A_HUB_TOKEN/);
+  assert.match(httpWorker.prompt, /专用令牌/);
+  assert.match(httpWorker.prompt, /"receive_mode":"http-poll"/);
+  assert.match(httpWorker.prompt, /不需要下载或运行任何脚本/);
+  assert.equal(httpWorker.prompt.includes("a2a_check.py"), false);
+  assert.equal(httpWorker.prompt.includes(BROWSER_USER_AGENT), false);
+  // 明文 Token 只在请求头说明里出现一次。
   assert.equal(httpWorker.prompt.split(secret).length - 1, 1);
   assert.match(httpWorker.steps.join("\n"), /每 5 分钟/);
-  assert.match(httpWorker.steps.join("\n"), /a2a_check\.py/);
 
   const leader = buildOnboarding({
     hubUrl: "https://hub.example",
@@ -181,9 +180,11 @@ test("http 接入提示词改为脚本门控，host/inbox 仍是原来的句子"
     token: secret,
   });
   assert.match(leader.prompt, /每 5 分钟/);
-  assert.match(leader.prompt, /每 5 分钟直接执行上面的【处理流程】/);
   assert.match(leader.prompt, /poll\?timeout=0/);
   assert.match(leader.prompt, /updates\?new=1/);
+  assert.match(leader.prompt, /idempotencyKey/);
+  assert.match(leader.prompt, /绝不以任何方式代批/);
+  assert.match(leader.prompt, /from 必须是 "muse"/);
   assert.equal(leader.prompt.includes("hybrid"), false);
   assert.equal(leader.prompt.split(secret).length - 1, 1);
 
@@ -196,12 +197,10 @@ test("http 接入提示词改为脚本门控，host/inbox 仍是原来的句子"
   });
   assert.match(hybrid.prompt, /每 5 分钟/);
   assert.match(hybrid.prompt, /<AH_API_TOKEN>/);
-  assert.match(hybrid.prompt, /每 5 分钟直接执行上面的【处理流程】/);
-  assert.match(hybrid.prompt, /本段是取单与回执/);
-  assert.match(hybrid.prompt, /本段是跟单与派单/);
+  assert.match(hybrid.prompt, /【每次运行】/);
+  assert.match(hybrid.prompt, /【跟单与派单】/);
   assert.match(hybrid.prompt, /"role":"leader"/);
   assert.equal(hybrid.prompt.includes("hybrid"), false);
-  assert.match(hybrid.prompt, /a2a-hub-both-流程\.md/);
 
   const host = buildOnboarding({
     hubUrl: "http://hub.local:8787",
@@ -258,7 +257,7 @@ test("接入提示词按接收方式区分，host/inbox 说明常驻长连接和
   assert.match(longpoll.prompt, /"receive_mode":"http-longpoll"/);
   assert.match(longpoll.prompt, /poll\?timeout=25/);
   assert.match(longpoll.prompt, /1 秒、3 秒、8 秒、30 秒/);
-  assert.match(longpoll.prompt, /不要下载或运行 a2a_check\.py/);
+  assert.match(longpoll.prompt, /不需要下载或运行任何脚本/);
   assert.match(longpoll.prompt, /heartbeat/);
   assert.equal(longpoll.prompt.includes("每 5 分钟"), false);
   assert.equal(longpoll.prompt.includes('"receive_mode":"http-poll"'), false);
@@ -300,16 +299,15 @@ test("接入提示词按接收方式区分，host/inbox 说明常驻长连接和
   });
   assert.match(webhook.prompt, /"receive_mode":"webhook"/);
   assert.match(webhook.prompt, /HMAC-SHA256/);
-  assert.match(webhook.prompt, /5 分钟/);
   assert.match(webhook.prompt, /300 秒/);
-  assert.match(webhook.prompt, /不要再保存一份名为 A2A_HUB_WEBHOOK_SECRET/);
+  assert.match(webhook.prompt, /Webhook 密钥只配在接收端/);
   assert.match(webhook.prompt, /timestamp/);
-  assert.match(webhook.prompt, /rawBody/);
+  assert.match(webhook.prompt, /raw body/);
   assert.match(webhook.prompt, /poll\?timeout=0/);
   assert.match(webhook.prompt, /updates\?new=1/);
   assert.match(webhook.prompt, /不含指令正文/);
   assert.match(webhook.prompt, /每 30 分钟/);
-  assert.match(webhook.prompt, /a2a_check\.py/);
+  assert.equal(webhook.prompt.includes("a2a_check"), false);
   assert.equal(webhook.prompt.includes(webhookSecret), false);
   assert.equal(webhook.prompt.split(secret).length - 1, 1);
   assert.equal(webhook.steps.join("\n").includes(webhookSecret), false);
@@ -321,10 +319,10 @@ test("接入提示词按接收方式区分，host/inbox 说明常驻长连接和
     role: "worker",
     receive: "webhook",
   });
-  assert.match(webhookNoSecret.prompt, /不要再保存一份名为 A2A_HUB_WEBHOOK_SECRET/);
+  assert.match(webhookNoSecret.prompt, /Webhook 密钥只配在接收端/);
   assert.equal(webhookNoSecret.prompt.includes("向机主索取"), false);
   assert.equal(webhookNoSecret.prompt.includes("这一次的明文 Webhook 密钥"), false);
-  assert.match(webhookNoSecret.prompt, /忽略 task\.updated/);
+  assert.match(webhookNoSecret.prompt, /忽略 event=task\.updated/);
 
   const host = buildOnboarding({
     hubUrl: "http://hub.local:8787",
@@ -357,6 +355,73 @@ test("接入提示词按接收方式区分，host/inbox 说明常驻长连接和
   assert.match(inbox.prompt, /节点 → 待接纳/);
   assert.match(inbox.prompt, /ah inbox/);
   assert.equal(inbox.prompt.includes("名片墙"), false);
+});
+
+test("模板：muse 与 grok-bot 各自约束接收方式，提示词精简且自包含", () => {
+  const secret = "aht_tpl_once";
+  const muse = buildOnboarding({
+    hubUrl: "https://hub.example",
+    node: "muse-1",
+    access: "http",
+    role: "leader",
+    authRequired: true,
+    token: secret,
+    receive: "poll",
+    template: "muse",
+  });
+  assert.equal(muse.template, "muse");
+  assert.match(muse.prompt, /ah join https:\/\/hub\.example --agent --agent-role leader --node muse-1/);
+  assert.match(muse.prompt, /--token-file ~\/\.a2a-hub-muse-1\/agent\.token/);
+  assert.match(muse.prompt, /ah service --ensure --config/);
+  assert.match(muse.prompt, /runtime hook/);
+  assert.match(muse.prompt, /ah inbox --config ~\/\.a2a-hub-muse-1 --pop --json/);
+  assert.match(muse.prompt, /ah present --config/);
+  assert.match(muse.prompt, /install\.sh/);
+  // 接收方式被模板约束为长轮询（daemon 常驻），Token 只在 0600 写入行出现一次。
+  assert.equal(muse.prompt.includes("http-poll"), false);
+  assert.equal(muse.prompt.split(secret).length - 1, 1);
+  assert.equal(muse.prompt.includes(BROWSER_USER_AGENT), false);
+
+  const grok = buildOnboarding({
+    hubUrl: "https://hub.example",
+    node: "grok-1",
+    access: "http",
+    role: "worker",
+    authRequired: true,
+    token: secret,
+    receive: "poll",
+    template: "grok-bot",
+  });
+  assert.equal(grok.template, "grok-bot");
+  assert.match(grok.prompt, /"receive_mode":"webhook"/);
+  assert.match(grok.prompt, /POST to 和 key/);
+  assert.match(grok.prompt, /A2A_HUB_TOKEN/);
+  assert.match(grok.prompt, /event 为 ping 或 task_id 为空就结束/);
+  assert.match(grok.prompt, /poll\?timeout=0/);
+  assert.match(grok.prompt, /每 30 分钟/);
+  // Grok Bot 看不到原始请求体与签名头：不含验签、不含脚本下载。
+  assert.equal(grok.prompt.includes("HMAC"), false);
+  assert.equal(grok.prompt.includes("a2a_check"), false);
+  assert.equal(grok.prompt.split(secret).length - 1, 1);
+
+  assert.throws(
+    () => buildOnboarding({ hubUrl: "https://hub.example", node: "n1", access: "http", role: "worker", template: "nope" }),
+    /template 只能是 generic \/ muse \/ grok-bot/,
+  );
+});
+
+test("模板：presetHttpCardFields 把模板写进 Metadata，parseCardMetadata 读回，rotate 可按名片推导", () => {
+  const fields = presetHttpCardFields({ node: "muse-1", role: "leader", receiveMode: "http-longpoll", template: "muse" });
+  const meta = parseCardMetadata(fields);
+  assert.equal(meta.template, "muse");
+  assert.equal(meta.role, "leader");
+  // generic 是默认值，不落盘，保持历史名片形状不变。
+  const plain = presetHttpCardFields({ node: "n1", role: "worker", receiveMode: "http-poll" });
+  assert.equal(parseCardMetadata(plain).template, "");
+  assert.equal(JSON.parse(plain.Metadata).template, undefined);
+  assert.equal(receiveForTemplate("muse", "poll"), "longpoll");
+  assert.equal(receiveForTemplate("grok-bot", "poll"), "webhook");
+  assert.equal(receiveForTemplate("generic", "webhook"), "webhook");
 });
 
 test("派单门：未接纳（pending/缺省）与 rejected 拒单且不写表，接纳后可派", async () => {

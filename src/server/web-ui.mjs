@@ -780,25 +780,46 @@ export function renderWebConsoleHtml() {
       <div class="form-row" id="afReceiveGroup">
         <label>接收方式（HTTP 接入方式）</label>
         <div class="choice-list" id="receiveChoices" style="margin-bottom:0;">
-          <label class="choice-card selected" data-receive="poll">
+          <label class="choice-card selected" data-receive="poll" data-template="generic" data-preset="">
             <input type="radio" name="afReceiveRadio" value="poll" checked />
             <div>
-              <div style="font-weight:600;">定时检查（poll，默认）</div>
-              <div class="hint">适合被定时唤醒的云端 Agent，按固定间隔运行检查脚本取单。</div>
+              <div style="font-weight:600;">通用 · 定时检查（poll，默认）</div>
+              <div class="hint">适合会被定时唤醒的云端 Agent（ChatGPT 定时任务、Claude、Coze 等）。提示词自包含，不需要对方下载或运行任何脚本。</div>
             </div>
           </label>
-          <label class="choice-card" data-receive="longpoll">
+          <label class="choice-card" data-receive="poll" data-template="generic" data-preset="workbuddy">
+            <input type="radio" name="afReceiveRadio" value="poll" />
+            <div>
+              <div style="font-weight:600;">WorkBuddy 云端版（定时任务）</div>
+              <div class="hint">腾讯 WorkBuddy 云端定时任务，间隔建议 30 分钟起；提示词自包含，不要求改 UA、不下载脚本。</div>
+            </div>
+          </label>
+          <label class="choice-card" data-receive="longpoll" data-template="muse" data-preset="">
             <input type="radio" name="afReceiveRadio" value="longpoll" />
             <div>
-              <div style="font-weight:600;">常驻长连接（longpoll）</div>
-              <div class="hint">适合常驻运行的进程，循环长轮询实时取单，无需额外定时脚本。</div>
+              <div style="font-weight:600;">Muse（临时云 VM，高保活）</div>
+              <div class="hint">官方 ah CLI + runtime hook 每 5 秒自愈，换机自动重建拉起；Token 只落家目录 0600 凭据文件。</div>
             </div>
           </label>
-          <label class="choice-card" data-receive="webhook">
+          <label class="choice-card" data-receive="webhook" data-template="grok-bot" data-preset="">
             <input type="radio" name="afReceiveRadio" value="webhook" />
             <div>
-              <div style="font-weight:600;">Webhook 推送（webhook）</div>
-              <div class="hint">有新任务或状态变化时，中台主动向您的回调 URL 推门铃通知。</div>
+              <div style="font-weight:600;">Grok Bot（Webhook 门铃）</div>
+              <div class="hint">桌面端 routine 的 POST to 填为 URL、key 填为密钥；提示词是短指令，不含验签与脚本。</div>
+            </div>
+          </label>
+          <label class="choice-card" data-receive="longpoll" data-template="generic" data-preset="">
+            <input type="radio" name="afReceiveRadio" value="longpoll" />
+            <div>
+              <div style="font-weight:600;">常驻长连接（longpoll，自建进程）</div>
+              <div class="hint">适合常驻运行的进程，循环长轮询实时取单，无需定时任务。</div>
+            </div>
+          </label>
+          <label class="choice-card" data-receive="webhook" data-template="generic" data-preset="">
+            <input type="radio" name="afReceiveRadio" value="webhook" />
+            <div>
+              <div style="font-weight:600;">Webhook 推送（自建接收端）</div>
+              <div class="hint">面向您自己的接收服务：门铃含 HMAC-SHA256 签名，提示词带验签说明。</div>
             </div>
           </label>
         </div>
@@ -1084,6 +1105,8 @@ const state = {
   wizardStep: 1,
   wizardAccess: "http",
   wizardReceive: "poll",
+  wizardTemplate: "generic",
+  wizardPreset: "",
   addCapTarget: { node: "", isHttp: true },
   filePreviewCache: new Map(),
   filePreviewTaskId: null,
@@ -2477,8 +2500,10 @@ function syncAccessChoiceCards() {
 }
 
 function syncReceiveChoiceCards() {
+  const want = state.wizardReceive + "|" + (state.wizardTemplate || "generic") + "|" + (state.wizardPreset || "");
   document.querySelectorAll("#receiveChoices .choice-card").forEach((card) => {
-    const checked = card.dataset.receive === state.wizardReceive;
+    const key = card.dataset.receive + "|" + (card.dataset.template || "generic") + "|" + (card.dataset.preset || "");
+    const checked = key === want;
     card.classList.toggle("selected", checked);
     const radio = card.querySelector("input[type=radio]");
     if (radio) radio.checked = checked;
@@ -2496,7 +2521,7 @@ function syncReceiveChoiceCards() {
     const cur = String(intervalInput.value ?? "").trim();
     // 仍是空或两种默认值时跟着接收方式切换；用户填过的 15、60 等保留。
     if (cur === "" || cur === "5" || cur === "30") {
-      intervalInput.value = state.wizardReceive === "webhook" ? "30" : "5";
+      intervalInput.value = state.wizardReceive === "webhook" || state.wizardPreset === "workbuddy" ? "30" : "5";
     }
   }
 }
@@ -2509,6 +2534,8 @@ function openAgentModal() {
   errBox.textContent = "";
   state.wizardAccess = "http";
   state.wizardReceive = "poll";
+  state.wizardTemplate = "generic";
+  state.wizardPreset = "";
   syncAccessChoiceCards();
   syncReceiveChoiceCards();
   setWizardStep(1);
@@ -3967,6 +3994,8 @@ document.getElementById("receiveChoices").addEventListener("click", (e) => {
   const card = e.target.closest(".choice-card[data-receive]");
   if (!card) return;
   state.wizardReceive = card.dataset.receive;
+  state.wizardTemplate = card.dataset.template || "generic";
+  state.wizardPreset = card.dataset.preset || "";
   syncReceiveChoiceCards();
 });
 document.getElementById("agentNextBtn").addEventListener("click", () => {
@@ -4013,6 +4042,7 @@ document.getElementById("agentStep2").addEventListener("submit", async (e) => {
   if (access === "http") {
     const receive = state.wizardReceive || "poll";
     body.receive = receive;
+    body.template = state.wizardTemplate || "generic";
     if (receive === "webhook") {
       const webhookUrl = document.getElementById("afWebhookUrl").value.trim();
       const webhookKey = document.getElementById("afWebhookKey").value.trim();
