@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { resolveSkillsForHost } from "./setup.mjs";
+import { service } from "./service.mjs";
 
 // git / npm 输出直接透传：npm ci 可能要几分钟，静默会像卡死。
 function run(cmd, args, cwd) {
@@ -201,7 +202,33 @@ export async function update(appDir, { check = false, skipSkill = false, configD
 
   ensureEntrySymlinks(appDir);
   refreshSkill(appDir, skipSkill, configDir);
-  if (configDir) daemonHint(configDir);
-  console.log(`更新完成：v${before} → v${after}。重启 ah daemon 后生效。`);
+
+  // 更新成功后自动重启守护进程，省得用户再手动跑一条命令。
+  // 只在检测到守护进程确实在跑时才重启；没在跑就只打提示，不擅自拉起。
+  if (configDir && isDaemonRunning(configDir)) {
+    console.log(`更新完成：v${before} → v${after}。正在重启守护进程…`);
+    const rc = await service(configDir, {}, appDir);
+    if (rc === 0) {
+      console.log("守护进程已重启，新版本生效。");
+    } else {
+      console.error(`守护进程重启失败（exit ${rc}），请手动运行 ah service --config ${configDir}`);
+      return rc;
+    }
+  } else {
+    if (configDir) daemonHint(configDir);
+    console.log(`更新完成：v${before} → v${after}。重启 ah daemon 后生效。`);
+  }
   return 0;
+}
+
+// 读 daemon.lock 判断守护进程是否存活（PID 存在且 process.kill(pid,0) 不抛错）。
+function isDaemonRunning(configDir) {
+  try {
+    const pid = Number(fs.readFileSync(path.join(configDir, "daemon.lock"), "utf8").trim());
+    if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }

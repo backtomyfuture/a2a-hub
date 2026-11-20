@@ -16,6 +16,80 @@ const RECEIVE_SET = new Set(RECEIVE_VALUES);
 export const TEMPLATE_VALUES = Object.freeze(["generic", "muse", "grok-bot"]);
 const TEMPLATE_SET = new Set(TEMPLATE_VALUES);
 
+// 节点模板注册表：数据驱动、可扩展。控制台 Step 2 的下拉框从这里渲染，
+// 选了模板后自动选中下面 3 种接收方式之一，并填入所有可填参数的默认参考值。
+// 新增模板只需往这个数组追加一条，前端无需改 HTML。
+export const AGENT_TEMPLATE_PRESETS = Object.freeze([
+  {
+    id: "generic-poll",
+    label: "通用",
+    access: "http",
+    template: "generic",
+    receive: "poll",
+    role: "worker",
+    interval: 5,
+    hint: "适合 ChatGPT 定时任务、Claude、Coze 等云端 Agent，自动选「定时检查」并填入 5 分钟默认参数",
+    defaults: {
+      node: "cloud-agent",
+      displayName: "云端通用助手",
+      description: "通用云端任务执行（定时轮询接单）",
+      adminNote: "定时轮询模式，每 5 分钟检查一次",
+    },
+  },
+  {
+    id: "workbuddy",
+    label: "WorkBuddy 云端版",
+    access: "http",
+    template: "generic",
+    receive: "poll",
+    role: "worker",
+    interval: 30,
+    preset: "workbuddy",
+    hint: "腾讯 WorkBuddy 云端定时任务，自动选「定时检查」并将间隔设为 30 分钟",
+    defaults: {
+      node: "workbuddy-cloud",
+      displayName: "WorkBuddy 云端助手",
+      description: "WorkBuddy 云端定时任务执行（资料整理、文案、日常协同）",
+      adminNote: "腾讯 WorkBuddy 云端定时任务，每 30 分钟检查一次",
+    },
+  },
+  {
+    id: "muse",
+    label: "Muse（临时云 VM）",
+    access: "http",
+    template: "muse",
+    receive: "longpoll",
+    role: "worker",
+    interval: null,
+    hint: "官方 ah CLI + runtime hook 每 5 秒自愈，自动选「常驻长连接」",
+    defaults: {
+      node: "muse-vm",
+      displayName: "Muse 云端 VM",
+      description: "Muse 云端 VM 常驻执行（代码开发、调研分析、自动化脚本）",
+      adminNote: "Muse 临时云 VM，官方 ah CLI + runtime hook 每 5 秒自愈",
+    },
+  },
+  {
+    id: "grok-bot",
+    label: "Grok Bot（Webhook）",
+    access: "http",
+    template: "grok-bot",
+    receive: "webhook",
+    role: "worker",
+    interval: 30,
+    hint: "桌面端 routine Webhook 门铃（短指令不含验签），自动选「Webhook 推送」与 30 分钟兜底",
+    defaults: {
+      node: "grok-bot",
+      displayName: "Grok Bot 助手",
+      description: "Grok Bot Webhook 实时响应（信息检索、快问快答、轻量执行）",
+      adminNote: "Grok 桌面端 routine Webhook 门铃触发，30 分钟兜底",
+      webhookHeader: "Authorization",
+      webhookUrlPlaceholder: "从 Grok 桌面端 Details → Routines 复制 POST to",
+      webhookKeyPlaceholder: "从 Grok 桌面端 Details → Routines 复制 key",
+    },
+  },
+]);
+
 export function httpError(status, message) {
   const err = new Error(message);
   err.status = status;

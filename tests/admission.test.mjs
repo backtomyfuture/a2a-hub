@@ -8,7 +8,12 @@ import { SqliteBus } from "../src/bus/sqlite-bus.mjs";
 import { DEFAULT_TABLES, f1 } from "../src/bus/tables.mjs";
 import { capIdOf } from "../src/config.mjs";
 import {
+  ACCESS_VALUES,
   ADMISSION_VALUES,
+  AGENT_TEMPLATE_PRESETS,
+  RECEIVE_VALUES,
+  ROLE_VALUES,
+  TEMPLATE_VALUES,
   admissionOf,
   buildOnboarding,
   ensureLeaderIdentityCards,
@@ -975,4 +980,21 @@ test("poll_interval_min 默认值、校验，以及接入提示词按分钟改�
   });
   assert.match(loop.prompt, /不要提前批量认领/);
   assert.equal(loop.prompt.includes("每 60 分钟"), false);
+});
+
+test("AGENT_TEMPLATE_PRESETS 注册表字段合法、含默认参考值且与后端约束一致", () => {
+  assert.ok(Array.isArray(AGENT_TEMPLATE_PRESETS) && AGENT_TEMPLATE_PRESETS.length >= 4);
+  const ids = new Set();
+  for (const preset of AGENT_TEMPLATE_PRESETS) {
+    assert.ok(preset.id && typeof preset.id === "string");
+    assert.equal(ids.has(preset.id), false, `重复模板 id: ${preset.id}`);
+    ids.add(preset.id);
+    assert.ok(preset.label && typeof preset.label === "string");
+    assert.ok(ACCESS_VALUES.includes(preset.access));
+    assert.ok(TEMPLATE_VALUES.includes(preset.template));
+    assert.ok(RECEIVE_VALUES.includes(preset.receive));
+    assert.ok(ROLE_VALUES.includes(preset.role));
+    assert.equal(receiveForTemplate(preset.template, preset.receive), preset.receive);
+    assert.ok(preset.defaults && preset.defaults.node && preset.defaults.displayName && preset.defaults.description && preset.defaults.adminNote);
+  }
 });

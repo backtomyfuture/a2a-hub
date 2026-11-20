@@ -1,6 +1,8 @@
 // 内置 Web 控制台（零外部构建依赖、无外网 CDN 依赖，局域网/离线可用）。
 // 面向非开发者机主视角设计：用大白话表达状态与操作，把技术参数折叠在高级/技术详情中。
 
+import { AGENT_TEMPLATE_PRESETS } from "../hub/admission.mjs";
+
 export function renderWebConsoleHtml() {
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -761,6 +763,11 @@ export function renderWebConsoleHtml() {
     </div>
 
     <form id="agentStep2" style="display:none;">
+      <div class="form-row" id="afTemplateRow">
+        <label>节点模板（选好后自动选择接收方式并填入默认参考值）</label>
+        <select class="input" id="afTemplatePreset"></select>
+        <div class="hint" id="afTemplateHint"></div>
+      </div>
       <div class="form-row">
         <label>节点标识（英文/数字，用于系统唯一识别）</label>
         <input class="input mono" id="afNode" placeholder="例如 muse-leader 或 grok-bot" required />
@@ -780,46 +787,25 @@ export function renderWebConsoleHtml() {
       <div class="form-row" id="afReceiveGroup">
         <label>接收方式（HTTP 接入方式）</label>
         <div class="choice-list" id="receiveChoices" style="margin-bottom:0;">
-          <label class="choice-card selected" data-receive="poll" data-template="generic" data-preset="">
+          <label class="choice-card selected" data-receive="poll">
             <input type="radio" name="afReceiveRadio" value="poll" checked />
             <div>
-              <div style="font-weight:600;">通用 · 定时检查（poll，默认）</div>
-              <div class="hint">适合会被定时唤醒的云端 Agent（ChatGPT 定时任务、Claude、Coze 等）。提示词自包含，不需要对方下载或运行任何脚本。</div>
+              <div style="font-weight:600;">定时检查（poll，默认）</div>
+              <div class="hint">适合被定时唤醒的云端 Agent（ChatGPT、Claude、Coze、WorkBuddy 等），按固定间隔检查并取单。</div>
             </div>
           </label>
-          <label class="choice-card" data-receive="poll" data-template="generic" data-preset="workbuddy">
-            <input type="radio" name="afReceiveRadio" value="poll" />
-            <div>
-              <div style="font-weight:600;">WorkBuddy 云端版（定时任务）</div>
-              <div class="hint">腾讯 WorkBuddy 云端定时任务，间隔建议 30 分钟起；提示词自包含，不要求改 UA、不下载脚本。</div>
-            </div>
-          </label>
-          <label class="choice-card" data-receive="longpoll" data-template="muse" data-preset="">
+          <label class="choice-card" data-receive="longpoll">
             <input type="radio" name="afReceiveRadio" value="longpoll" />
             <div>
-              <div style="font-weight:600;">Muse（临时云 VM，高保活）</div>
-              <div class="hint">官方 ah CLI + runtime hook 每 5 秒自愈，换机自动重建拉起；Token 只落家目录 0600 凭据文件。</div>
+              <div style="font-weight:600;">常驻长连接（longpoll）</div>
+              <div class="hint">适合常驻运行的进程或临时云 VM（如 Muse），循环长轮询实时取单，无需定时任务。</div>
             </div>
           </label>
-          <label class="choice-card" data-receive="webhook" data-template="grok-bot" data-preset="">
+          <label class="choice-card" data-receive="webhook">
             <input type="radio" name="afReceiveRadio" value="webhook" />
             <div>
-              <div style="font-weight:600;">Grok Bot（Webhook 门铃）</div>
-              <div class="hint">桌面端 routine 的 POST to 填为 URL、key 填为密钥；提示词是短指令，不含验签与脚本。</div>
-            </div>
-          </label>
-          <label class="choice-card" data-receive="longpoll" data-template="generic" data-preset="">
-            <input type="radio" name="afReceiveRadio" value="longpoll" />
-            <div>
-              <div style="font-weight:600;">常驻长连接（longpoll，自建进程）</div>
-              <div class="hint">适合常驻运行的进程，循环长轮询实时取单，无需定时任务。</div>
-            </div>
-          </label>
-          <label class="choice-card" data-receive="webhook" data-template="generic" data-preset="">
-            <input type="radio" name="afReceiveRadio" value="webhook" />
-            <div>
-              <div style="font-weight:600;">Webhook 推送（自建接收端）</div>
-              <div class="hint">面向您自己的接收服务：门铃含 HMAC-SHA256 签名，提示词带验签说明。</div>
+              <div style="font-weight:600;">Webhook 推送（webhook）</div>
+              <div class="hint">有新任务或状态变化时，中台主动向回调 URL 推门铃通知（如 Grok Bot 或自建接收端）。</div>
             </div>
           </label>
         </div>
@@ -1051,6 +1037,9 @@ export function renderWebConsoleHtml() {
 <div class="toast" id="toast"></div>
 
 <script>
+// 节点模板注册表（服务端数据驱动，可扩展；新增模板只需改 admission.mjs 的 AGENT_TEMPLATE_PRESETS）
+const AGENT_TEMPLATES = ${JSON.stringify(AGENT_TEMPLATE_PRESETS).replace(/</g, "\\u003c")};
+
 (() => {
   try {
     const params = new URLSearchParams(location.search);
@@ -1107,6 +1096,7 @@ const state = {
   wizardReceive: "poll",
   wizardTemplate: "generic",
   wizardPreset: "",
+  wizardPresetDefaults: {},
   addCapTarget: { node: "", isHttp: true },
   filePreviewCache: new Map(),
   filePreviewTaskId: null,
@@ -2500,10 +2490,8 @@ function syncAccessChoiceCards() {
 }
 
 function syncReceiveChoiceCards() {
-  const want = state.wizardReceive + "|" + (state.wizardTemplate || "generic") + "|" + (state.wizardPreset || "");
   document.querySelectorAll("#receiveChoices .choice-card").forEach((card) => {
-    const key = card.dataset.receive + "|" + (card.dataset.template || "generic") + "|" + (card.dataset.preset || "");
-    const checked = key === want;
+    const checked = card.dataset.receive === state.wizardReceive;
     card.classList.toggle("selected", checked);
     const radio = card.querySelector("input[type=radio]");
     if (radio) radio.checked = checked;
@@ -2526,6 +2514,80 @@ function syncReceiveChoiceCards() {
   }
 }
 
+const DEFAULT_WEBHOOK_URL_PLACEHOLDER = "https://example.com/a2a/webhook";
+const DEFAULT_WEBHOOK_KEY_PLACEHOLDER = "";
+
+// 仅当字段为空或仍为上一模板自动填入的参考值时覆盖，保留用户手工改动。
+function fillIfDefault(elId, key, nextVal) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  const val = nextVal == null ? "" : String(nextVal);
+  const prevAuto = state.wizardPresetDefaults[key];
+  if (el.value === "" || (prevAuto !== undefined && el.value === prevAuto)) {
+    el.value = val;
+  }
+  state.wizardPresetDefaults[key] = val;
+}
+
+// 按 Step 1 选的接入类型渲染「节点模板」下拉框（数据来自 AGENT_TEMPLATES，可扩展）；没有匹配模板时整行隐藏。
+function renderTemplateOptions() {
+  const row = document.getElementById("afTemplateRow");
+  const sel = document.getElementById("afTemplatePreset");
+  const group = document.getElementById("afReceiveGroup");
+  const list = AGENT_TEMPLATES.filter((t) => t.access === state.wizardAccess);
+  sel.innerHTML = "";
+  if (!list.length) {
+    row.style.display = "none";
+    group.style.display = "none";
+    return;
+  }
+  row.style.display = "flex";
+  group.style.display = "flex";
+  for (const t of list) {
+    const opt = document.createElement("option");
+    opt.value = t.id;
+    opt.textContent = t.label;
+    sel.appendChild(opt);
+  }
+  sel.value = list[0].id;
+  applyTemplatePreset();
+}
+
+// 选中模板后保持 3 种接收方式可见并自动选中对应那一种，同时填入各参数默认参考值。
+function applyTemplatePreset() {
+  const id = document.getElementById("afTemplatePreset").value;
+  const hint = document.getElementById("afTemplateHint");
+  const group = document.getElementById("afReceiveGroup");
+  group.style.display = state.wizardAccess === "http" ? "flex" : "none";
+  const urlEl = document.getElementById("afWebhookUrl");
+  const keyEl = document.getElementById("afWebhookKey");
+  const t = AGENT_TEMPLATES.find((x) => x.id === id);
+  if (!t) {
+    state.wizardTemplate = "generic";
+    state.wizardPreset = "";
+    hint.textContent = "可手动选择下面 3 种接收方式并填写参数。";
+    if (urlEl) urlEl.placeholder = DEFAULT_WEBHOOK_URL_PLACEHOLDER;
+    if (keyEl) keyEl.placeholder = DEFAULT_WEBHOOK_KEY_PLACEHOLDER;
+    syncReceiveChoiceCards();
+    return;
+  }
+  hint.textContent = t.hint || "";
+  state.wizardReceive = t.receive || "poll";
+  state.wizardTemplate = t.template || "generic";
+  state.wizardPreset = t.preset || "";
+  if (t.role) document.getElementById("afRole").value = t.role;
+  const d = t.defaults || {};
+  fillIfDefault("afNode", "node", d.node || "");
+  fillIfDefault("afName", "displayName", d.displayName || "");
+  fillIfDefault("afDesc", "description", d.description || "");
+  fillIfDefault("afNote", "adminNote", d.adminNote || "");
+  fillIfDefault("afWebhookHeader", "webhookHeader", d.webhookHeader || "");
+  if (urlEl) urlEl.placeholder = d.webhookUrlPlaceholder || DEFAULT_WEBHOOK_URL_PLACEHOLDER;
+  if (keyEl) keyEl.placeholder = d.webhookKeyPlaceholder || DEFAULT_WEBHOOK_KEY_PLACEHOLDER;
+  syncReceiveChoiceCards();
+  if (t.interval != null) document.getElementById("afPollInterval").value = String(t.interval);
+}
+
 function openAgentModal() {
   document.getElementById("agentStep2").reset();
   document.getElementById("onboardBox").innerHTML = "";
@@ -2536,6 +2598,11 @@ function openAgentModal() {
   state.wizardReceive = "poll";
   state.wizardTemplate = "generic";
   state.wizardPreset = "";
+  state.wizardPresetDefaults = {};
+  const urlEl = document.getElementById("afWebhookUrl");
+  const keyEl = document.getElementById("afWebhookKey");
+  if (urlEl) urlEl.placeholder = DEFAULT_WEBHOOK_URL_PLACEHOLDER;
+  if (keyEl) keyEl.placeholder = DEFAULT_WEBHOOK_KEY_PLACEHOLDER;
   syncAccessChoiceCards();
   syncReceiveChoiceCards();
   setWizardStep(1);
@@ -3993,18 +4060,27 @@ document.getElementById("accessChoices").addEventListener("click", (e) => {
 document.getElementById("receiveChoices").addEventListener("click", (e) => {
   const card = e.target.closest(".choice-card[data-receive]");
   if (!card) return;
-  state.wizardReceive = card.dataset.receive;
-  state.wizardTemplate = card.dataset.template || "generic";
-  state.wizardPreset = card.dataset.preset || "";
+  const nextReceive = card.dataset.receive;
+  state.wizardReceive = nextReceive;
+  const presetSel = document.getElementById("afTemplatePreset");
+  const curPreset = AGENT_TEMPLATES.find((x) => x.id === presetSel.value);
+  if (curPreset && curPreset.receive !== nextReceive) {
+    // 手动换了接收方式：下拉框回到「通用」（不重置已填字段），按通用模板生成提示词。
+    const generic = AGENT_TEMPLATES.find((x) => x.template === "generic" && !x.preset && x.access === state.wizardAccess);
+    if (generic) presetSel.value = generic.id;
+    state.wizardTemplate = "generic";
+    state.wizardPreset = "";
+    document.getElementById("afTemplateHint").textContent = "已手动调整接收方式，使用通用模板。";
+  }
   syncReceiveChoiceCards();
 });
 document.getElementById("agentNextBtn").addEventListener("click", () => {
   setWizardStep(2);
-  const isHttp = state.wizardAccess === "http";
-  document.getElementById("afReceiveGroup").style.display = isHttp ? "flex" : "none";
-  document.getElementById("afDescRow").style.display = isHttp ? "flex" : "none";
+  document.getElementById("afDescRow").style.display = state.wizardAccess === "http" ? "flex" : "none";
+  renderTemplateOptions();
   syncReceiveChoiceCards();
 });
+document.getElementById("afTemplatePreset").addEventListener("change", applyTemplatePreset);
 document.getElementById("afRole").addEventListener("change", () => {
   document.getElementById("afDescRow").style.display = state.wizardAccess === "http" ? "flex" : "none";
 });
