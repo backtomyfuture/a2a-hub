@@ -18,10 +18,12 @@ import {
   buildOnboarding,
   ensureLeaderIdentityCards,
   formatAgentCard,
+  inferTemplateId,
   isAdmitted,
   parseCardMetadata,
   presetHttpCardFields,
   receiveForTemplate,
+  resolveHttpOnboardingChoice,
   validatePollIntervalMin,
 } from "../src/hub/admission.mjs";
 import { AgentTokenStore } from "../src/hub/agent-tokens.mjs";
@@ -420,10 +422,24 @@ test("模板：presetHttpCardFields 把模板写进 Metadata，parseCardMetadata
   const meta = parseCardMetadata(fields);
   assert.equal(meta.template, "muse");
   assert.equal(meta.role, "leader");
-  // generic 是默认值，不落盘，保持历史名片形状不变。
+  assert.equal(meta.template_id, "");
+  // generic 是默认值，不落盘，保持历史名片形状不变。节点模板 id 单独记，用来回到同一套提示词。
   const plain = presetHttpCardFields({ node: "n1", role: "worker", receiveMode: "http-poll" });
   assert.equal(parseCardMetadata(plain).template, "");
+  assert.equal(parseCardMetadata(plain).template_id, "");
   assert.equal(JSON.parse(plain.Metadata).template, undefined);
+  assert.equal(JSON.parse(plain.Metadata).template_id, undefined);
+  const buddy = presetHttpCardFields({
+    node: "wb",
+    role: "worker",
+    receiveMode: "http-poll",
+    template: "generic",
+    templateId: "workbuddy",
+  });
+  assert.equal(parseCardMetadata(buddy).template, "");
+  assert.equal(parseCardMetadata(buddy).template_id, "workbuddy");
+  assert.equal(JSON.parse(buddy.Metadata).template, undefined);
+  assert.equal(formatAgentCard(buddy).template_id, "workbuddy");
   assert.equal(receiveForTemplate("muse", "poll"), "longpoll");
   assert.equal(receiveForTemplate("grok-bot", "poll"), "webhook");
   assert.equal(receiveForTemplate("generic", "webhook"), "webhook");
@@ -996,5 +1012,132 @@ test("AGENT_TEMPLATE_PRESETS 注册表字段合法、含默认参考值且与后
     assert.ok(ROLE_VALUES.includes(preset.role));
     assert.equal(receiveForTemplate(preset.template, preset.receive), preset.receive);
     assert.ok(preset.defaults && preset.defaults.node && preset.defaults.displayName && preset.defaults.description && preset.defaults.adminNote);
+    const ob = buildOnboarding({
+      hubUrl: "https://hub.example",
+      node: preset.defaults.node,
+      access: preset.access,
+      role: preset.role,
+      templateId: preset.id,
+      pollIntervalMin: preset.interval,
+    });
+    assert.equal(ob.template_id, preset.id);
+    assert.equal(ob.template_label, preset.label);
+    assert.equal(ob.template, preset.template);
+    assert.ok(ob.prompt && ob.prompt.length > 40);
   }
+});
+
+test("节点模板 id 决定 Step 3 提示词；WorkBuddy 不与通用定时检查混用", () => {
+  const generic = buildOnboarding({
+    hubUrl: "https://hub.example",
+    node: "cloud-agent",
+    access: "http",
+    role: "worker",
+    templateId: "generic-poll",
+    pollIntervalMin: 5,
+  });
+  const buddy = buildOnboarding({
+    hubUrl: "https://hub.example",
+    node: "workbuddy-cloud",
+    access: "http",
+    role: "worker",
+    receive: "webhook",
+    template: "grok-bot",
+    templateId: "workbuddy",
+    pollIntervalMin: 30,
+  });
+  assert.equal(generic.template_id, "generic-poll");
+  assert.equal(generic.template_label, "通用");
+  assert.match(generic.prompt, /每 5 分钟/);
+  assert.equal(generic.prompt.includes("WorkBuddy"), false);
+  // 显式 template_id 覆盖同时传入的粗 template / receive，第三步跟所选节点模板走。
+  assert.equal(buddy.template_id, "workbuddy");
+  assert.equal(buddy.template, "generic");
+  assert.match(buddy.prompt, /腾讯 WorkBuddy 的云端定时任务/);
+  assert.match(buddy.prompt, /每 30 分钟/);
+  assert.match(buddy.steps.join("\n"), /发给 WorkBuddy/);
+  assert.equal(buddy.prompt.includes("HMAC"), false);
+  assert.notEqual(buddy.prompt, generic.prompt);
+
+  const manualLongpoll = buildOnboarding({
+    hubUrl: "https://hub.example",
+    node: "lp",
+    access: "http",
+    role: "worker",
+    receive: "longpoll",
+  });
+  assert.equal(manualLongpoll.template_id, "");
+  assert.equal(manualLongpoll.template_label, "");
+  assert.match(manualLongpoll.prompt, /poll\?timeout=25/);
+
+  const muse = buildOnboarding({
+    hubUrl: "https://hub.example",
+    node: "muse-1",
+    access: "http",
+    role: "worker",
+    template: "muse",
+  });
+  assert.equal(muse.template_id, "muse");
+  assert.equal(inferTemplateId("generic", "poll"), "");
+  assert.equal(inferTemplateId("muse", "longpoll"), "muse");
+  assert.throws(
+    () => resolveHttpOnboardingChoice({ templateId: "workbuddy", receive: "longpoll" }),
+    /receive 与节点模板不一致/,
+  );
+  assert.deepEqual(
+    resolveHttpOnboardingChoice({ template: "generic", receive: "poll", templateId: "workbuddy" }),
+    { template: "generic", receive: "poll", templateId: "workbuddy" },
+  );
+});
+
+test("添加 Agent 时节点模板写入名片，注册不冲掉，轮换仍生成该模板的提示词", async () => {
+  await withHubServer(async ({ baseUrl, apiToken }) => {
+    const added = await apiJson(baseUrl, "/api/v1/admin/agents", {
+      method: "POST",
+      token: apiToken,
+      body: {
+        node: "wb-cloud",
+        access: "http",
+        role: "worker",
+        template: "generic",
+        receive: "poll",
+        template_id: "workbuddy",
+        poll_interval_min: 30,
+      },
+    });
+    assert.equal(added.status, 200);
+    assert.equal(added.data.card.template_id, "workbuddy");
+    assert.equal(added.data.card.template, "");
+    assert.equal(added.data.onboarding.template_id, "workbuddy");
+    assert.equal(added.data.onboarding.template_label, "WorkBuddy 云端版");
+    assert.match(added.data.onboarding.prompt, /腾讯 WorkBuddy 的云端定时任务/);
+
+    const reg = await apiJson(baseUrl, "/api/v1/agents/register", {
+      method: "POST",
+      token: added.data.token,
+      body: { node: "wb-cloud", role: "worker", kind: "agent", receive_mode: "http-poll" },
+    });
+    assert.equal(reg.status, 200);
+    const state = await apiJson(baseUrl, "/api/v1/state", { token: apiToken });
+    const card = state.data.agentCards.find((item) => item.node === "wb-cloud" && item.skill_id === "agent");
+    assert.equal(card.template_id, "workbuddy");
+
+    const rotated = await apiJson(baseUrl, "/api/v1/admin/tokens/wb-cloud/rotate", {
+      method: "POST",
+      token: apiToken,
+      body: {},
+    });
+    assert.equal(rotated.status, 200);
+    assert.equal(rotated.data.onboarding.template_id, "workbuddy");
+    assert.match(rotated.data.onboarding.prompt, /腾讯 WorkBuddy 的云端定时任务/);
+    assert.equal(rotated.data.onboarding.prompt.includes(rotated.data.token), true);
+
+    const conflict = await apiJson(baseUrl, "/api/v1/admin/agents", {
+      method: "POST",
+      token: apiToken,
+      body: { node: "wb-bad", access: "http", role: "worker", template_id: "workbuddy", receive: "longpoll" },
+    });
+    assert.equal(conflict.status, 400);
+    assert.match(conflict.data.error, /receive 与节点模板不一致/);
+  });
 });

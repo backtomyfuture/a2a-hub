@@ -335,7 +335,7 @@ test("控制台内嵌脚本：节点分层渲染、stageBindings 闭环提交、
         cap_id: "CAP-poll-agent", node: "poll-bot", worker: "", skill_id: "agent",
         skill_name: "Poll Bot", display_name: "定时助手", side_effect: "write", approval_class: "auto",
         availability: "online", dispatchable: "Yes", receive_mode: "http-poll", daemon_version: "http-agent",
-        admission: "admitted", kind: "agent", role: "worker",
+        admission: "admitted", kind: "agent", role: "worker", template_id: "generic-poll",
       },
     ],
     tasks: [],
@@ -420,7 +420,15 @@ test("控制台内嵌脚本：节点分层渲染、stageBindings 闭环提交、
         ok: true, node: body.node, token: "tok_once_123",
         webhook: { url: body.webhook_url, header: "Authorization", secret_mask: "receiv…", legacy: false },
         card: { cap_id: "CAP-x" },
-        onboarding: { access: "http", role: "worker", prompt: "test prompt", steps: [], skills: [] },
+        onboarding: {
+          access: "http",
+          role: "worker",
+          prompt: body.template_id === "workbuddy" ? "WorkBuddy 云端定时任务提示词" : "test prompt",
+          template_id: body.template_id || "",
+          template_label: body.template_id === "workbuddy" ? "WorkBuddy 云端版" : (body.template_id === "generic-poll" ? "通用" : ""),
+          steps: [],
+          skills: [],
+        },
       });
     }
     return jsonRes(404, { error: "Not Found" });
@@ -455,8 +463,8 @@ test("控制台内嵌脚本：节点分层渲染、stageBindings 闭环提交、
   assert.equal(cloudCard.includes("https://bot.example/hook"), false);
   assert.equal(cloudCard.includes("data-action=\"delete-webhook\""), false);
   assert.equal(cloudCard.includes("data-action=\"test-webhook\""), false);
-  assert.match(pollCard, /云端 HTTP 节点 · 定时检查 · 执行方 \(Worker\)/);
-  assert.match(pollCard, /接收方式：定时检查/);
+  assert.match(pollCard, /云端 HTTP 节点 · 定时检查 · 通用 · 执行方 \(Worker\)/);
+  assert.match(pollCard, /接收方式：定时检查 · 节点模板：通用/);
   assert.equal(pollCard.includes("切换接收方式"), false);
   assert.equal(pollCard.includes("data-action=\"edit-webhook\""), false);
   assert.equal(pollCard.includes("data-action=\"test-webhook\""), false);
@@ -603,6 +611,21 @@ test("控制台内嵌脚本：节点分层渲染、stageBindings 闭环提交、
   assert.equal(getEl("afNode").value, "workbuddy-cloud");
   assert.equal(getEl("afName").value, "WorkBuddy 云端助手");
   assert.equal(getEl("afPollInterval").value, "30");
+  await getEl("agentStep2").dispatch("submit");
+  const buddyPost = requests.filter((r) => r.url === "/api/v1/admin/agents" && r.method === "POST").at(-1);
+  assert.equal(buddyPost.body.template_id, "workbuddy");
+  assert.equal(buddyPost.body.template, "generic");
+  assert.equal(buddyPost.body.receive, "poll");
+  assert.match(getEl("onboardBox").innerHTML, /本提示词对应该节点模板：WorkBuddy 云端版/);
+  assert.match(getEl("onboardBox").innerHTML, /WorkBuddy 云端定时任务提示词/);
+
+  await vm.runInContext('state.wizardReceive = "longpoll";', sandbox);
+  getEl("afNode").value = "wb-manual";
+  await getEl("agentStep2").dispatch("submit");
+  const drifted = requests.filter((r) => r.url === "/api/v1/admin/agents" && r.method === "POST").at(-1);
+  assert.equal(drifted.body.receive, "longpoll");
+  assert.equal(Object.hasOwn(drifted.body, "template_id"), false);
+  getEl("afNode").value = "workbuddy-cloud";
 
   getEl("afTemplatePreset").value = "grok-bot";
   await getEl("afTemplatePreset").dispatch("change");

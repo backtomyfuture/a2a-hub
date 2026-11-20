@@ -1255,12 +1255,23 @@ function agentTypeSummary(kind, role, mode) {
 }
 
 // 卡片副标题要把接收方式写出来。宿主节点没有这档选择，仍用原来的类型加角色。
+function nodeTemplateLabel(g) {
+  for (const card of (g && g.cards) || []) {
+    const id = card && card.template_id;
+    if (!id) continue;
+    const preset = AGENT_TEMPLATES.find((item) => item.id === id);
+    if (preset) return preset.label;
+  }
+  return "";
+}
+
 function nodeCardSubtitle(g) {
   if (!isHttpNodeGroup(g)) return agentTypeSummary(g.kind, g.role, g.mode);
   const mode = httpReceiveModeOf(g) || "http-poll";
   const receive = receiveModeLabelZh(mode) || "定时检查";
   const role = roleLabelZh(g.role);
-  const head = "云端 HTTP 节点 · " + receive;
+  const tpl = nodeTemplateLabel(g);
+  const head = "云端 HTTP 节点 · " + receive + (tpl ? " · " + tpl : "");
   return role ? (head + " · " + role) : head;
 }
 
@@ -2647,10 +2658,12 @@ function renderOnboardingResult(res) {
   }
 
   if (ob.prompt) {
-    html += '<div class="form-row"><div style="display:flex;justify-content:space-between;align-items:center;">'
+    const tplLabel = ob.template_label ? String(ob.template_label) : "";
+    html += '<div class="form-row"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">'
       + '<label>接入提示词（直接发给您的 Agent 即可完成接入）</label>'
       + '<button type="button" class="btn sm primary" id="copyPromptBtn">一键复制提示词</button>'
       + '</div>'
+      + (tplLabel ? '<div class="hint" style="margin-bottom:6px;">本提示词对应该节点模板：' + esc(tplLabel) + '</div>' : '')
       + '<textarea class="input mono" id="onboardPrompt" readonly style="min-height:120px;">' + esc(ob.prompt) + '</textarea>'
       + '</div>';
   }
@@ -2718,6 +2731,7 @@ async function doRotateToken(node) {
     });
     const token = res.token || "";
     const prompt = (res.onboarding && res.onboarding.prompt) || "";
+    const tplLabel = (res.onboarding && res.onboarding.template_label) || "";
     document.getElementById("tmTitle").textContent = "新密钥已生成 · " + node;
     let html = '<div class="token-reveal">'
       + '<div class="token-reveal-title">Token 只显示这一次，请立即复制保存</div>'
@@ -2730,6 +2744,7 @@ async function doRotateToken(node) {
       html += '<div class="form-row"><div style="display:flex;justify-content:space-between;align-items:center;">'
         + '<label>更新后的接入提示词</label>'
         + '<button type="button" class="btn sm" data-action="copy-rotated-prompt">复制提示词</button></div>'
+        + (tplLabel ? '<div class="hint" style="margin-bottom:6px;">本提示词对应该节点模板：' + esc(tplLabel) + '</div>' : '')
         + '<textarea class="input mono" id="rotatedPromptBox" readonly style="min-height:110px;">' + esc(prompt) + '</textarea></div>';
     }
     html += '<div style="display:flex;justify-content:flex-end;"><button type="button" class="btn primary" data-close-modal="tokenManageModal">我已保存，关闭</button></div>';
@@ -3235,8 +3250,10 @@ function renderReceiveBox(g) {
   }
   const mode = httpReceiveModeOf(g) || "http-poll";
   const label = receiveModeLabelZh(mode) || "定时检查";
+  const tpl = nodeTemplateLabel(g);
+  const receiveText = "接收方式：" + label + (tpl ? " · 节点模板：" + tpl : "");
   if (mode !== "webhook") {
-    return '<div class="token-box"><strong>接收方式：' + esc(label) + '</strong></div>';
+    return '<div class="token-box"><strong>' + esc(receiveText) + '</strong></div>';
   }
   // 和定时检查、宿主节点同一行。地址和密钥放进弹窗，卡片上不再单独开一块 Webhook 管理框。
   const wh = webhookRecord(g.node);
@@ -3249,7 +3266,7 @@ function renderReceiveBox(g) {
   }
   return '<div class="token-box">'
     + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">'
-    + '<strong>接收方式：' + esc(label) + '</strong>'
+    + '<strong>' + esc(receiveText) + '</strong>'
     + '<span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">' + side + '</span>'
     + '</div></div>';
 }
@@ -4119,6 +4136,12 @@ document.getElementById("agentStep2").addEventListener("submit", async (e) => {
     const receive = state.wizardReceive || "poll";
     body.receive = receive;
     body.template = state.wizardTemplate || "generic";
+    // 只在下拉框仍和当前接收方式一致时带上节点模板。手动改过接收方式时不带，第三步回到该接收方式的通用提示词。
+    const presetSel = document.getElementById("afTemplatePreset");
+    const selectedPreset = AGENT_TEMPLATES.find((item) => item.id === (presetSel && presetSel.value));
+    if (selectedPreset && selectedPreset.receive === receive && (selectedPreset.template || "generic") === body.template) {
+      body.template_id = selectedPreset.id;
+    }
     if (receive === "webhook") {
       const webhookUrl = document.getElementById("afWebhookUrl").value.trim();
       const webhookKey = document.getElementById("afWebhookKey").value.trim();

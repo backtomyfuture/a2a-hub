@@ -20,6 +20,10 @@ import {
   presetHttpCardFields,
   receiveForTemplate,
   receiveModeFor,
+  resolveHttpOnboardingChoice,
+  templatePresetById,
+  knownTemplateId,
+  inferTemplateId,
   validateAccess,
   validateAdmission,
   validateNodeName,
@@ -1095,9 +1099,16 @@ export async function startHubHttpServer({
         let webhookHeader = "Authorization";
         let pollIntervalMin = null;
         let template = "generic";
+        let templateId = "";
         if (access === "http") {
-          template = validateTemplate(body?.template);
-          receive = receiveForTemplate(template, validateReceive(body?.receive));
+          const choice = resolveHttpOnboardingChoice({
+            template: Object.hasOwn(body ?? {}, "template") ? body.template : undefined,
+            receive: Object.hasOwn(body ?? {}, "receive") ? body.receive : undefined,
+            templateId: body?.template_id,
+          });
+          template = choice.template;
+          receive = choice.receive;
+          templateId = choice.templateId;
           pollIntervalMin = validatePollIntervalMin(body?.poll_interval_min, receive);
           if (receive === "webhook") {
             webhookUrl = validateWebhookUrl(body?.webhook_url);
@@ -1135,6 +1146,7 @@ export async function startHubHttpServer({
             updatedAt: nowMinute(),
             pollIntervalMin,
             template,
+            templateId,
           });
           const existing = await bus.listRecords(bus.tables.agentCards);
           if (existing.some((r) => f1(r, "Cap_ID") === fields.Cap_ID)) {
@@ -1175,6 +1187,7 @@ export async function startHubHttpServer({
           receive,
           pollIntervalMin,
           template,
+          templateId,
         });
         if (access === "http") broker?.setNodePollInterval?.(node, pollIntervalMin);
         const payload = { ok: true, node, card, onboarding };
@@ -1220,10 +1233,15 @@ export async function startHubHttpServer({
         );
         const access = validateAccess(reqUrl.searchParams.get("access"));
         const role = validateRole(reqUrl.searchParams.get("role"));
-        const template = access === "http" ? validateTemplate(reqUrl.searchParams.get("template")) : "generic";
-        const receive = access === "http" ? receiveForTemplate(template, validateReceive(reqUrl.searchParams.get("receive"))) : "poll";
+        const choice = access === "http"
+          ? resolveHttpOnboardingChoice({
+            template: reqUrl.searchParams.get("template"),
+            receive: reqUrl.searchParams.get("receive"),
+            templateId: reqUrl.searchParams.get("template_id"),
+          })
+          : { template: "generic", receive: "poll", templateId: "" };
         const pollIntervalMin = reqUrl.searchParams.has("poll_interval_min")
-          ? validatePollIntervalMin(reqUrl.searchParams.get("poll_interval_min"), receive)
+          ? validatePollIntervalMin(reqUrl.searchParams.get("poll_interval_min"), choice.receive)
           : undefined;
         const onboarding = buildOnboarding({
           hubUrl: requestHubUrl(req),
@@ -1231,9 +1249,10 @@ export async function startHubHttpServer({
           access,
           role,
           authRequired: Boolean(apiToken) || Boolean(tokenStore?.hasAny()),
-          receive,
+          receive: choice.receive,
           pollIntervalMin,
-          template,
+          template: choice.template,
+          templateId: choice.templateId,
         });
         sendJson(res, 200, { onboarding });
         return;
@@ -1269,19 +1288,40 @@ export async function startHubHttpServer({
         }
         const scopes = Object.hasOwn(body, "scopes") ? body.scopes : undefined;
         const issued = tokenStore.rotate({ node, role, scopes });
-        // 模板优先取请求体，其次沿用名片里登记过的（建单时写进 Metadata），默认 generic。
-        let template = "generic";
-        if (Object.hasOwn(body, "template")) {
-          template = validateTemplate(body.template);
+        // 节点模板 id 优先于粗 template：WorkBuddy 和通用的粗分类都是 generic，只靠后者会生成同一段提示词。
+        let templateId = "";
+        if (Object.hasOwn(body, "template_id") && String(body.template_id ?? "").trim()) {
+          templateId = templatePresetById(body.template_id).id;
         } else {
           for (const card of cards) {
             if (f1(card, "Node") !== node) continue;
-            const t = parseCardMetadata(card).template;
-            if (t) { template = t; break; }
+            const id = knownTemplateId(parseCardMetadata(card).template_id);
+            if (id) { templateId = id; break; }
           }
         }
+        let templateFromCard = "";
+        for (const card of cards) {
+          if (f1(card, "Node") !== node) continue;
+          const t = parseCardMetadata(card).template;
+          if (t) { templateFromCard = t; break; }
+        }
+        let template = "generic";
+        if (Object.hasOwn(body, "template")) template = validateTemplate(body.template);
+        else if (templateFromCard) template = validateTemplate(templateFromCard);
         const storedReceive = nodeStoredReceiveMode(cards, node);
-        const receive = receiveForTemplate(template, storedReceive === "http-longpoll" ? "longpoll" : (storedReceive === "webhook" ? "webhook" : "poll"));
+        let receive = storedReceive === "http-longpoll" ? "longpoll" : (storedReceive === "webhook" ? "webhook" : "poll");
+        if (templateId && !Object.hasOwn(body, "template")) {
+          const preset = templatePresetById(templateId);
+          // 名片接收方式已经和建单时的模板不一致时，不再套用那套提示词。
+          if (!storedReceive || preset.receive === receive) {
+            template = preset.template;
+            receive = preset.receive;
+          } else {
+            templateId = "";
+          }
+        }
+        if (!templateId) templateId = inferTemplateId(template, receive);
+        receive = receiveForTemplate(template, receive);
         let pollIntervalMin = null;
         for (const card of cards) {
           if (f1(card, "Node") !== node) continue;
@@ -1300,6 +1340,7 @@ export async function startHubHttpServer({
           receive,
           pollIntervalMin,
           template,
+          templateId,
         });
         sendJson(res, 200, { token: issued.token, onboarding });
         return;

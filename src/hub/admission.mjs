@@ -18,7 +18,8 @@ const TEMPLATE_SET = new Set(TEMPLATE_VALUES);
 
 // 节点模板注册表：数据驱动、可扩展。控制台 Step 2 的下拉框从这里渲染，
 // 选了模板后自动选中下面 3 种接收方式之一，并填入所有可填参数的默认参考值。
-// 新增模板只需往这个数组追加一条，前端无需改 HTML。
+// 同一个 id 也是 Step 3 接入提示词的主键（buildOnboarding 的 templateId）。
+// 新增模板只需往这个数组追加一条，并在 buildOnboarding 里接上对应提示词。前端无需改 HTML。
 export const AGENT_TEMPLATE_PRESETS = Object.freeze([
   {
     id: "generic-poll",
@@ -169,13 +170,16 @@ export function presetHttpCardFields({
   updatedAt,
   pollIntervalMin,
   template = "",
+  templateId = "",
 } = {}) {
   const storedRole = role === "hybrid" ? "leader" : role;
   const interval = pollIntervalForCard(receiveMode, pollIntervalMin);
   const meta = { kind: "agent", role: storedRole, mode: receiveMode, preset: true };
   if (interval > 0) meta.poll_interval_min = interval;
-  // 记住接入提示词模板，轮换 Token 重新生成提示词时不用机主再选一次。
+  // 粗分类只在非默认时落盘。节点模板 id 单独记下，轮换 Token 时才能回到同一套 Step 3 提示词。
+  // generic 与 WorkBuddy 的粗分类都是 generic，只靠 template 分不开。
   if (template && template !== "generic") meta.template = template;
+  if (templateId) meta.template_id = templateId;
   return {
     Cap_ID: capIdOf("agent", {}, node),
     Node: node,
@@ -248,6 +252,51 @@ export function receiveForTemplate(template, receive) {
   return receive;
 }
 
+// 空串表示没选节点模板。未知 id 直接 400，避免静默落到通用提示词。
+export function templatePresetById(raw) {
+  const id = String(raw ?? "").trim();
+  if (!id) return null;
+  const preset = AGENT_TEMPLATE_PRESETS.find((item) => item.id === id);
+  if (!preset) throw httpError(400, `节点模板不存在：${id}`);
+  return preset;
+}
+
+// 名片里的旧 id 可能已从注册表拿掉。轮换时忽略，不要因此发不出新 Token。
+export function knownTemplateId(raw) {
+  const id = String(raw ?? "").trim();
+  if (!id) return "";
+  return AGENT_TEMPLATE_PRESETS.some((item) => item.id === id) ? id : "";
+}
+
+// 粗分类 + 接收方式只能唯一对应一个节点模板时才推导。
+// generic + poll 同时命中「通用」和 WorkBuddy，不能猜。
+export function inferTemplateId(template, receive) {
+  const matches = AGENT_TEMPLATE_PRESETS.filter((item) => (
+    item.access === "http" && item.template === template && item.receive === receive
+  ));
+  return matches.length === 1 ? matches[0].id : "";
+}
+
+// 添加 Agent / 只读预览用。显式 template_id 与粗 template、receive 打架时 400。
+// 没传 id 时，能唯一对上的模板（muse、grok-bot）补上 id，generic+poll 留空。
+export function resolveHttpOnboardingChoice({ template, receive, templateId } = {}) {
+  const rawId = String(templateId ?? "").trim();
+  if (rawId) {
+    const preset = templatePresetById(rawId);
+    if (preset.access !== "http") throw httpError(400, "该节点模板不适用于此接入类型");
+    if (template != null && String(template).trim() && validateTemplate(template) !== preset.template) {
+      throw httpError(400, "template 与节点模板不一致");
+    }
+    if (receive != null && String(receive).trim() && validateReceive(receive) !== preset.receive) {
+      throw httpError(400, "receive 与节点模板不一致");
+    }
+    return { template: preset.template, receive: preset.receive, templateId: preset.id };
+  }
+  const tmpl = validateTemplate(template);
+  const mode = receiveForTemplate(tmpl, validateReceive(receive));
+  return { template: tmpl, receive: mode, templateId: inferTemplateId(tmpl, mode) };
+}
+
 export function receiveModeFor(receive) {
   if (receive === "longpoll") return "http-longpoll";
   if (receive === "webhook") return "webhook";
@@ -312,7 +361,7 @@ function storedPollIntervalMin(raw) {
 
 export function parseCardMetadata(card) {
   const rawMeta = card?.fields !== undefined ? f1(card, "Metadata") : card?.Metadata;
-  const empty = { kind: "", role: "", manual: false, preset: false, poll_interval_min: null, template: "" };
+  const empty = { kind: "", role: "", manual: false, preset: false, poll_interval_min: null, template: "", template_id: "" };
   if (!rawMeta) return empty;
   try {
     const meta = typeof rawMeta === "object" ? rawMeta : JSON.parse(String(rawMeta));
@@ -324,6 +373,7 @@ export function parseCardMetadata(card) {
       preset: meta.preset === true,
       poll_interval_min: storedPollIntervalMin(meta.poll_interval_min),
       template: meta.template == null ? "" : String(meta.template),
+      template_id: meta.template_id == null ? "" : String(meta.template_id),
     };
   } catch {
     return empty;
@@ -331,7 +381,7 @@ export function parseCardMetadata(card) {
 }
 
 export function formatAgentCard(c) {
-  const { kind, role, manual, preset, poll_interval_min, template } = parseCardMetadata(c);
+  const { kind, role, manual, preset, poll_interval_min, template, template_id } = parseCardMetadata(c);
   return {
     record_id: c.record_id,
     cap_id: f1(c, "Cap_ID"),
@@ -353,6 +403,7 @@ export function formatAgentCard(c) {
     kind,
     role,
     template,
+    template_id,
     // 控制台据此只对机主手动添加或向导预置的名片显示「删除」，其余名片由节点对账维护。
     manual,
     preset,
@@ -450,10 +501,11 @@ function leaderFlowLines(base, node) {
 }
 
 // 通用模板 · 定时检查：自包含，不下载脚本、不伪装 UA（1010 由边缘放行解决，见 docs/configuration.md）。
-function genericScheduledPrompt({ base, node, role, cred, intervalMin = 5 }) {
+// intro 只换开场身份句。WorkBuddy 复用同一套取单流程，平台差异留在这一句，避免两套协议步骤分叉。
+function genericScheduledPrompt({ base, node, role, cred, intervalMin = 5, intro }) {
   const shown = promptRole(role);
   const blocks = [
-    `我是 ${base} 这个任务中台的机主，服务是我自己部署的（a2a-hub）。请你以节点 ${node} 的身份，每 ${intervalMin} 分钟按下面流程检查一次，有分配给你的任务就替我完成并回报。下面是完整说明：不需要下载或运行任何脚本，不要修改 User-Agent。`,
+    intro || `我是 ${base} 这个任务中台的机主，服务是我自己部署的（a2a-hub）。请你以节点 ${node} 的身份，每 ${intervalMin} 分钟按下面流程检查一次，有分配给你的任务就替我完成并回报。下面是完整说明：不需要下载或运行任何脚本，不要修改 User-Agent。`,
     ...scopeLines({ base, node, cred }),
     "【每次运行】（每次都是新会话，以本段为准；没有待办就静默结束）",
     ...workerFlowLines(base, node),
@@ -463,6 +515,19 @@ function genericScheduledPrompt({ base, node, role, cred, intervalMin = 5 }) {
   }
   blocks.push(`【首次接入】（只做一次）：POST ${base}/api/v1/agents/register ，body {"node":"${node}","role":"${shown}","kind":"agent","receive_mode":"http-poll"} 。`);
   return blocks.join("\n");
+}
+
+// WorkBuddy 节点模板。流程先与通用定时检查相同，开场点明是腾讯云端定时任务。
+// 具体平台限制等机主按实际使用再改这一支，不要改通用版。
+function workbuddyPrompt({ base, node, role, cred, intervalMin = 30 }) {
+  return genericScheduledPrompt({
+    base,
+    node,
+    role,
+    cred,
+    intervalMin,
+    intro: `我是 ${base} 这个任务中台的机主，服务是我自己部署的（a2a-hub）。请你在腾讯 WorkBuddy 的云端定时任务里，以节点 ${node} 的身份，每 ${intervalMin} 分钟按下面流程检查一次，有分配给你的任务就替我完成并回报。下面是完整说明：不需要下载或运行任何脚本，不要修改 User-Agent。`,
+  });
 }
 
 // 通用模板 · 常驻长连接：面向能自己维持在线进程的执行体（VPS、容器、常驻脚本）。
@@ -585,6 +650,7 @@ export function buildOnboarding({
   receive = "poll",
   pollIntervalMin = null,
   template = "generic",
+  templateId = "",
 }) {
   const base = String(hubUrl ?? "").trim().replace(/\/+$/, "") || "http://127.0.0.1:8787";
   const skills = skillNamesFor(access, role).map((name) => ({
@@ -592,11 +658,26 @@ export function buildOnboarding({
     url: `${base}/api/v1/skills/${name}`,
   }));
   const cred = credentialOf(token, authRequired);
-  const tmpl = access === "http" ? validateTemplate(template) : "generic";
+  let tmpl = access === "http" ? validateTemplate(template) : "generic";
   // receive 只对 HTTP Agent 有意义；host / inbox 始终是 ah daemon 出站长轮询。
   let receiveMode = access === "http" && (receive === "longpoll" || receive === "webhook") ? receive : "poll";
-  // 模板决定接收方式：Muse 由 ah daemon 常驻长轮询，Grok Bot 只走 Webhook 门铃。
-  if (access === "http") receiveMode = receiveForTemplate(tmpl, receiveMode);
+  // 显式节点模板是 Step 3 提示词的主键，覆盖粗 template / receive。
+  // 没传 id 时，只有唯一对应的模板才挂上标签（muse、grok-bot）；generic+poll 不猜。
+  let preset = null;
+  if (access === "http") {
+    const explicit = String(templateId ?? "").trim();
+    if (explicit) {
+      const found = templatePresetById(explicit);
+      if (found.access !== "http") throw httpError(400, "该节点模板不适用于此接入类型");
+      tmpl = found.template;
+      receiveMode = found.receive;
+      preset = found;
+    } else {
+      receiveMode = receiveForTemplate(tmpl, receiveMode);
+      const inferred = inferTemplateId(tmpl, receiveMode);
+      if (inferred) preset = templatePresetById(inferred);
+    }
+  }
 
   let steps;
   let prompt;
@@ -652,6 +733,14 @@ export function buildOnboarding({
       "用「节点」页的 Webhook「测试」验证（Bot 会空跑一次 ping，属正常），再派一张真任务确认它 claim 并 complete。",
     ];
     prompt = grokBotPrompt({ base, node, role, cred });
+  } else if (preset?.id === "workbuddy") {
+    const intervalMin = pollIntervalMin || preset.interval || 30;
+    steps = [
+      `把接入提示词发给 WorkBuddy，并让它为自己创建每 ${intervalMin} 分钟一次的云端定时任务（提示词里已含完整流程，不需要下载任何脚本）。`,
+      `它首次会调用 POST ${base}/api/v1/agents/register 注册；名片已预建并自动接纳，上线后即可派单。`,
+      `在控制台「节点」页确认它在线（按 ${intervalMin} 分钟 × 1.5 判定）。`,
+    ];
+    prompt = workbuddyPrompt({ base, node, role, cred, intervalMin });
   } else if (receiveMode === "longpoll") {
     steps = [
       "把接入提示词发给目标常驻进程（它能自己维持一个在线进程，如 VPS、容器、常驻脚本）。",
@@ -680,6 +769,8 @@ export function buildOnboarding({
     access,
     role,
     template: tmpl,
+    template_id: preset?.id || "",
+    template_label: preset?.label || "",
     skills,
     steps,
     prompt,

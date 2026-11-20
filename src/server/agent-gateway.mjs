@@ -76,6 +76,9 @@ function keepOwnerFlags(rawMeta, next) {
   const out = { ...next };
   if (prev.manual === true) out.manual = true;
   if (prev.preset === true) out.preset = true;
+  // 重新注册不改机主选定的节点模板，否则轮换 Token 时 Step 3 提示词会退回通用版。
+  if (typeof prev.template === "string" && prev.template && !out.template) out.template = prev.template;
+  if (typeof prev.template_id === "string" && prev.template_id && !out.template_id) out.template_id = prev.template_id;
   // 重新注册没再带间隔时，留下机主或上次写入的 poll_interval_min，避免被刷掉后在线窗口回到默认。
   if (out.poll_interval_min == null) {
     const kept = Number(prev.poll_interval_min);
