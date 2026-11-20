@@ -407,8 +407,11 @@ function pacePolicy(pace) {
     return { queueTimeoutSec: queue, leaseTtlSec: 1200, waitTimeoutSec: queue };
   }
   if (pace.cls === "http-poll") {
-    const mins = pace.poll > 0 ? pace.poll : 5;
-    const queue = Math.max(900, mins * 60 * 2);
+    // 名片上的分钟数经常短于云端定时任务的真实周期（写成 10，实际约 60）。
+    // 只按 2 倍名片间隔给 20 分钟，随机相位下大约三分之二的小时级节点等不到下一轮。
+    // 至少盖住 65 分钟；间隔更长时再加 5 分钟余量。
+    const mins = pace.poll > 0 ? pace.poll : 60;
+    const queue = Math.max(65 * 60, mins * 60 + 5 * 60);
     return { queueTimeoutSec: queue, leaseTtlSec: 1200, waitTimeoutSec: queue };
   }
   if (pace.cls === "http-longpoll") {

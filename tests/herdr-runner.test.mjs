@@ -8,7 +8,7 @@ import { signDecision, loadOrCreateHubKey } from "../src/approval-sign.mjs";
 import { f1 } from "../src/bus/tables.mjs";
 import { controlKeysIn, inferHerdrKind, loadConfig, normalizeCommands } from "../src/config.mjs";
 import { doctor } from "../src/doctor.mjs";
-import { hasPastedPlaceholder, herdrAgentName, isTerminalChromeOnly, readHerdrLedger } from "../src/herdr-runner.mjs";
+import { hasPastedPlaceholder, herdrAgentName, isTerminalChromeOnly, isUnusableHerdrScreen, readHerdrLedger } from "../src/herdr-runner.mjs";
 import { Kernel } from "../src/kernel.mjs";
 import { discoverLocalAgents, runSetup } from "../src/setup.mjs";
 import { TABLES, withTemp } from "./helpers.mjs";
@@ -723,6 +723,23 @@ test("纯 TUI 横幅和粘贴占位符不是有效回执", () => {
   assert.equal(isTerminalChromeOnly("[Pasted text #1 +10 lines]"), true);
   assert.equal(hasPastedPlaceholder("[Pasted text #1 +10 lines]"), true);
   assert.equal(isTerminalChromeOnly("已完成任务，结果是 42"), false);
+  // 2026-11-20 两轮 Mac mini 回传：欢迎框带字形和粘贴占位符，第二轮没有答案，第一轮还夹着提示词原文。
+  const round2 = [
+    "▐▛███▛█   Claude Code v2.1.329",
+    "▝▜██████▀  Haiku 5.5 · Claude Pro",
+    " ▝▝   ▝▝   ~/.a2a-hub",
+    "                                                                                                   ◐ medium · /effort",
+    "───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+    "❯ [Pasted text #1 +16 lines]",
+    "───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+    "  paste again to expand",
+  ].join("\n");
+  const round1 = `${round2}\n9. 可选：仅当本轮完成时，在围栏外单独整行写 LATER。`;
+  assert.equal(isTerminalChromeOnly(round2), true);
+  assert.equal(isUnusableHerdrScreen(round2), true);
+  assert.equal(isTerminalChromeOnly(round1), false);
+  assert.equal(isUnusableHerdrScreen(round1), true);
+  assert.equal(isUnusableHerdrScreen("1) 节点名 jarods-mac-mini\n2) 2026-11-20T18:57:20+08:00\n3) 579"), false);
 });
 
 test("herdr 只有启动横幅时不得标记 completed", async () => {
@@ -747,6 +764,39 @@ test("herdr 只有启动横幅时不得标记 completed", async () => {
     assert.equal(f1(await taskOf(mock, "TASK-BANNER"), "Status"), "working");
     await kernel.sweepOnce();
     const done = await taskOf(mock, "TASK-BANNER");
+    assert.equal(f1(done, "Status"), "failed");
+    assert.notEqual(f1(done, "Status"), "completed");
+  });
+});
+
+test("herdr 把带粘贴占位符的 Claude 欢迎框交上来时不得标记 completed", async () => {
+  await withTemp(async (dir) => {
+    fs.writeFileSync(path.join(dir, "commands.json"), JSON.stringify({
+      workers: {
+        claude: { context: "herdr", herdr_kind: "claude", timeout_sec: 120 },
+      },
+    }), { mode: 0o600 });
+    const mock = new MockBus({ tables: TABLES });
+    const herdr = createMockHerdr();
+    const kernel = makeKernel(dir, mock, herdr.exec);
+    await seedTask(mock, { Task_ID: "TASK-PASTE", Context_ID: "CTX-PASTE" });
+    await kernel.sweepOnce();
+    assert.equal(f1(await taskOf(mock, "TASK-PASTE"), "Status"), "working");
+    await kernel.sweepOnce();
+    assert.equal(f1(await taskOf(mock, "TASK-PASTE"), "Status"), "working");
+    const ag = herdr.agents.get(herdrAgentName("TASK-PASTE"));
+    ag.status = "idle";
+    ag.output = [
+      "▐▛███▛█   Claude Code v2.1.329",
+      "▝▜██████▀  Haiku 5.5 · Claude Pro",
+      "~/.a2a-hub",
+      "❯ [Pasted text #1 +16 lines]9. 可选：仅当本轮完成时写 LATER。",
+      "paste again to expand",
+    ].join("\n");
+    await kernel.sweepOnce();
+    assert.equal(f1(await taskOf(mock, "TASK-PASTE"), "Status"), "working");
+    await kernel.sweepOnce();
+    const done = await taskOf(mock, "TASK-PASTE");
     assert.equal(f1(done, "Status"), "failed");
     assert.notEqual(f1(done, "Status"), "completed");
   });

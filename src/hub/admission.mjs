@@ -45,12 +45,12 @@ export const AGENT_TEMPLATE_PRESETS = Object.freeze([
     role: "worker",
     interval: 30,
     preset: "workbuddy",
-    hint: "腾讯 WorkBuddy 云端定时任务，自动选「定时检查」并将间隔设为 30 分钟（内置宽任务范围与预览确认流程）",
+    hint: "腾讯 WorkBuddy 云端定时任务，自动选「定时检查」并将间隔设为 30 分钟。令牌存 /ags/workbuddy-data/token",
     defaults: {
       node: "workbuddy-cloud",
       displayName: "WorkBuddy 云端助手",
       description: "WorkBuddy 云端定时任务执行（调研、规划、编程、文案、日常协同）",
-      adminNote: "腾讯 WorkBuddy 云端定时任务，每 30 分钟检查一次",
+      adminNote: "腾讯 WorkBuddy 云端定时任务，每 30 分钟检查一次，凭据存 /ags/workbuddy-data/token",
     },
   },
   {
@@ -540,13 +540,14 @@ function leaderFlowLines(base, node) {
 // 通用模板 · 定时检查：自包含，不下载脚本。
 // 双层结构：首次接入（存凭证 + register + 建定时任务）与【每次运行】（高密度正文，自带宽任务边界与最小必要护栏）。
 // intro 只换开场身份句。WorkBuddy / 豆包 / 千问复用同一套协议步骤，平台差异留在开场与凭据位置。
-function genericScheduledPrompt({ base, node, role, cred, intervalMin = 5, intro, tokenStoreHint = "", credLostHint = "（或凭据缺失）", setupExtra = "" }) {
+function genericScheduledPrompt({ base, node, role, cred, intervalMin = 5, intro, tokenStoreHint = "", credLostHint = "（或凭据缺失）", setupExtra = "", runPreamble = "" }) {
   const shown = promptRole(role);
   const blocks = [
     intro || `我是 ${base} 这个任务中台的机主，服务是我自己部署的（a2a-hub）。请你以节点 ${node} 的身份，每 ${intervalMin} 分钟按下面流程检查一次，有分配给你的任务就替我完成并回报。下面是完整说明，不需要下载或运行任何脚本。`,
     ...scopeLines({ base, node, cred, tokenStoreHint }),
     `【首次接入】（只做一次）：按上述方式保存凭证，调用 POST ${base}/api/v1/agents/register ，body {"node":"${node}","role":"${shown}","kind":"agent","receive_mode":"http-poll"} ；然后创建每 ${intervalMin} 分钟一次的定时任务，将下方【每次运行】作为定时任务执行流程。${setupExtra}`,
     "【每次运行】（每次都是新会话，以本段为准；无待办则直接结束）",
+    ...(runPreamble ? [runPreamble] : []),
     ...workerFlowLines(base, node, { credLostHint }),
   ];
   if (actsAsLeader(role)) {
@@ -555,7 +556,10 @@ function genericScheduledPrompt({ base, node, role, cred, intervalMin = 5, intro
   return blocks.join("\n");
 }
 
-// WorkBuddy 的流程与通用定时检查相同，额外适配其「环境变量/密钥优先 + 定时任务预览确认」机制。
+// WorkBuddy 的 /root 与家目录不保留。令牌只放稳定目录 /ags/workbuddy-data。
+// 文件还没建好时先写入再继续：旧提示词把「凭据缺失」写成停轮，模型会自己挑一个不存在的路径然后整轮不做。
+const WORKBUDDY_TOKEN_FILE = "/ags/workbuddy-data/token";
+
 function workbuddyPrompt({ base, node, role, cred, intervalMin = 30, intro }) {
   return genericScheduledPrompt({
     base,
@@ -563,8 +567,10 @@ function workbuddyPrompt({ base, node, role, cred, intervalMin = 30, intro }) {
     role,
     cred,
     intervalMin,
-    tokenStoreHint: "优先使用环境变量或密钥引用保存凭证（若环境不支持再存受限文件），勿明文写入定时任务配置。",
-    setupExtra: "如平台要求创建定时任务前预览确认，请先整理配置预览供机主确认后启用。",
+    tokenStoreHint: `令牌只放 0600 文件 ${WORKBUDDY_TOKEN_FILE}（目录 /ags/workbuddy-data 会稳定保留）。本提示词里的令牌只出现这一次：文件还不存在就立刻写入并 chmod 600，然后继续，不要停轮。定时任务正文不要再抄令牌明文。`,
+    credLostHint: "",
+    setupExtra: `先确认 ${WORKBUDDY_TOKEN_FILE} 已写好，再注册。如平台要求创建定时任务前预览确认，请先整理配置预览供机主确认后启用。`,
+    runPreamble: `凭据：读 ${WORKBUDDY_TOKEN_FILE} 作为 Bearer token。文件不存在、且上面仍有 Bearer 令牌时，先写入该文件（chmod 600）再继续查活。文件不存在且本段没有令牌时，停本轮并请机主把令牌写入该路径。不要改存到别的路径。`,
     intro: intro || `我是 ${base} 这个任务中台的机主，服务是我自己部署的（a2a-hub）。请你在腾讯 WorkBuddy 的云端定时任务里，以节点 ${node} 的身份，每 ${intervalMin} 分钟按下面流程检查一次，有分配给你的任务就替我完成并回报。下面是完整说明，不需要下载或运行任何脚本。`,
   });
 }
@@ -829,7 +835,7 @@ export function buildOnboarding({
     prompt = grokBotPrompt({ base, node, role, cred, intro });
   } else if (preset?.id === "workbuddy") {
     steps = [
-      `把接入提示词发给 WorkBuddy，并让它为自己创建每 ${intervalMin} 分钟一次的云端定时任务（提示词里已含完整流程，不需要下载任何脚本）。`,
+      `把接入提示词发给 WorkBuddy：它会把令牌写入 0600 文件 /ags/workbuddy-data/token（该目录稳定保留），并创建每 ${intervalMin} 分钟一次的云端定时任务（提示词里已含完整流程，不需要下载任何脚本）。`,
       `它首次会调用 POST ${base}/api/v1/agents/register 注册；名片已预建并自动接纳，上线后即可派单。`,
       `在控制台「节点」页确认它在线（按 ${intervalMin} 分钟 × 1.5 判定）。`,
     ];

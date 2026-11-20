@@ -19,7 +19,7 @@ import {
   herdrLedgerPath,
   herdrReceiptPath,
   inspectHerdrAgent,
-  isTerminalChromeOnly,
+  isUnusableHerdrScreen,
   launchHerdrAgent,
   listHerdrLedgers,
   readHerdrLedger,
@@ -421,9 +421,10 @@ export const herdrMethods = {
     }
     const cleaned = fromReceiptFile ? String(output ?? "") : stripAnsi(output);
     try {
-      // 未通过回执文件交付且终端仅包含 CLI 启动横幅/界面噪音时，绝不能标 completed（防止假完成）。
-      if (!fromReceiptFile && isTerminalChromeOnly(cleaned)) {
-        throw new InvalidReceipt("herdr 终端仅返回界面横幅或空提示符，未收到有效任务回执", cleaned);
+      // 未通过回执文件交付，且屏幕仍是欢迎框或粘贴占位符时，绝不能标 completed。
+      // 占位符还在，说明提示词停在输入区，夹进来的原文不是答案。
+      if (!fromReceiptFile && isUnusableHerdrScreen(cleaned)) {
+        throw new InvalidReceipt("herdr 终端仅返回界面横幅或粘贴占位符，未收到有效任务回执", cleaned);
       }
       const res = flight.mode === "json"
         ? this.interpretCommandResult("json", { code: 0, stdout: cleaned.trim(), stderr: "" })
@@ -547,9 +548,10 @@ export const herdrMethods = {
         const cleaned = stripAnsi(res.output);
         const sincePrompt = Date.now() - (Number(flight.promptSentMs) || Number(flight.startedMs) || 0);
         const graceMs = this.herdrStartupGraceMs();
-        const chromeOnly = isTerminalChromeOnly(cleaned);
-        // 刚发 prompt 尚未观测到进入 working、或终端还是启动横幅/粘贴占位符时，先观察并最多补一次回车，绝不秒判完成。
-        if ((!flight.seenWorking && sincePrompt < graceMs && chromeOnly) || (chromeOnly && (flight.idleStrikes || 0) < 1 && !this.timeoutDueHerdr(flight))) {
+        const unusable = isUnusableHerdrScreen(cleaned);
+        const withinGrace = !flight.seenWorking && sincePrompt < graceMs;
+        // 欢迎框、粘贴占位符，或起跑宽限内还没见过 working：先补一次回车再看，不能把屏幕转储写成 completed。
+        if (unusable && (withinGrace || (flight.idleStrikes || 0) < 1) && !this.timeoutDueHerdr(flight)) {
           flight.idleStrikes = (flight.idleStrikes || 0) + 1;
           if (!flight.nudgedEnter && (hasPastedPlaceholder(cleaned) || sincePrompt >= 3_000)) {
             flight.nudgedEnter = true;
