@@ -62,9 +62,75 @@ REPO_TAR="https://codeload.github.com/backtomyfuture/a2a-hub/tar.gz/refs/heads/m
 HOME_DIR="${AH_HOME:-$HOME/.a2a-hub}"
 APP="$HOME_DIR/app"
 
-command -v node >/dev/null 2>&1 || { echo "需要先安装 Node.js >= 24" >&2; exit 1; }
-NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
-[ "$NODE_MAJOR" -ge 24 ] || { echo "Node.js 版本过低（当前 $(node -v)），需要 >= 24" >&2; exit 1; }
+# 没有 node 或版本过低时，把官方 Node 24 LTS 装进家目录（不需要 root），而不是直接失败。
+node_major_of() {
+  "$1" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0
+}
+
+install_node24() {
+  os_name="$(uname -s)"
+  arch_name="$(uname -m)"
+  case "$os_name:$arch_name" in
+    Linux:x86_64) node_plat="linux-x64" ;;
+    Linux:aarch64|Linux:arm64) node_plat="linux-arm64" ;;
+    Darwin:arm64) node_plat="darwin-arm64" ;;
+    Darwin:x86_64) node_plat="darwin-x64" ;;
+    *)
+      echo "不支持自动安装 Node.js 的平台（${os_name} ${arch_name}），请手动安装 Node.js >= 24：https://nodejs.org/" >&2
+      exit 1
+      ;;
+  esac
+
+  LOCAL_DIR="$HOME/.local"
+  mkdir -p "$LOCAL_DIR/bin"
+
+  # 幂等：~/.local/bin/node 已是 >=24 就不再下载。
+  if [ -x "$LOCAL_DIR/bin/node" ] && [ "$(node_major_of "$LOCAL_DIR/bin/node")" -ge 24 ]; then
+    PATH="$LOCAL_DIR/bin:$PATH"
+    export PATH
+    return 0
+  fi
+
+  command -v curl >/dev/null 2>&1 || { echo "自动安装 Node.js 需要 curl，请先安装 curl 或手动安装 Node.js >= 24" >&2; exit 1; }
+  NODE_DIST="https://nodejs.org/dist/latest-v24.x"
+  echo "未找到 Node.js >= 24，正在安装官方 Node 24 LTS（${node_plat}）到 ${LOCAL_DIR}…"
+  sums="$(curl -fsSL "$NODE_DIST/SHASUMS256.txt")" || { echo "下载 Node.js 校验清单失败：${NODE_DIST}/SHASUMS256.txt" >&2; exit 1; }
+  line="$(printf '%s\n' "$sums" | grep -E "  node-v24\.[0-9.]+-${node_plat}\.tar\.gz\$" | head -n 1)" || line=
+  [ -n "$line" ] || { echo "校验清单里没有 ${node_plat} 的 Node 24 安装包，请手动安装 Node.js >= 24" >&2; exit 1; }
+  node_file="${line##* }"
+
+  ntmp="$(mktemp -d)"
+  curl -fsSL -o "$ntmp/$node_file" "$NODE_DIST/$node_file" || { rm -rf "$ntmp"; echo "下载 Node.js 失败：${NODE_DIST}/${node_file}" >&2; exit 1; }
+  printf '%s\n' "$line" > "$ntmp/SHASUM"
+  if command -v shasum >/dev/null 2>&1; then
+    (cd "$ntmp" && shasum -a 256 -c SHASUM >/dev/null) || { rm -rf "$ntmp"; echo "Node.js 安装包 sha256 校验失败，已停止" >&2; exit 1; }
+  elif command -v sha256sum >/dev/null 2>&1; then
+    (cd "$ntmp" && sha256sum -c SHASUM >/dev/null) || { rm -rf "$ntmp"; echo "Node.js 安装包 sha256 校验失败，已停止" >&2; exit 1; }
+  else
+    rm -rf "$ntmp"
+    echo "未找到 shasum / sha256sum，无法校验 Node.js 安装包，已停止" >&2
+    exit 1
+  fi
+
+  mkdir -p "$LOCAL_DIR/node-v24"
+  tar xzf "$ntmp/$node_file" -C "$LOCAL_DIR/node-v24" || { rm -rf "$ntmp"; echo "解压 Node.js 安装包失败" >&2; exit 1; }
+  rm -rf "$ntmp"
+  ln -sfn "$LOCAL_DIR/node-v24/${node_file%.tar.gz}" "$LOCAL_DIR/node"
+  for bin_name in node npm npx; do
+    if [ -e "$LOCAL_DIR/node/bin/$bin_name" ]; then
+      ln -sf "$LOCAL_DIR/node/bin/$bin_name" "$LOCAL_DIR/bin/$bin_name"
+    fi
+  done
+  PATH="$LOCAL_DIR/bin:$PATH"
+  export PATH
+  echo "已安装 Node.js $(node -v) 到 ${LOCAL_DIR}/node。非登录 shell（如 runtime hook）需在 PATH 前加 ${LOCAL_DIR}/bin。"
+}
+
+if ! command -v node >/dev/null 2>&1 || [ "$(node_major_of node)" -lt 24 ]; then
+  install_node24
+fi
+NODE_MAJOR="$(node_major_of node)"
+[ "$NODE_MAJOR" -ge 24 ] || { echo "Node.js 版本过低（当前 $(node -v 2>/dev/null || echo 未知)），需要 >= 24" >&2; exit 1; }
 
 # 只认本仓库。大小写、https/ssh、有无 .git 后缀都算。不打印 origin：地址里可能嵌了凭据。
 is_a2a_hub_origin() {
