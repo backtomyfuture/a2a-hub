@@ -46,7 +46,78 @@ export class LongPollBroker {
     this._nodes = new Map();
     // 记住名片配置的分钟轮询间隔：即便 Hub 重启后首次事件是 Webhook 投递（noteDelivery），也能立刻套用正确窗口。
     this._configuredPollMin = new Map();
+    this._presenceSink = null;
+    this._lastPresencePersistAt = 0;
     this._closed = false;
+  }
+
+  // 绑定持久化回调（写回 SqliteBus meta），节流落盘，避免 Hub 重启后 last_seen_at 全清空。
+  attachPresenceSink(fn) {
+    this._presenceSink = typeof fn === "function" ? fn : null;
+  }
+
+  exportPresence() {
+    const out = {};
+    for (const [node, info] of this._nodes.entries()) {
+      out[node] = {
+        node,
+        firstSeenAt: info.firstSeenAt || 0,
+        lastSeenAt: info.lastSeenAt || 0,
+        lastPollAt: info.lastPollAt || 0,
+        lastDeliveredAt: info.lastDeliveredAt || 0,
+        remoteAddr: info.remoteAddr || "",
+        kind: info.kind || "host",
+        mode: info.mode || "longpoll",
+        role: info.role || "",
+        intervalMs: info.intervalMs || 0,
+        pollIntervalMin: info.pollIntervalMin || 0,
+      };
+    }
+    return out;
+  }
+
+  loadPresence(snapshot, now = Date.now()) {
+    if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return 0;
+    let loaded = 0;
+    for (const [node, item] of Object.entries(snapshot)) {
+      const key = String(node ?? "").trim();
+      if (!key || key === "*" || key === "_web") continue;
+      if (this._nodes.has(key)) continue;
+      const seen = Number(item?.lastSeenAt) || 0;
+      if (seen <= 0 || now - seen > NODE_EXPIRE_MS) continue;
+      const pollMin = Number(item?.pollIntervalMin) > 0
+        ? Number(item.pollIntervalMin)
+        : (this._configuredPollMin.get(key) || 0);
+      this._nodes.set(key, {
+        node: key,
+        firstSeenAt: Number(item?.firstSeenAt) || seen,
+        lastSeenAt: seen,
+        lastPollAt: Number(item?.lastPollAt) || 0,
+        lastDeliveredAt: Number(item?.lastDeliveredAt) || 0,
+        cursor: 0,
+        remoteAddr: String(item?.remoteAddr || ""),
+        activeWaiters: 0,
+        kind: String(item?.kind || "host"),
+        mode: String(item?.mode || "longpoll"),
+        role: String(item?.role || ""),
+        intervalMs: Number(item?.intervalMs) || 0,
+        runStartAt: 0,
+        pollIntervalMin: pollMin,
+        deferCycle: true,
+      });
+      loaded += 1;
+    }
+    return loaded;
+  }
+
+  _persistPresence(force = false) {
+    if (!this._presenceSink) return;
+    const now = Date.now();
+    if (!force && now - this._lastPresencePersistAt < 30_000) return;
+    this._lastPresencePersistAt = now;
+    try {
+      Promise.resolve(this._presenceSink(this.exportPresence())).catch(() => {});
+    } catch { /* 持久化失败不挡主流程 */ }
   }
 
   _oldestSeq() {
@@ -175,6 +246,7 @@ export class LongPollBroker {
     };
     if (next.pollIntervalMin > 0) this._configuredPollMin.set(key, next.pollIntervalMin);
     this._nodes.set(key, next);
+    this._persistPresence(false);
     return next;
   }
 
@@ -242,6 +314,7 @@ export class LongPollBroker {
       deferCycle: !prev?.runStartAt,
     };
     this._nodes.set(key, next);
+    this._persistPresence(false);
     return next;
   }
 
@@ -249,7 +322,9 @@ export class LongPollBroker {
   forgetNode(node) {
     const key = String(node ?? "").trim();
     this._configuredPollMin.delete(key);
-    return this._nodes.delete(key);
+    const removed = this._nodes.delete(key);
+    if (removed) this._persistPresence(true);
+    return removed;
   }
 
   async wait({ node = "*", cursor = 0, timeoutMs = 25_000, signal = null, remoteAddr = "" } = {}) {

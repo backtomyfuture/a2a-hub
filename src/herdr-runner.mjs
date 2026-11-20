@@ -360,6 +360,35 @@ export async function inspectHerdrAgent({ exec, agentName, paneId: _paneId = "",
   return { status: "working", rawStatus: info.status };
 }
 
+// 判断终端屏幕抓回的文本是否仅为交互式 CLI 的启动横幅/界面噪音（如 Claude Code 欢迎框、粘贴占位符），
+// 防止 agent 刚启动尚未开始思考时，因初始 idle 误把屏幕转储当成 completed 回执。
+export function isTerminalChromeOnly(rawText) {
+  const text = String(rawText ?? "").replace(/\r/g, "").trim();
+  if (!text) return true;
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  if (!lines.length) return true;
+  const chromePatterns = [
+    /^claude code\s+v?\d/i,
+    /^(haiku|sonnet|opus)(\s+\d.*)?$/i,
+    /claude\s+(pro|max|team|enterprise)/i,
+    /^updated:\s*\d+\s+features?/i,
+    /code\.claude\.com\/docs/i,
+    /^\[pasted text\b/i,
+    /^press enter\b/i,
+    /^[❯›>$%#]\s*$/,
+    /^[─━═╭╮╰╯│┌┐└┘├┤┬┴┼\s]+$/,
+    /^~\/\.a2a-hub\b/,
+    /^\/help\b|^type your message\b|^shift\+tab\b/i,
+    /^for shortcuts\b|\?\s*for shortcuts/i,
+  ];
+  const meaningful = lines.filter((line) => !chromePatterns.some((re) => re.test(line)));
+  return meaningful.length === 0;
+}
+
+export function hasPastedPlaceholder(rawText) {
+  return /\[pasted text\b/i.test(String(rawText ?? ""));
+}
+
 export async function closeHerdrTask({ exec, configDir, taskId, entry = null }) {
   const ledger = entry || readHerdrLedger(configDir, taskId);
   if (ledger && !ledger.broken) {

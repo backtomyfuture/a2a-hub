@@ -15,9 +15,11 @@ import {
   closeHerdrTask,
   createHerdrExec,
   getHerdrAgentStatus,
+  hasPastedPlaceholder,
   herdrLedgerPath,
   herdrReceiptPath,
   inspectHerdrAgent,
+  isTerminalChromeOnly,
   launchHerdrAgent,
   listHerdrLedgers,
   readHerdrLedger,
@@ -25,7 +27,7 @@ import {
   saveHerdrLedger,
   sendHerdrPrompt,
 } from "./herdr-runner.mjs";
-import { TERMINAL_STATUSES, clipText, log, nowStr } from "./kernel-util.mjs";
+import { TERMINAL_STATUSES, clipText, heartbeatFields, log, nowStr } from "./kernel-util.mjs";
 import { InvalidReceipt, NeedAuth, NeedInput } from "./receipt.mjs";
 
 const MAX_RETRIES = 2;
@@ -170,6 +172,10 @@ export const herdrMethods = {
       state: ledger.state === "parked" ? "parked" : "working",
       blocked: Boolean(ledger.blocked),
       turnCount: Number(ledger.turn_count) || 1,
+      seenWorking: Boolean(ledger.seen_working),
+      promptSentMs: Number(ledger.prompt_sent_ms) || Number(ledger.started_ms) || Date.now(),
+      idleStrikes: 0,
+      nudgedEnter: false,
       hbTimer: null,
       timeoutTimer: null,
       heartbeat: null,
@@ -194,7 +200,7 @@ export const herdrMethods = {
           return;
         }
         if (flight.finishing || this._sweepBusy) return;
-        await this.bus.updateRecord(this.T.tasks, flight.recordId, { Heartbeat_At: nowStr() });
+        await this.bus.updateRecord(this.T.tasks, flight.recordId, heartbeatFields(f1(row, "Metadata")));
       })().catch((e) => log("herdr heartbeat failed: " + (e?.message ?? e)))
         .finally(() => { flight.heartbeat = null; });
     }, 60_000);
@@ -225,7 +231,13 @@ export const herdrMethods = {
     return Date.now() >= (Number(flight.startedMs) || 0) + timeoutMs;
   },
 
-  // 后台异步 wait，不堵主循环；若 mock 立刻返回（<20ms）则不自激唤醒，留给常规扫表收口。
+  herdrStartupGraceMs() {
+    const n = Number(this.cfg?.herdrStartupGraceMs);
+    return Number.isFinite(n) && n >= 0 ? n : 15_000;
+  },
+
+  // 后台异步 wait，不堵主循环；若 mock 立刻返回（<20ms）或刚发完 prompt 尚未进入 working，
+  // 则不自激唤醒，防止刚启动的 Claude Code TUI 在初始 idle 态被秒杀误判完成。
   startHerdrWatcher(flight) {
     if (!flight || flight.watching || flight.state !== "working" || this._stopping) return;
     flight.watching = true;
@@ -233,8 +245,11 @@ export const herdrMethods = {
     const waitMs = Math.max(5_000, Math.min((Number(flight.timeoutSec) || 600) * 1000, 300_000));
     this.herdrExec()(["agent", "wait", flight.agentName, "--timeout", String(waitMs)], { timeoutMs: waitMs + 5_000 })
       .then(() => {
+        const sincePrompt = Date.now() - (Number(flight.promptSentMs) || 0);
         if (!flight.finishing && flight.state === "working" && Date.now() - t0 >= 20) {
-          this.pulseWake();
+          if (flight.seenWorking || sincePrompt >= Math.min(2_000, this.herdrStartupGraceMs())) {
+            this.pulseWake();
+          }
         }
       })
       .catch(() => { /* agent wait 失败或超时由下次扫表接手 */ })
@@ -406,6 +421,10 @@ export const herdrMethods = {
     }
     const cleaned = fromReceiptFile ? String(output ?? "") : stripAnsi(output);
     try {
+      // 未通过回执文件交付且终端仅包含 CLI 启动横幅/界面噪音时，绝不能标 completed（防止假完成）。
+      if (!fromReceiptFile && isTerminalChromeOnly(cleaned)) {
+        throw new InvalidReceipt("herdr 终端仅返回界面横幅或空提示符，未收到有效任务回执", cleaned);
+      }
       const res = flight.mode === "json"
         ? this.interpretCommandResult("json", { code: 0, stdout: cleaned.trim(), stderr: "" })
         : this.parseAgentOutput(cleaned.trim());
@@ -524,8 +543,36 @@ export const herdrMethods = {
       receiptPath: flight.receiptPath,
     });
     if (res.status === "settled") {
+      if (!res.fromReceiptFile) {
+        const cleaned = stripAnsi(res.output);
+        const sincePrompt = Date.now() - (Number(flight.promptSentMs) || Number(flight.startedMs) || 0);
+        const graceMs = this.herdrStartupGraceMs();
+        const chromeOnly = isTerminalChromeOnly(cleaned);
+        // 刚发 prompt 尚未观测到进入 working、或终端还是启动横幅/粘贴占位符时，先观察并最多补一次回车，绝不秒判完成。
+        if ((!flight.seenWorking && sincePrompt < graceMs && chromeOnly) || (chromeOnly && (flight.idleStrikes || 0) < 1 && !this.timeoutDueHerdr(flight))) {
+          flight.idleStrikes = (flight.idleStrikes || 0) + 1;
+          if (!flight.nudgedEnter && (hasPastedPlaceholder(cleaned) || sincePrompt >= 3_000)) {
+            flight.nudgedEnter = true;
+            await this.herdrExec()(["agent", "send-keys", flight.agentName, "enter"]).catch(() => {});
+          }
+          await this.touchHeartbeat(task);
+          this.startHerdrWatcher(flight);
+          return;
+        }
+      }
       await this.settleHerdrOutput(task, flight, res.output, { fromReceiptFile: res.fromReceiptFile });
       return;
+    }
+    if (res.status === "working") {
+      flight.idleStrikes = 0;
+      if (!flight.seenWorking) {
+        flight.seenWorking = true;
+        const ledger = readHerdrLedger(this.cfg.configDir, flight.taskId);
+        if (ledger && !ledger.broken && !ledger.seen_working) {
+          ledger.seen_working = true;
+          saveHerdrLedger(this.cfg.configDir, ledger);
+        }
+      }
     }
     if (res.status === "blocked") {
       await this.stopHerdrHeartbeat(flight);
@@ -670,6 +717,8 @@ export const herdrMethods = {
             existing.receipt_path = receiptPath;
             existing.input_path = inputPath;
             existing.turn_count = (Number(existing.turn_count) || 1) + 1;
+            existing.seen_working = false;
+            existing.prompt_sent_ms = startedMs;
             saveHerdrLedger(this.cfg.configDir, existing);
 
             const promptText = this.buildHerdrResumePrompt(inputPath, entry, hasCriteria, receiptPath);
@@ -688,6 +737,10 @@ export const herdrMethods = {
             flight.state = "working";
             flight.blocked = false;
             flight.turnCount = existing.turn_count;
+            flight.seenWorking = false;
+            flight.promptSentMs = startedMs;
+            flight.idleStrikes = 0;
+            flight.nudgedEnter = false;
             this._herdrFlights.set(taskId, flight);
             this.startHerdrHeartbeat(flight);
             this.armHerdrTimer(flight);
@@ -737,6 +790,8 @@ export const herdrMethods = {
         input_path: inputPath,
         turn_count: 1,
         blocked: false,
+        seen_working: false,
+        prompt_sent_ms: startedMs,
       };
       saveHerdrLedger(this.cfg.configDir, ledger);
 

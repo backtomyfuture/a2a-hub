@@ -245,12 +245,20 @@ export async function startHubHttpServer({
         configDir: cfg.configDir,
         hubNode: cfg?.node || "hub",
         taskTable: bus?.tables?.tasks || "tasks",
+        messageTable: bus?.tables?.messages || "messages",
+        bus,
         broker,
         log,
       })
       : null);
   // 调用方先建好的 dispatcher 也要能在投递成功时刷新在线，不能只靠自己 new 的那条路径。
   if (webhooks && broker && !webhooks.broker) webhooks.broker = broker;
+  // 答复门铃要靠 bus 反查 Target_Node。hub 启动路径已经 addListener，这里只给自己 new 出来的那份注册，避免双推。
+  if (webhooks && bus) {
+    if (!webhooks.bus) webhooks.bus = bus;
+    if (bus.tables?.messages) webhooks.messageTable = bus.tables.messages;
+  }
+  if (!webhookDispatcher && webhooks && typeof bus?.addListener === "function") bus.addListener(webhooks);
   if (tokenStore && bus) {
     try {
       const created = await ensureLeaderIdentityCards({
@@ -766,6 +774,9 @@ export async function startHubHttpServer({
           validateTarget: body.validateTarget !== false,
           attachments,
           fileStore: activeFileStore,
+          queueTimeoutSec: body.queue_timeout_sec,
+          leaseTtlSec: body.lease_ttl_sec,
+          waitTimeoutSec: body.wait_timeout_sec,
         });
         onWake();
         sendJson(res, 201, { task_id: taskId });
@@ -799,6 +810,13 @@ export async function startHubHttpServer({
         }
         if (f1(task, "Status") !== "input-required") {
           sendJson(res, 409, { error: `任务当前状态为 ${f1(task, "Status")}，不是 input-required` });
+          return;
+        }
+        // 同一 Status_Msg 已有 answer 就停在写表之前。新问题会换 Status_Msg，多轮追问不受影响。
+        const statusMsg = String(f1(task, "Status_Msg") ?? "").trim();
+        if (body.append !== true && statusMsg && messages.some((m) =>
+          f1(m, "Kind") === "answer" && String(f1(m, "In_Reply_To") ?? "").trim() === statusMsg)) {
+          sendJson(res, 409, { error: "该问题已有答复；如需再补一条请传 append:true" });
           return;
         }
         let max = 0;
@@ -1273,6 +1291,19 @@ export async function startHubHttpServer({
 
       if (method === "GET" && pathname === "/api/v1/admin/tokens") {
         sendJson(res, 200, { tokens: tokenStore ? tokenStore.listPublic() : [] });
+        return;
+      }
+
+      // 名录变更只追加。Agent 身份在 assertAgentRoute 已被拒绝，这里只对机主和 open 开放。
+      if (method === "GET" && pathname === "/api/v1/admin/audit") {
+        const logs = typeof bus.listAuditLogs === "function"
+          ? bus.listAuditLogs({
+            table: String(reqUrl.searchParams.get("table") ?? "").trim(),
+            node: String(reqUrl.searchParams.get("node") ?? "").trim(),
+            limit: reqUrl.searchParams.get("limit"),
+          })
+          : [];
+        sendJson(res, 200, { logs });
         return;
       }
 

@@ -29,6 +29,31 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// 在线记录在内存里，进程一退就没了。节流写入 meta（不推进总线 seq），失败只记日志，不能因此退出。
+async function bindPresence(broker, bus, log) {
+  if (!broker || !bus) return;
+  if (typeof broker.attachPresenceSink === "function" && typeof bus.setMeta === "function") {
+    broker.attachPresenceSink((snap) => Promise.resolve()
+      .then(() => bus.setMeta("presence", JSON.stringify(snap)))
+      .catch((e) => log("在线快照写入失败：" + (e?.message ?? e))));
+  }
+  if (typeof bus.getMeta !== "function" || typeof broker.loadPresence !== "function") return;
+  let raw = null;
+  try {
+    raw = await bus.getMeta("presence");
+  } catch (e) {
+    log("在线快照读取失败，按空名册继续：" + (e?.message ?? e));
+    return;
+  }
+  if (!raw) return;
+  try {
+    const n = broker.loadPresence(JSON.parse(raw));
+    if (n > 0) log(`已恢复 ${n} 条在线记录`);
+  } catch (e) {
+    log("在线快照无法解析，按空名册继续：" + (e?.message ?? e));
+  }
+}
+
 async function importWakerModule() {
   const base = new URL("../transport/index.mjs", import.meta.url);
   try {
@@ -122,7 +147,7 @@ export async function hubDoctor(configDir) {
       bad("陈旧告警模块不可用");
       problems++;
     } else {
-      ok("陈旧告警与回收：working 心跳超过 20 分钟或为空先告警，告警后宽限 30 分钟无心跳恢复则由 hub 置 failed 回收（心跳恢复自动撤销告警）；submitted 超过 20 分钟无人认领只告警。状态在 stale_state.json");
+      ok("陈旧告警与回收：working 心跳超过 20 分钟或为空先告警，告警后宽限 30 分钟无心跳则置 failed；Metadata 里的租约到期、排队超时与挂起超时也会回收。没写这些秒数时，submitted 超过 20 分钟只告警。约每 60 秒巡检一次，状态在 stale_state.json");
     }
     if (typeof schedule.ScheduleService !== "function" || typeof schedule.parseCron !== "function") {
       bad("定时调度模块不可用");
@@ -178,6 +203,8 @@ export async function runHub(cfg, log = logLine, hooks = {}) {
   if (isStandalone) {
     broker = new LongPollBroker({ initialSeq: cfg.bus?.currentSeq?.() ?? 0 });
     cfg.bus?.attachBroker?.(broker);
+    // 先装回上次的 last_seen，再让内核 touch。loadPresence 会跳过已经在内存里的节点。
+    await bindPresence(broker, cfg.bus, log);
     if (cfg.notifications) {
       notifier = new ExternalNotifier({
         config: cfg.notifications,
@@ -193,6 +220,8 @@ export async function runHub(cfg, log = logLine, hooks = {}) {
           configDir: cfg.configDir,
           hubNode: cfg.node || "hub",
           taskTable: cfg.bus?.tables?.tasks || "tasks",
+          messageTable: cfg.bus?.tables?.messages || "messages",
+          bus: cfg.bus,
           broker,
           log,
         });
@@ -310,7 +339,38 @@ export class HubRuntime {
     this._stopped = false;
     this._waker = null;
     this._kickTimer = null;
+    this._staleTimer = null;
     this._onStop = null;
+  }
+
+  noteHubPresence() {
+    try { this.kernel?.touchLocalPresence?.(); }
+    catch (e) { this.log("本机在线登记失败：" + (e?.message ?? e)); }
+  }
+
+  // 陈旧巡检跟 15 分钟对账解开。链式 setTimeout，退出时清掉，不改 sweepSec。
+  startStaleWatch() {
+    this.stopStaleWatch();
+    const arm = () => {
+      if (this._stopped) return;
+      this._staleTimer = setTimeout(() => {
+        this._staleTimer = null;
+        if (this._stopped) return;
+        this.noteHubPresence();
+        Promise.resolve(this.stale?.scan?.()).catch((e) => {
+          this.log("陈旧巡检失败（下一分钟再试）：" + (e?.message ?? e));
+        }).finally(() => arm());
+      }, 60_000);
+      this._staleTimer.unref?.();
+    };
+    arm();
+  }
+
+  stopStaleWatch() {
+    if (this._staleTimer) {
+      clearTimeout(this._staleTimer);
+      this._staleTimer = null;
+    }
   }
 
   wakeNow() {
@@ -344,6 +404,7 @@ export class HubRuntime {
 
   stop() {
     this._stopped = true;
+    this.stopStaleWatch();
     clearTimeout(this._kickTimer);
     this._kickTimer = null;
     // 分钟定时器挂在内核上。这里清掉，避免 hub 退出后它还握着进程。
@@ -502,6 +563,8 @@ export class HubRuntime {
     this.log(`hub daemon starting on ${this.cfg.node}（对账 ${this.sweepSec()}s，SQLite + HTTP 长轮询事件驱动；含能力登记与接单、审批、呈递、陈旧告警、later 复查；本机计划由内核本地调度）`);
     // hub 不走 Kernel.run。分钟定时器仍要起：到点经 kernel._notifyWake 抬这里的 _wakeFlag。
     this.kernel?.startMinuteTimer();
+    this.noteHubPresence();
+    this.startStaleWatch();
     try {
     try {
       await this.cfg.bus.tenantToken();
@@ -525,6 +588,7 @@ export class HubRuntime {
       await this.waitWake();
     }
     } finally {
+      this.stopStaleWatch();
       try { this.kernel?.stopMinuteTimer(); }
       catch (e) { this.log("停止分钟定时器失败：" + (e?.message ?? e)); }
     }

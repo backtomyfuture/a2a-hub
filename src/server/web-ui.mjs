@@ -1090,6 +1090,8 @@ const state = {
   schedulesApiAvailable: true,
   schedulesError: "",
   schedules: [],
+  auditApiAvailable: true,
+  auditLogs: [],
   dismissedFailed: loadDismissedAlerts(),
   cursor: 0,
   token: localStorage.getItem("a2a_hub_token") || localStorage.getItem("lobe_a2a_token") || "",
@@ -1455,6 +1457,27 @@ async function refreshWebhooks() {
   }
 }
 
+async function refreshAudit() {
+  try {
+    const headers = {};
+    if (state.token) headers.Authorization = "Bearer " + state.token;
+    const r = await fetch("/api/v1/admin/audit?table=agentCards&limit=30", { headers });
+    if (r.status === 404) {
+      state.auditApiAvailable = false;
+      state.auditLogs = [];
+      return;
+    }
+    if (!r.ok) return;
+    const d = await r.json().catch(() => null);
+    if (d && Array.isArray(d.logs)) {
+      state.auditApiAvailable = true;
+      state.auditLogs = d.logs;
+    }
+  } catch {
+    // 网络波动时不推翻已有记录
+  }
+}
+
 async function refreshSchedules() {
   try {
     const headers = {};
@@ -1523,9 +1546,7 @@ function buildNodeGroups(d) {
     const kind = (g.conn && g.conn.kind) || (primaryCard && primaryCard.kind) || "host";
     const role = (g.conn && g.conn.role) || (g.cards.find((c) => c.role) && g.cards.find((c) => c.role).role) || "";
     const mode = (g.conn && g.conn.mode) || (primaryCard && primaryCard.receive_mode) || "longpoll";
-    const online = g.conn
-      ? Boolean(g.conn.online)
-      : g.cards.some((c) => String(c.availability || "").toLowerCase() !== "offline");
+    const online = g.conn ? Boolean(g.conn.online) : false;
     const lastSeenAt = g.conn ? g.conn.lastSeenAt : null;
     const nodeDesc = (g.cards.find((c) => c.node_desc) && g.cards.find((c) => c.node_desc).node_desc) || "";
     const adminNote = (g.cards.find((c) => c.admin_note) && g.cards.find((c) => c.admin_note).admin_note) || "";
@@ -1580,7 +1601,7 @@ function computeTodos(d) {
 
 async function refreshState() {
   try {
-    const [d] = await Promise.all([api("/api/v1/state"), refreshTokens(), refreshWebhooks(), refreshSchedules()]);
+    const [d] = await Promise.all([api("/api/v1/state"), refreshTokens(), refreshWebhooks(), refreshSchedules(), refreshAudit()]);
     state.data = d;
     if (d.seq != null && d.seq > state.cursor) state.cursor = d.seq;
     document.getElementById("hubNodeLabel").textContent = "中台节点: " + (d.hubNode || "hub");
@@ -3498,6 +3519,24 @@ function renderAgents(d) {
     + '<div>纯协调者 / 外部 HTTP Agent：执行方 <span class="mono">a2a-worker</span> · 派单方 <span class="mono">a2a-leader</span> · 本机独立 Agent <span class="mono">ah-inbox</span></div>'
     + '<div class="mono">· ah（控制端 + CLI）：Hub / 工作机主控终端派单与闭环编排，不按接入方式下发。</div>'
     + '</div></details>';
+
+  html += '<div class="card" style="margin-top:16px;">'
+    + '<div class="node-name">名录变更</div>'
+    + '<div class="hint">只追加，不改历史。仅机主可见。</div>';
+  if (!state.auditApiAvailable) {
+    html += '<div class="muted">名录变更记录暂不可用</div>';
+  } else if (!state.auditLogs.length) {
+    html += '<div class="muted">还没有名片变更记录</div>';
+  } else {
+    html += '<div class="table-wrap"><table class="clean-table"><thead><tr>'
+      + '<th>时间</th><th>操作</th><th>节点</th><th>名片</th></tr></thead><tbody>';
+    for (const row of state.auditLogs.slice(0, 30)) {
+      html += '<tr><td class="mono">' + esc(row.ts || "") + '</td><td>' + esc(row.op || "")
+        + '</td><td class="mono">' + esc(row.node || "") + '</td><td class="mono">' + esc(row.cap_id || "") + '</td></tr>';
+    }
+    html += '</tbody></table></div>';
+  }
+  html += '</div>';
 
   html += '</div>';
   return html;

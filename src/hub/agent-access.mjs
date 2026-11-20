@@ -31,6 +31,7 @@ function foreverDeny(pathname, method) {
   if (pathname === "/api/v1/poll") return "Agent 身份不能使用 Hub 长轮询 /api/v1/poll";
   if (pathname === "/api/v1/schedules") return "Agent 身份不能查看定时任务 /api/v1/schedules";
   if (pathname === "/api/v1/admin/commands-snippet") return "Agent 身份不能生成 commands.json 片段";
+  if (pathname === "/api/v1/admin/audit") return "Agent 身份不能查看名录变更审计日志";
   if (method === "DELETE" && /^\/api\/v1\/admin\/cards\/[^/]+$/.test(pathname)) {
     return "Agent 身份不能删除能力名片";
   }

@@ -53,13 +53,38 @@ export function log(msg) {
   console.log(new Date().toISOString().slice(0, 19), msg);
 }
 
-export function nowStr() {
-  const d = new Date();
+// 与历史 nowStr 同一口径：本地时间 ISO 8601 带时区偏移。心跳和租约到期共用这一格式，parseHeartbeat 才能读。
+export function isoOffset(date) {
+  const d = date instanceof Date ? date : new Date(date);
   const p = (n) => String(n).padStart(2, "0");
   const off = -d.getTimezoneOffset();
   const sign = off >= 0 ? "+" : "-";
   const oh = p(Math.floor(Math.abs(off) / 60)) + p(Math.abs(off) % 60);
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}${sign}${oh}`;
+}
+
+export function nowStr() {
+  return isoOffset(new Date());
+}
+
+// 有 lease_ttl_sec 才刷新 lease_expires_at。坏 JSON 返回 null，调用方不得把 Metadata 写成 {}。
+export function withRefreshedLease(raw, now = new Date()) {
+  const parsed = readTaskMeta(raw);
+  if (!parsed.ok) return null;
+  const ttl = Number(parsed.meta.lease_ttl_sec);
+  if (!Number.isFinite(ttl) || ttl <= 0) return null;
+  const clock = now instanceof Date ? now : new Date(now);
+  const exp = new Date(clock.getTime() + Math.round(ttl) * 1000);
+  return JSON.stringify({ ...parsed.meta, lease_expires_at: isoOffset(exp) });
+}
+
+// 认领和心跳只改这两项。没有租约时不带 Metadata，避免冲掉验收等其它键。
+export function heartbeatFields(raw, now = new Date()) {
+  const clock = now instanceof Date ? now : new Date(now);
+  const fields = { Heartbeat_At: isoOffset(clock) };
+  const leased = withRefreshedLease(raw, clock);
+  if (leased) fields.Metadata = leased;
+  return fields;
 }
 
 // 一行 key=value、值里没有空格，方便按天 awk 相加。ms 不取整：调用方传入的就是要打印的数。

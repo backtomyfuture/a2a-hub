@@ -378,6 +378,92 @@ test("role=hub 的本机名片空 Admission 自动补成 admitted，显式决定
   });
 });
 
+test("已答复的 input-required 不再进入 Leader updates；无连接时 online 为 false", async () => {
+  await withTemp(async (dir) => {
+    const token = "hygiene-token";
+    const leader = "muse-inc";
+    const broker = new LongPollBroker();
+    const bus = new SqliteBus({ dbPath: path.join(dir, "hub.db"), tables: DEFAULT_TABLES, broker });
+    const httpHandle = await startServer(dir, bus, broker, token);
+    try {
+      await seedTask(bus, { taskId: "TASK-OPEN", from: leader, status: "input-required" });
+      const answered = await seedTask(bus, { taskId: "TASK-ANS", from: leader, status: "input-required" });
+      await bus.updateRecord(bus.tables.tasks, answered.task.record.record_id, { Status_Msg: "MSG-Q" });
+      await bus.createRecord(bus.tables.messages, {
+        Msg_ID: "MSG-A",
+        Task_ID: "TASK-ANS",
+        Context_ID: "CTX-H",
+        From_Node: leader,
+        To_Node: "worker-a",
+        Role: "user",
+        Kind: "answer",
+        In_Reply_To: "MSG-Q",
+        Created_At: "2026-11-18T00:02:00.000Z",
+      });
+      await bus.createRecord(bus.tables.tasks, {
+        Task_ID: "TASK-AUTH",
+        Title: "auth",
+        Source: leader,
+        Target_Node: "worker-a",
+        Status: "auth-required",
+        Status_Msg: "MSG-AUTH",
+        Context_ID: "CTX-H",
+        Skill_ID: "echo",
+      });
+      await bus.createRecord(bus.tables.messages, {
+        Msg_ID: "MSG-AUTH-I",
+        Task_ID: "TASK-AUTH",
+        Context_ID: "CTX-H",
+        From_Node: leader,
+        To_Node: "worker-a",
+        Role: "user",
+        Kind: "instruction",
+        Created_At: "2026-11-18T00:00:00.000Z",
+      });
+      const decisionId = "MSG-AUTH-D";
+      await bus.createRecord(bus.tables.messages, {
+        Msg_ID: decisionId,
+        Task_ID: "TASK-AUTH",
+        Context_ID: "CTX-H",
+        From_Node: "hub",
+        To_Node: "worker-a",
+        Role: "user",
+        Kind: "auth_decision",
+        In_Reply_To: "MSG-AUTH",
+        Created_At: "2026-11-18T00:03:00.000Z",
+      });
+      await bus.createRecord(bus.tables.parts, {
+        Part_ID: `${decisionId}-P1`,
+        Parent_ID: decisionId,
+        Parent_Type: "message",
+        Seq: 1,
+        Kind: "data",
+        Data: JSON.stringify({ decision: "" }),
+      });
+      await bus.createRecord(bus.tables.agentCards, {
+        Cap_ID: "CAP-ghost",
+        Node: "ghost-node",
+        Skill_ID: "agent",
+        Availability: "online",
+        Admission: "admitted",
+        Dispatchable: "Yes",
+      });
+
+      const updates = await apiJson(httpHandle.localUrl, `/api/v1/agents/${leader}/updates?new=1`, { token });
+      assert.equal(updates.status, 200);
+      assert.deepEqual(updates.data.updates.map((u) => u.task_id), ["TASK-OPEN"]);
+
+      const agents = await apiJson(httpHandle.localUrl, "/api/v1/agents", { token });
+      const ghost = agents.data.agents.find((a) => a.node === "ghost-node");
+      assert.equal(ghost.online, false);
+    } finally {
+      await httpHandle.close();
+      broker.close();
+      bus.close();
+    }
+  });
+});
+
 test("role=node 对账不给本机名片写 Admission", async () => {
   await withTemp(async (dir) => {
     const bus = new MockBus({ tables: TABLES });

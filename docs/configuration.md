@@ -289,7 +289,7 @@ ah task begin --schedule <id> [--period <期次键>] [--cap <cap_id>] [--text <�
 
 - **单向观察镜像**：节点将本机每条计划镜像为 Rules 一行（`Rule_ID=<Node_ID>:<Schedule_ID>`）。任何节点**绝不从 Rules 读计划触发任务**，手动修改 Rules **不影响本地实际执行**。
 - **升级顺序：先升级 hub，再升级各节点。** 旧版本 hub 仍会把 Rules 里 `Enabled=Yes` 且 `Schedule` 非空的行当成计划建单；新版节点一旦写入镜像行，就会被旧 hub 误触发，造成同一计划双跑。迁移存量计划（如 `SCHED-HUB-MORNING`）时，先把 Rules 旧行 `Enabled` 置 No，再用 `ah schedule add` 在对应节点落计划。
-- **已知限制：定时任务中途提问需要人答复。** 本地定时任务的发起方是本节点自己，`question` 会原路回给本节点并进入 `present_queue.jsonl`，需要本机 Agent 消费后执行 `ah task reply`。无人值守时任务会停在 `input-required`，hub 的陈旧告警只处理 `working` 与无人认领的 `submitted`，不会提醒。无人值守的计划请选不会提问的能力。
+- **已知限制：定时任务中途提问需要人答复。** 本地定时任务的发起方是本节点自己，`question` 会原路回给本节点并进入 `present_queue.jsonl`，需要本机 Agent 消费后执行 `ah task reply`。无人值守时任务会停在 `input-required`。没写 `wait_timeout_sec` 时，hub 的陈旧告警只处理 `working` 与无人认领的 `submitted`；建单写入该键后，挂起超时会回收。无人值守的计划请选不会提问的能力。
 - **`ah doctor` 增检**：存在 `schedules.json` 时，自检会逐条验证 cap 存在性、cron 表达式合法性、时区 `tz` 合法性与控制键拦截。若有异常仅打印告警，不改变 doctor 退出码，不阻断守护进程启动。时区检查放开至所有含有 `schedules.json` 的节点。
 - **只读总览**：机主用 `GET /api/v1/schedules` 或控制台「定时任务」页看各节点镜像（cron、下次触发、上次任务、异常）。改计划仍用本机 `ah schedule`。HTTP Agent 可 `PUT /api/v1/agents/:node/schedules/:id` 自报计划，中台只展示、不据此触发。详见 §7.6。
 
@@ -490,6 +490,7 @@ ah loop cancel <Loop_ID> [--text "说明"] [--config <dir>]
 | 方法与路径 | 谁能调用 | 作用 |
 |---|---|---|
 | `GET /api/v1/admin/tokens` | 仅机主 | 列出节点、角色、scopes、前缀与时间，不含哈希与明文 |
+| `GET /api/v1/admin/audit` | 仅机主 | 名录变更只追加日志。查询参数 `table`、`node`、`limit`（1–500）。没有审计表时 `{logs:[]}` |
 | `POST /api/v1/admin/tokens/:node/rotate` | 仅机主 | 重新生成。body 可带 `role`、`scopes`、`template`；省略则沿用旧值（`template` 缺省时从该节点名片的 `Metadata.template` 推导，默认 `generic`）。没有旧记录时必须给 `role`。响应含新明文和已嵌入该 Token 的接入提示词 |
 | `DELETE /api/v1/admin/tokens/:node` | 仅机主 | 吊销。不存在则 `404` |
 
@@ -502,7 +503,7 @@ ah loop cancel <Loop_ID> [--text "说明"] [--config <dir>]
 - leader：worker 的全部，再加上自己的 `updates`；`GET`/`POST /api/v1/tasks`；自己发起或指向自己的任务详情；答复、撤销只限自己发起的任务；`loops` 的列表与取消只限自己发起的。
 - `scopes` 含 `admin` 的 leader：`POST /api/v1/admin/cards/:capId/admission`、`POST /api/v1/admin/nodes/:node/admission`、profile、`GET /api/v1/admin/onboarding`，以及 `POST /api/v1/admin/cards`（给别的节点加能力）。不能 `DELETE` 名片。
 - 任何角色：`PUT` / `DELETE /api/v1/agents/:node/schedules/:id`，且只能操作 Token 绑定的节点。这是自报计划，中台不据此触发。
-- 一律拒绝：`/api/v1/approvals/*`、`/api/v1/admin/agents`、`/api/v1/admin/tokens*`、`/api/v1/admin/webhooks*`、`/api/v1/admin/commands-snippet`、`DELETE /api/v1/admin/cards/:capId`、`/api/v1/schedules`、`/api/v1/state`、`/api/v1/tables/*`、`/api/v1/poll`。
+- 一律拒绝：`/api/v1/approvals/*`、`/api/v1/admin/agents`、`/api/v1/admin/tokens*`、`/api/v1/admin/webhooks*`、`/api/v1/admin/commands-snippet`、`GET /api/v1/admin/audit`、`DELETE /api/v1/admin/cards/:capId`、`/api/v1/schedules`、`/api/v1/state`、`/api/v1/tables/*`、`/api/v1/poll`。
 
 `GET /api/v1/agents/:node/check` 是给定时脚本的只读探测。`tasks` 与 `poll` 的可认领任务同一口径，`working` 是本节点已认领且仍为 `working` 的任务。`updates` 是自持久水位以来 `updates?new=1` 会返回的条数（含仍待处理的 `input-required` / `auth-required`）。leader（含旧值 `hybrid`）同时返回这三项。它不写水位，所以随后的 `updates?new=1` 仍能看到这些变化。唯一副作用是刷新该节点在线状态。Agent Token 按绑定角色计算；机主调用可用查询参数 `role`（`worker` / `leader` / `hybrid`，缺省 `leader`，即接单和跟单都算）。空闲时 `{"work":false}`。检查脚本与无脚本回退都是每 5 分钟。
 
