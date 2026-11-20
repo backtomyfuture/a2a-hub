@@ -970,8 +970,15 @@ test("poll_interval_min 默认值、校验，以及接入提示词按分钟改�
   assert.match(slow.prompt, /每 60 分钟/);
   assert.equal(slow.prompt.includes("每 5 分钟"), false);
   assert.match(slow.steps.join("\n"), /每 60 分钟/);
-  assert.match(slow.prompt, /POST https:\/\/hub\.example\/api\/v1\/tasks\/<task_id>\/claim/);
+  assert.match(slow.prompt, /POST \/api\/v1\/tasks\/<task_id>\/claim/);
+  assert.match(slow.prompt, /lease_id/);
   assert.match(slow.prompt, /不要提前批量认领/);
+  assert.match(slow.prompt, /401\/403/);
+  assert.match(slow.prompt, /主动提醒机主更换令牌/);
+  assert.match(slow.prompt, /skill_id 默认为 "agent"/);
+  assert.match(slow.prompt, /结果：<结论>/);
+  assert.equal(slow.prompt.includes("/.well-known/agent.json"), false);
+  assert.equal(slow.prompt.includes("不要修改 User-Agent"), false);
 
   const hook = buildOnboarding({
     hubUrl: "https://hub.example",
@@ -1046,6 +1053,43 @@ test("节点模板 id 决定 Step 3 提示词；WorkBuddy 不与通用定时检�
     templateId: "workbuddy",
     pollIntervalMin: 30,
   });
+  const doubao = buildOnboarding({
+    hubUrl: "https://hub.example",
+    node: "doubao-cloud",
+    access: "http",
+    role: "worker",
+    authRequired: true,
+    token: "aht_doubao_once",
+    templateId: "doubao",
+    pollIntervalMin: 60,
+  });
+  assert.equal(doubao.template_id, "doubao");
+  assert.equal(doubao.template_label, "豆包（云端定时）");
+  assert.equal(doubao.template, "generic");
+  assert.match(doubao.prompt, /豆包的云端定时任务/);
+  assert.match(doubao.prompt, /每 60 分钟/);
+  assert.match(doubao.prompt, /\/home\/user\/\.a2a\/token/);
+  assert.match(doubao.steps.join("\n"), /90 分钟在线窗口/);
+  assert.equal(doubao.prompt.split("aht_doubao_once").length - 1, 1);
+
+  const qwen = buildOnboarding({
+    hubUrl: "https://hub.example",
+    node: "qwen",
+    access: "http",
+    role: "worker",
+    authRequired: true,
+    token: "aht_qwen_once",
+    templateId: "qwen",
+    pollIntervalMin: 60,
+  });
+  assert.equal(qwen.template_id, "qwen");
+  assert.equal(qwen.template_label, "千问 Go（小时级定时）");
+  assert.equal(qwen.template, "generic");
+  assert.match(qwen.prompt, /千问的定时任务/);
+  assert.match(qwen.prompt, /每 60 分钟/);
+  assert.match(qwen.prompt, /a2a_token\.txt/);
+  assert.match(qwen.prompt, /skill_id 默认为 "agent"/);
+  assert.equal(qwen.prompt.split("aht_qwen_once").length - 1, 1);
   assert.equal(generic.template_id, "generic-poll");
   assert.equal(generic.template_label, "通用");
   assert.match(generic.prompt, /每 5 分钟/);

@@ -198,6 +198,7 @@ test("GET check 只读：worker 任务、working、leader 计数且不推进水�
     assert.equal(workerCheck.data.work, true);
     assert.deepEqual(workerCheck.data.tasks, ["TASK-NEW"]);
     assert.deepEqual(workerCheck.data.working, ["TASK-WORK"]);
+    assert.deepEqual(workerCheck.data.stale_working, ["TASK-WORK"]);
     const poll = await apiJson(baseUrl, "/api/v1/agents/grok-bot/poll?timeout=0", { token: workerToken });
     assert.deepEqual(poll.data.tasks.map((item) => item.task_id), ["TASK-NEW"]);
     const rosterKept = await apiJson(baseUrl, "/api/v1/agents", { token: apiToken });
@@ -229,6 +230,48 @@ test("GET check 只读：worker 任务、working、leader 计数且不推进水�
     const disc = await apiJson(baseUrl, "/.well-known/agent.json");
     assert.equal(disc.data.endpoints.check, "/api/v1/agents/{node}/check");
     assert.equal(disc.data.endpoints.checkScript, "/api/v1/kit/a2a_check.py");
+  });
+});
+
+test("GET check：活跃心跳中的 working 不置 work=true，心跳超 20 分钟后才进 stale_working 并唤醒", async () => {
+  await withHub(async ({ baseUrl, apiToken, bus }) => {
+    const workerToken = await addAgent(baseUrl, apiToken, "doubao-cloud", "worker");
+    await bus.createRecord(bus.tables.messages, {
+      Msg_ID: "MSG-TASK-ALIVE",
+      Task_ID: "TASK-ALIVE",
+      Context_ID: "CTX-ALIVE",
+      From_Node: "mac-mini-hub",
+      To_Node: "doubao-cloud",
+      Role: "user",
+      Kind: "instruction",
+      Created_At: new Date().toISOString(),
+    });
+    const rec = await bus.createRecord(bus.tables.tasks, {
+      Task_ID: "TASK-ALIVE",
+      Title: "长耗时任务",
+      Source: "mac-mini-hub",
+      Target_Node: "doubao-cloud",
+      Claimed_By: "doubao-cloud",
+      Status: "working",
+      Heartbeat_At: new Date().toISOString(),
+      Context_ID: "CTX-ALIVE",
+      Skill_ID: "agent",
+    });
+
+    const fresh = await apiJson(baseUrl, "/api/v1/agents/doubao-cloud/check", { token: workerToken });
+    assert.equal(fresh.status, 200);
+    assert.equal(fresh.data.work, false);
+    assert.deepEqual(fresh.data.tasks, []);
+    assert.deepEqual(fresh.data.working, ["TASK-ALIVE"]);
+    assert.deepEqual(fresh.data.stale_working, []);
+
+    const staleAt = new Date(Date.now() - 25 * 60_000).toISOString();
+    await bus.updateRecord(bus.tables.tasks, rec.record.record_id, { Heartbeat_At: staleAt });
+    const stale = await apiJson(baseUrl, "/api/v1/agents/doubao-cloud/check", { token: workerToken });
+    assert.equal(stale.status, 200);
+    assert.equal(stale.data.work, true);
+    assert.deepEqual(stale.data.working, ["TASK-ALIVE"]);
+    assert.deepEqual(stale.data.stale_working, ["TASK-ALIVE"]);
   });
 });
 
