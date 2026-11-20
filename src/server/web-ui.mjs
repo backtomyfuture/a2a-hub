@@ -2549,10 +2549,6 @@ function renderTemplateOptions() {
     opt.textContent = t.label;
     sel.appendChild(opt);
   }
-  const custom = document.createElement("option");
-  custom.value = "__custom__";
-  custom.textContent = "自定义（手动选择接收方式并填写）";
-  sel.appendChild(custom);
   sel.value = list[0].id;
   applyTemplatePreset();
 }
@@ -4069,10 +4065,12 @@ document.getElementById("receiveChoices").addEventListener("click", (e) => {
   const presetSel = document.getElementById("afTemplatePreset");
   const curPreset = AGENT_TEMPLATES.find((x) => x.id === presetSel.value);
   if (curPreset && curPreset.receive !== nextReceive) {
-    presetSel.value = "__custom__";
+    // 手动换了接收方式：下拉框回到「通用」（不重置已填字段），按通用模板生成提示词。
+    const generic = AGENT_TEMPLATES.find((x) => x.template === "generic" && !x.preset && x.access === state.wizardAccess);
+    if (generic) presetSel.value = generic.id;
     state.wizardTemplate = "generic";
     state.wizardPreset = "";
-    document.getElementById("afTemplateHint").textContent = "已手动调整接收方式，将使用通用模板。";
+    document.getElementById("afTemplateHint").textContent = "已手动调整接收方式，使用通用模板。";
   }
   syncReceiveChoiceCards();
 });

@@ -589,7 +589,7 @@ test("控制台内嵌脚本：节点分层渲染、stageBindings 闭环提交、
   assert.equal(getEl("afTemplateRow").style.display, "flex");
   assert.equal(getEl("afReceiveGroup").style.display, "flex");
   assert.equal(getEl("afTemplatePreset").value, "generic-poll");
-  assert.ok(getEl("afTemplatePreset").options.some((o) => o.value === "__custom__"));
+  assert.equal(getEl("afTemplatePreset").options.some((o) => o.value === "__custom__"), false);
   assert.equal(getEl("afNode").value, "cloud-agent");
   assert.equal(getEl("afName").value, "云端通用助手");
   assert.ok(getEl("afDesc").value.length > 0);
@@ -632,10 +632,14 @@ test("控制台内嵌脚本：节点分层渲染、stageBindings 闭环提交、
   assert.equal(getEl("afNode").value, "my-custom-node");
   assert.equal(getEl("afName").value, "WorkBuddy 云端助手");
 
-  getEl("afTemplatePreset").value = "__custom__";
+  // 手动换接收方式：下拉框回到「通用」，提交按通用模板
+  await vm.runInContext('state.wizardReceive = "poll";', sandbox);
+  getEl("afTemplatePreset").value = "muse";
   await getEl("afTemplatePreset").dispatch("change");
-  assert.equal(getEl("afReceiveGroup").style.display, "flex");
+  await getEl("receiveChoices").dispatch("click", { target: { closest: () => ({ dataset: { receive: "webhook" } }) } });
+  assert.equal(getEl("afTemplatePreset").value, "generic-poll");
   assert.equal(vm.runInContext("state.wizardTemplate", sandbox), "generic");
+  assert.equal(vm.runInContext("state.wizardReceive", sandbox), "webhook");
 
   await vm.runInContext('openAgentModal(); state.wizardAccess = "host";', sandbox);
   await getEl("agentNextBtn").dispatch("click");

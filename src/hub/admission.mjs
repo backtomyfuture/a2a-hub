@@ -22,7 +22,7 @@ const TEMPLATE_SET = new Set(TEMPLATE_VALUES);
 export const AGENT_TEMPLATE_PRESETS = Object.freeze([
   {
     id: "generic-poll",
-    label: "通用（定时检查）",
+    label: "通用",
     access: "http",
     template: "generic",
     receive: "poll",
