@@ -64,6 +64,10 @@ test("控制台包含新术语结构、接收方式、添加能力、闭环分�
   assert.match(html, /定时检查（poll，默认）/);
   assert.match(html, /常驻长连接（longpoll）/);
   assert.match(html, /Webhook 推送（webhook）/);
+  assert.match(html, /id="afPollIntervalRow"/);
+  assert.match(html, /轮询间隔（分钟）/);
+  assert.match(html, /id="afPollInterval"[^>]*type="number"[^>]*min="1"[^>]*max="1440"[^>]*value="5"/);
+  assert.match(html, /中台按此间隔 × 1\.5 判定该 Agent 是否在线/);
   assert.match(html, /webhook_url/);
   assert.match(html, /webhook_key/);
   assert.match(html, /Token 只显示这一次/);
@@ -533,9 +537,30 @@ test("控制台内嵌脚本：节点分层渲染、stageBindings 闭环提交、
   assert.equal(agentPost.body.receive, "webhook");
   assert.equal(agentPost.body.webhook_url, "https://wh.example/cb");
   assert.equal(agentPost.body.webhook_key, "receiver-key-ui");
+  assert.equal(agentPost.body.poll_interval_min, 5);
   assert.match(getEl("onboardBox").innerHTML, /tok_once_123/);
   assert.equal(getEl("onboardBox").innerHTML.includes("receiver-key-ui"), false);
   assert.equal(renderWebConsoleHtml().includes("receiveModal"), false);
+
+  await vm.runInContext('openAgentModal();', sandbox);
+  getEl("afNode").value = "hourly-bot";
+  getEl("afPollInterval").value = "60";
+  await vm.runInContext('state.wizardAccess = "http"; state.wizardReceive = "webhook"; syncReceiveChoiceCards();', sandbox);
+  assert.equal(getEl("afPollInterval").value, "60");
+  assert.equal(getEl("afPollIntervalRow").style.display, "flex");
+  getEl("afPollInterval").value = "5";
+  await vm.runInContext('syncReceiveChoiceCards();', sandbox);
+  assert.equal(getEl("afPollInterval").value, "30");
+  await vm.runInContext('state.wizardReceive = "longpoll"; syncReceiveChoiceCards();', sandbox);
+  assert.equal(getEl("afPollIntervalRow").style.display, "none");
+  await vm.runInContext('state.wizardReceive = "poll"; syncReceiveChoiceCards();', sandbox);
+  assert.equal(getEl("afPollInterval").value, "5");
+  getEl("afPollInterval").value = "60";
+  await getEl("agentStep2").dispatch("submit");
+  const hourlyPost = requests.filter((r) => r.url === "/api/v1/admin/agents" && r.method === "POST").at(-1);
+  assert.equal(hourlyPost.body.node, "hourly-bot");
+  assert.equal(hourlyPost.body.receive, "poll");
+  assert.equal(hourlyPost.body.poll_interval_min, 60);
 });
 
 test("控制台对尚未合入的后端接口（404）给出友好降级提示而非报错白屏", async () => {

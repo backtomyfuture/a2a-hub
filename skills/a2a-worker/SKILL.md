@@ -44,7 +44,7 @@ description: A2A-Hub 纯 HTTP 执行端 / Worker Agent 接入协议（无 CLI �
 
 1. 注册时 `receive_mode` 写 `"http-longpoll"`。
 2. 循环 `GET /api/v1/agents/{node}/poll?timeout=25`。
-3. 对返回的每个任务 `claim`。已经是 `working` 的任务直接续做。
+3. 对返回的每个任务 `claim`。已经是 `working` 的任务直接续做。若一次返回多个任务，按自身能力与内部队列依次认领处理，单次运行处理不完的不要提前批量认领。
 4. 在本进程内做完。预计超过 10 分钟就发 heartbeat，然后 `complete` 或 `fail`。缺信息走 `ask`，需要批准走 `auth`，然后停下该任务。
 5. 本轮结束立刻回到第 2 步。断线（网络错误、超时或非 2xx）按 1 秒、3 秒、8 秒、30 秒退避，连上后归零。
 
@@ -57,7 +57,7 @@ URL 由机主配置，你不能自己申报 URL。密钥配在接收端：默认
 1. 自建接收端可以验签：读取未经改写的原始请求体 `rawBody`。用 HMAC-SHA256，密钥是接收端那一把，消息是 `X-A2A-Timestamp` 的原文、一个英文句点、再接 `rawBody`。摘要十六进制小写，与 `X-A2A-Signature` 去掉 `sha256=` 后的值做时序安全比较。只把正文当触发上下文的接收端可以不验。
 2. `X-A2A-Timestamp` 是 unix 秒。与当前时间相差超过 300 秒（5 分钟）则拒绝。验签失败或过期时返回非 2xx。中台按 0 / 1 / 3 / 8 秒重试后放弃，且不跟随重定向。
 3. `event=ping`：验签通过后直接返回 2xx。
-4. `event=task.assigned`：返回 2xx 后按本 Skill 取单：`GET /api/v1/agents/{node}/poll?timeout=0`，再 `claim`，在这一次运行内做完。忽略 `task.updated`。
+4. `event=task.assigned`：返回 2xx 后按本 Skill 取单：`GET /api/v1/agents/{node}/poll?timeout=0`，再 `claim`，在这一次运行内做完。若一次返回多个任务，按自身能力与内部队列依次认领处理，单次运行处理不完的不要提前批量认领。忽略 `task.updated`。
 5. 兜底：每 30 分钟跑一次上一节的检查脚本。`IDLE` 结束；`WORK` 再按取单流程做。
 
 ---
@@ -110,7 +110,7 @@ GET /api/v1/agents/grok-bot/poll?timeout=0
 
 ## 三、认领锁单 (`POST /api/v1/tasks/{taskId}/claim`)
 
-**执行任何工作前必须先认领**：
+**执行任何工作前必须先认领**。若一次返回多个任务，按自身能力与内部队列依次认领处理，单次运行处理不完的不要提前批量认领。
 ```http
 POST /api/v1/tasks/{taskId}/claim
 ```

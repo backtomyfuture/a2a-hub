@@ -13,7 +13,7 @@ import { pickSignedDecision, publicKeyOf } from "../approval-sign.mjs";
 import { f1 } from "../bus/tables.mjs";
 import { capIdOf } from "../config.mjs";
 import { agentCanSeeTask, assertAgentRoute } from "../hub/agent-access.mjs";
-import { admissionOf, actsAsLeader, httpError, presetHttpCardFields, validateNodeName } from "../hub/admission.mjs";
+import { admissionOf, actsAsLeader, httpError, parseCardMetadata, presetHttpCardFields, validateNodeName, validatePollIntervalMin } from "../hub/admission.mjs";
 import { alignNodeReceiveMode, removeHttpAgentSchedule, saveHttpAgentSchedule } from "../hub/capabilities.mjs";
 import { rosterNodeVisible } from "./longpoll-broker.mjs";
 import { submitAgentReceipt } from "../inbox.mjs";
@@ -76,6 +76,11 @@ function keepOwnerFlags(rawMeta, next) {
   const out = { ...next };
   if (prev.manual === true) out.manual = true;
   if (prev.preset === true) out.preset = true;
+  // 重新注册没再带间隔时，留下机主或上次写入的 poll_interval_min，避免被刷掉后在线窗口回到默认。
+  if (out.poll_interval_min == null) {
+    const kept = Number(prev.poll_interval_min);
+    if (Number.isInteger(kept) && kept >= 1 && kept <= 1440) out.poll_interval_min = kept;
+  }
   return out;
 }
 
@@ -124,17 +129,21 @@ function checkScopeOf(principal, searchParams) {
   return { role: raw, worker: raw === "worker" || leader, leader };
 }
 
-// 在线窗口认名片上的 Receive_Mode。检查请求本身不带这个字段，不查的话重启后会按普通 http-poll 的 12.5 分钟判离线。
-async function nodeCardReceiveMode(bus, node) {
+// 在线窗口认名片上的 Receive_Mode 和 poll_interval_min。
+// 检查和 poll 请求本身不带间隔；不查的话 Hub 重启后会按默认 5 分钟窗口判离线。
+async function nodeCardRuntime(bus, node) {
   const cards = await bus.listRecords(bus.tables.agentCards);
   let fallback = "";
+  let pollIntervalMin = null;
   for (const card of cards) {
     if (f1(card, "Node") !== node) continue;
     const mode = f1(card, "Receive_Mode");
-    if (mode === "webhook") return "webhook";
+    const interval = parseCardMetadata(card).poll_interval_min;
+    if (mode === "webhook") return { mode: "webhook", pollIntervalMin: interval || pollIntervalMin };
+    if (interval && pollIntervalMin == null) pollIntervalMin = interval;
     if (!fallback && (mode === "http-poll" || mode === "http-longpoll")) fallback = mode;
   }
-  return fallback;
+  return { mode: fallback, pollIntervalMin };
 }
 
 // 2×2 四类 Skill 目录：控制端/执行端 × 有 ah CLI / 纯 HTTP，避免向工作机或云端 Agent 下发无关指令
@@ -848,6 +857,19 @@ export async function handleAgentGatewayRequest({
     const version = String(body.version ?? "http-agent").trim();
     const capPrefix = String(body.cap_prefix ?? node).trim() || node;
     const worker = String(body.worker ?? "").trim();
+    const intervalProvided = body.poll_interval_min !== undefined
+      && body.poll_interval_min !== null
+      && String(body.poll_interval_min).trim() !== "";
+    const explicitPoll = intervalProvided
+      ? validatePollIntervalMin(
+        body.poll_interval_min,
+        receiveMode === "webhook" ? "webhook" : (receiveMode === "http-longpoll" ? "longpoll" : "poll"),
+      )
+      : null;
+    const withPoll = (meta) => {
+      if (explicitPoll > 0) meta.poll_interval_min = explicitPoll;
+      return meta;
+    };
 
     let capSpecs = Array.isArray(body.caps) ? body.caps : null;
     // 不报能力的 leader（含旧 hybrid）补一张可派单的身份名片。显式 caps 仍按对方申报的能力写，不另造这张。
@@ -894,6 +916,7 @@ export async function handleAgentGatewayRequest({
           description: String(spec?.description ?? spec?.desc ?? nodeDesc),
           availability: "online",
           updatedAt: nowMinute(),
+          pollIntervalMin: explicitPoll,
         })
         : null;
       const fields = preset
@@ -924,7 +947,7 @@ export async function handleAgentGatewayRequest({
           Node_Desc: nodeDesc,
           Zone: zone,
           Updated_At: nowMinute(),
-          Metadata: JSON.stringify({ kind, role: storedRole, mode: receiveMode, worker: specWorker }),
+          Metadata: JSON.stringify(withPoll({ kind, role: storedRole, mode: receiveMode, worker: specWorker })),
         };
 
       const match = existingCards.find((r) => f1(r, "Node") === node && f1(r, "Cap_ID") === capId);
@@ -934,9 +957,9 @@ export async function handleAgentGatewayRequest({
         delete fields.Admission;
         delete fields.Display_Name;
         delete fields.Admin_Note;
-        const meta = preset
+        const meta = withPoll(preset
           ? { kind: "agent", role: "leader", mode: receiveMode, preset: true }
-          : { kind, role: storedRole, mode: receiveMode, worker: specWorker };
+          : { kind, role: storedRole, mode: receiveMode, worker: specWorker });
         fields.Metadata = JSON.stringify(keepOwnerFlags(f1(match, "Metadata"), meta));
         const resUpd = await bus.updateRecord(bus.tables.agentCards, match.record_id, fields);
         const current = resUpd?.record ?? match;
@@ -953,7 +976,27 @@ export async function handleAgentGatewayRequest({
     const pending = Object.values(admissionMap).some((v) => v !== "admitted");
     // 这次没报上来的旧名片也要改成同一个接收方式，否则一个节点会同时写着两种模式。
     await alignNodeReceiveMode(bus, node, receiveMode);
-    broker?.touchAgent?.(node, { remoteAddr, mode: receiveMode, kind, role });
+    let pollIntervalMin = explicitPoll;
+    if (!(pollIntervalMin > 0)) {
+      for (const card of existingCards) {
+        if (f1(card, "Node") !== node) continue;
+        const kept = parseCardMetadata(card).poll_interval_min;
+        if (kept) {
+          pollIntervalMin = kept;
+          break;
+        }
+      }
+    }
+    if (!(pollIntervalMin > 0) && identityOnly && receiveMode !== "http-longpoll") {
+      pollIntervalMin = receiveMode === "webhook" ? 30 : 5;
+    }
+    broker?.touchAgent?.(node, {
+      remoteAddr,
+      mode: receiveMode,
+      kind,
+      role,
+      ...(pollIntervalMin > 0 ? { pollIntervalMin } : {}),
+    });
     onWake();
     const payload = {
       ok: true,
@@ -1034,14 +1077,15 @@ export async function handleAgentGatewayRequest({
   if (method === "GET" && checkMatch) {
     const node = validateNodeName(decodeURIComponent(checkMatch[1]));
     const scope = checkScopeOf(principal, reqUrl.searchParams);
-    const cardMode = await nodeCardReceiveMode(bus, node);
+    const cardRuntime = await nodeCardRuntime(bus, node);
     broker?.touchAgent?.(node, {
       remoteAddr,
-      // 只有 webhook 要换窗口。其余检查仍记成 http-poll，避免长轮询节点被一次检查改成 75 分钟。
-      mode: cardMode === "webhook" ? "webhook" : "http-poll",
+      // 只有 webhook 要换窗口。其余检查仍记成 http-poll，避免长轮询节点被一次检查改成兜底窗口。
+      mode: cardRuntime.mode === "webhook" ? "webhook" : "http-poll",
       kind: "agent",
       role: scope.role,
       receiveFromCard: true,
+      ...(cardRuntime.pollIntervalMin ? { pollIntervalMin: cardRuntime.pollIntervalMin } : {}),
     });
     const payload = { work: false };
     if (scope.worker) {
@@ -1089,7 +1133,14 @@ export async function handleAgentGatewayRequest({
       && reqUrl.searchParams.get("include_updates") !== "0";
 
     const modeHint = timeoutMs > 0 ? "longpoll" : "http-poll";
-    broker?.touchAgent?.(node, { remoteAddr, mode: modeHint, kind: "agent" });
+    const cardRuntime = await nodeCardRuntime(bus, node);
+    const pollTouch = {
+      remoteAddr,
+      mode: modeHint,
+      kind: "agent",
+      ...(cardRuntime.pollIntervalMin ? { pollIntervalMin: cardRuntime.pollIntervalMin } : {}),
+    };
+    broker?.touchAgent?.(node, pollTouch);
 
     let mailbox = await collectAgentMailbox({
       bus,
@@ -1125,7 +1176,7 @@ export async function handleAgentGatewayRequest({
       } finally {
         req.off("close", onClose);
       }
-      broker.touchAgent(node, { remoteAddr, mode: modeHint, kind: "agent", cursor: nextCursor });
+      broker.touchAgent(node, { ...pollTouch, cursor: nextCursor });
     }
 
     let finalTasks = mailbox.actionable;
@@ -1190,12 +1241,15 @@ export async function handleAgentGatewayRequest({
     const storedWatermark = await readUpdatesWatermark(bus, node);
     const threshold = since != null ? since : (useNew ? storedWatermark : null);
 
-    broker?.touchAgent?.(node, {
+    const cardRuntime = await nodeCardRuntime(bus, node);
+    const updatesTouch = {
       remoteAddr,
-      mode: timeoutMs > 0 ? "longpoll" : "http-poll",
+      mode: timeoutMs > 0 ? "longpoll" : (cardRuntime.mode === "webhook" ? "webhook" : "http-poll"),
       kind: "agent",
       role: "leader",
-    });
+      ...(cardRuntime.pollIntervalMin ? { pollIntervalMin: cardRuntime.pollIntervalMin } : {}),
+    };
+    broker?.touchAgent?.(node, updatesTouch);
 
     const queryUpdates = () => listSelectableLeaderUpdates(bus, node, { wantedStatuses, threshold, view });
 
@@ -1216,7 +1270,7 @@ export async function handleAgentGatewayRequest({
       } finally {
         req.off("close", onClose);
       }
-      broker.touchAgent(node, { remoteAddr, mode: "longpoll", kind: "agent", role: "leader", cursor: nextCursor });
+      broker.touchAgent(node, { ...updatesTouch, mode: "longpoll", cursor: nextCursor });
     }
 
     if (!res.writableEnded) {

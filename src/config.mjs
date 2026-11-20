@@ -14,6 +14,7 @@ const EXEC_CONTROL_KEYS = new Set([
   "side_effect", "approval_class", "permissions", "permission",
   "shell", "env", "executable", "argv", "bin", "max_timeout_sec",
   "verify", "verify_timeout_sec",
+  "herdr_kind", "herdr_args", "herdr_env", "herdr_session", "herdr_workspace",
 ]);
 
 export function controlKeysIn(params) {
@@ -46,8 +47,49 @@ export function clampTimeoutSec(raw, entry) {
 
 const WORKER_NAME = /^[A-Za-z0-9._-]+$/;
 // 启动方式只归 Worker 管，技能条目不能改写。
-const LAUNCH_KEYS = new Set(["command", "resume_command", "mode", "context", "cwd", "workers", "cap_id", "worker", "skill"]);
+const LAUNCH_KEYS = new Set([
+  "command", "resume_command", "mode", "context", "cwd", "workers", "cap_id", "worker", "skill",
+  "env", "herdr_kind", "herdr_args", "herdr_env", "herdr_session", "herdr_workspace",
+]);
 const APPROVAL_RANK = { "": 0, auto: 0, notify: 1, auto_notify: 1, approve: 2 };
+const HERDR_KNOWN_KINDS = new Set([
+  "pi", "claude", "codex", "gemini", "cursor", "devin", "agy", "cline",
+  "omp", "mastracode", "opencode", "copilot", "kimi", "kiro", "droid",
+  "amp", "grok", "hermes", "kilo", "qodercli", "qwen", "letta", "maki", "muse",
+]);
+
+function normalizeHerdrKindToken(raw) {
+  const t = String(raw ?? "").trim().toLowerCase();
+  if (!t) return "";
+  if (t === "cursor-agent") return "cursor";
+  return t;
+}
+
+function commandExecutableName(command) {
+  const s = String(command ?? "").trim();
+  if (!s) return "";
+  let tok = "";
+  if (s[0] === "'" || s[0] === '"') {
+    const q = s[0];
+    const end = s.indexOf(q, 1);
+    tok = end > 1 ? s.slice(1, end) : s.slice(1);
+  } else {
+    tok = s.split(/\s+/)[0] || "";
+  }
+  return tok ? path.basename(tok) : "";
+}
+
+// 推导 herdr_kind：显式配置优先，其次识别知名 Worker 名，再回退 command 首词可执行文件名（cursor-agent 映射为 cursor）。
+export function inferHerdrKind(entry, workerName = "") {
+  if (!isEntry(entry)) return "";
+  const explicitRaw = String(entry.herdr_kind ?? "").trim();
+  if (explicitRaw) return explicitRaw.toLowerCase() === "cursor-agent" ? "cursor" : explicitRaw;
+  const workerToken = normalizeHerdrKindToken(entry.worker || workerName);
+  if (workerToken && HERDR_KNOWN_KINDS.has(workerToken)) return workerToken;
+  const binToken = normalizeHerdrKindToken(commandExecutableName(entry.command));
+  if (binToken) return binToken;
+  return workerToken || "";
+}
 
 function isEntry(v) {
   return !!v && typeof v === "object" && !Array.isArray(v);
@@ -97,12 +139,19 @@ export function normalizeCommands(raw, onProblem = () => {}) {
       for (const [name, w] of Object.entries(raw.workers)) {
         if (!WORKER_NAME.test(name)) {
           onProblem(`Worker ${name}：名字只能含字母、数字、. _ -`);
-        } else if (!isEntry(w) || typeof w.command !== "string" || !w.command.trim()) {
+        } else if (!isEntry(w)) {
           onProblem(`Worker ${name} 缺 command 模板`);
-        } else if (w.mode != null && w.mode !== "agent" && w.mode !== "json") {
-          onProblem(`Worker ${name}：mode=${JSON.stringify(w.mode)} 非法（Worker 只认 agent / json）`);
         } else {
-          workers[name] = w;
+          const hasCmd = typeof w.command === "string" && w.command.trim();
+          const herdrKind = typeof w.herdr_kind === "string" ? w.herdr_kind.trim() : "";
+          if (!hasCmd && !(w.context === "herdr" && herdrKind)) {
+            onProblem(`Worker ${name} 缺 command 模板`);
+          } else if (w.mode != null && w.mode !== "agent" && w.mode !== "json") {
+            onProblem(`Worker ${name}：mode=${JSON.stringify(w.mode)} 非法（Worker 只认 agent / json）`);
+          } else {
+            // herdr Worker 只配了 herdr_kind 时补等效占位 command，保证下游检查与展示兼容。
+            workers[name] = hasCmd ? w : { ...w, command: `${herdrKind} {prompt}` };
+          }
         }
       }
     }
@@ -363,6 +412,9 @@ export function loadConfig(configDir, opts = {}) {
     hubPublicKey: cfg.hubPublicKey,
     // 只给节点本地定时调度读。缺省由 resolveScheduleTz 解释成 Asia/Shanghai，这里不套宿主机时区。
     tz: cfg.tz,
+    maxConcurrent: Number.isInteger(Number(cfg.maxConcurrent)) && Number(cfg.maxConcurrent) >= 1 ? Number(cfg.maxConcurrent) : 4,
+    herdrSession: String(cfg.herdrSession ?? "").trim(),
+    herdrWorkspace: String(cfg.herdrWorkspace ?? "").trim() || "a2a-hub",
     busType,
     bus,
     configDir,

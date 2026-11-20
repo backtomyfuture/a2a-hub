@@ -803,6 +803,11 @@ export function renderWebConsoleHtml() {
           </label>
         </div>
       </div>
+      <div class="form-row" id="afPollIntervalRow">
+        <label>轮询间隔（分钟）</label>
+        <input class="input" id="afPollInterval" type="number" min="1" max="1440" value="5" />
+        <div class="hint">默认 5 分钟（Webhook 兜底默认 30 分钟，也可填 60 表示 1 小时）。中台按此间隔 × 1.5 判定该 Agent 是否在线。</div>
+      </div>
       <div class="form-row" id="afWebhookUrlRow" style="display:none;">
         <label>Webhook 回调 URL（必填）</label>
         <input class="input mono" type="url" id="afWebhookUrl" maxlength="2048" placeholder="https://example.com/a2a/webhook" />
@@ -2483,6 +2488,17 @@ function syncReceiveChoiceCards() {
     const row = document.getElementById(id);
     if (row) row.style.display = showWebhook ? "flex" : "none";
   }
+  const intervalRow = document.getElementById("afPollIntervalRow");
+  const showInterval = state.wizardAccess === "http" && (state.wizardReceive === "poll" || state.wizardReceive === "webhook");
+  if (intervalRow) intervalRow.style.display = showInterval ? "flex" : "none";
+  const intervalInput = document.getElementById("afPollInterval");
+  if (showInterval && intervalInput) {
+    const cur = String(intervalInput.value ?? "").trim();
+    // 仍是空或两种默认值时跟着接收方式切换；用户填过的 15、60 等保留。
+    if (cur === "" || cur === "5" || cur === "30") {
+      intervalInput.value = state.wizardReceive === "webhook" ? "30" : "5";
+    }
+  }
 }
 
 function openAgentModal() {
@@ -4009,6 +4025,13 @@ document.getElementById("agentStep2").addEventListener("submit", async (e) => {
       body.webhook_url = webhookUrl;
       body.webhook_key = webhookKey;
       if (webhookHeader) body.webhook_header = webhookHeader;
+    }
+    if (receive === "poll" || receive === "webhook") {
+      const rawInterval = document.getElementById("afPollInterval").value.trim();
+      const intervalMin = Number(rawInterval);
+      if (rawInterval !== "" && Number.isInteger(intervalMin) && intervalMin > 0) {
+        body.poll_interval_min = intervalMin;
+      }
     }
   }
 

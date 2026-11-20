@@ -14,6 +14,9 @@ import {
   ensureLeaderIdentityCards,
   formatAgentCard,
   isAdmitted,
+  parseCardMetadata,
+  presetHttpCardFields,
+  validatePollIntervalMin,
 } from "../src/hub/admission.mjs";
 import { AgentTokenStore } from "../src/hub/agent-tokens.mjs";
 import { createTask } from "../src/hub/create.mjs";
@@ -841,7 +844,70 @@ test("formatAgentCard 透出 manual / preset，供控制台判断能否删除", 
   const manual = formatAgentCard({ record_id: "r1", fields: { Cap_ID: "CAP-a-x", Node: "a", Metadata: JSON.stringify({ kind: "agent", manual: true }) } });
   assert.equal(manual.manual, true);
   assert.equal(manual.preset, false);
+  assert.equal(manual.poll_interval_min, null);
   const plain = formatAgentCard({ record_id: "r2", fields: { Cap_ID: "CAP-b-x", Node: "b", Metadata: "not-json" } });
   assert.equal(plain.manual, false);
   assert.equal(plain.preset, false);
+  assert.equal(plain.poll_interval_min, null);
+  const paced = formatAgentCard({ record_id: "r3", fields: { Cap_ID: "CAP-c-x", Node: "c", Metadata: JSON.stringify({ poll_interval_min: 60 }) } });
+  assert.equal(paced.poll_interval_min, 60);
+  assert.equal(parseCardMetadata(paced).poll_interval_min, null);
+  assert.equal(parseCardMetadata({ Metadata: { poll_interval_min: 15 } }).poll_interval_min, 15);
+});
+
+test("poll_interval_min 默认值、校验，以及接入提示词按分钟改写", () => {
+  assert.equal(validatePollIntervalMin(undefined, "poll"), 5);
+  assert.equal(validatePollIntervalMin(null, "webhook"), 30);
+  assert.equal(validatePollIntervalMin("", "longpoll"), null);
+  assert.equal(validatePollIntervalMin("60", "poll"), 60);
+  assert.throws(() => validatePollIntervalMin(0, "poll"), /poll_interval_min 必须是 1 到 1440 之间的整数/);
+  assert.throws(() => validatePollIntervalMin(1441, "webhook"), /1 到 1440/);
+  assert.throws(() => validatePollIntervalMin(1.5, "poll"), /1 到 1440/);
+
+  const pollCard = presetHttpCardFields({ node: "n", role: "worker", receiveMode: "http-poll" });
+  assert.equal(JSON.parse(pollCard.Metadata).poll_interval_min, 5);
+  const customCard = presetHttpCardFields({ node: "n", role: "worker", receiveMode: "http-poll", pollIntervalMin: 60 });
+  assert.equal(JSON.parse(customCard.Metadata).poll_interval_min, 60);
+  const hookCard = presetHttpCardFields({ node: "n", role: "worker", receiveMode: "webhook" });
+  assert.equal(JSON.parse(hookCard.Metadata).poll_interval_min, 30);
+  const loopCard = presetHttpCardFields({ node: "n", role: "leader", receiveMode: "http-longpoll" });
+  assert.equal(JSON.parse(loopCard.Metadata).poll_interval_min, undefined);
+
+  const slow = buildOnboarding({
+    hubUrl: "https://hub.example",
+    node: "grok-bot",
+    access: "http",
+    role: "worker",
+    receive: "poll",
+    pollIntervalMin: 60,
+  });
+  assert.match(slow.prompt, /每 60 分钟/);
+  assert.equal(slow.prompt.includes("每 5 分钟"), false);
+  assert.match(slow.steps.join("\n"), /每 60 分钟/);
+  assert.match(slow.prompt, /POST https:\/\/hub\.example\/api\/v1\/tasks\/<task_id>\/claim/);
+  assert.match(slow.prompt, /不要提前批量认领/);
+
+  const hook = buildOnboarding({
+    hubUrl: "https://hub.example",
+    node: "grok-bot",
+    access: "http",
+    role: "worker",
+    receive: "webhook",
+    pollIntervalMin: 15,
+  });
+  assert.match(hook.prompt, /每 15 分钟/);
+  assert.equal(hook.prompt.includes("每 30 分钟"), false);
+  assert.match(hook.steps.join("\n"), /每 15 分钟/);
+  assert.match(hook.prompt, /不要提前批量认领/);
+
+  const loop = buildOnboarding({
+    hubUrl: "https://hub.example",
+    node: "grok-bot",
+    access: "http",
+    role: "worker",
+    receive: "longpoll",
+    pollIntervalMin: 60,
+  });
+  assert.match(loop.prompt, /不要提前批量认领/);
+  assert.equal(loop.prompt.includes("每 60 分钟"), false);
 });

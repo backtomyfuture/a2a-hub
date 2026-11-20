@@ -22,6 +22,7 @@ import {
   validateAccess,
   validateAdmission,
   validateNodeName,
+  validatePollIntervalMin,
   validateProfileFields,
   validateReceive,
   validateRole,
@@ -254,6 +255,19 @@ export async function startHubHttpServer({
     } catch (err) {
       // 补建失败不能挡住 Hub 起来；下一轮启动会再试，已有名片不会被覆盖。
       log(`补建 leader 身份名片失败：${err?.message ?? err}`);
+    }
+  }
+  // 启动时将名片已保存的 poll_interval_min 预同步到 Broker，避免重启后首次 Webhook 投递回落到默认窗口。
+  if (broker?.setNodePollInterval && bus?.tables?.agentCards && typeof bus.listRecords === "function") {
+    try {
+      const bootCards = await bus.listRecords(bus.tables.agentCards);
+      for (const card of bootCards) {
+        const nodeName = f1(card, "Node");
+        const intervalMin = parseCardMetadata(card).poll_interval_min;
+        if (nodeName && intervalMin > 0) broker.setNodePollInterval(nodeName, intervalMin);
+      }
+    } catch (err) {
+      log(`同步名片轮询间隔失败：${err?.message ?? err}`);
     }
   }
   const runtimePath = cfg?.configDir ? path.join(cfg.configDir, "hub_runtime.json") : "";
@@ -1077,8 +1091,10 @@ export async function startHubHttpServer({
         let webhookUrl = "";
         let webhookKey = "";
         let webhookHeader = "Authorization";
+        let pollIntervalMin = null;
         if (access === "http") {
           receive = validateReceive(body?.receive);
+          pollIntervalMin = validatePollIntervalMin(body?.poll_interval_min, receive);
           if (receive === "webhook") {
             webhookUrl = validateWebhookUrl(body?.webhook_url);
             webhookKey = validateWebhookKey(body?.webhook_key ?? body?.key, { required: true });
@@ -1113,6 +1129,7 @@ export async function startHubHttpServer({
             adminNote,
             availability: "offline",
             updatedAt: nowMinute(),
+            pollIntervalMin,
           });
           const existing = await bus.listRecords(bus.tables.agentCards);
           if (existing.some((r) => f1(r, "Cap_ID") === fields.Cap_ID)) {
@@ -1151,7 +1168,9 @@ export async function startHubHttpServer({
           authRequired: Boolean(apiToken) || Boolean(issued),
           token: issued?.token || "",
           receive,
+          pollIntervalMin,
         });
+        if (access === "http") broker?.setNodePollInterval?.(node, pollIntervalMin);
         const payload = { ok: true, node, card, onboarding };
         if (issued) payload.token = issued.token;
         if (webhookPayload) payload.webhook = webhookPayload;
@@ -1196,6 +1215,9 @@ export async function startHubHttpServer({
         const access = validateAccess(reqUrl.searchParams.get("access"));
         const role = validateRole(reqUrl.searchParams.get("role"));
         const receive = access === "http" ? validateReceive(reqUrl.searchParams.get("receive")) : "poll";
+        const pollIntervalMin = reqUrl.searchParams.has("poll_interval_min")
+          ? validatePollIntervalMin(reqUrl.searchParams.get("poll_interval_min"), receive)
+          : undefined;
         const onboarding = buildOnboarding({
           hubUrl: requestHubUrl(req),
           node,
@@ -1203,6 +1225,7 @@ export async function startHubHttpServer({
           role,
           authRequired: Boolean(apiToken) || Boolean(tokenStore?.hasAny()),
           receive,
+          pollIntervalMin,
         });
         sendJson(res, 200, { onboarding });
         return;
@@ -1240,6 +1263,14 @@ export async function startHubHttpServer({
         const issued = tokenStore.rotate({ node, role, scopes });
         const storedReceive = nodeStoredReceiveMode(cards, node);
         const receive = storedReceive === "http-longpoll" ? "longpoll" : (storedReceive === "webhook" ? "webhook" : "poll");
+        let pollIntervalMin = null;
+        for (const card of cards) {
+          if (f1(card, "Node") !== node) continue;
+          const stored = parseCardMetadata(card).poll_interval_min;
+          if (!stored) continue;
+          pollIntervalMin = stored;
+          if (f1(card, "Receive_Mode") === storedReceive) break;
+        }
         const onboarding = buildOnboarding({
           hubUrl: requestHubUrl(req),
           node,
@@ -1248,6 +1279,7 @@ export async function startHubHttpServer({
           authRequired: true,
           token: issued.token,
           receive,
+          pollIntervalMin,
         });
         sendJson(res, 200, { token: issued.token, onboarding });
         return;

@@ -36,6 +36,8 @@
 - `longPollSec`：长轮询单次挂起秒数（默认 `25`）；`pollSec`（默认 `45`）是 `poll` 模式的定时轮询间隔；`sweepSec`（默认 `900`，即 15 分钟）是对账兜底。
 - `hubPublicKey`：hub 的审批签名公钥（base64）。`ah join` 会从 `GET /api/v1/health` 自动拉取写入；配了它，本节点只认 hub 私钥签过的 `auth_decision`。hub 自己私钥在配置目录 `approval_key.pem`（600，首次启动自动生成），公钥由私钥推出。详见 [SECURITY.md](../SECURITY.md)。
 - `tz`：IANA 时区名，缺省 `Asia/Shanghai`。决定本地定时调度的 cron 墙钟与期次键偏移，与宿主机时区及系统 `TZ` 环境变量无关。
+- `maxConcurrent`：可选正整数，默认 `4`。控制 `context: "herdr"` 宿主机节点的最大并发槽位数（`working` 与处于 `input-required` / `auth-required` 的驻留 Pane 均计入占槽）。`ah setup` 检测到本机安装 `herdr` 时自动写入 `4`。
+- `herdrSession` / `herdrWorkspace`：可选。指定 `herdr` 的 `--session <name>`（缺省使用默认 session）及任务工作区标签（默认 `"a2a-hub"`）。
 
 ## 3. 机器类型：host 与 agent
 
@@ -106,7 +108,10 @@ Worker 条目与节点本尊的技能条目可用的字段：
 |---|---|
 | `command` | 命令模板。agent 模式含 `{prompt}` |
 | `mode` | `agent`（默认）纯文本输出＋结构化回执；`json` 脚本类，stdin 收信封、stdout 最后一行出结果；`inbox` 交给本尊收件箱 |
-| `context` | 只有 `direct`（默认，可省略，守护进程直接拉起）。取值非法时任务直接 `rejected`，不静默降级 |
+| `context` | 支持 `direct`（默认，守护进程直接拉起单槽子进程）与 `herdr`（借本机 `herdr` 终端复用器为每个任务开独立 Tab/Pane，支持 `maxConcurrent` 多槽并行与多轮交互热驻留）。取值非法时任务直接 `rejected`，不静默降级 |
+| `herdr_kind` | `context=herdr` 时传给 `herdr agent start --kind <kind>` 的交互式 Agent 类型（如 `claude`、`codex`、`agy`、`gemini`、`amp`、`droid`、`grok`、`hermes`、`cursor`、`opencode`）。缺省可从 Worker 名或 `command` 首词推导 |
+| `herdr_args` | 可选字符串数组。`context=herdr` 时附在 `herdr agent start ... -- <args...>` 后的额外参数 |
+| `herdr_env` | 可选对象（`{ KEY: "VAL" }`）。`context=herdr` 创建 Tab 时通过 `--env` 注入的自定义环境变量（内核固定注入 `AH_TASK_ID` / `AH_NODE` / `AH_WORKER` / `AH_RUN_DIR` / `AH_INPUT_PATH` / `AH_RECEIPT_PATH`） |
 | `timeout_sec` | 单次执行上限，默认 600 |
 | `verify` | 可选。一条本机 shell 命令，与 `command` 同一可信等级，原样执行，不做 `{prompt}` / `{session}` 替换。只支持 `context=direct` 的 `json` / `agent`。Skill 条目优先，Skill 未写时用其 Worker 条目的值。`mode=inbox` 写了是配置错误：认领预检 `rejected` + notice，`ah doctor` 报问题，不静默忽略。命令必须只读、可重复。执行者的数据不拼进命令，只经两条通道：stdin 一行 JSON `{"task_id","summary","artifact","artifact_name","checks"}`，以及环境变量 `AH_TASK_ID`、`AH_ARTIFACT`、`AH_RUN_DIR`、`AH_MAIN_STDOUT` |
 | `verify_timeout_sec` | 可选正数，缺省 120，夹紧到 1–1800。继承规则同 `verify` |
@@ -313,7 +318,7 @@ ah task begin --schedule <id> [--period <期次键>] [--cap <cap_id>] [--text <�
 | `ah schedule enable\|disable <id> [--config <dir>]` | 启用/停用本机计划 |
 | `ah schedule register --id <id> --cron "<五段>" --cap <cap_id> [--text <指令>]` | 登记 Agent 观察镜像（不写本机计划） |
 | `ah present [--pop] [--task <Task_ID>] [--wait <秒>]` | 读取本机发起任务的回执队列。`--wait` 阻塞到出现匹配回执（超时退出码 2）；`--pop` 只移除本次输出的条目 |
-| `ah inbox [--pop] [--json]` | `kind=agent` 接单 |
+| `ah inbox [--pop] [--limit <n>] [--json]` | `kind=agent` 接单（`--limit <n>` 可限制本次弹出条数） |
 | `ah inbox done\|ask\|fail\|auth --task <id> --text …` | 完单（可重复 `--artifact <路径或URL>`、`--check <id>=<pass\|fail\|blocked>[:证据]`）、追问（可重复 `--file`）、失败、执行中请求审批回执（可重复 `--file`） |
 
 回执队列 `present_queue.jsonl` 旁边的 `present_bell` 仍会在有新回执落盘时刷新 mtime，供想低成本感知的 Hook 使用。`ah present --wait` 不依赖门铃，直接轮询队列文件。
@@ -382,7 +387,7 @@ api backoff reason=http-429 kind=list retry=1/3 wait=2s
   - `ah setup --role hub --bus sqlite [--listen 0.0.0.0:8787] [--db-path ./hub.db] [--public-url http://...] [--api-token <token>] [--yes]`
   - `ah setup --role node --bus http --hub-url http://<HUB>:8787 --api-token <token> [--hub-key <pubkey>] [--yes]`
   - `ah setup --bus agent --agent-role leader --hub-url http://<HUB>:8787 --token-file ~/.a2a-hub-leader/token --node leader-1 --config ~/.a2a-hub-leader-1 --yes`
-- **纯 HTTP 外部 Agent（Muse Leader / Grok Bot 等无守护进程 Agent）**：在控制台添加并复制分 Agent Token，存进平台安全密钥空间 `A2A_HUB_TOKEN`。角色是 `worker`（只接单）或 `leader`（派单并接单）。`hybrid` 为旧值，等同 `leader`；新签发不再写出 `hybrid`。`access=http` 时选一种接收方式：定时检查（默认，`receive=poll`，名片 `Receive_Mode=http-poll`）、常驻长轮询（`longpoll` → `http-longpoll`）或 Webhook 门铃（`webhook`，必填对方的 URL 与密钥）。定时检查是每 5 分钟跑 `a2a_check.py`；输出 `IDLE` 就结束，输出 `WORK` 再按【处理流程】执行 `poll?timeout=0` 或 `updates?new=1`。跑不了脚本时也是每 5 分钟。常驻长轮询不跑检查脚本。Webhook 由接收端验签后再拉详情，另每 30 分钟跑一次检查脚本兜底。无需安装本地 `ah` 进程。控制台的在线判定按 Hub 观测到的唤醒周期放宽：距上次报到不超过周期的 2.5 倍算在线（下限 3 分钟）。定时检查未观测到周期时按 5 分钟 × 2.5 = 12.5 分钟，上限 30 分钟。Webhook 不探测回调地址：检查脚本报到或 2xx 投递（含机主点测试）算活动，失败投递不算；成功投递不计入唤醒周期。未观测到周期时按 30 分钟兜底 × 2.5 = 75 分钟，上限也是 75 分钟，避免被名册 30 分钟闲置期限截断。最近一次投递失败且之后没有这些活动时，节点圆点用警示色，在线文字仍按窗口显示。长轮询的宿主节点仍是 90 秒。三种方式怎么选、门铃怎么验签，见 [外部 HTTP Agent 手册](protocol-node-runbook.md)。
+- **纯 HTTP 外部 Agent（Muse Leader / Grok Bot 等无守护进程 Agent）**：在控制台添加并复制分 Agent Token，存进平台安全密钥空间 `A2A_HUB_TOKEN`。角色是 `worker`（只接单）或 `leader`（派单并接单）。`hybrid` 为旧值，等同 `leader`；新签发不再写出 `hybrid`。`access=http` 时选一种接收方式：定时检查（默认，`receive=poll`，名片 `Receive_Mode=http-poll`）、常驻长轮询（`longpoll` → `http-longpoll`）或 Webhook 门铃（`webhook`，必填对方的 URL 与密钥）。添加或注册时可配置分钟级轮询间隔 `poll_interval_min`（`1–1440` 整数分钟，定时检查默认 `5`，Webhook 兜底默认 `30`，支持 60 分钟等长周期），持久化在名片 `Metadata.poll_interval_min` 并动态写入接入提示词。定时检查按设定间隔跑 `a2a_check.py`；输出 `IDLE` 就结束，输出 `WORK` 再按【处理流程】执行 `poll?timeout=0` 或 `updates?new=1`。常驻长轮询不跑检查脚本。Webhook 由接收端验签后再拉详情，另按兜底间隔跑检查脚本防漏推。无需安装本地 `ah` 进程。控制台的在线判定统一按 **「轮询间隔 × 1.5」** 计算：显式配置了 `poll_interval_min` 时直接取 `poll_interval_min × 60s × 1.5`（如 60 分钟 → 90 分钟，不被 30 分钟名册闲置期限截断，也不被 3 分钟下限强行拉长）；未配置时，定时检查默认 5 × 1.5 = 7.5 分钟（观测到周期后按观测值 × 1.5，上限 30 分钟），Webhook 固定按 30 × 1.5 = 45 分钟。Hub 启动时预加载名片中的 `poll_interval_min` 至内存 Broker，确保重启后首次 Webhook 投递或 `updates` 调用均套用正确窗口。长轮询的宿主节点仍是 90 秒。三种方式怎么选、门铃怎么验签，见 [外部 HTTP Agent 手册](protocol-node-runbook.md)。
 
 ### 7.3 LoopForge SOP 多阶段闭环 CLI（`ah loop`）
 
@@ -439,9 +444,9 @@ ah loop cancel <Loop_ID> [--text "说明"] [--config <dir>]
 | `POST /api/v1/admin/cards` | 给已存在的 http 节点加一张已接纳能力。body：`node`、`skill_id`（规则同节点名，不能是保留键 `workers`）、可选 `worker`、`skill_name`、`description`、`side_effect`（`read`/`write`，默认 `write`）、`approval_class`（`auto`/`notify`/`approve`，默认 `auto`）、`display_name`、`admin_note`。`Cap_ID` 与 `register` 相同。`Receive_Mode`、Availability 沿用该节点现有名片。Metadata 含 `kind:"agent"`、`manual:true`、`preset:true`。已存在 409；节点不存在 404；宿主节点 409，并尽量附上 `snippet` / `text` / `hint`。成功 201 |
 | `DELETE /api/v1/admin/cards/:capId` | 只删 `Metadata.manual` 或 `preset` 的 http 名片，响应 `{ok:true}`。宿主名片 409。仅机主 |
 | `POST /api/v1/admin/commands-snippet` | 生成可合并进 `commands.json` 的片段，不下发。有 `worker` 时条目含 `workers`；否则必须有 `command`，`mode` 为 `agent` 或 `json`。响应 `{snippet, text, hint}`。仅机主 |
-| `POST /api/v1/admin/agents` | 添加 Agent。`access=http` 时可选 `receive`（`poll`/`longpoll`/`webhook`，默认 `poll`）。`receive=webhook` 时 `webhook_url` 与 `webhook_key` 必填，`webhook_header` 可选（默认 `Authorization`）。角色 `worker` 或 `leader`；传入 `hybrid` 时按 `leader` 签发。一并签发 Token，并预建已接纳的 `CAP-<node>-agent`（`Dispatchable=Yes`）。响应含一次性明文 `token` 与 `onboarding`；Webhook 另含 `webhook:{url, header, secret_mask, legacy}`，不含明文。该节点已有 Token 则 `409`，改走轮换。`access` 不是 `http` 时忽略 `receive`。接收方式在这里选定，没有单独的切换接口 |
+| `POST /api/v1/admin/agents` | 添加 Agent。`access=http` 时可选 `receive`（`poll`/`longpoll`/`webhook`，默认 `poll`）与 `poll_interval_min`（`1–1440` 整数分钟，默认 `poll` 为 `5`、`webhook` 为 `30`、`longpoll` 为 `null`）。`receive=webhook` 时 `webhook_url` 与 `webhook_key` 必填，`webhook_header` 可选（默认 `Authorization`）。角色 `worker` 或 `leader`；传入 `hybrid` 时按 `leader` 签发。一并签发 Token，并预建已接纳的 `CAP-<node>-agent`（`Dispatchable=Yes`，`Metadata.poll_interval_min` 同步写入并通知 Broker）。响应含一次性明文 `token` 与 `onboarding`；Webhook 另含 `webhook:{url, header, secret_mask, legacy}`，不含明文。该节点已有 Token 则 `409`，改走轮换。`access` 不是 `http` 时忽略 `receive`。接收方式在这里选定，没有单独的切换接口 |
 | `DELETE /api/v1/admin/agents/:node` | 删除 Agent：先吊销该节点 Token，再删 Webhook 与全部名片，并从在线名册移除。响应含 `tokenRevoked`、`webhookRemoved`、`cardsRemoved`。历史任务与消息保留；`openTasks` 是仍指向它的未结束任务数，需要另行撤销。不能删 Hub 本机；宿主节点要先停掉它的 `ah` 服务，否则下次对账会重新登记名片。什么都没找到时 `404` |
-| `GET /api/v1/admin/onboarding` | 只生成接入提示词，不写表。查询参数增加 `receive`（仅 `access=http`，默认 `poll`）与 `role`（`worker` / `leader`；`hybrid` 按 leader 生成，返回的 `role` 仍是请求值）。未附带刚签发的 Token 时，提示词里是占位符 `<AH_API_TOKEN>`。提示词不包含 Webhook 密钥 |
+| `GET /api/v1/admin/onboarding` | 只生成接入提示词，不写表。查询参数支持 `receive`（仅 `access=http`，默认 `poll`）、`poll_interval_min`（`1–1440` 整数分钟）与 `role`（`worker` / `leader`；`hybrid` 按 leader 生成，返回的 `role` 仍是请求值）。未附带刚签发的 Token 时，提示词里是占位符 `<AH_API_TOKEN>`。提示词不包含 Webhook 密钥 |
 | `GET /api/v1/admin/webhooks` | 仅机主。`{webhooks:[{node, url, header, secret_mask, legacy, created_at, updated_at, last_status, last_error, last_delivered_at, last_attempt_at}]}`，无明文。`last_attempt_at` 是最近一次尝试（含失败）；`last_delivered_at` 只在 2xx 时更新 |
 | `PUT /api/v1/admin/webhooks/:node` | 仅机主。当前 `Receive_Mode` 不是 `webhook` 时 `409`（该节点的接收方式不是 Webhook，不能登记推送）。是 `webhook` 时 body `{url, key? 或 webhook_key?, header? 或 webhook_header?}` 可改 URL 或密钥。新建必须带密钥。更新时密钥留空表示不变。没有 `header` 字段的旧记录只改头名不会开始发送 `Authorization`。`rotate_secret` 忽略。响应 `{ok, webhook}` 用列表同一形状，不含明文 |
 | `DELETE /api/v1/admin/webhooks/:node` | 仅机主。没有记录则 404，成功 `{ok:true}`。同时把该节点名片的接收方式改回 `http-poll` |
