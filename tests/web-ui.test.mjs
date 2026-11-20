@@ -58,17 +58,17 @@ test("控制台包含新术语结构、接收方式、添加能力、闭环分�
   assert.match(html, /技术详情/);
   assert.match(html, /展开能力/);
 
-  // 三步添加 Agent 向导：接收方式预设（通用/WorkBuddy/Muse/Grok Bot/长连接/自建 Webhook）、host/inbox 常驻长连接说明、Webhook Secret 提示
+  // 三步添加 Agent 向导：保留 3 种接收方式卡片 + 节点模板注册表（通用/WorkBuddy/Muse/Grok Bot）
   assert.match(html, /选择接入类型/);
   assert.match(html, /填写名字与角色/);
   assert.match(html, /id="afTemplatePreset"/);
   assert.match(html, /const AGENT_TEMPLATES = /);
-  assert.match(html, /通用 · 定时检查（poll，默认）/);
-  assert.match(html, /WorkBuddy 云端版（定时任务）/);
-  assert.match(html, /Muse（临时云 VM，高保活）/);
-  assert.match(html, /Grok Bot（Webhook 门铃）/);
-  assert.match(html, /常驻长连接（longpoll，自建进程）/);
-  assert.match(html, /Webhook 推送（自建接收端）/);
+  assert.match(html, /定时检查（poll，默认）/);
+  assert.match(html, /常驻长连接（longpoll）/);
+  assert.match(html, /Webhook 推送（webhook）/);
+  assert.match(html, /WorkBuddy 云端版/);
+  assert.match(html, /Muse（临时云 VM）/);
+  assert.match(html, /Grok Bot（Webhook）/);
   assert.match(html, /id="afPollIntervalRow"/);
   assert.match(html, /轮询间隔（分钟）/);
   assert.match(html, /id="afPollInterval"[^>]*type="number"[^>]*min="1"[^>]*max="1440"[^>]*value="5"/);
@@ -203,6 +203,15 @@ function runInlineConsole(fetchHandler, extra = {}) {
       if (id === "acSideEffect") el.value = "write";
       if (id === "acApproval") el.value = "auto";
       if (id === "acMode") el.value = "agent";
+      if (id === "agentStep2") {
+        el.reset = () => {
+          for (const fid of ["afNode", "afName", "afDesc", "afNote", "afWebhookUrl", "afWebhookKey", "afWebhookHeader"]) {
+            if (elements.has(fid)) elements.get(fid).value = "";
+          }
+          if (elements.has("afRole")) elements.get("afRole").value = "worker";
+          if (elements.has("afPollInterval")) elements.get("afPollInterval").value = "5";
+        };
+      }
       elements.set(id, el);
     }
     return elements.get(id);
@@ -574,38 +583,59 @@ test("控制台内嵌脚本：节点分层渲染、stageBindings 闭环提交、
   assert.equal(hourlyPost.body.receive, "poll");
   assert.equal(hourlyPost.body.poll_interval_min, 60);
 
-  // 6) Step 2 节点模板下拉框：数据驱动渲染、选模板自动带出参数、选「自定义」展开手动接收方式、host 隐藏模板
+  // 6) Step 2 节点模板下拉框：保持 3 种接收方式卡片可见，选模板自动选中其中一种并填入所有可填参数的默认参考值
   await vm.runInContext('openAgentModal(); state.wizardAccess = "http";', sandbox);
   await getEl("agentNextBtn").dispatch("click");
   assert.equal(getEl("afTemplateRow").style.display, "flex");
-  assert.equal(getEl("afReceiveGroup").style.display, "none");
+  assert.equal(getEl("afReceiveGroup").style.display, "flex");
   assert.equal(getEl("afTemplatePreset").value, "generic-poll");
   assert.ok(getEl("afTemplatePreset").options.some((o) => o.value === "__custom__"));
+  assert.equal(getEl("afNode").value, "cloud-agent");
+  assert.equal(getEl("afName").value, "云端通用助手");
+  assert.ok(getEl("afDesc").value.length > 0);
+  assert.ok(getEl("afNote").value.length > 0);
   assert.equal(getEl("afPollInterval").value, "5");
 
   getEl("afTemplatePreset").value = "workbuddy";
   await getEl("afTemplatePreset").dispatch("change");
-  assert.equal(getEl("afPollInterval").value, "30");
-  assert.equal(getEl("afReceiveGroup").style.display, "none");
+  assert.equal(getEl("afReceiveGroup").style.display, "flex");
   assert.equal(vm.runInContext("state.wizardReceive", sandbox), "poll");
+  assert.equal(getEl("afNode").value, "workbuddy-cloud");
+  assert.equal(getEl("afName").value, "WorkBuddy 云端助手");
+  assert.equal(getEl("afPollInterval").value, "30");
 
   getEl("afTemplatePreset").value = "grok-bot";
   await getEl("afTemplatePreset").dispatch("change");
+  assert.equal(getEl("afReceiveGroup").style.display, "flex");
   assert.equal(vm.runInContext("state.wizardReceive", sandbox), "webhook");
   assert.equal(vm.runInContext("state.wizardTemplate", sandbox), "grok-bot");
+  assert.equal(getEl("afNode").value, "grok-bot");
+  assert.equal(getEl("afName").value, "Grok Bot 助手");
+  assert.equal(getEl("afWebhookHeader").value, "Authorization");
   assert.equal(getEl("afWebhookUrlRow").style.display, "flex");
   assert.equal(getEl("afPollInterval").value, "30");
 
   getEl("afTemplatePreset").value = "muse";
   await getEl("afTemplatePreset").dispatch("change");
+  assert.equal(getEl("afReceiveGroup").style.display, "flex");
   assert.equal(vm.runInContext("state.wizardReceive", sandbox), "longpoll");
   assert.equal(vm.runInContext("state.wizardTemplate", sandbox), "muse");
+  assert.equal(getEl("afNode").value, "muse-vm");
+  assert.equal(getEl("afName").value, "Muse 云端 VM");
   assert.equal(getEl("afWebhookUrlRow").style.display, "none");
   assert.equal(getEl("afPollIntervalRow").style.display, "none");
+
+  // 用户手工修改过的字段，切换模板时不被覆盖
+  getEl("afNode").value = "my-custom-node";
+  getEl("afTemplatePreset").value = "workbuddy";
+  await getEl("afTemplatePreset").dispatch("change");
+  assert.equal(getEl("afNode").value, "my-custom-node");
+  assert.equal(getEl("afName").value, "WorkBuddy 云端助手");
 
   getEl("afTemplatePreset").value = "__custom__";
   await getEl("afTemplatePreset").dispatch("change");
   assert.equal(getEl("afReceiveGroup").style.display, "flex");
+  assert.equal(vm.runInContext("state.wizardTemplate", sandbox), "generic");
 
   await vm.runInContext('openAgentModal(); state.wizardAccess = "host";', sandbox);
   await getEl("agentNextBtn").dispatch("click");

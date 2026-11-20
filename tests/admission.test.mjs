@@ -982,8 +982,8 @@ test("poll_interval_min 默认值、校验，以及接入提示词按分钟改�
   assert.equal(loop.prompt.includes("每 60 分钟"), false);
 });
 
-test("AGENT_TEMPLATE_PRESETS 注册表字段合法且与后端约束一致", () => {
-  assert.ok(Array.isArray(AGENT_TEMPLATE_PRESETS) && AGENT_TEMPLATE_PRESETS.length >= 6);
+test("AGENT_TEMPLATE_PRESETS 注册表字段合法、含默认参考值且与后端约束一致", () => {
+  assert.ok(Array.isArray(AGENT_TEMPLATE_PRESETS) && AGENT_TEMPLATE_PRESETS.length >= 4);
   const ids = new Set();
   for (const preset of AGENT_TEMPLATE_PRESETS) {
     assert.ok(preset.id && typeof preset.id === "string");
@@ -995,5 +995,6 @@ test("AGENT_TEMPLATE_PRESETS 注册表字段合法且与后端约束一致", () 
     assert.ok(RECEIVE_VALUES.includes(preset.receive));
     assert.ok(ROLE_VALUES.includes(preset.role));
     assert.equal(receiveForTemplate(preset.template, preset.receive), preset.receive);
+    assert.ok(preset.defaults && preset.defaults.node && preset.defaults.displayName && preset.defaults.description && preset.defaults.adminNote);
   }
 });
