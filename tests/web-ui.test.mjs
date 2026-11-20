@@ -61,6 +61,8 @@ test("控制台包含新术语结构、接收方式、添加能力、闭环分�
   // 三步添加 Agent 向导：接收方式预设（通用/WorkBuddy/Muse/Grok Bot/长连接/自建 Webhook）、host/inbox 常驻长连接说明、Webhook Secret 提示
   assert.match(html, /选择接入类型/);
   assert.match(html, /填写名字与角色/);
+  assert.match(html, /id="afTemplatePreset"/);
+  assert.match(html, /const AGENT_TEMPLATES = /);
   assert.match(html, /通用 · 定时检查（poll，默认）/);
   assert.match(html, /WorkBuddy 云端版（定时任务）/);
   assert.match(html, /Muse（临时云 VM，高保活）/);
@@ -143,6 +145,7 @@ function runInlineConsole(fetchHandler, extra = {}) {
     }
     set innerHTML(v) {
       this._innerHTML = String(v ?? "");
+      this.children = [];
       if (this.tagName === "SELECT") {
         const opts = [];
         const re = /<option[^>]*value="([^"]*)"[^>]*>/g;
@@ -168,7 +171,12 @@ function runInlineConsole(fetchHandler, extra = {}) {
     querySelectorAll() { return []; }
     querySelector() { return null; }
     closest() { return null; }
-    appendChild(c) { this.children.push(c); }
+    appendChild(c) {
+      this.children.push(c);
+      if (this.tagName === "SELECT" && c.tagName === "OPTION") {
+        this.options.push(c);
+      }
+    }
     removeChild(c) { this.children = this.children.filter((x) => x !== c); }
     click() { if (typeof extra.onAnchorClick === "function") extra.onAnchorClick(this); }
     reset() { this.value = ""; }
@@ -184,6 +192,7 @@ function runInlineConsole(fetchHandler, extra = {}) {
     acApproval: "select",
     acMode: "select",
     afRole: "select",
+    afTemplatePreset: "select",
   };
   function getEl(id) {
     if (!elements.has(id)) {
@@ -564,6 +573,44 @@ test("控制台内嵌脚本：节点分层渲染、stageBindings 闭环提交、
   assert.equal(hourlyPost.body.node, "hourly-bot");
   assert.equal(hourlyPost.body.receive, "poll");
   assert.equal(hourlyPost.body.poll_interval_min, 60);
+
+  // 6) Step 2 节点模板下拉框：数据驱动渲染、选模板自动带出参数、选「自定义」展开手动接收方式、host 隐藏模板
+  await vm.runInContext('openAgentModal(); state.wizardAccess = "http";', sandbox);
+  await getEl("agentNextBtn").dispatch("click");
+  assert.equal(getEl("afTemplateRow").style.display, "flex");
+  assert.equal(getEl("afReceiveGroup").style.display, "none");
+  assert.equal(getEl("afTemplatePreset").value, "generic-poll");
+  assert.ok(getEl("afTemplatePreset").options.some((o) => o.value === "__custom__"));
+  assert.equal(getEl("afPollInterval").value, "5");
+
+  getEl("afTemplatePreset").value = "workbuddy";
+  await getEl("afTemplatePreset").dispatch("change");
+  assert.equal(getEl("afPollInterval").value, "30");
+  assert.equal(getEl("afReceiveGroup").style.display, "none");
+  assert.equal(vm.runInContext("state.wizardReceive", sandbox), "poll");
+
+  getEl("afTemplatePreset").value = "grok-bot";
+  await getEl("afTemplatePreset").dispatch("change");
+  assert.equal(vm.runInContext("state.wizardReceive", sandbox), "webhook");
+  assert.equal(vm.runInContext("state.wizardTemplate", sandbox), "grok-bot");
+  assert.equal(getEl("afWebhookUrlRow").style.display, "flex");
+  assert.equal(getEl("afPollInterval").value, "30");
+
+  getEl("afTemplatePreset").value = "muse";
+  await getEl("afTemplatePreset").dispatch("change");
+  assert.equal(vm.runInContext("state.wizardReceive", sandbox), "longpoll");
+  assert.equal(vm.runInContext("state.wizardTemplate", sandbox), "muse");
+  assert.equal(getEl("afWebhookUrlRow").style.display, "none");
+  assert.equal(getEl("afPollIntervalRow").style.display, "none");
+
+  getEl("afTemplatePreset").value = "__custom__";
+  await getEl("afTemplatePreset").dispatch("change");
+  assert.equal(getEl("afReceiveGroup").style.display, "flex");
+
+  await vm.runInContext('openAgentModal(); state.wizardAccess = "host";', sandbox);
+  await getEl("agentNextBtn").dispatch("click");
+  assert.equal(getEl("afTemplateRow").style.display, "none");
+  assert.equal(getEl("afReceiveGroup").style.display, "none");
 });
 
 test("控制台对尚未合入的后端接口（404）给出友好降级提示而非报错白屏", async () => {

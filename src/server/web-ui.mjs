@@ -1,6 +1,8 @@
 // 内置 Web 控制台（零外部构建依赖、无外网 CDN 依赖，局域网/离线可用）。
 // 面向非开发者机主视角设计：用大白话表达状态与操作，把技术参数折叠在高级/技术详情中。
 
+import { AGENT_TEMPLATE_PRESETS } from "../hub/admission.mjs";
+
 export function renderWebConsoleHtml() {
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -761,6 +763,11 @@ export function renderWebConsoleHtml() {
     </div>
 
     <form id="agentStep2" style="display:none;">
+      <div class="form-row" id="afTemplateRow">
+        <label>节点模板</label>
+        <select class="input" id="afTemplatePreset"></select>
+        <div class="hint" id="afTemplateHint"></div>
+      </div>
       <div class="form-row">
         <label>节点标识（英文/数字，用于系统唯一识别）</label>
         <input class="input mono" id="afNode" placeholder="例如 muse-leader 或 grok-bot" required />
@@ -777,7 +784,7 @@ export function renderWebConsoleHtml() {
           <option value="leader">派单并接单 (Leader)</option>
         </select>
       </div>
-      <div class="form-row" id="afReceiveGroup">
+      <div class="form-row" id="afReceiveGroup" style="display:none;">
         <label>接收方式（HTTP 接入方式）</label>
         <div class="choice-list" id="receiveChoices" style="margin-bottom:0;">
           <label class="choice-card selected" data-receive="poll" data-template="generic" data-preset="">
@@ -1051,6 +1058,9 @@ export function renderWebConsoleHtml() {
 <div class="toast" id="toast"></div>
 
 <script>
+// 节点模板注册表（服务端数据驱动，可扩展；新增模板只需改 admission.mjs 的 AGENT_TEMPLATE_PRESETS）
+const AGENT_TEMPLATES = ${JSON.stringify(AGENT_TEMPLATE_PRESETS).replace(/</g, "\\u003c")};
+
 (() => {
   try {
     const params = new URLSearchParams(location.search);
@@ -2524,6 +2534,53 @@ function syncReceiveChoiceCards() {
       intervalInput.value = state.wizardReceive === "webhook" || state.wizardPreset === "workbuddy" ? "30" : "5";
     }
   }
+}
+
+// 按 Step 1 选的接入类型渲染「节点模板」下拉框（数据来自 AGENT_TEMPLATES，可扩展）；没有匹配模板时整行隐藏。
+function renderTemplateOptions() {
+  const row = document.getElementById("afTemplateRow");
+  const sel = document.getElementById("afTemplatePreset");
+  const list = AGENT_TEMPLATES.filter((t) => t.access === state.wizardAccess);
+  sel.innerHTML = "";
+  if (!list.length) {
+    row.style.display = "none";
+    document.getElementById("afReceiveGroup").style.display = "none";
+    return;
+  }
+  row.style.display = "flex";
+  for (const t of list) {
+    const opt = document.createElement("option");
+    opt.value = t.id;
+    opt.textContent = t.label;
+    sel.appendChild(opt);
+  }
+  const custom = document.createElement("option");
+  custom.value = "__custom__";
+  custom.textContent = "自定义（手动选择接收方式）";
+  sel.appendChild(custom);
+  sel.value = list[0].id;
+  applyTemplatePreset();
+}
+
+// 选中模板后自动带出角色、接收方式、轮询间隔；选「自定义」才展开接收方式卡片手动选。
+function applyTemplatePreset() {
+  const id = document.getElementById("afTemplatePreset").value;
+  const hint = document.getElementById("afTemplateHint");
+  const group = document.getElementById("afReceiveGroup");
+  const t = AGENT_TEMPLATES.find((x) => x.id === id);
+  if (!t) {
+    group.style.display = "flex";
+    hint.textContent = "手动选择下面的接收方式。";
+    return;
+  }
+  group.style.display = "none";
+  hint.textContent = t.hint || "";
+  state.wizardReceive = t.receive || "poll";
+  state.wizardTemplate = t.template || "generic";
+  state.wizardPreset = t.preset || "";
+  if (t.role) document.getElementById("afRole").value = t.role;
+  syncReceiveChoiceCards();
+  if (t.interval != null) document.getElementById("afPollInterval").value = String(t.interval);
 }
 
 function openAgentModal() {
@@ -4000,11 +4057,11 @@ document.getElementById("receiveChoices").addEventListener("click", (e) => {
 });
 document.getElementById("agentNextBtn").addEventListener("click", () => {
   setWizardStep(2);
-  const isHttp = state.wizardAccess === "http";
-  document.getElementById("afReceiveGroup").style.display = isHttp ? "flex" : "none";
-  document.getElementById("afDescRow").style.display = isHttp ? "flex" : "none";
+  document.getElementById("afDescRow").style.display = state.wizardAccess === "http" ? "flex" : "none";
+  renderTemplateOptions();
   syncReceiveChoiceCards();
 });
+document.getElementById("afTemplatePreset").addEventListener("change", applyTemplatePreset);
 document.getElementById("afRole").addEventListener("change", () => {
   document.getElementById("afDescRow").style.display = state.wizardAccess === "http" ? "flex" : "none";
 });

@@ -16,6 +16,18 @@ const RECEIVE_SET = new Set(RECEIVE_VALUES);
 export const TEMPLATE_VALUES = Object.freeze(["generic", "muse", "grok-bot"]);
 const TEMPLATE_SET = new Set(TEMPLATE_VALUES);
 
+// 节点模板注册表：数据驱动、可扩展。控制台 Step 2 的下拉框从这里渲染，
+// 选了模板后自动带出 receive / role / interval 等字段；按 access 过滤，当前只有 http 有模板。
+// 新增模板只需往这个数组追加一条，前端无需改 HTML。
+export const AGENT_TEMPLATE_PRESETS = Object.freeze([
+  { id: "generic-poll", label: "通用 · 定时检查", access: "http", template: "generic", receive: "poll", role: "worker", interval: 5, hint: "适合 ChatGPT 定时任务、Claude、Coze 等云端 Agent，每 5 分钟检查一次" },
+  { id: "workbuddy", label: "WorkBuddy 云端版", access: "http", template: "generic", receive: "poll", role: "worker", interval: 30, preset: "workbuddy", hint: "腾讯 WorkBuddy 定时任务，间隔建议 30 分钟起" },
+  { id: "muse", label: "Muse（临时云 VM）", access: "http", template: "muse", receive: "longpoll", role: "worker", interval: null, hint: "官方 ah CLI + runtime hook 每 5 秒自愈，常驻长连接" },
+  { id: "grok-bot", label: "Grok Bot（Webhook）", access: "http", template: "grok-bot", receive: "webhook", role: "worker", interval: 30, hint: "桌面端 routine Webhook 门铃，短指令不含验签" },
+  { id: "longpoll-custom", label: "常驻长连接（自建进程）", access: "http", template: "generic", receive: "longpoll", role: "worker", interval: null, hint: "自己写循环 poll?timeout=25，实时取单" },
+  { id: "webhook-custom", label: "Webhook 推送（自建接收端）", access: "http", template: "generic", receive: "webhook", role: "worker", interval: 30, hint: "门铃含 HMAC-SHA256 签名，提示词带验签说明" },
+]);
+
 export function httpError(status, message) {
   const err = new Error(message);
   err.status = status;
