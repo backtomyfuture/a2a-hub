@@ -234,6 +234,8 @@ export class WebhookDispatcher {
     configDir,
     hubNode = "hub",
     taskTable = "tasks",
+    messageTable = "messages",
+    bus = null,
     fetchImpl,
     log,
     now = () => Date.now(),
@@ -244,8 +246,10 @@ export class WebhookDispatcher {
   } = {}) {
     this.store = store ?? new AgentWebhookStore(configDir, { now: () => new Date(now()) });
     this.broker = broker;
+    this.bus = bus;
     this.hubNode = String(hubNode || "hub");
     this.taskTable = String(taskTable || "tasks");
+    this.messageTable = String(messageTable || "messages");
     this.fetch = fetchImpl ?? globalThis.fetch;
     this.log = log ?? (() => {});
     this.now = now;
@@ -257,14 +261,45 @@ export class WebhookDispatcher {
 
   #seen;
 
+  async #targetNodeForTask(taskId) {
+    if (!this.bus || typeof this.bus.listRecords !== "function" || !taskId) return "";
+    try {
+      const tasks = await this.bus.listRecords(this.taskTable);
+      const hit = tasks.find((t) => fieldOf(t?.fields ?? t, "Task_ID") === taskId);
+      return hit ? fieldOf(hit?.fields ?? hit, "Target_Node") : "";
+    } catch {
+      return "";
+    }
+  }
+
   async onBusEvent(ev) {
-    if (!ev || String(ev.table ?? "") !== this.taskTable) return null;
+    if (!ev) return null;
+    const tbl = String(ev.table ?? "");
     const fields = ev.fields ?? {};
+    const seq = Number(ev.seq) || 0;
+
+    // Leader 答复（answer）或机主审批决定（auth_decision）写入 messages 表，不改 Tasks.Status；
+    // 必须向 webhook 模式的执行节点发门铃（task.resumed），否则它会卡在 input-required / auth-required 直到兜底轮询。
+    if (tbl === this.messageTable) {
+      const kind = fieldOf(fields, "Kind");
+      if (kind !== "answer" && kind !== "auth_decision") return null;
+      const taskId = fieldOf(fields, "Task_ID");
+      if (!taskId) return null;
+      const msgId = fieldOf(fields, "Msg_ID") || String(seq);
+      let node = fieldOf(fields, "To_Node");
+      if (!node || node === "hub" || node === "all") {
+        node = await this.#targetNodeForTask(taskId);
+      }
+      if (!node) return null;
+      const status = kind === "answer" ? "input-required" : "auth-required";
+      return this.#push("task.resumed", node, taskId, status, seq, `${node}\0${taskId}\0resumed\0${msgId}`);
+    }
+
+    if (tbl !== this.taskTable) return null;
     const status = fieldOf(fields, "Status");
     const taskId = fieldOf(fields, "Task_ID");
     if (!taskId || !status) return null;
-    const seq = Number(ev.seq) || 0;
-    // 答复把任务拉回 working 是续跑，不是新门铃。只有首次 submitted 才通知执行节点。
+    // 首次 submitted 通知执行节点领单；续跑门铃由上面 messages 表的 answer/auth_decision 触发。
     if (status === "submitted") {
       const node = fieldOf(fields, "Target_Node");
       if (!node) return null;
@@ -285,10 +320,10 @@ export class WebhookDispatcher {
     return this.deliver(hook, this.#body({ event: "ping", node: name, taskId: "", status: "", seq: 0 }));
   }
 
-  async #push(event, node, taskId, status, seq) {
+  async #push(event, node, taskId, status, seq, dedupeKey = "") {
     const hook = this.store.get(node);
     if (!hook?.url || !hook.secret) return null;
-    const key = `${node}\0${taskId}\0${status}`;
+    const key = dedupeKey || `${node}\0${taskId}\0${status}`;
     if (this.#seen.has(key)) return null;
     this.#seen.add(key);
     if (this.#seen.size > 4096) this.#seen.delete(this.#seen.values().next().value);

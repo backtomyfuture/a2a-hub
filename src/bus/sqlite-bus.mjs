@@ -95,6 +95,11 @@ export class SqliteBus {
       listCards: this.db.prepare("SELECT * FROM cards ORDER BY rowid DESC"),
       getCard: this.db.prepare("SELECT * FROM cards WHERE message_id = ?"),
       getMessageByMsgId: this.db.prepare("SELECT fields_json FROM records WHERE table_name = ? AND json_extract(fields_json, '$.Msg_ID') = ? LIMIT 1"),
+      insertAudit: this.db.prepare("INSERT INTO audit_logs (ts, seq, table_name, op, record_id, node, cap_id, before_json, after_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"),
+      listAuditAll: this.db.prepare("SELECT * FROM audit_logs ORDER BY id DESC LIMIT ?"),
+      listAuditByTable: this.db.prepare("SELECT * FROM audit_logs WHERE table_name = ? ORDER BY id DESC LIMIT ?"),
+      listAuditByNode: this.db.prepare("SELECT * FROM audit_logs WHERE node = ? ORDER BY id DESC LIMIT ?"),
+      listAuditByTableNode: this.db.prepare("SELECT * FROM audit_logs WHERE table_name = ? AND node = ? ORDER BY id DESC LIMIT ?"),
     };
 
     if (this.broker && Number(this.broker.latestSeq) < this.currentSeq()) {
@@ -137,6 +142,21 @@ export class SqliteBus {
         k TEXT PRIMARY KEY,
         v TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        table_name TEXT NOT NULL,
+        op TEXT NOT NULL,
+        record_id TEXT NOT NULL,
+        node TEXT NOT NULL DEFAULT '',
+        cap_id TEXT NOT NULL DEFAULT '',
+        before_json TEXT,
+        after_json TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_audit_table_id ON audit_logs(table_name, id DESC);
+      CREATE INDEX IF NOT EXISTS idx_audit_node_id ON audit_logs(node, id DESC);
     `);
     this.db.prepare("INSERT OR IGNORE INTO meta (k, v) VALUES ('seq', '0')").run();
   }
@@ -223,6 +243,62 @@ export class SqliteBus {
     return rows.filter((row) => f1(row, field) === value);
   }
 
+  // 名录（AgentCards）变更审计：同事务写入只追加 audit_logs；仅 Updated_At 变化时不刷屏。
+  _recordCardAudit(op, tbl, recordId, seq, beforeFields, afterFields, ts) {
+    if (tbl !== this.tables.agentCards) return;
+    if (op === "update" && beforeFields && afterFields) {
+      const strip = (obj) => {
+        const copy = { ...obj };
+        delete copy.Updated_At;
+        return JSON.stringify(copy);
+      };
+      if (strip(beforeFields) === strip(afterFields)) return;
+    }
+    const src = afterFields || beforeFields || {};
+    const node = scalar(src, "Node");
+    const capId = scalar(src, "Cap_ID");
+    this._stmts.insertAudit.run(
+      ts,
+      seq,
+      tbl,
+      op,
+      recordId,
+      node,
+      capId,
+      beforeFields ? JSON.stringify(beforeFields) : null,
+      afterFields ? JSON.stringify(afterFields) : null,
+    );
+  }
+
+  listAuditLogs({ table = "", node = "", limit = 100 } = {}) {
+    const cap = Math.max(1, Math.min(500, Number(limit) || 100));
+    const tbl = String(table ?? "").trim();
+    const nd = String(node ?? "").trim();
+    let rows;
+    if (tbl && nd) rows = this._stmts.listAuditByTableNode.all(tbl, nd, cap);
+    else if (tbl) rows = this._stmts.listAuditByTable.all(tbl, cap);
+    else if (nd) rows = this._stmts.listAuditByNode.all(nd, cap);
+    else rows = this._stmts.listAuditAll.all(cap);
+    return rows.map((r) => {
+      let before = null;
+      let after = null;
+      try { if (r.before_json) before = JSON.parse(r.before_json); } catch {}
+      try { if (r.after_json) after = JSON.parse(r.after_json); } catch {}
+      return {
+        id: r.id,
+        ts: r.ts,
+        seq: r.seq,
+        table: r.table_name,
+        op: r.op,
+        record_id: r.record_id,
+        node: r.node,
+        cap_id: r.cap_id,
+        before,
+        after,
+      };
+    });
+  }
+
   async createRecord(table, fields, clientToken) {
     this._stats.write += 1;
     const tbl = String(table);
@@ -251,6 +327,7 @@ export class SqliteBus {
         seq = this._bumpSeq();
         const cleanFields = structuredClone(fields ?? {});
         this._stmts.insert.run(tbl, recordId, seq, JSON.stringify(cleanFields), now, now);
+        this._recordCardAudit("create", tbl, recordId, seq, null, cleanFields, now);
         if (token) {
           this._stmts.putToken.run(tbl, token, recordId, now);
         }
@@ -293,6 +370,7 @@ export class SqliteBus {
       const merged = { ...prevFields, ...structuredClone(fields ?? {}) };
       seq = this._bumpSeq();
       this._stmts.update.run(seq, JSON.stringify(merged), now, tbl, id);
+      this._recordCardAudit("update", tbl, id, seq, prevFields, merged, now);
       updated = { record_id: id, seq, fields: merged };
       this.db.exec("COMMIT");
     } catch (e) {
@@ -327,6 +405,7 @@ export class SqliteBus {
       fields = this._toRow(existing).fields;
       seq = this._bumpSeq();
       this._stmts.remove.run(tbl, id);
+      this._recordCardAudit("delete", tbl, id, seq, fields, null, new Date().toISOString());
       this.db.exec("COMMIT");
     } catch (e) {
       try { this.db.exec("ROLLBACK"); } catch { /* ignore */ }

@@ -15,7 +15,7 @@ import { runDetachedCommand } from "./proc.mjs";
 import { createTask } from "./hub/create.mjs";
 import { PresentService } from "./hub/present.mjs";
 import { enqueueOrUpdateInbox, readInbox, markInboxStatus } from "./inbox.mjs";
-import { TERMINAL_STATUSES, annotateElapsed, approvalRank, formatStats, log, nowStr } from "./kernel-util.mjs";
+import { TERMINAL_STATUSES, annotateElapsed, approvalRank, formatStats, heartbeatFields, log, nowStr } from "./kernel-util.mjs";
 import { approvalMethods } from "./kernel-approval.mjs";
 import { directMethods } from "./kernel-direct.mjs";
 import { herdrMethods } from "./kernel-herdr.mjs";
@@ -995,7 +995,7 @@ export class Kernel {
               log(`inbox task timed out and marked failed: ${taskId}`);
             } else if (this.heartbeatDue(current)) {
               // 未超时才保活，避免 20 分钟租约回收。不够最小间隔就不写，否则每轮扫表都叫醒全网。
-              await this.bus.updateRecord(this.T.tasks, current.record_id, { Heartbeat_At: nowStr() });
+              await this.bus.updateRecord(this.T.tasks, current.record_id, heartbeatFields(f1(current, "Metadata")));
               log(`inbox heartbeat refreshed: ${taskId}`);
             }
             continue;
@@ -1092,7 +1092,7 @@ export class Kernel {
       catch (e) { log(`outbox submit failed ${taskId}: ${e.message}`); }
       return;
     }
-    const claim = { Status: "working", Claimed_By: this.cfg.node, Heartbeat_At: nowStr() };
+    const claim = { Status: "working", Claimed_By: this.cfg.node, ...heartbeatFields(f1(task, "Metadata")) };
     // 认领时回填实际选中的 Worker。此后的重试、回收重跑与问答续跑都钉在它上面（标准 §2）。
     const picked = this.commands[skill]?.worker;
     if (picked && !String(f1(task, "Worker_Hint") ?? "").trim()) claim.Worker_Hint = picked;
@@ -1132,7 +1132,9 @@ export class Kernel {
           return;
         }
         if (finishing) return;
-        await this.bus.updateRecord(this.T.tasks, task.record_id, { Heartbeat_At: nowStr() });
+        const row = await this.bus.getRecord(this.T.tasks, task.record_id);
+        if (!row) return;
+        await this.bus.updateRecord(this.T.tasks, task.record_id, heartbeatFields(f1(row, "Metadata")));
       })().catch((e) => log("heartbeat failed: " + e.message))
         .finally(() => { heartbeat = null; });
     }, 60_000);
@@ -1479,7 +1481,7 @@ export class Kernel {
     const entry = this.commands[this.capKeyOf(task)] ?? {};
     if (entry.mode === "inbox") {
       if (!(await this.updateTaskState(task, {
-        Status: "working", Heartbeat_At: nowStr(),
+        Status: "working", ...heartbeatFields(f1(task, "Metadata")),
       }, ["auth-required"], true))) return;
       const check = await this.bus.getRecord(this.T.tasks, task.record_id);
       if (!(await this.verifyApprovedAndUncanceled(check || task, statusMsg))) return;
@@ -1564,7 +1566,7 @@ export class Kernel {
 
       if (entry.mode === "inbox") {
         if (!(await this.updateTaskState(task, {
-          Status: "working", Heartbeat_At: nowStr(), Status_Msg: "",
+          Status: "working", ...heartbeatFields(f1(task, "Metadata")), Status_Msg: "",
         }, ["input-required"], true))) return;
         const dialogue = await this.collectDialogue(task, answers);
         enqueueOrUpdateInbox(this.cfg.configDir, {
@@ -1638,6 +1640,17 @@ export class Kernel {
     }
   }
 
+  // mode=local 的在线窗口只有约 90 秒。Hub 的 60 秒巡检和每次扫表都要登记，重启后的名册才有本机 last_seen。
+  touchLocalPresence() {
+    const broker = this.bus?.broker;
+    if (!broker || typeof broker.touchAgent !== "function") return;
+    try {
+      broker.touchAgent(this.cfg.node, { kind: this.cfg.kind || "host", mode: "local" });
+    } catch (e) {
+      log("本机在线登记失败：" + (e?.message ?? e));
+    }
+  }
+
   async sweepOnce() {
     const t0 = Date.now();
     let ok = false;
@@ -1651,6 +1664,7 @@ export class Kernel {
   }
 
   async _sweepBody() {
+    this.touchLocalPresence();
     // 上一轮的消息索引不能带到这一轮，否则看不到别人刚写的行。
     this._round = null;
     // 心跳间隔回调若已经发出写请求，先等它落定，再开始本轮的表写入。
@@ -1768,6 +1782,7 @@ export class Kernel {
 
   async run({ once = false } = {}) {
     log(`node daemon ${DAEMON_VERSION} starting on ${this.cfg.node}${once ? " (once)" : ""}`);
+    this.touchLocalPresence();
     // 常驻进程的第一原则：启动期任何一步失败都不许死，进主循环重试。
     try { await this.bus.tenantToken(); } catch (e) {
       log("initial token failed (will retry in loop): " + e.message);

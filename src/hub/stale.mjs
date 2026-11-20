@@ -1,10 +1,13 @@
 // hub 角色的陈旧任务告警与回收（标准 §10.1 第 6 条，v3.5.1）。
-// working：心跳为空、无法解析，或早于 20 分钟（与节点 STALE_MIN 一致）→ 先
-// 告警机主；告警后宽限 30 分钟，心跳恢复则撤销告警，届满仍无心跳由 hub 置
-// failed 回收（清认领、关未结束的 Run、写 notice 说明）。submitted：仍无人
-// 认领且已超过 20 分钟，只告警不回收。Tasks 没有创建时间，submitted 的龄
-// 能解析到首条 instruction 的 Created_At 就用它，否则从本进程第一次看见该
-// 任务起算。告警去重与宽限计时记在配置目录的 stale_state.json，不进仓库。
+// working：没写租约时，心跳为空、无法解析，或早于 20 分钟 → 先告警机主；
+// 告警后宽限 30 分钟，心跳恢复则撤销告警，届满仍无心跳由 hub 置 failed。
+// Metadata 里有 lease_ttl_sec / lease_expires_at 时，到期直接回收，不再等宽限；
+// 心跳仍落在租约内（或新于到期时刻）则不回收，避免刚续上的心跳被旧到期时间误伤。
+// submitted：仍无人认领且已超过 20 分钟，只告警；写了 queue_timeout_sec（或构造参数
+// submittedTimeoutMin）才回收。input-required / auth-required 仅在 wait_timeout_sec
+// （或 waitTimeoutMin）大于 0 时回收，龄从最近一条 question/answer/auth_* 起算。
+// Tasks 没有创建时间，submitted 的龄能解析到首条 instruction 的 Created_At 就用它，
+// 否则从本进程第一次看见该任务起算。告警去重与宽限计时记在配置目录的 stale_state.json，不进仓库。
 
 import fs from "node:fs";
 import path from "node:path";
@@ -126,8 +129,79 @@ function alertText(kind, task) {
   ].join("\n");
 }
 
+function parseTaskMeta(task) {
+  const raw = f1(task, "Metadata");
+  if (!raw) return {};
+  if (typeof raw === "object" && !Array.isArray(raw)) return raw;
+  try {
+    const obj = JSON.parse(String(raw));
+    return obj && typeof obj === "object" && !Array.isArray(obj) ? obj : {};
+  } catch {
+    return {};
+  }
+}
+
+function positiveMsFromSec(val) {
+  const n = Number(val);
+  return Number.isFinite(n) && n > 0 ? Math.round(n * 1000) : 0;
+}
+
+function leaseExpiredMs(task, nowMs) {
+  const meta = parseTaskMeta(task);
+  if (meta.lease_expires_at) {
+    const exp = parseHeartbeat(meta.lease_expires_at);
+    if (exp) return nowMs > exp.getTime();
+  }
+  const ttlMs = positiveMsFromSec(meta.lease_ttl_sec);
+  if (ttlMs > 0) {
+    const hb = parseHeartbeat(f1(task, "Heartbeat_At"));
+    if (!hb) return true;
+    return nowMs - hb.getTime() > ttlMs;
+  }
+  return false;
+}
+
+// 显式租约到期不能盖过刚写上的心跳：ttl 内、心跳时刻不早于 lease_expires_at、或时钟略超前，都视为仍在租约内。
+function heartbeatCoversLease(task, nowMs) {
+  const hb = parseHeartbeat(f1(task, "Heartbeat_At"));
+  if (!hb) return false;
+  const hbMs = hb.getTime();
+  if (hbMs >= nowMs) return true;
+  const meta = parseTaskMeta(task);
+  const ttlMs = positiveMsFromSec(meta.lease_ttl_sec);
+  if (ttlMs > 0) return nowMs - hbMs <= ttlMs;
+  const exp = parseHeartbeat(meta.lease_expires_at);
+  return Boolean(exp && hbMs >= exp.getTime());
+}
+
+function latestWaitAgeMs(messages, taskId, nowMs) {
+  let latest = null;
+  for (const msg of messages) {
+    if (String(f1(msg, "Task_ID") ?? "") !== taskId) continue;
+    const kind = f1(msg, "Kind");
+    if (kind !== "question" && kind !== "answer" && kind !== "auth_request" && kind !== "auth_decision") continue;
+    const ts = parseHeartbeat(f1(msg, "Created_At"));
+    if (!ts) continue;
+    if (latest == null || ts.getTime() > latest) latest = ts.getTime();
+  }
+  if (latest == null) return null;
+  return nowMs - latest;
+}
+
 export class StaleService {
-  constructor({ bus, ownerId = "", allowLocalAlert = false, notifier = null, statePath, log, now = () => Date.now() }) {
+  constructor({
+    bus,
+    ownerId = "",
+    allowLocalAlert = false,
+    notifier = null,
+    statePath,
+    log,
+    now = () => Date.now(),
+    workingStaleMin = STALE_MIN,
+    workingGraceMin = STALE_GRACE_MIN,
+    submittedTimeoutMin = 0,
+    waitTimeoutMin = 0,
+  }) {
     this.bus = bus;
     this.ownerId = String(ownerId ?? "").trim();
     this.allowLocalAlert = !!allowLocalAlert;
@@ -135,15 +209,27 @@ export class StaleService {
     this.statePath = statePath;
     this.log = log ?? (() => {});
     this.now = now;
+    this.workingStaleMs = Math.max(1, Number(workingStaleMin) || STALE_MIN) * 60_000;
+    this.workingGraceMs = Math.max(0, Number(workingGraceMin ?? STALE_GRACE_MIN)) * 60_000;
+    this.submittedTimeoutMs = Math.max(0, Number(submittedTimeoutMin) || 0) * 60_000;
+    this.waitTimeoutMs = Math.max(0, Number(waitTimeoutMin) || 0) * 60_000;
   }
 
-  // 宽限届满的回收：置 failed + notice + 关未结束的 Run + 清认领。动手前回读
-  // 任务再验一次状态与心跳，避免与刚恢复的节点抢写；校验不过就放弃本轮。
-  async reclaim(task) {
+  // 宽限届满或显式租约/排队/挂起超时的回收：置 failed + notice + 关未结束的 Run + 清认领。
+  // 动手前回读任务再验一次状态与心跳，避免与刚恢复的节点抢写；校验不过就放弃本轮。
+  async reclaim(task, { expectedStatuses = ["working"], reason = "", skipHeartbeatCheck = false } = {}) {
     const taskId = String(f1(task, "Task_ID") ?? "");
     const fresh = await this.bus.getRecord(this.bus.tables.tasks, task.record_id);
-    if (!fresh || String(f1(fresh, "Status") ?? "") !== "working") return false;
-    if (!isStaleWorking(f1(fresh, "Heartbeat_At"), new Date(Number(this.now())))) return false;
+    const freshStatus = fresh ? String(f1(fresh, "Status") ?? "") : "";
+    if (!fresh || !expectedStatuses.includes(freshStatus)) return false;
+    const nowMs = Number(this.now());
+    if (freshStatus === "working" && !skipHeartbeatCheck) {
+      // 扫描到回收之间节点可能刚续上心跳。回读后再看一次，避免把活着的执行收掉。
+      if (heartbeatCoversLease(fresh, nowMs)) return false;
+      const staleByDefault = isStaleWorking(f1(fresh, "Heartbeat_At"), new Date(nowMs));
+      const staleByLease = leaseExpiredMs(fresh, nowMs);
+      if (!staleByDefault && !staleByLease) return false;
+    }
     const target = String(f1(fresh, "Target_Node") ?? "") || "-";
     const messages = (await this.bus.listRecords(this.bus.tables.messages))
       .filter((m) => String(f1(m, "Task_ID") ?? "") === taskId);
@@ -157,11 +243,14 @@ export class StaleService {
       }
     }
     if (!initiator) initiator = String(f1(fresh, "Source") ?? "").trim() || "hub";
-    const noticeText = [
+    const noticeText = reason || [
       `【陈旧回收】任务在 ${target} 的心跳已停止：超过 ${STALE_MIN} 分钟无心跳时枢纽已告警，`,
       `${STALE_GRACE_MIN} 分钟宽限内仍未恢复。枢纽已将任务置 failed 并回收认领、关账未结束的 Run。`,
       "原节点若事后恢复，其迟到回执将按终态守卫处理；需要重跑请按同一 Context_ID 新建任务。",
     ].join("");
+    const runErr = reason
+      ? reason.slice(0, 400)
+      : `陈旧回收：心跳停止超 ${STALE_MIN} 分钟告警，${STALE_GRACE_MIN} 分钟宽限内未恢复`;
     // 上一轮回收若在写完 notice 后中断，重试时复用那条 notice 而不是再写一条：
     // Messages 只追加，多余的回收说明会让呈递与审计都变脏。
     const existing = messages.find((m) => f1(m, "Kind") === "notice" && String(f1(m, "From_Node") ?? "") === "hub");
@@ -191,7 +280,7 @@ export class StaleService {
       if (String(f1(run, "Finished_At") ?? "").trim()) continue;
       await this.bus.updateRecord(this.bus.tables.runs, run.record_id, {
         Finished_At: nowIso(), Outcome: "failed",
-        Error_Log: `陈旧回收：心跳停止超 ${STALE_MIN} 分钟告警，${STALE_GRACE_MIN} 分钟宽限内未恢复`,
+        Error_Log: runErr,
       });
     }
     await this.bus.updateRecord(this.bus.tables.tasks, fresh.record_id, {
@@ -211,27 +300,60 @@ export class StaleService {
     const alerted = new Set(state.alerted);
     const nowMs = Number(this.now());
     const tasks = await this.bus.listRecords(this.bus.tables.tasks);
-    const submittedIds = [];
-    for (const task of tasks) {
-      if (f1(task, "Status") !== "submitted") continue;
-      if (String(f1(task, "Claimed_By") ?? "").trim()) continue;
+    const needMessages = tasks.some((task) => {
+      const st = String(f1(task, "Status") ?? "");
       const taskId = String(f1(task, "Task_ID") ?? "");
-      if (taskId) submittedIds.push(taskId);
-    }
+      if (!taskId) return false;
+      if (st === "submitted" && !String(f1(task, "Claimed_By") ?? "").trim()) {
+        const meta = parseTaskMeta(task);
+        if (positiveMsFromSec(meta.queue_timeout_sec) > 0 || this.submittedTimeoutMs > 0) return true;
+        return !alerted.has(`${taskId}\tsubmitted`);
+      }
+      if (st === "input-required" || st === "auth-required") {
+        const meta = parseTaskMeta(task);
+        return positiveMsFromSec(meta.wait_timeout_sec) > 0 || this.waitTimeoutMs > 0;
+      }
+      return false;
+    });
     let messages = null;
-    if (submittedIds.some((id) => !alerted.has(`${id}\tsubmitted`))) {
+    if (needMessages) {
       messages = await this.bus.listRecords(this.bus.tables.messages);
     }
     const due = [];
     const reclaimDue = [];
-    const liveSubmitted = new Set();
+    const liveTracked = new Set();
     let seenDirty = false;
     for (const task of tasks) {
       const taskId = String(f1(task, "Task_ID") ?? "");
       if (!taskId) continue;
       const status = String(f1(task, "Status") ?? "");
+      const meta = parseTaskMeta(task);
+      const target = String(f1(task, "Target_Node") ?? "") || "-";
       if (status === "working") {
         const key = `${taskId}\tworking`;
+        // 显式租约替换 20+30 的默认路径：到期直接回收；心跳仍覆盖租约则不告警也不回收。
+        const hasExplicitLease = Boolean(meta.lease_expires_at || positiveMsFromSec(meta.lease_ttl_sec) > 0);
+        if (hasExplicitLease) {
+          if (heartbeatCoversLease(task, nowMs)) {
+            if (alerted.has(key)) {
+              alerted.delete(key);
+              state.alerted = state.alerted.filter((k) => k !== key);
+              delete state.alertedAt[key];
+              seenDirty = true;
+              this.log("stale recovered " + taskId + "（心跳仍在租约内，告警撤销）");
+            }
+            continue;
+          }
+          if (leaseExpiredMs(task, nowMs)) {
+            reclaimDue.push({
+              task,
+              key,
+              expectedStatuses: ["working"],
+              reason: `【租约到期】任务在 ${target} 的执行租约已过期且未续约，枢纽已自动置 failed 并回收认领。`,
+            });
+          }
+          continue;
+        }
         if (!isStaleWorking(f1(task, "Heartbeat_At"), new Date(nowMs))) {
           // 心跳已恢复：撤销告警与宽限计时，下次再超时重新走一遍完整流程。
           if (alerted.has(key)) {
@@ -253,33 +375,68 @@ export class StaleService {
           seenDirty = true;
           continue;
         }
-        if (nowMs - Number(state.alertedAt[key]) >= GRACE_MS) {
-          reclaimDue.push({ task, key });
+        if (nowMs - Number(state.alertedAt[key]) >= this.workingGraceMs) {
+          reclaimDue.push({ task, key, expectedStatuses: ["working"] });
+        }
+        continue;
+      }
+      if (status === "input-required" || status === "auth-required") {
+        const waitLimitMs = positiveMsFromSec(meta.wait_timeout_sec) || this.waitTimeoutMs;
+        if (waitLimitMs <= 0) continue;
+        const waitTrackKey = `wait:${taskId}:${status}`;
+        liveTracked.add(waitTrackKey);
+        let age = latestWaitAgeMs(messages ?? [], taskId, nowMs);
+        if (age == null) {
+          if (state.seen[waitTrackKey] == null) {
+            state.seen[waitTrackKey] = nowMs;
+            seenDirty = true;
+            continue;
+          }
+          age = nowMs - Number(state.seen[waitTrackKey]);
+        }
+        if (age > waitLimitMs) {
+          const mins = Math.max(1, Math.round(waitLimitMs / 60_000));
+          reclaimDue.push({
+            task,
+            key: `${taskId}\t${status}`,
+            expectedStatuses: [status],
+            skipHeartbeatCheck: true,
+            reason: `【挂起超时】任务处于 ${status} 已超过 ${mins} 分钟未闭环，枢纽已自动置 failed 回收。`,
+          });
         }
         continue;
       }
       if (status !== "submitted") continue;
       if (String(f1(task, "Claimed_By") ?? "").trim()) continue;
-      liveSubmitted.add(taskId);
+      liveTracked.add(taskId);
+      let age = instructionAgeMs(messages ?? [], taskId, nowMs);
+      if (age == null) {
+        if (state.seen[taskId] == null) {
+          state.seen[taskId] = nowMs;
+          seenDirty = true;
+          continue;
+        }
+        age = nowMs - Number(state.seen[taskId]);
+      }
+      const queueLimitMs = positiveMsFromSec(meta.queue_timeout_sec) || this.submittedTimeoutMs;
+      if (queueLimitMs > 0 && age > queueLimitMs) {
+        const mins = Math.max(1, Math.round(queueLimitMs / 60_000));
+        reclaimDue.push({
+          task,
+          key: `${taskId}\tsubmitted`,
+          expectedStatuses: ["submitted"],
+          skipHeartbeatCheck: true,
+          reason: `【排队超时】任务指派给 ${target} 后超过 ${mins} 分钟无人认领，枢纽已自动置 failed 结束排队。`,
+        });
+        continue;
+      }
       const key = `${taskId}\tsubmitted`;
       if (alerted.has(key)) continue;
-      const age = instructionAgeMs(messages ?? [], taskId, nowMs);
-      if (age != null) {
-        if (age > STALE_MS) due.push({ task, key, kind: "submitted" });
-        continue;
-      }
-      if (state.seen[taskId] == null) {
-        state.seen[taskId] = nowMs;
-        seenDirty = true;
-        continue;
-      }
-      if (nowMs - Number(state.seen[taskId]) > STALE_MS) {
-        due.push({ task, key, kind: "submitted" });
-      }
+      if (age > STALE_MS) due.push({ task, key, kind: "submitted" });
     }
-    for (const taskId of Object.keys(state.seen)) {
-      if (!liveSubmitted.has(taskId)) {
-        delete state.seen[taskId];
+    for (const trackKey of Object.keys(state.seen)) {
+      if (!liveTracked.has(trackKey)) {
+        delete state.seen[trackKey];
         seenDirty = true;
       }
     }
@@ -324,7 +481,11 @@ export class StaleService {
     for (const item of reclaimDue) {
       let ok = false;
       try {
-        ok = await this.reclaim(item.task);
+        ok = await this.reclaim(item.task, {
+          expectedStatuses: item.expectedStatuses || ["working"],
+          reason: item.reason || "",
+          skipHeartbeatCheck: Boolean(item.skipHeartbeatCheck),
+        });
       } catch (e) {
         reclaimFailed = true;
         this.log("陈旧回收失败 " + f1(item.task, "Task_ID") + "（保留告警记录，下一轮重试）：" + (e?.message ?? e));

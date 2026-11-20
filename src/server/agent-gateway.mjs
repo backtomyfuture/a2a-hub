@@ -18,6 +18,7 @@ import { alignNodeReceiveMode, removeHttpAgentSchedule, saveHttpAgentSchedule } 
 import { isStaleWorking } from "../hub/stale.mjs";
 import { rosterNodeVisible } from "./longpoll-broker.mjs";
 import { submitAgentReceipt } from "../inbox.mjs";
+import { readTaskMeta, withRefreshedLease } from "../kernel-util.mjs";
 import { DAEMON_VERSION } from "../kernel.mjs";
 
 const LEADER_UPDATE_STATUSES = new Set([
@@ -114,7 +115,13 @@ async function writeUpdatesWatermark(bus, node, seq) {
 
 function selectLeaderUpdates(updates, since) {
   if (since == null) return updates;
-  return updates.filter((u) => LEADER_PENDING_STATUSES.has(u.status) || u.changed_seq > since);
+  return updates.filter((u) => {
+    if (LEADER_PENDING_STATUSES.has(u.status)) {
+      // 仅在尚未答复/审批时才持续提醒 Leader；已答复等待 Worker 续跑的不再重复唤醒。
+      return u.needs_leader_action !== false;
+    }
+    return u.changed_seq > since;
+  });
 }
 
 // 机主用 query role，缺省 worker 与 leader 都算。Agent Token 只用绑定角色，避免用查询参数扩权。
@@ -353,10 +360,18 @@ function buildTaskBrief(task, taskMsgs, partsByParent, artsByTask, view = {}) {
     };
   });
 
+  const status = f1(task, "Status");
+  const statusMsg = String(f1(task, "Status_Msg") ?? "").trim();
+  const hasAnswerForCurrent = status === "input-required" && taskMsgs.some((m) =>
+    f1(m, "Kind") === "answer" && (!statusMsg || f1(m, "In_Reply_To") === statusMsg));
+  let pendingAction = "none";
+  if (status === "input-required") pendingAction = hasAnswerForCurrent ? "wait_resume" : "answer";
+  else if (status === "auth-required") pendingAction = "approve";
+
   return {
     task_id: taskId,
     title: f1(task, "Title"),
-    status: f1(task, "Status"),
+    status,
     from_node: fromNode,
     source: f1(task, "Source"),
     target_node: f1(task, "Target_Node"),
@@ -366,7 +381,7 @@ function buildTaskBrief(task, taskMsgs, partsByParent, artsByTask, view = {}) {
     claimed_by: f1(task, "Claimed_By"),
     heartbeat_at: f1(task, "Heartbeat_At"),
     context_id: f1(task, "Context_ID"),
-    status_msg: f1(task, "Status_Msg"),
+    status_msg: statusMsg,
     latest_run: f1(task, "Latest_Run"),
     instruction: instr.text,
     instruction_attachments: attachmentsOfMsg(instr.msgId, partsByParent, view),
@@ -374,6 +389,9 @@ function buildTaskBrief(task, taskMsgs, partsByParent, artsByTask, view = {}) {
     criteria: instr.criteria,
     result_text: resultMsg?.text || "",
     question_text: questionMsg?.text || "",
+    answer_text: answerMsg?.text || "",
+    answered: hasAnswerForCurrent,
+    pending_action: pendingAction,
     auth_text: authReqMsg?.text || "",
     question_attachments: attachmentsOfMsg(questionMsg?.msg_id, partsByParent, view),
     answer_attachments: attachmentsOfMsg(answerMsg?.msg_id, partsByParent, view),
@@ -444,12 +462,17 @@ function normalizeLeaseId(raw) {
   return String(raw ?? "").trim().slice(0, 128);
 }
 
-// 将 lease_id 合并进 Tasks.Metadata JSON，保留原有验收等字段，不新增表列。
-function withLeaseMetadata(rawMeta, leaseId) {
-  const prev = parseJson(rawMeta, {});
-  const obj = prev && typeof prev === "object" && !Array.isArray(prev) ? { ...prev } : {};
-  if (leaseId) obj.lease_id = leaseId;
-  return JSON.stringify(obj);
+// 认领时合并 lease_id，并按已有 lease_ttl_sec 刷新到期时间。坏 JSON 返回 null，不能写成 {}。
+function metadataForClaim(rawMeta, leaseId) {
+  const parsed = readTaskMeta(rawMeta);
+  if (!parsed.ok) return null;
+  const meta = { ...parsed.meta };
+  const id = normalizeLeaseId(leaseId);
+  if (id) meta.lease_id = id;
+  const leased = withRefreshedLease(meta);
+  if (leased) return leased;
+  if (id) return JSON.stringify(meta);
+  return null;
 }
 
 function leaseIdOfTask(task) {
@@ -482,10 +505,10 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
       if (!isStaleWorking(f1(task, "Heartbeat_At"))) {
         throw httpError(409, "任务正由同节点另一运行实例活跃执行中，请勿并发重复认领");
       }
-      await bus.updateRecord(bus.tables.tasks, task.record_id, {
-        Heartbeat_At: nowIso(),
-        Metadata: withLeaseMetadata(f1(task, "Metadata"), reqLease),
-      });
+      const takeoverFields = { Heartbeat_At: nowIso() };
+      const takeoverMeta = metadataForClaim(f1(task, "Metadata"), reqLease);
+      if (takeoverMeta) takeoverFields.Metadata = takeoverMeta;
+      await bus.updateRecord(bus.tables.tasks, task.record_id, takeoverFields);
       onWake();
       const instr = instructionOfTask(taskMsgs, partsByParent);
       return {
@@ -544,7 +567,8 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
     };
     if (runId) updateFields.Latest_Run = runId;
     if (!f1(task, "Worker_Hint") && worker) updateFields.Worker_Hint = worker;
-    if (reqLease) updateFields.Metadata = withLeaseMetadata(f1(task, "Metadata"), reqLease);
+    const claimMeta = metadataForClaim(f1(task, "Metadata"), reqLease);
+    if (claimMeta) updateFields.Metadata = claimMeta;
     await bus.updateRecord(bus.tables.tasks, task.record_id, updateFields);
     onWake();
 
@@ -581,7 +605,8 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
       Status: "working",
       Heartbeat_At: nowIso(),
     };
-    if (reqLease) updateFields.Metadata = withLeaseMetadata(f1(task, "Metadata"), reqLease);
+    const resumeMeta = metadataForClaim(f1(task, "Metadata"), reqLease);
+    if (resumeMeta) updateFields.Metadata = resumeMeta;
     await bus.updateRecord(bus.tables.tasks, task.record_id, updateFields);
     onWake();
     const instr = instructionOfTask(taskMsgs, partsByParent);
@@ -611,7 +636,8 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
       Status: "working",
       Heartbeat_At: nowIso(),
     };
-    if (reqLease) updateFields.Metadata = withLeaseMetadata(f1(task, "Metadata"), reqLease);
+    const authMeta = metadataForClaim(f1(task, "Metadata"), reqLease);
+    if (authMeta) updateFields.Metadata = authMeta;
     await bus.updateRecord(bus.tables.tasks, task.record_id, updateFields);
     onWake();
     const instr = instructionOfTask(taskMsgs, partsByParent);
@@ -722,8 +748,28 @@ async function collectAgentMailbox({ bus, node, verifyKey, onWake, includeUpdate
   return { actionable, updates, working, staleWorking };
 }
 
+// 判断挂起态任务是否仍需要 Leader 介入：
+// - input-required 若已对当前 Status_Msg 写过 answer，说明在等 Worker 续跑，不再反复唤醒 Leader；
+// - auth-required 若已有有效 ed25519 签名决定，同理不再反复唤醒。
+function needsLeaderActionFor(task, taskMsgs, partsByParent, verifyKey) {
+  const st = f1(task, "Status");
+  const statusMsg = String(f1(task, "Status_Msg") ?? "").trim();
+  if (st === "input-required") {
+    const answered = taskMsgs.some((m) =>
+      f1(m, "Kind") === "answer" && (!statusMsg || f1(m, "In_Reply_To") === statusMsg));
+    return !answered;
+  }
+  if (st === "auth-required") {
+    if (!statusMsg) return true;
+    const decision = signedDecisionFor(f1(task, "Task_ID"), taskMsgs, partsByParent, statusMsg, verifyKey);
+    // 空串也是一条决定（pickSignedDecision 的约定）。只有没有任何幸存决定才继续叫醒 Leader。
+    return decision == null;
+  }
+  return false;
+}
+
 // 与 GET updates 同一口径，含仍待处理的 input-required / auth-required。调用方决定要不要写水位。
-async function listSelectableLeaderUpdates(bus, node, { wantedStatuses = LEADER_UPDATE_STATUSES, threshold = null, view = {} } = {}) {
+async function listSelectableLeaderUpdates(bus, node, { wantedStatuses = LEADER_UPDATE_STATUSES, threshold = null, verifyKey = "", view = {} } = {}) {
   const [tasks, messages, parts, artifacts] = await Promise.all([
     bus.listRecords(bus.tables.tasks),
     bus.listRecords(bus.tables.messages),
@@ -740,8 +786,10 @@ async function listSelectableLeaderUpdates(bus, node, { wantedStatuses = LEADER_
     const initiator = instr.fromNode || f1(task, "Source");
     if (initiator !== node) continue;
     const brief = buildTaskBrief(task, taskMsgs, partsByParent, artsByTask, view);
+    const needsLeaderAction = needsLeaderActionFor(task, taskMsgs, partsByParent, verifyKey);
+    if (st === "auth-required" && !needsLeaderAction) brief.pending_action = "wait_resume";
     // 只取任务行和它的消息行。Parts 是另一张表，不能把无关写入算进这条任务的变更。
-    out.push({ ...brief, changed_seq: changedSeqOf(task, taskMsgs) });
+    out.push({ ...brief, needs_leader_action: needsLeaderAction, changed_seq: changedSeqOf(task, taskMsgs) });
   }
   return selectLeaderUpdates(out.reverse(), threshold);
 }
@@ -1102,7 +1150,7 @@ export async function handleAgentGatewayRequest({
           kind: parseJson(f1(c, "Metadata"), {})?.kind || "host",
           mode: f1(c, "Receive_Mode") || "event",
           role: parseJson(f1(c, "Metadata"), {})?.role || "worker",
-          online: conn ? conn.online : String(f1(c, "Availability") ?? "").toLowerCase() !== "offline",
+          online: conn ? conn.online : false,
           polling: conn?.polling ?? false,
           remote_addr: conn?.remoteAddr || "",
           last_seen_at: conn?.lastSeenAt || null,
@@ -1166,7 +1214,7 @@ export async function handleAgentGatewayRequest({
     }
     if (scope.leader) {
       const watermark = await readUpdatesWatermark(bus, node);
-      const updates = await listSelectableLeaderUpdates(bus, node, { threshold: watermark, view });
+      const updates = await listSelectableLeaderUpdates(bus, node, { threshold: watermark, verifyKey, view });
       payload.updates = updates.length;
       if (payload.updates > 0) payload.work = true;
     }
@@ -1314,7 +1362,7 @@ export async function handleAgentGatewayRequest({
     };
     broker?.touchAgent?.(node, updatesTouch);
 
-    const queryUpdates = () => listSelectableLeaderUpdates(bus, node, { wantedStatuses, threshold, view });
+    const queryUpdates = () => listSelectableLeaderUpdates(bus, node, { wantedStatuses, threshold, verifyKey, view });
 
     let list = await queryUpdates();
     let wake = list.length > 0;
@@ -1431,7 +1479,10 @@ export async function handleAgentGatewayRequest({
         throw httpError(409, `任务状态是 ${f1(task, "Status")}，无法续心跳`);
       }
       const hb = nowIso();
-      await bus.updateRecord(bus.tables.tasks, task.record_id, { Heartbeat_At: hb });
+      const hbFields = { Heartbeat_At: hb };
+      const hbMeta = withRefreshedLease(f1(task, "Metadata"));
+      if (hbMeta) hbFields.Metadata = hbMeta;
+      await bus.updateRecord(bus.tables.tasks, task.record_id, hbFields);
 
       const progressText = String(body.text ?? "").trim();
       if (progressText) {

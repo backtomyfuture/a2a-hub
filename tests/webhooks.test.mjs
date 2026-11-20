@@ -312,6 +312,60 @@ test("单次超时按失败重试", async () => {
   });
 });
 
+test("answer 与 auth_decision 发 task.resumed，To_Node 为 hub 时改找执行节点，且不跟随重定向", async () => {
+  await withTemp(async (dir) => {
+    const store = new AgentWebhookStore(dir);
+    store.put({ node: "worker-1", url: "https://worker.example/hook", key: "receiver-key-worker" });
+    const calls = [];
+    const bus = {
+      async listRecords() {
+        return [{ fields: { Task_ID: "TASK-1", Target_Node: "worker-1" } }];
+      },
+    };
+    const dispatcher = new WebhookDispatcher({
+      store,
+      bus,
+      taskTable: "tasks",
+      messageTable: "messages",
+      sleep: async () => {},
+      retryDelays: [0],
+      fetchImpl: async (_url, opts) => {
+        calls.push({ redirect: opts.redirect, body: JSON.parse(opts.body) });
+        return { status: 302 };
+      },
+    });
+    const answer = await dispatcher.onBusEvent({
+      table: "messages",
+      seq: 3,
+      fields: { Kind: "answer", Task_ID: "TASK-1", To_Node: "hub", Msg_ID: "MSG-1" },
+    });
+    assert.equal(answer.ok, false);
+    assert.equal(answer.status, 302);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].redirect, "manual");
+    assert.equal(calls[0].body.event, "task.resumed");
+    assert.equal(calls[0].body.node, "worker-1");
+    assert.equal(calls[0].body.task_id, "TASK-1");
+    assert.equal(calls[0].body.status, "input-required");
+    assert.equal(await dispatcher.onBusEvent({
+      table: "messages",
+      seq: 4,
+      fields: { Kind: "answer", Task_ID: "TASK-1", To_Node: "hub", Msg_ID: "MSG-1" },
+    }), null);
+    assert.equal(calls.length, 1);
+    const decision = await dispatcher.onBusEvent({
+      table: "messages",
+      seq: 5,
+      fields: { Kind: "auth_decision", Task_ID: "TASK-1", To_Node: "worker-1", Msg_ID: "MSG-2" },
+    });
+    assert.equal(decision.ok, false);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1].body.event, "task.resumed");
+    assert.equal(calls[1].body.status, "auth-required");
+    assert.equal(calls[1].redirect, "manual");
+  });
+});
+
 test("没有登记 Webhook 的节点不推送；非任务表不推送", async () => {
   await withTemp(async (dir) => {
     const store = new AgentWebhookStore(dir);

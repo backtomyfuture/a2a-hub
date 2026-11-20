@@ -56,7 +56,7 @@
   - 纯 HTTP Leader Agent（如 Muse）则通过 `GET /api/v1/agents/{node}/updates?new=1` 拉取所属任务回执。
 - 去重键：中断态是 `(Task_ID, Status_Msg)`；终态带上 `Status`。
 - 本地与总线双向记账：已呈递的键保存在本地配置目录的 `present_state.json`，并读-合并写回 `Tasks.Metadata.presented_keys`。
-- 陈旧告警与呈递分开：`working` 心跳为空或早于 20 分钟，以及 `submitted` 超过 20 分钟无人认领，每种情况每个任务只告警一次，记在 `stale_state.json`。
+- 陈旧告警与呈递分开：`working` 心跳为空或早于 20 分钟先告警，宽限后再回收；没写超时秒数时，`submitted` 超过 20 分钟无人认领只告警。`Tasks.Metadata` 里的 `queue_timeout_sec`、`lease_ttl_sec`、`wait_timeout_sec` 到期会回收排队、租约和挂起任务。每种告警每个任务只发一次，记在 `stale_state.json`。巡检约每 60 秒一次。
 
 ## 审批回路
 

@@ -489,6 +489,23 @@ test("控制台内嵌脚本：节点分层渲染、stageBindings 闭环提交、
   assert.equal(pollCard.includes("data-action=\"test-webhook\""), false);
   assert.equal(pollCard.includes(">管理<"), false);
   assert.equal(pollCard.includes("https://bot.example/hook"), false);
+  // 名片 Availability=online 但没有连接记录时，节点页必须显示离线。
+  assert.match(pollCard, />离线</);
+  assert.equal(pollCard.includes(">在线<"), false);
+  // 审计接口 404 时名录区降级，不把整页打成白屏。
+  assert.match(nodesHtml, /名录变更/);
+  assert.match(nodesHtml, /名录变更记录暂不可用/);
+
+  await vm.runInContext(`
+    state.auditApiAvailable = true;
+    state.auditLogs = [{ ts: "2026-11-20T00:00:00Z", op: "create", node: "poll-bot", cap_id: "CAP-poll-agent" }];
+    render();
+  `, sandbox);
+  const auditHtml = getEl("content").innerHTML;
+  assert.match(auditHtml, /名录变更/);
+  assert.match(auditHtml, /只追加，不改历史/);
+  assert.match(auditHtml, /CAP-poll-agent/);
+  assert.equal(auditHtml.includes("名录变更记录暂不可用"), false);
 
   await vm.runInContext('openWebhookModal("cloud-bot")', sandbox);
   assert.equal(getEl("whUrl").value, "https://bot.example/hook");

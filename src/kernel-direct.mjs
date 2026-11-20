@@ -25,7 +25,7 @@ import {
   spawnVerifyWrapped,
   spawnWrapped,
 } from "./direct-ledger.mjs";
-import { log, nowStr } from "./kernel-util.mjs";
+import { heartbeatFields, log, nowStr } from "./kernel-util.mjs";
 import { InvalidReceipt, NeedAuth, NeedInput } from "./receipt.mjs";
 
 const MAX_RETRIES = 2;
@@ -157,7 +157,7 @@ export const directMethods = {
           return;
         }
         if (flight.finishing || this._sweepBusy) return;
-        await this.bus.updateRecord(this.T.tasks, flight.recordId, { Heartbeat_At: nowStr() });
+        await this.bus.updateRecord(this.T.tasks, flight.recordId, heartbeatFields(f1(row, "Metadata")));
       })().catch((e) => log("heartbeat failed: " + (e?.message ?? e)))
         .finally(() => { flight.heartbeat = null; });
     }, 60_000);
@@ -193,7 +193,9 @@ export const directMethods = {
     // pokeFlight、多余账本和接管都从这里过。间隔内不写，打断「写 → 事件 → 扫表 → 再写」。
     if (!this.heartbeatDue(task)) return;
     try {
-      await this.bus.updateRecord(this.T.tasks, task.record_id, { Heartbeat_At: nowStr() });
+      const row = await this.bus.getRecord(this.T.tasks, task.record_id);
+      if (!row) return;
+      await this.bus.updateRecord(this.T.tasks, task.record_id, heartbeatFields(f1(row, "Metadata")));
     } catch (e) {
       log("heartbeat refresh failed: " + (e?.message ?? e));
     }

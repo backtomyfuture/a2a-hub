@@ -370,9 +370,74 @@ export async function resolveDispatchTarget({ bus, to = "", cap = "", worker = "
   return { node, skill, workerHint };
 }
 
+function cardMeta(card) {
+  const raw = f1(card, "Metadata");
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) return raw;
+  if (!raw) return {};
+  try {
+    const obj = JSON.parse(String(raw));
+    return obj && typeof obj === "object" && !Array.isArray(obj) ? obj : {};
+  } catch {
+    return {};
+  }
+}
+
+// 宿主守护的 Receive_Mode=poll 不是 http-poll。只有 kind=agent 且 mode/receive 为 poll（或两者都空）才算定时拉取。
+function classifyCardPace(card) {
+  const receive = cardText(card, "Receive_Mode").toLowerCase();
+  const meta = cardMeta(card);
+  const kind = String(meta.kind ?? "").toLowerCase();
+  const mode = String(meta.mode ?? "").toLowerCase();
+  const pollMin = Number(meta.poll_interval_min);
+  const poll = Number.isFinite(pollMin) && pollMin > 0 ? pollMin : 0;
+  if (receive === "webhook" || mode === "webhook") return { cls: "webhook", poll, rank: 3 };
+  const httpPoll = receive === "http-poll" || mode === "http-poll"
+    || (kind === "agent" && (receive === "poll" || mode === "poll" || (!receive && !mode)));
+  if (httpPoll) return { cls: "http-poll", poll, rank: 2 };
+  if (receive === "http-longpoll" || receive === "longpoll" || mode === "http-longpoll" || mode === "longpoll") {
+    return { cls: "http-longpoll", poll, rank: 1 };
+  }
+  return { cls: "host", poll, rank: 0 };
+}
+
+function pacePolicy(pace) {
+  if (pace.cls === "webhook") {
+    const intervalSec = (pace.poll > 0 ? pace.poll : 30) * 60;
+    const queue = Math.max(intervalSec * 2, 45 * 60);
+    return { queueTimeoutSec: queue, leaseTtlSec: 1200, waitTimeoutSec: queue };
+  }
+  if (pace.cls === "http-poll") {
+    const mins = pace.poll > 0 ? pace.poll : 5;
+    const queue = Math.max(900, mins * 60 * 2);
+    return { queueTimeoutSec: queue, leaseTtlSec: 1200, waitTimeoutSec: queue };
+  }
+  if (pace.cls === "http-longpoll") {
+    return { queueTimeoutSec: 900, leaseTtlSec: 1200, waitTimeoutSec: 900 };
+  }
+  return { queueTimeoutSec: 900, leaseTtlSec: 300, waitTimeoutSec: 900 };
+}
+
+// 同一节点多张名片时取最慢的接收方式，排队和挂起才留得住下一轮轮询。没有名片按宿主默认。
+export function defaultTaskPolicy(cards, node) {
+  const name = String(node ?? "").trim();
+  const mine = (cards || []).filter((card) => cardText(card, "Node") === name);
+  let best = { cls: "host", poll: 0, rank: 0 };
+  for (const card of mine) {
+    const pace = classifyCardPace(card);
+    if (pace.rank > best.rank || (pace.rank === best.rank && pace.poll > best.poll)) best = pace;
+  }
+  return pacePolicy(best);
+}
+
+function positiveSec(raw, fallback) {
+  const n = Number(raw);
+  if (Number.isFinite(n) && n > 0) return Math.round(n);
+  return fallback;
+}
+
 export async function createTask({
   bus, from = "", source = "", to, cap, worker = "", text = "", params, criteria, context = "", ref = "", approval = "", idempotencyKey = "", now = new Date(), validateTarget = true,
-  attachments, fileStore = null,
+  attachments, fileStore = null, queueTimeoutSec = 0, leaseTtlSec = 0, waitTimeoutSec = 0,
 }) {
   if (!bus?.tables?.messages || !bus.tables.parts || !bus.tables.tasks) {
     throw new Error("总线缺少 messages / parts / tasks 表");
@@ -381,6 +446,16 @@ export async function createTask({
   // 附件校验也在第一笔写之前：hub:// 不存在或外部 URL 非法时不留半截消息。
   const files = normalizeAttachments(attachments, { fileStore });
   const { node, skill, workerHint } = await resolveDispatchTarget({ bus, to, cap, worker, validateTarget });
+  let policy = pacePolicy({ cls: "host" });
+  if (bus.tables.agentCards) {
+    let cards = [];
+    try {
+      cards = await bus.listRecords(bus.tables.agentCards);
+    } catch (e) {
+      throw new Error(`读取 AgentCards 以确定超时失败：${e?.message ?? e}`);
+    }
+    policy = defaultTaskPolicy(cards, node);
+  }
   const sender = String(from || source || "hub").trim();
   const taskSource = String(source || from || "hub").trim();
   const approvalClass = String(approval ?? "").trim();
@@ -489,6 +564,12 @@ export async function createTask({
   if (approvalClass) taskFields.Approval_Class = approvalClass;
   // 留空由目标节点取默认 Worker，并在认领时回填。
   if (workerHint) taskFields.Worker_Hint = workerHint;
+  // 超时/租约只进 Metadata，不加 Tasks 列。调用方传入的正数优先，0 或缺省用目标节点接收方式的默认值。
+  taskFields.Metadata = JSON.stringify({
+    queue_timeout_sec: positiveSec(queueTimeoutSec, policy.queueTimeoutSec),
+    lease_ttl_sec: positiveSec(leaseTtlSec, policy.leaseTtlSec),
+    wait_timeout_sec: positiveSec(waitTimeoutSec, policy.waitTimeoutSec),
+  });
   // 最后写任务行。前面的消息和 Parts 已经落表，节点被这条记录叫醒时读得到参数。
   await bus.createRecord(bus.tables.tasks, taskFields);
   return taskId;

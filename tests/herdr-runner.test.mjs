@@ -8,7 +8,7 @@ import { signDecision, loadOrCreateHubKey } from "../src/approval-sign.mjs";
 import { f1 } from "../src/bus/tables.mjs";
 import { controlKeysIn, inferHerdrKind, loadConfig, normalizeCommands } from "../src/config.mjs";
 import { doctor } from "../src/doctor.mjs";
-import { herdrAgentName, readHerdrLedger } from "../src/herdr-runner.mjs";
+import { hasPastedPlaceholder, herdrAgentName, isTerminalChromeOnly, readHerdrLedger } from "../src/herdr-runner.mjs";
 import { Kernel } from "../src/kernel.mjs";
 import { discoverLocalAgents, runSetup } from "../src/setup.mjs";
 import { TABLES, withTemp } from "./helpers.mjs";
@@ -714,5 +714,40 @@ test("4. setup 检测 herdr 自动配置 context/herdr_kind/maxConcurrent，doct
     } finally {
       console.log = origLog;
     }
+  });
+});
+
+test("纯 TUI 横幅和粘贴占位符不是有效回执", () => {
+  const banner = "Claude Code v2.1.329\nHaiku\n";
+  assert.equal(isTerminalChromeOnly(banner), true);
+  assert.equal(isTerminalChromeOnly("[Pasted text #1 +10 lines]"), true);
+  assert.equal(hasPastedPlaceholder("[Pasted text #1 +10 lines]"), true);
+  assert.equal(isTerminalChromeOnly("已完成任务，结果是 42"), false);
+});
+
+test("herdr 只有启动横幅时不得标记 completed", async () => {
+  await withTemp(async (dir) => {
+    fs.writeFileSync(path.join(dir, "commands.json"), JSON.stringify({
+      workers: {
+        claude: { context: "herdr", herdr_kind: "claude", timeout_sec: 120 },
+      },
+    }), { mode: 0o600 });
+    const mock = new MockBus({ tables: TABLES });
+    const herdr = createMockHerdr();
+    const kernel = makeKernel(dir, mock, herdr.exec);
+    await seedTask(mock, { Task_ID: "TASK-BANNER", Context_ID: "CTX-BANNER" });
+    await kernel.sweepOnce();
+    assert.equal(f1(await taskOf(mock, "TASK-BANNER"), "Status"), "working");
+    await kernel.sweepOnce();
+    assert.equal(f1(await taskOf(mock, "TASK-BANNER"), "Status"), "working");
+    const ag = herdr.agents.get(herdrAgentName("TASK-BANNER"));
+    ag.status = "idle";
+    ag.output = "Claude Code v2.1.329\nHaiku\n";
+    await kernel.sweepOnce();
+    assert.equal(f1(await taskOf(mock, "TASK-BANNER"), "Status"), "working");
+    await kernel.sweepOnce();
+    const done = await taskOf(mock, "TASK-BANNER");
+    assert.equal(f1(done, "Status"), "failed");
+    assert.notEqual(f1(done, "Status"), "completed");
   });
 });

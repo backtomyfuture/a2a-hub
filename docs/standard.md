@@ -209,7 +209,7 @@ Cap_ID 推导口径（守护进程登记时）：节点本尊的能力为条目�
   - `Approval_Class` 取计划配置与本机 `commands.json` 对应能力的 `approval_class` 下限中更严者（只收紧不放宽）；
   - 建单成功后立即置本进程唤醒标志（`_wakeFlag = true`），由本节点现有认领链路接管并流转到 `working`（若生效审批级别为 `approve` 则认领前由节点置 `auth-required`）。严禁跳过 submitted 直写 `working`，以保证在途执行账本、心跳、单并发管控、重试退避与机主审批红线完整生效；
   - 多节点配置相同 Schedule_ID 时，各自独立建单并独立执行一份；
-  - 已知限制：本地定时任务的发起方是本节点，执行中提问（`input-required`）的 `question` 原路回给本节点，须由本机 Agent 经 `ah task reply` 答复；§10.1 第 6 条的陈旧告警不覆盖 `input-required`，无人值守的计划应选择不会提问的能力。
+  - 已知限制：本地定时任务的发起方是本节点，执行中提问（`input-required`）的 `question` 原路回给本节点，须由本机 Agent 经 `ah task reply` 答复。任务没写 `wait_timeout_sec` 时，陈旧告警不覆盖 `input-required`；建单按接收方式写入该键后，挂起超时会回收。无人值守的计划应选择不会提问的能力。
 - **幂等与防重**：幂等键格式为 `sched:<Node_ID>:<Schedule_ID>:<期次键>`。触发建单前先按幂等键查验总线 Tasks 表，已有同键任务则只补写本地状态水位线、不重复建单（双保险防重）。
 - **Agent 类自带时钟与 `ah task begin`**：Agent 定时器到点调用 `ah task begin --schedule <id> [--period <期次键>] [--cap <cap>] --text <指令>`。默认 `--cap agent`、`--from`＝`--to`＝本节点、`Source=cron`，生成同格式幂等键建单为 `submitted`，由本节点守护进程认领进入收件箱（`agent_inbox.jsonl`），Agent 处理完后调用 `ah inbox done|ask|fail` 交付结果。同键重复调用输出已有 Task_ID，不重复建单。
 - **Rules 观察镜像**：Rules 表中的 `Schedule`、`Text`、`Last_Fired` 等列降级为「节点单向写入的只读观察镜像」，仅供全网总览页展示：
@@ -315,7 +315,7 @@ Cap_ID 推导口径（守护进程登记时）：节点本尊的能力为条目�
   4. 审批中继：只给已经是 auth-required 的任务受理审批，不在 submitted 阶段代写 auth_request；审批操作受 Hub Bearer Token 鉴权保护并由 `ApprovalService` 串行校验状态与 `Status_Msg` 后写入签名 `auth_decision`（From_Node=hub、Role=user、In_Reply_To=任务当前 Status_Msg）。`Claimed_By` 为空则批准后置回 submitted，非空则保持 auth-required；驳回置 canceled（§8.3）；
   5. 取消：审批驳回时写 canceled；hub 角色也可执行 `ah task cancel`（或经控制台/网关）取消任意任务。发起方只能在本机显式执行 `ah task cancel`（或 HTTP Leader 调 `/cancel`）取消自己发起的任务；
   6. 结果呈递：将本节点或主节点归属的任务结果（终态、input-required、rejected）落入本地 `present_queue.jsonl`，去重按 §8.5；
-  7. 陈旧任务告警与回收：working 且心跳超时（20 分钟）的任务先告警；告警后宽限 30 分钟，心跳恢复则撤销告警、不留痕迹；宽限届满仍无心跳，由 hub 将任务置 `failed`、清空认领、关账未结束的 Run，并写一条 notice 说明回收原因（原节点事后恢复时，其迟到回执按终态守卫处理）。这是 hub 唯一可代写的任务终态——与 `canceled`（机主/发起方意愿）严格区分，语义为「执行方失联」。submitted 无人认领的任务只告警、不回收；
+  7. 陈旧任务告警与回收：working 且心跳超时（20 分钟）的任务先告警；告警后宽限 30 分钟，心跳恢复则撤销告警、不留痕迹；宽限届满仍无心跳，由 hub 将任务置 `failed`、清空认领、关账未结束的 Run，并写一条 notice 说明回收原因（原节点事后恢复时，其迟到回执按终态守卫处理）。这是 hub 唯一可代写的任务终态——与 `canceled`（机主/发起方意愿）严格区分，语义为「执行方失联」。`Tasks.Metadata` 可带 `queue_timeout_sec`、`lease_ttl_sec`、`lease_expires_at`、`wait_timeout_sec`（不加列）。显式租约到期且心跳未落在租约内时直接回收 working；`queue_timeout_sec` 到期回收无人认领的 submitted；`wait_timeout_sec` 到期回收 `input-required` / `auth-required`（最近一条 question、answer、auth_request 或 auth_decision 重新计时）。未写这些键时，submitted 仍只告警不回收，挂起态不设超时。陈旧巡检约每 60 秒一次，不改 15 分钟对账（`sweepSec=900`）。
   8. 账本派生职责（事项级 `later` 复查与 LoopForge SOP 闭环）：
      - `ScheduleService` 每轮扫表找出 `Status=completed`、`Metadata.later` 已到点、且还没有 `later_fired` 的任务，经现行建单在同一 `Context_ID` 下新建复查任务（幂等键 `later:<前任 Task_ID>`，受 `Hop_Count > 8` 熔断）。纯 node 部署不建复查任务；
      - `LoopService` 追踪 `Loops` 表中 `Status=running` 的多阶段闭环，当阶段子任务进入终态时结合任务状态与 `acceptanceForTask` 验收结果推进下一阶段或按阶段策略触发 `retry` / `goto:<stage_id>` / `abort`，受 `Max_Iterations` 与 `Hop_Count > 8` 双重熔断保护。
@@ -353,7 +353,7 @@ Cap_ID 推导口径（守护进程登记时）：节点本尊的能力为条目�
 POST <机主登记的 URL>
 Content-Type: application/json
 User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36
-X-A2A-Event: task.assigned | task.updated | ping
+X-A2A-Event: task.assigned | task.updated | task.resumed | ping
 X-A2A-Delivery: <uuid，每次尝试一个>
 X-A2A-Timestamp: <unix 秒>
 X-A2A-Signature: sha256=<hex>
@@ -371,9 +371,10 @@ X-A2A-Signature: sha256=<hex>
 
 - `task.assigned`：`Target_Node` 为该节点且 `Status=submitted`。答复后回到 `working` 的续跑不是 `submitted`，不推。
 - `task.updated`：`From_Node` 为该节点，且状态进入 `completed` / `failed` / `canceled` / `rejected` / `input-required` / `auth-required`（给发起方 Leader）。
+- `task.resumed`：messages 写入 `Kind=answer` 或 `auth_decision`，且不改 `Tasks.Status`。门铃发给 `To_Node`；`To_Node` 为空、`hub` 或 `all` 时改发给该任务的 `Target_Node`。
 - `ping`：机主测试按钮。`task_id` 与 `status` 为空字符串，`seq` 为 0。验签通过后直接返回 2xx。
 
-去重键是进程内的 `(node, task_id, status)`，最多保留 4096 条；同一进程里同一键只推一次，重启后会再推。`ping` 不进这张表。收到门铃后用自己的 Agent Token 走现有 `poll` / `claim` / `updates` 拉详情。Webhook 模式另以每 30 分钟一次的 `a2a_check.py` 兜底，防止漏推。
+去重键是进程内的 `(node, task_id, status)`，`task.resumed` 再带上消息号，最多保留 4096 条；同一进程里同一键只推一次，重启后会再推。`ping` 不进这张表。收到门铃后用自己的 Agent Token 走现有 `poll` / `claim` / `updates` 拉详情。Webhook 模式另以每 30 分钟一次的 `a2a_check.py` 兜底，防止漏推。
 
 - **对账兜底**：守护进程模式必须保留低频对账扫表，默认 15 分钟（`sweepSec=900`）。`poll` 方式的轮询间隔不得长于对账周期。
 - **挂起复查（等的一方自己回表看）**：答复（`answer`）与审批决定（`auth_decision`）只追加在 Messages；执行中批准连任务行都不改。守护进程型节点名下有 `input-required` 或 `auth-required` 任务时，两次扫表的间隔按挂起时长缩短：前 10 分钟不超过 60 秒，10～60 分钟不超过 180 秒，超过 60 分钟回到原周期。计时以 (Task_ID, Status_Msg) 为键，同一任务再提问或再申请审批重新计时。事件仍是提前叫醒，这一节奏只保证事件漏掉时的上限；它只缩短等待，不拉长。
