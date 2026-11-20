@@ -360,29 +360,42 @@ export async function inspectHerdrAgent({ exec, agentName, paneId: _paneId = "",
   return { status: "working", rawStatus: info.status };
 }
 
+// Claude Code 欢迎框会在正文前画 ▐▛███▛█ 这类字形和横线。先剥掉，再判断是不是界面噪音。
+const CHROME_FRAME_RE = /^[\s▐▛▜▝▘▀█▌░▒▓╭╮╰╯│┌┐└┘├┤┬┴┼─━═❯›>$%#◐◑]+/u;
+
+function normalizeChromeLine(line) {
+  return String(line ?? "").replace(/\r/g, "").trim().replace(CHROME_FRAME_RE, "").trim();
+}
+
 // 判断终端屏幕抓回的文本是否仅为交互式 CLI 的启动横幅/界面噪音（如 Claude Code 欢迎框、粘贴占位符），
 // 防止 agent 刚启动尚未开始思考时，因初始 idle 误把屏幕转储当成 completed 回执。
 export function isTerminalChromeOnly(rawText) {
   const text = String(rawText ?? "").replace(/\r/g, "").trim();
   if (!text) return true;
-  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  const lines = text.split("\n").map(normalizeChromeLine).filter(Boolean);
   if (!lines.length) return true;
   const chromePatterns = [
-    /^claude code\s+v?\d/i,
-    /^(haiku|sonnet|opus)(\s+\d.*)?$/i,
+    /claude code\s+v?\d/i,
+    /^(haiku|sonnet|opus)\b/i,
     /claude\s+(pro|max|team|enterprise)/i,
     /^updated:\s*\d+\s+features?/i,
     /code\.claude\.com\/docs/i,
-    /^\[pasted text\b/i,
+    /\[pasted text\b/i,
+    /paste again to expand/i,
     /^press enter\b/i,
-    /^[❯›>$%#]\s*$/,
-    /^[─━═╭╮╰╯│┌┐└┘├┤┬┴┼\s]+$/,
+    /\/effort\b/i,
+    /^medium\b/i,
     /^~\/\.a2a-hub\b/,
     /^\/help\b|^type your message\b|^shift\+tab\b/i,
     /^for shortcuts\b|\?\s*for shortcuts/i,
   ];
   const meaningful = lines.filter((line) => !chromePatterns.some((re) => re.test(line)));
   return meaningful.length === 0;
+}
+
+// 粘贴占位符还在屏幕上，说明回车没送出去，后面即使夹着提示词原文也不是任务答案。
+export function isUnusableHerdrScreen(rawText) {
+  return isTerminalChromeOnly(rawText) || hasPastedPlaceholder(rawText);
 }
 
 export function hasPastedPlaceholder(rawText) {

@@ -4,6 +4,7 @@
 
 ## 未发布
 
+- **WorkBuddy 凭据路径**：接入提示词把令牌写到稳定目录 `/ags/workbuddy-data/token`（0600）。文件还不存在时先写入再继续本轮；只有请求返回 401/403，或定时任务正文里已经没有令牌且文件仍缺失时，才停轮并提醒机主。
 - **附件能力（`hub://files/<file_id>`）**：新增中台文件存储（`<configDir>/files/blobs` + `files.db`，目录 `0700`、文件 `0600`；`node.json` 可配 `maxFileBytes`，默认 100MB）与 `/api/v1/files` 上传、流式下载和元数据接口，按上传者与引用任务可见性鉴权。
 - **附件写入、执行与清理**：CLI（`task create`/`reply`、`inbox ask`/`auth` 支持 `--file`，`inbox done` 支持可重复 `--artifact`）与 HTTP 网关（`attachments` / `artifacts`）支持附件；执行器自动下载 `hub://` 文件至 `runs/<Task_ID>/files/` 并写入 `input.json.files[]`；控制台支持图片缩略图与安全下载；`FileRetentionService` 自动清理 24 小时未引用或满 30 天且引用任务均已终态的文件（下载返回 410，Parts 不动）。
 - **控制台接收方式**：HTTP 节点卡片副标题带上接收方式。所有节点只留一行「接收方式」。Webhook 的地址、请求头、密钥掩码、最近投递、最近错误和 30 分钟兜底说明收进这一行的「管理」弹窗，可改 URL、密钥（留空不变）和请求头，并可测试。卡片上不再单独渲染 Webhook 管理框。

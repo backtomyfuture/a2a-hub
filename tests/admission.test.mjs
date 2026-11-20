@@ -1099,7 +1099,9 @@ test("节点模板 id 决定 Step 3 提示词；WorkBuddy 不与通用定时检�
   assert.equal(buddy.template, "generic");
   assert.match(buddy.prompt, /腾讯 WorkBuddy 的云端定时任务/);
   assert.match(buddy.prompt, /每 30 分钟/);
-  assert.match(buddy.steps.join("\n"), /发给 WorkBuddy/);
+  assert.match(buddy.prompt, /\/ags\/workbuddy-data\/token/);
+  assert.equal(buddy.prompt.includes("凭据缺失"), false);
+  assert.match(buddy.steps.join("\n"), /\/ags\/workbuddy-data\/token/);
   assert.equal(buddy.prompt.includes("HMAC"), false);
   assert.notEqual(buddy.prompt, generic.prompt);
 

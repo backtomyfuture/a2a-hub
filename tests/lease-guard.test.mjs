@@ -52,11 +52,17 @@ test("建单按接收方式写默认超时，显式秒数优先", async () => {
   assert.deepEqual(defaultTaskPolicy([
     card("slow", "http-poll", { kind: "agent", mode: "http-poll", poll_interval_min: 10 }),
   ], "slow"), {
-    queueTimeoutSec: 1200, leaseTtlSec: 1200, waitTimeoutSec: 1200,
+    queueTimeoutSec: 3900, leaseTtlSec: 1200, waitTimeoutSec: 3900,
   });
+  assert.equal(defaultTaskPolicy([
+    card("hourly", "http-poll", { kind: "agent", mode: "http-poll", poll_interval_min: 60 }),
+  ], "hourly").queueTimeoutSec, 3900);
+  assert.equal(defaultTaskPolicy([
+    card("slower", "http-poll", { kind: "agent", mode: "http-poll", poll_interval_min: 90 }),
+  ], "slower").queueTimeoutSec, 5700);
   assert.deepEqual(defaultTaskPolicy([
     card("wiz", "poll", { kind: "agent", mode: "poll", poll_interval_min: 10 }),
-  ], "wiz").queueTimeoutSec, 1200);
+  ], "wiz").queueTimeoutSec, 3900);
   assert.deepEqual(defaultTaskPolicy([
     card("hook", "webhook", { kind: "agent", mode: "webhook" }),
   ], "hook"), {
