@@ -8,7 +8,7 @@ import path from "node:path";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { loadConfig, DAEMON_VERSION } from "./kernel.mjs";
-import { capIdOf, capIdsOf, normalizeCommands, resolveListenAddr, resolveTokenFilePath } from "./config.mjs";
+import { capIdOf, capIdsOf, inferHerdrKind, normalizeCommands, resolveListenAddr, resolveTokenFilePath } from "./config.mjs";
 import { isHubPublicKey, readHubPublicKey } from "./approval-sign.mjs";
 import { resolveScheduleTz } from "./hub/schedule.mjs";
 import { LocalScheduleService } from "./local-schedule.mjs";
@@ -112,7 +112,7 @@ function readAgyPermissionsAllow() {
 }
 
 const COMMAND_MODES = new Set(["agent", "json", "inbox"]);
-const COMMAND_CONTEXTS = new Set(["direct"]);
+const COMMAND_CONTEXTS = new Set(["direct", "herdr"]);
 
 function hasVerify(entry) {
   return typeof entry?.verify === "string" && entry.verify.trim().length > 0;
@@ -137,7 +137,8 @@ function auditCommandsShape(cmds, capPrefix) {
       bad(`能力 ${name}：mode=${JSON.stringify(entry.mode)} 非法（只认 agent / json / inbox；认领时内核会拒收该能力的任务）`);
       problems++;
     }
-    if (mode !== "inbox" && (typeof entry.command !== "string" || !entry.command.trim())) {
+    const isHerdr = entry.context === "herdr";
+    if (mode !== "inbox" && !(isHerdr && inferHerdrKind(entry)) && (typeof entry.command !== "string" || !entry.command.trim())) {
       bad(`能力 ${name} 缺 command 模板`);
       problems++;
     }
@@ -149,8 +150,18 @@ function auditCommandsShape(cmds, capPrefix) {
     }
     if (entry.context != null && !COMMAND_CONTEXTS.has(entry.context)) {
       const hint = entry.context === "carrier" ? "carrier 语境已在本版本移除，请把该能力改为 direct 或删除；" : "";
-      bad(`能力 ${name}：context=${JSON.stringify(entry.context)} 非法（${hint}只认 direct；认领时内核会拒收该能力的任务，不会静默直跑）`);
+      bad(`能力 ${name}：context=${JSON.stringify(entry.context)} 非法（${hint}只认 direct / herdr；认领时内核会拒收该能力的任务，不会静默直跑）`);
       problems++;
+    }
+    if (isHerdr) {
+      if (mode === "inbox") {
+        bad(`能力 ${name}：context="herdr" 不支持 mode="inbox"`);
+        problems++;
+      }
+      if (!inferHerdrKind(entry)) {
+        bad(`能力 ${name}：context="herdr" 缺少 herdr_kind 且无法从 worker / command 推导`);
+        problems++;
+      }
     }
     if (entry.timeout_sec != null) {
       const v = entry.timeout_sec;

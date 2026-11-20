@@ -303,7 +303,7 @@ const USAGE_LINES = [
   "  ah doctor  [--config <dir>] [--role node|hub]  本机自检",
   "  ah service [--config <dir>] [--role node|hub] [--system|--user] [--name <unit>]  注册开机自启（--remove 卸载）",
   "  ah update  [--check] [--skip-skill] [--config <dir>]  自更新程序本体（git pull + 依赖重装 + 软链/Skill 补齐）",
-  "  ah inbox   [--pop] [--json]    读取专属 Agent 收件箱（--pop 提取并标为 acked）",
+  "  ah inbox   [--pop] [--limit <n>] [--json]    读取专属 Agent 收件箱（--pop 提取并标为 acked；--limit 只取前 n 条 pending）",
   "  ah inbox done --task <Task_ID> --text <处理结果> [--artifact <路径或URL>]... [--check <id>=<pass|fail|blocked>[:<证据>]]",
   "  ah inbox ask  --task <Task_ID> --text <补充提问> [--file <路径>]...",
   "  ah inbox fail --task <Task_ID> --text <失败原因>",
@@ -918,12 +918,21 @@ if (wantsHelp) {
       }
     }
   } else {
-    // ah inbox [--pop] [--json]
+    // ah inbox [--pop] [--limit <n>] [--json]
     const isPop = rest.includes("--pop");
     const isJson = rest.includes("--json");
+    let limit = 0;
+    for (let i = 0; i < rest.length; i++) {
+      if (rest[i] === "--limit") {
+        const n = Number(rest[i + 1]);
+        limit = Number.isFinite(n) ? n : 0;
+      }
+    }
     try {
       const { popPendingInbox, readInbox } = await import("../src/inbox.mjs");
-      const items = isPop ? popPendingInbox(configDir, { pop: true }) : readInbox(configDir);
+      const items = (isPop || limit > 0)
+        ? popPendingInbox(configDir, { pop: isPop, limit })
+        : readInbox(configDir);
       if (isJson) {
         console.log(JSON.stringify(items, null, 2));
       } else {

@@ -6,28 +6,32 @@ const DEFAULT_MAX_HISTORY = 1024;
 const DEFAULT_STALE_NODE_MS = 90_000;
 // 探针节点只碰一次 poll/register 就会留在内存里。超过一天仍无活动就删掉，避免名册无限增长。
 export const NODE_EXPIRE_MS = 24 * 60 * 60 * 1000;
-// 检查脚本和跑不了脚本时的回退都是 5 分钟。无名片且超过 30 分钟没活动，视为幽灵，不进名册。
+// 检查脚本和跑不了脚本时的回退默认 5 分钟。无名片且超过这段闲置仍无活动，视为幽灵，不进名册。
 export const ROSTER_IDLE_MS = 30 * 60 * 1000;
 // 定时唤醒的 HTTP Agent 两次报到之间本来就隔几分钟，不能套用长轮询守护进程的 90 秒判离线。
 // 一次运行里会连发 check / poll / claim 等请求，间隔短于这个值的视为同一轮，不计入唤醒周期。
 const RUN_BURST_MS = 30_000;
-// 还没观测到周期时（如 Hub 刚重启），按 5 分钟一轮套同一个 2.5 倍系数。
-// 只留 1 分钟余量的话，外部定时器稍有抖动就会在重启后误判离线。
-const DEFAULT_AGENT_WINDOW_MS = 12.5 * 60 * 1000;
+// 没写 poll_interval_min、也还没观测到周期时（如 Hub 刚重启），按默认间隔 × 1.5。
+// 显式间隔不再套 3 分钟下限，也不再被 30 分钟名册闲置截断，否则 60 分钟一轮会在 31 分钟被判离线。
+export const AGENT_WINDOW_FACTOR = 1.5;
+export const DEFAULT_POLL_INTERVAL_MIN = 5;
+export const DEFAULT_WEBHOOK_INTERVAL_MIN = 30;
 const MIN_AGENT_WINDOW_MS = 3 * 60 * 1000;
-// 错过两次左右唤醒才算离线。
-const AGENT_WINDOW_FACTOR = 2.5;
-// Webhook 接收端每收到一次推送就可能起一轮 Agent，中台不能为了判在线去 ping。
-// 兜底检查是 30 分钟，未观测到周期时仍用 2.5 倍，得到 75 分钟。
-const WEBHOOK_FALLBACK_MS = 30 * 60 * 1000;
-const DEFAULT_WEBHOOK_WINDOW_MS = WEBHOOK_FALLBACK_MS * AGENT_WINDOW_FACTOR;
 
-// 有名片的节点离线也要留在名册里。没有名片时，只保留 30 分钟内活动过的在线记录。
+function configuredWindowMs(pollIntervalMin) {
+  const minutes = Number(pollIntervalMin);
+  if (!Number.isFinite(minutes) || minutes <= 0) return 0;
+  return Math.round(minutes * 60_000 * AGENT_WINDOW_FACTOR);
+}
+
+// 有名片的节点离线也要留在名册里。没有名片时，闲置窗口至少 30 分钟；
+// 配了更长轮询间隔的，按间隔 × 1.5 放宽，避免慢节奏 Agent 被当成幽灵删掉。
 export function rosterNodeVisible(info, hasCard, now = Date.now()) {
   if (hasCard) return true;
   const seen = Number(info?.lastSeenAt ?? info?.last_seen_at ?? 0);
   if (!Number.isFinite(seen) || seen <= 0) return false;
-  return now - seen <= ROSTER_IDLE_MS;
+  const idleMs = Math.max(ROSTER_IDLE_MS, configuredWindowMs(info?.pollIntervalMin));
+  return now - seen <= idleMs;
 }
 
 export class LongPollBroker {
@@ -40,6 +44,8 @@ export class LongPollBroker {
     this._localListeners = new Set();
     // node -> { node, lastSeenAt, cursor, remoteAddr, activeWaiters, lastPollAt }
     this._nodes = new Map();
+    // 记住名片配置的分钟轮询间隔：即便 Hub 重启后首次事件是 Webhook 投递（noteDelivery），也能立刻套用正确窗口。
+    this._configuredPollMin = new Map();
     this._closed = false;
   }
 
@@ -160,25 +166,51 @@ export class LongPollBroker {
       kind: meta?.kind || prev.kind || "host",
       mode: meta?.mode || prev.mode || "longpoll",
       role: meta?.role !== undefined ? meta.role : (prev.role || ""),
+      // 名片上的分钟间隔优先于观测值。没带新值时保留（或继承启动预加载的配置），避免 poll/重启把配置清掉。
+      pollIntervalMin: configuredWindowMs(meta?.pollIntervalMin) > 0
+        ? Number(meta.pollIntervalMin)
+        : (Number(prev.pollIntervalMin) > 0
+          ? Number(prev.pollIntervalMin)
+          : (this._configuredPollMin.get(key) || 0)),
     };
+    if (next.pollIntervalMin > 0) this._configuredPollMin.set(key, next.pollIntervalMin);
     this._nodes.set(key, next);
     return next;
   }
 
   // 记录外部 HTTP Agent 或客户端心跳/轮询活跃态，方便控制台统一展示连接节点与接入模式。
   // 省略 role 时保留原角色。poll / claim 没带角色，不能把 check 刚写上的角色清成空。
-  touchAgent(node, { remoteAddr = "", mode = "http-poll", kind = "agent", role, cursor = undefined, receiveFromCard = false } = {}) {
+  touchAgent(node, { remoteAddr = "", mode = "http-poll", kind = "agent", role, cursor = undefined, receiveFromCard = false, pollIntervalMin } = {}) {
     const key = String(node ?? "").trim();
     const prev = this._nodes.get(key);
     // poll / updates 不知道名片上的接收方式，缺省报 http-poll 或长轮询。
-    // 已经确认是 webhook 的不能因此改用 12.5 分钟窗口。检查脚本会带 receiveFromCard，可以按名片改回去。
+    // 已经确认是 webhook 的不能因此改用默认定时窗口。检查脚本会带 receiveFromCard，可以按名片改回去。
     let nextMode = mode;
     if (!receiveFromCard && prev?.mode === "webhook" && (mode === "http-poll" || mode === "longpoll")) {
       nextMode = "webhook";
     }
     const meta = { mode: nextMode, kind };
     if (role) meta.role = role;
+    if (pollIntervalMin != null) meta.pollIntervalMin = pollIntervalMin;
     return this._touchNode(node, cursor, remoteAddr, 0, meta);
+  }
+
+  // 从名片 Metadata 同步轮询间隔。节点还没活动过时不建在线记录，但先缓存间隔，等首次 touchAgent / noteDelivery 生效。
+  setNodePollInterval(node, pollIntervalMin) {
+    const key = String(node ?? "").trim();
+    if (!key || key === "*" || key === "_web") return null;
+    const minutes = Number(pollIntervalMin);
+    const valid = Number.isFinite(minutes) && minutes > 0 ? minutes : 0;
+    if (valid > 0) this._configuredPollMin.set(key, valid);
+    else this._configuredPollMin.delete(key);
+    const prev = this._nodes.get(key);
+    if (!prev) return null;
+    const next = {
+      ...prev,
+      pollIntervalMin: valid,
+    };
+    this._nodes.set(key, next);
+    return next;
   }
 
   // 2xx 投递（含机主测试）算一次活动。不走 _touchNode，避免把门铃间隔写进 intervalMs。
@@ -188,6 +220,9 @@ export class LongPollBroker {
     if (!key || key === "*" || key === "_web") return null;
     const prev = this._nodes.get(key);
     const now = Date.now();
+    const configured = Number(prev?.pollIntervalMin) > 0
+      ? Number(prev.pollIntervalMin)
+      : (this._configuredPollMin.get(key) || 0);
     const next = {
       node: key,
       firstSeenAt: prev?.firstSeenAt || now,
@@ -202,6 +237,7 @@ export class LongPollBroker {
       role: prev?.role || "",
       intervalMs: prev?.intervalMs || 0,
       runStartAt: prev?.runStartAt || 0,
+      pollIntervalMin: configured,
       // 还没有检查锚点时，下次检查才开始记周期。已有锚点就留着，让下一次检查仍相对上次检查计量。
       deferCycle: !prev?.runStartAt,
     };
@@ -211,7 +247,9 @@ export class LongPollBroker {
 
   // 删除 Agent 后立刻从名册消失，不必等 24 小时过期。对方若仍在轮询会被重新记上，所以要先吊销 Token。
   forgetNode(node) {
-    return this._nodes.delete(String(node ?? "").trim());
+    const key = String(node ?? "").trim();
+    this._configuredPollMin.delete(key);
+    return this._nodes.delete(key);
   }
 
   async wait({ node = "*", cursor = 0, timeoutMs = 25_000, signal = null, remoteAddr = "" } = {}) {
@@ -270,17 +308,23 @@ export class LongPollBroker {
     });
   }
 
-  // 长轮询节点断线就该立刻显示离线；定时 HTTP Agent 按观测到的唤醒周期放宽。
-  // 定时检查的上限沿用名册闲置期限（ROSTER_IDLE_MS，30 分钟）：周期估得再长，也不能比「无名片多久算幽灵」更久地显示在线。
-  // Webhook 的兜底检查本身就是 30 分钟。若仍用 30 分钟封顶，75 分钟窗口会被截断，健康节点会在下一次兜底之前被判离线。
-  // 所以 webhook 的上限是这份 75 分钟。名册收不收录仍由 rosterNodeVisible 用 ROSTER_IDLE_MS 决定，这里不放宽。
+  // 长轮询节点断线就该立刻显示离线。定时与 Webhook 按「间隔 × 1.5」放宽。
+  // 名片写了 poll_interval_min 时直接用它，不再套 3 分钟下限，也不再被名册 30 分钟截断。
+  // 没写时：Webhook 固定按 30 分钟兜底（窗口 45 分钟），不拿门铃间隔去估；
+  // http-poll 才用观测到的 intervalMs，并且仍用 30 分钟封顶。刚重启还没观测到时按默认 5 分钟。
   onlineWindowMs(info) {
     const mode = info?.mode || "longpoll";
     if (mode !== "http-poll" && mode !== "webhook") return this.staleNodeMs;
-    // Webhook 节点的请求是门铃触发的，间隔不规律；按观测周期估窗口会在两次门铃之间误判离线，所以固定 75 分钟。
-    if (mode === "webhook") return Math.max(this.staleNodeMs, DEFAULT_WEBHOOK_WINDOW_MS);
-    const base = info.intervalMs ? info.intervalMs * AGENT_WINDOW_FACTOR : DEFAULT_AGENT_WINDOW_MS;
-    return Math.min(ROSTER_IDLE_MS, Math.max(this.staleNodeMs, MIN_AGENT_WINDOW_MS, base));
+    const configured = configuredWindowMs(info?.pollIntervalMin);
+    if (configured > 0) return Math.max(this.staleNodeMs, configured);
+    if (mode === "webhook") {
+      return Math.max(this.staleNodeMs, DEFAULT_WEBHOOK_INTERVAL_MIN * 60_000 * AGENT_WINDOW_FACTOR);
+    }
+    if (info?.intervalMs > 0) {
+      const observed = Math.round(info.intervalMs * AGENT_WINDOW_FACTOR);
+      return Math.min(ROSTER_IDLE_MS, Math.max(this.staleNodeMs, MIN_AGENT_WINDOW_MS, observed));
+    }
+    return DEFAULT_POLL_INTERVAL_MIN * 60_000 * AGENT_WINDOW_FACTOR;
   }
 
   connectedNodes(now = Date.now()) {
@@ -302,6 +346,7 @@ export class LongPollBroker {
         mode: info.mode || "longpoll",
         role: info.role || "",
         intervalSec: info.intervalMs ? Math.round(info.intervalMs / 1000) : null,
+        pollIntervalMin: info.pollIntervalMin > 0 ? info.pollIntervalMin : null,
         lastDeliveredAt: info.lastDeliveredAt || null,
       });
     }

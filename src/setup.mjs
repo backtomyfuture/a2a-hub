@@ -172,6 +172,7 @@ const KNOWN_AGENTS = [
   {
     bin: "claude",
     skill: "claude-agent",
+    herdrKind: "claude",
     name: "Claude Code Agent",
     // 无头 -p 会停在权限确认，没人点就卡住；跳过权限必须写进模板。
     cmdTemplate: (b) => `${b} -p --dangerously-skip-permissions {prompt}`,
@@ -180,6 +181,7 @@ const KNOWN_AGENTS = [
   {
     bin: "codex",
     skill: "codex-agent",
+    herdrKind: "codex",
     name: "Codex Agent",
     // 默认沙箱是只读档，写类任务必失败，所以模板钉 workspace-write。
     cmdTemplate: (b) => `${b} exec --sandbox workspace-write {prompt}`,
@@ -188,6 +190,7 @@ const KNOWN_AGENTS = [
   {
     bin: "agy",
     skill: "agy-agent",
+    herdrKind: "agy",
     name: "Antigravity Agent",
     // --print 会把紧随其后的参数当成 prompt 吞掉，批准参数必须放在 --print 前面（本机实测）。
     cmdTemplate: (b) => `${b} --dangerously-skip-permissions --print {prompt}`,
@@ -196,6 +199,7 @@ const KNOWN_AGENTS = [
   {
     bin: "gemini",
     skill: "gemini-agent",
+    herdrKind: "gemini",
     name: "Gemini Agent",
     // 批准模式必须放在 -p 前面，否则 -p 会把后面的参数当成 prompt；-y / --yolo 已废弃。
     cmdTemplate: (b) => `${b} --approval-mode yolo -p {prompt}`,
@@ -204,6 +208,7 @@ const KNOWN_AGENTS = [
   {
     bin: "amp",
     skill: "amp-agent",
+    herdrKind: "amp",
     name: "Amp Agent",
     // 无头 -x 默认会停在权限确认，全批准开关写进模板。
     cmdTemplate: (b) => `${b} --dangerously-allow-all -x {prompt}`,
@@ -212,6 +217,7 @@ const KNOWN_AGENTS = [
   {
     bin: "droid",
     skill: "droid-agent",
+    herdrKind: "droid",
     name: "Factory Droid Agent",
     // 分级自治取中档，避免默认停在确认，也不放到最高档。
     cmdTemplate: (b) => `${b} exec --auto medium {prompt}`,
@@ -220,13 +226,16 @@ const KNOWN_AGENTS = [
   {
     bin: "grok",
     skill: "grok-agent",
+    herdrKind: "grok",
     name: "Grok CLI Agent",
     cmdTemplate: (b) => `${b} -p {prompt}`,
+    herdrKind: "grok",
     desc: "以本机 Grok CLI (grok) 为执行主体，处理调研、分析与本地工具执行任务",
   },
   {
     bin: "hermes",
     skill: "hermes-agent",
+    herdrKind: "hermes",
     name: "Hermes Agent",
     cmdTemplate: (b) => `${b} -z {prompt}`,
     desc: "以 Hermes Agent (hermes) 为执行主体，带本机工具面处理自动化与创作任务",
@@ -234,6 +243,7 @@ const KNOWN_AGENTS = [
   {
     bin: "cursor-agent",
     skill: "cursor-agent",
+    herdrKind: "cursor",
     name: "Cursor Agent",
     cmdTemplate: (b) => `${b} -p {prompt}`,
     desc: "以 Cursor Agent (cursor-agent) 为执行主体，处理代码编辑与本机终端任务",
@@ -241,6 +251,7 @@ const KNOWN_AGENTS = [
   {
     bin: "opencode",
     skill: "opencode-agent",
+    herdrKind: "opencode",
     name: "OpenCode Agent",
     // 无头 run 需要显式放开权限。参数名有版本差异，以目标机 opencode --help 为准：
     // 本机较新版本 --help 可见的是 --auto；--dangerously-skip-permissions 是旧名/隐藏别名。
@@ -272,25 +283,31 @@ const KNOWN_AGENTS = [
   },
 ];
 
-export function discoverLocalAgents() {
+export function discoverLocalAgents({ useHerdr } = {}) {
+  const herdrEnabled = useHerdr === undefined ? Boolean(findExecutable("herdr")) : Boolean(useHerdr);
   const discovered = [];
   for (const item of KNOWN_AGENTS) {
     const fullPath = findExecutable(item.bin);
     if (fullPath) {
+      const entry = {
+        command: item.cmdTemplate(fullPath),
+        desc: item.desc,
+        mode: "agent",
+        name: item.name,
+        side_effect: "write",
+        approval_class: "auto",
+        timeout_sec: 900,
+      };
+      if (herdrEnabled && item.herdrKind) {
+        entry.context = "herdr";
+        entry.herdr_kind = item.herdrKind;
+      }
       discovered.push({
         ...item,
         // Worker 名取旧能力名去掉 -agent 后缀，这样 Worker 名片的 Cap_ID 仍是 CAP-<前缀>-<x>-agent。
         worker: item.skill.replace(/-agent$/, ""),
         path: fullPath,
-        entry: {
-          command: item.cmdTemplate(fullPath),
-          desc: item.desc,
-          mode: "agent",
-          name: item.name,
-          side_effect: "write",
-          approval_class: "auto",
-          timeout_sec: 900,
-        },
+        entry,
       });
     }
   }
@@ -767,6 +784,7 @@ export async function runSetup(configDir, argv, appDir) {
     if (!owRes.ok) return owRes.code;
 
     const tables = normalizeTables(existingRaw?.tables);
+    const hasHerdr = kind === "host" && Boolean(findExecutable("herdr"));
     let bus = null;
     const nodeJson = {
       node,
@@ -782,6 +800,10 @@ export async function runSetup(configDir, argv, appDir) {
       events: true,
       tables,
     };
+    if (hasHerdr) {
+      nodeJson.maxConcurrent = Number(existingRaw?.maxConcurrent) > 0 ? Number(existingRaw.maxConcurrent) : 4;
+      console.log(`  ✓ 检测到 herdr：本机 Agent 将默认使用 context=herdr 调度（maxConcurrent=${nodeJson.maxConcurrent}）`);
+    }
 
     // tokenFile 只记路径。明文留在那份 0600 文件里，不复制进 node.json 或 app.env。
     if (apiToken && !(setupBus === "agent" && flags.tokenFile)) {

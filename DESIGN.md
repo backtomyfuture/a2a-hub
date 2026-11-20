@@ -42,19 +42,19 @@
 |---|---|---|---|
 | **宿主守护进程型**（`kind: host`） | 办公电脑、Mac mini、Linux 工作站、GPU 服务器 | `ah daemon` 出站长轮询（`/api/v1/poll`），按 `commands.json` 拉起本机 CLI/脚本 | 守护内核强制租约、心跳、单并发账本、退避与验收 |
 | **本地独立 Agent 型**（`kind: agent`） | 同机常驻但自主消费任务的独立 Agent | `ah daemon` 认领后写入 `0600` `agent_inbox.jsonl` 并持续续心跳；本尊调 `ah inbox` 取单/交付 | 内核维护租约与 `inbox_timeout_sec`，`inbox` 出站计划保证防重与终态守卫 |
-| **纯 HTTP 外部 Agent** | 云端 Leader / Worker。角色两种：`worker` 只接单，`leader` 派单并接单（旧值 `hybrid` 等同 leader）。接收方式三选一 | 凭分 Agent Token 调 `agent-gateway`。定时检查（`http-poll`，默认）：每 5 分钟跑 `a2a_check.py`，`WORK` 后 `poll?timeout=0` 或 `updates?new=1`；跑不了脚本时也是每 5 分钟。常驻长轮询（`http-longpoll`）：循环 `poll?timeout=25`（Leader 每轮再拉 `updates?new=1`），断线 1/3/8/30 秒退避。Webhook（`webhook`）：Hub 向机主登记的 URL POST 门铃，用接收端提供的密钥做请求头和 HMAC，接收方回网关拉详情，每 30 分钟检查脚本兜底。Token 放 `A2A_HUB_TOKEN` | `agent-gateway` 在网关侧执行目标匹配、静态/动态审批门与状态守卫。`check` 不推进 Leader 水位。未知唤醒周期的在线窗口：定时检查 12.5 分钟，Webhook 75 分钟。Webhook URL 与密钥只由机主配置 |
+| **纯 HTTP 外部 Agent** | 云端 Leader / Worker。角色两种：`worker` 只接单，`leader` 派单并接单（旧值 `hybrid` 等同 leader）。接收方式三选一 | 凭分 Agent Token 调 `agent-gateway`。定时检查（`http-poll`，默认）：可自定义分钟级间隔 `poll_interval_min`（默认 5 分钟，支持 1–1440 分钟如 60 分钟），按设定间隔跑 `a2a_check.py`，`WORK` 后 `poll?timeout=0` 或 `updates?new=1`。常驻长轮询（`http-longpoll`）：循环 `poll?timeout=25`（Leader 每轮再拉 `updates?new=1`），断线 1/3/8/30 秒退避。Webhook（`webhook`）：Hub 向机主登记的 URL POST 门铃，用接收端提供的密钥做请求头和 HMAC，接收方回网关拉详情，另按 `poll_interval_min`（默认 30 分钟）检查脚本兜底。Token 放 `A2A_HUB_TOKEN` | `agent-gateway` 在网关侧执行目标匹配、静态/动态审批门与状态守卫。`check` 不推进 Leader 水位。在线判定统一按 `poll_interval_min × 1.5`（默认定时检查 7.5 分钟，Webhook 45 分钟；自定义 60 分钟则 90 分钟，不被 30 分钟名册闲置截断）。Webhook URL 与密钥只由机主配置 |
 
 ## 6. executor × context 抽象
 
-本机执行能力收敛为两个配置维度（`src/config.mjs`、`src/kernel-direct.mjs`、`src/inbox.mjs`）：
+本机执行能力收敛为两个配置维度（`src/config.mjs`、`src/kernel-direct.mjs`、`src/kernel-herdr.mjs`、`src/herdr-runner.mjs`、`src/inbox.mjs`）：
 
 - **执行模式（`mode`，即 executor 的交互形态）**：
   - `agent`（默认）：基于 `{prompt}` 模板拉起本机 Agent CLI，任务原文与参数写入 `runs/<Task_ID>/input.json`，通过结构化围栏（`` ```agent-ask ```` / ```` ```agent-auth ````）与围栏外整行指令解析回执；
   - `json`：确定性脚本或结构化工具，从 `stdin` 读取任务信封 JSON，从 `stdout` 最后一个非空行读取 JSON 回执；
-  - `inbox`：仅用于独立 Agent 节点（`kind: agent`），守护进程认领后写入 `agent_inbox.jsonl` 并保持心跳，不起子进程，由 Agent 本尊通过 `ah inbox (done|ask|fail|auth)` 完成交付与续跑。
+  - `inbox`：仅用于独立 Agent 节点（`kind: agent`），守护进程认领后写入 `agent_inbox.jsonl` 并保持心跳，不起子进程，由 Agent 本尊通过 `ah inbox [--pop] [--limit <n>]` 与 `done|ask|fail|auth` 完成交付与续跑。
 - **执行语境（`context`）**：
-  - 现行唯一合法值为 `direct`（默认值，可省略）：守护进程直接以独立进程组（`src/proc.mjs` / `src/direct-ledger.mjs`）拉起命令，并将 `pid`、进程启动时间戳、`run_id`、stdout/stderr/exit 文件路径原子写入 `runs/<Task_ID>/entry.json`（0600）。
-  - 同一节点同一时刻只允许一条 `direct` 在途命令，守护进程重启后依据账本判断进程组存活与退出码实现断点续接（不二次重跑副作用命令），超时向进程组先发 `SIGTERM` 再 `SIGKILL`。配置中出现非法 `context` 取值时认领预检直接 `rejected`。
+  - `direct`（默认值，可省略）：守护进程直接以独立进程组（`src/proc.mjs` / `src/direct-ledger.mjs`）拉起命令，并将 `pid`、进程启动时间戳、`run_id`、stdout/stderr/exit 文件路径原子写入 `runs/<Task_ID>/entry.json`（0600）。同一节点同一时刻只允许一条 `direct` 在途命令，守护进程重启后依据账本判断进程组存活与退出码实现断点续接（不二次重跑副作用命令），超时向进程组先发 `SIGTERM` 再 `SIGKILL`。
+  - `herdr`（边缘宿主机多 Agent 并发编排）：借助本机 `herdr` 终端复用器为每个任务创建独立 Tab/Pane 与唯一 Agent 名（`ah-<task_id>`），通过 `--env` 注入 `AH_TASK_ID` / `AH_NODE` / `AH_WORKER` / `AH_RUN_DIR` / `AH_INPUT_PATH` / `AH_RECEIPT_PATH` 与 Worker 自定义 `herdr_env`，账本落盘 `runs/<Task_ID>/herdr.json`（0600）。支持 `node.json` 的 `maxConcurrent` 多槽并发（默认 `4`）；处于 `input-required` / `auth-required` 的挂起任务保留活着的 Pane（`state="parked"`，继续占槽），答复或批准后原地 `herdr agent prompt` 热续接（原 Pane 丢失则冷重启兜底），终态自动关闭 Tab 释放槽位。`ah setup` 检测到本机已装 `herdr` 时默认给支持的编码 Agent 启用。配置中出现非法 `context` 取值时认领预检直接 `rejected`。
 
 ## 7. 能力模型与回执约定
 
@@ -69,7 +69,7 @@
 
 ## 8. 安全纪律
 
-- **控制键拦截**：`EXEC_CONTROL_KEYS`（`command`、`cmd`、`cwd`、`context`、`agent`、`worker`、`mode`、`side_effect`、`approval_class`、`permissions`、`shell`、`env`、`executable`、`argv`、`bin`、`max_timeout_sec`、`verify`、`verify_timeout_sec`）出现在任务参数中时，建单端与执行节点一律拒收；唯一可由任务参数覆盖的执行控制键为 `timeout_sec`（且受节点本地 `max_timeout_sec` 夹紧）。
+- **控制键拦截**：`EXEC_CONTROL_KEYS`（`command`、`cmd`、`cwd`、`context`、`agent`、`worker`、`mode`、`side_effect`、`approval_class`、`permissions`、`shell`、`env`、`executable`、`argv`、`bin`、`max_timeout_sec`、`verify`、`verify_timeout_sec`、`herdr_kind`、`herdr_args`、`herdr_env`、`herdr_session`、`herdr_workspace`）出现在任务参数中时，建单端与执行节点一律拒收；唯一可由任务参数覆盖的执行控制键为 `timeout_sec`（且受节点本地 `max_timeout_sec` 夹紧）。
 - **审批下限与 ed25519 签名**：认领前静态审批下限取「任务行 `Approval_Class`、本地 Worker 下限、本地 Skill 下限」中最严者；执行中可由 `agent-auth` / `need_auth` / `ah inbox auth` / 网关 `/auth` 触发动态审批。Hub 使用配置目录 `0600` 私钥 `approval_key.pem` 为 `auth_decision` 签名，配了 `hubPublicKey` 的节点与网关严格验签。
 - **分 Agent Token（`src/hub/agent-tokens.mjs` + `src/hub/agent-access.mjs`）**：机主 `apiToken` 即 owner，权限不变。每个外部 HTTP Agent 由机主在控制台（`POST /api/v1/admin/agents`，`access=http`）签发独立 Token，绑定 `{node, role, scopes}`，`<configDir>/agent_tokens.json`（0600）只存 sha256 哈希与展示前缀，明文只在签发/轮换响应出现一次；可 `rotate` 重新生成、`DELETE` 吊销。控制台添加时 `scopes` 为空，`admin` 要在轮换 body 里写入。未配置机主 `apiToken` 时拒绝签发（否则鉴权一开机主自己会被挡在外）。角色只有 `worker` 与 `leader`。`hybrid` 为旧值，等同 `leader`；新签发与显式轮换存成 `leader`。`worker` 只能 register / poll / inbox / 任务生命周期（claim、heartbeat、complete、fail、ask、auth）；`leader` 拥有这些权限，并可派单，查看自己发起或指向自己的任务，答复和撤销仅限自己发起的任务，loops 的列表与取消也仅限自己发起的，并用 updates；scopes 含 `admin` 的 leader 另可接纳名片（单卡或整节点）、改显示名、为别的节点生成接入提示词，以及 `POST /api/v1/admin/cards`。控制台添加 leader、leader 不报能力的 register，以及启动时对无名片的 leader / hybrid Token 补建，都写入可派单身份名片 `CAP-<node>-agent`（`Dispatchable=Yes`，新建 `Admission=admitted`），不覆盖已有名片的 `Admission`。任何角色可 `PUT`/`DELETE` 自己的 `/api/v1/agents/:node/schedules/:id`。任何 Agent 身份都不能访问 `/approvals/*`、`/admin/agents`、`/admin/tokens*`、`/admin/webhooks*`、`/admin/commands-snippet`、`DELETE /admin/cards/:capId`、`/schedules`、`/state`、`/tables/*`、`/poll`。路径节点、查询参数 `node`/`from`、请求头 `X-A2A-Node` 与绑定节点不一致返回 403；body 里省略 `node`/`from` 则补成绑定节点。`GET /api/v1/admin/onboarding` 的 `node` 是操作对象，不按冒充拒绝。
 - **Webhook 门铃（`src/hub/webhooks.mjs`）**：URL 与接收端提供的密钥只由机主写入 `<configDir>/agent_webhooks.json`（0600）。`secret` 明文落盘是因为每次出站都要用；列表、日志和门铃正文都不含明文，只返回掩码和请求头名。中台不签发密钥，也不再返回一次性明文。默认请求头 `Authorization: Bearer <密钥>`，自定义头名时值为密钥原文，并同时带 `X-A2A-Signature`。没有 `header` 字段的旧记录只做 HMAC。只允许 `http`/`https`，长度 ≤ 2048，禁止用户名密码。推送是门铃（`task.assigned` / `task.updated` / `ping`），正文多一句 `text`，不含指令。签名 `HMAC-SHA256(secret, "<X-A2A-Timestamp>.<rawBody>")`，头为 `sha256=<hex>`。自建接收端可核对 5 分钟时间窗，失败返回非 2xx。Hub 不跟随重定向，单次超时 10 秒，失败按 0/1/3/8 秒重试后放弃。进程内按 `(node, task_id, status)` 去重。非 Webhook 节点不能登记推送。`DELETE` 后名片回到 `http-poll`。Agent 不能自报或改 URL。这与 `notifications.webhookUrl`（机主提醒）不是同一条通道。
@@ -93,6 +93,8 @@ a2a-hub/
   src/
     kernel.mjs                  # 状态机骨架（Sweep 主循环、能力对账、认领与状态迁移）
     kernel-direct.mjs           # direct 在途命令与 L1 verify 编排（原型混入）
+    kernel-herdr.mjs            # herdr 多槽并发、驻留占槽与原地热续接编排（原型混入）
+    herdr-runner.mjs            # Herdr CLI 驱动与运行账本（runs/<Task_ID>/herdr.json）
     kernel-approval.mjs         # 认领前静态门与动态审批续跑（原型混入）
     kernel-outbox.mjs           # 回执 outbox 幂等提交（原型混入）
     kernel-metadata.mjs         # usage / later / acceptance Metadata 合并写（原型混入）

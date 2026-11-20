@@ -91,8 +91,12 @@ export function presetHttpCardFields({
   adminNote = "",
   availability = "offline",
   updatedAt,
+  pollIntervalMin,
 } = {}) {
   const storedRole = role === "hybrid" ? "leader" : role;
+  const interval = pollIntervalForCard(receiveMode, pollIntervalMin);
+  const meta = { kind: "agent", role: storedRole, mode: receiveMode, preset: true };
+  if (interval > 0) meta.poll_interval_min = interval;
   return {
     Cap_ID: capIdOf("agent", {}, node),
     Node: node,
@@ -111,7 +115,7 @@ export function presetHttpCardFields({
     Display_Name: displayName,
     Admin_Note: adminNote,
     Updated_At: updatedAt || minuteStamp(),
-    Metadata: JSON.stringify({ kind: "agent", role: storedRole, mode: receiveMode, preset: true }),
+    Metadata: JSON.stringify(meta),
   };
 }
 
@@ -154,6 +158,28 @@ export function receiveModeFor(receive) {
   return "http-poll";
 }
 
+// 轮询间隔单位是分钟。空值按接收方式给默认：定时检查 5，Webhook 兜底 30，长轮询不记间隔。
+export function validatePollIntervalMin(raw, receive = "poll") {
+  if (raw === undefined || raw === null || (typeof raw === "string" && raw.trim() === "")) {
+    if (receive === "webhook") return 30;
+    if (receive === "longpoll") return null;
+    return 5;
+  }
+  const n = typeof raw === "number" ? raw : Number(String(raw).trim());
+  if (!Number.isInteger(n) || n < 1 || n > 1440) {
+    throw httpError(400, "poll_interval_min 必须是 1 到 1440 之间的整数（分钟）");
+  }
+  return n;
+}
+
+function pollIntervalForCard(receiveMode, pollIntervalMin) {
+  const n = Number(pollIntervalMin);
+  if (Number.isInteger(n) && n > 0) return n;
+  if (receiveMode === "webhook") return 30;
+  if (receiveMode === "http-longpoll" || receiveMode === "longpoll") return 0;
+  return 5;
+}
+
 export function validateProfileFields(body) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     throw httpError(400, "请求体必须是 JSON 对象");
@@ -182,9 +208,15 @@ export function validateProfileFields(body) {
   return patch;
 }
 
+function storedPollIntervalMin(raw) {
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > 1440) return null;
+  return n;
+}
+
 export function parseCardMetadata(card) {
   const rawMeta = card?.fields !== undefined ? f1(card, "Metadata") : card?.Metadata;
-  const empty = { kind: "", role: "", manual: false, preset: false };
+  const empty = { kind: "", role: "", manual: false, preset: false, poll_interval_min: null };
   if (!rawMeta) return empty;
   try {
     const meta = typeof rawMeta === "object" ? rawMeta : JSON.parse(String(rawMeta));
@@ -194,6 +226,7 @@ export function parseCardMetadata(card) {
       role: meta.role == null ? "" : String(meta.role),
       manual: meta.manual === true,
       preset: meta.preset === true,
+      poll_interval_min: storedPollIntervalMin(meta.poll_interval_min),
     };
   } catch {
     return empty;
@@ -201,7 +234,7 @@ export function parseCardMetadata(card) {
 }
 
 export function formatAgentCard(c) {
-  const { kind, role, manual, preset } = parseCardMetadata(c);
+  const { kind, role, manual, preset, poll_interval_min } = parseCardMetadata(c);
   return {
     record_id: c.record_id,
     cap_id: f1(c, "Cap_ID"),
@@ -225,6 +258,7 @@ export function formatAgentCard(c) {
     // 控制台据此只对机主手动添加或向导预置的名片显示「删除」，其余名片由节点对账维护。
     manual,
     preset,
+    poll_interval_min,
   };
 }
 
@@ -298,7 +332,7 @@ function workerSchedule(base, node, cred, role = "worker") {
     "只处理分配给自己的任务，不要认领或改别人的任务。",
     `1. 报到：POST ${base}/api/v1/agents/register ，body {"node":"${node}","role":"${role}","kind":"agent","receive_mode":"http-poll"}`,
     `2. 短轮询取单：GET ${base}/api/v1/agents/${node}/poll?timeout=0 （timeout=0，不要长轮询挂起）`,
-    `3. 对返回的每个任务：POST ${base}/api/v1/tasks/<task_id>/claim ，body {"node":"${node}"}。check 返回的 working 里是你已认领、仍为 working 的任务，直接续心跳或收尾，不要重复认领。`,
+    `3. 对返回的每个任务：POST ${base}/api/v1/tasks/<task_id>/claim ，body {"node":"${node}"}。check 返回的 working 里是你已认领、仍为 working 的任务，直接续心跳或收尾，不要重复认领。若一次返回多个任务，按自身能力与内部队列依次认领处理，单次运行处理不完的不要提前批量认领。`,
     `4. 在本次运行内做完。若预计超过 10 分钟，处理期间 POST ${base}/api/v1/tasks/<task_id>/heartbeat ，body {"node":"${node}","text":"当前进度"}`,
     `5. 成功：POST ${base}/api/v1/tasks/<task_id>/complete ，body {"node":"${node}","text":"结果摘要"}。失败：POST ${base}/api/v1/tasks/<task_id>/fail ，body {"node":"${node}","text":"失败原因"}`,
     `6. 缺信息：POST ${base}/api/v1/tasks/<task_id>/ask ，body {"node":"${node}","text":"缺什么"}，然后停下该任务，不要猜。`,
@@ -339,10 +373,10 @@ function tokenSaveLines(cred) {
   ];
 }
 
-function gateLines(base, node) {
+function gateLines(base, node, intervalMin = 5) {
   return [
     "【定时任务】",
-    "创建定时任务，每 5 分钟运行一次。每次唤醒都没有上一轮上下文。【定时指令】只有下面这几行：",
+    `创建定时任务，每 ${intervalMin} 分钟运行一次。每次唤醒都没有上一轮上下文。【定时指令】只有下面这几行：`,
     `运行 python3 <保存路径>/a2a_check.py --hub ${base} --node ${node}。没有 python3 时改为 sh <保存路径>/a2a_check.sh --hub ${base} --node ${node}。`,
     "Token 从环境变量 A2A_HUB_TOKEN 或平台安全空间引用读取，不要写进这几行。免鉴权 Hub 不要传 --token。",
     "输出 IDLE 就立即结束，不回复、不做任何其它调用。",
@@ -352,8 +386,8 @@ function gateLines(base, node) {
   ];
 }
 
-function fallbackLines() {
-  return ["【回退】", "若无法运行任何脚本，每 5 分钟直接执行上面的【处理流程】。"];
+function fallbackLines(intervalMin = 5) {
+  return ["【回退】", `若无法运行任何脚本，每 ${intervalMin} 分钟直接执行上面的【处理流程】。`];
 }
 
 function longpollBackoffLine() {
@@ -365,7 +399,7 @@ function longpollWorkerLoop(base, node, cred) {
     "【主循环】（常驻进程；不要创建定时任务，也不要下载或运行 a2a_check.py）",
     `你是节点 ${node} 的执行端。Hub：${base}。${scheduleHeaders(cred)}`,
     `1. GET ${base}/api/v1/agents/${node}/poll?timeout=25 ，挂起等待新任务。timeout 用 25 秒，不要用 0。`,
-    `2. 对返回的每个任务：POST ${base}/api/v1/tasks/<task_id>/claim ，body {"node":"${node}"}。已经是 working 的任务直接续做，不要重复认领。`,
+    `2. 对返回的每个任务：POST ${base}/api/v1/tasks/<task_id>/claim ，body {"node":"${node}"}。已经是 working 的任务直接续做，不要重复认领。若一次返回多个任务，按自身能力与内部队列依次认领处理，单次运行处理不完的不要提前批量认领。`,
     "3. 在本进程内做完。若预计超过 10 分钟，处理期间 POST " + `${base}/api/v1/tasks/<task_id>/heartbeat ，body {"node":"${node}","text":"当前进度"}`,
     `4. 成功：POST ${base}/api/v1/tasks/<task_id>/complete ，body {"node":"${node}","text":"结果摘要"}。失败：POST ${base}/api/v1/tasks/<task_id>/fail ，body {"node":"${node}","text":"失败原因"}`,
     `5. 缺信息：POST ${base}/api/v1/tasks/<task_id>/ask ，body {"node":"${node}","text":"缺什么"}，然后停下该任务，不要猜。`,
@@ -439,7 +473,7 @@ function webhookWorkerFlow(base, node) {
   return [
     "【处理流程】（task.assigned 或兜底输出 WORK 时执行；每次都没有上一轮上下文）",
     `1. GET ${base}/api/v1/agents/${node}/poll?timeout=0 （timeout=0，不要长轮询挂起）。指令正文只在这个响应里，不在门铃里。`,
-    `2. POST ${base}/api/v1/tasks/<task_id>/claim ，body {"node":"${node}"}`,
+    `2. POST ${base}/api/v1/tasks/<task_id>/claim ，body {"node":"${node}"}。若一次返回多个任务，按自身能力与内部队列依次认领处理，单次运行处理不完的不要提前批量认领。`,
     `3. 在本次运行内做完。超过 10 分钟就 POST ${base}/api/v1/tasks/<task_id>/heartbeat ，body {"node":"${node}","text":"当前进度"}`,
     `4. 成功走 complete，失败走 fail，body {"node":"${node}","text":"..."}`,
     `5. 缺信息走 ask，需要批准走 auth，然后停下。不要自己批准，也不要调用 /api/v1/approvals。`,
@@ -457,7 +491,7 @@ function webhookLeaderFlow(base, node) {
   ];
 }
 
-function webhookPrompt({ base, node, role, cred, skills }) {
+function webhookPrompt({ base, node, role, cred, skills, intervalMin = 30 }) {
   const shown = promptRole(role);
   const skillLines = skills.map((s) => `GET ${s.url}`);
   const handle = [
@@ -494,12 +528,12 @@ function webhookPrompt({ base, node, role, cred, skills }) {
     ...flows,
     "",
     "【兜底】",
-    `每 30 分钟运行一次 python3 <保存路径>/a2a_check.py --hub ${base} --node ${node}，防止门铃漏推。没有 python3 时改为 sh <保存路径>/a2a_check.sh --hub ${base} --node ${node}。`,
+    `每 ${intervalMin} 分钟运行一次 python3 <保存路径>/a2a_check.py --hub ${base} --node ${node}，防止门铃漏推。没有 python3 时改为 sh <保存路径>/a2a_check.sh --hub ${base} --node ${node}。`,
     "Token 从环境变量 A2A_HUB_TOKEN 读取，不要写进命令。输出 IDLE 就立即结束；输出 WORK 再按【处理流程】执行；输出 ERROR 就结束。",
   ].join("\n");
 }
 
-function scheduledPrompt({ base, node, role, cred, skills }) {
+function scheduledPrompt({ base, node, role, cred, skills, intervalMin = 5 }) {
   const shown = promptRole(role);
   const skillLines = skills.map((s) => `GET ${s.url}`);
   const once = [
@@ -523,11 +557,11 @@ function scheduledPrompt({ base, node, role, cred, skills }) {
     "你是被定时唤醒的 HTTP Agent，每次运行都没有上一轮上下文。请接入 a2a-hub。能跑脚本时只执行【定时指令】；输出 WORK 才读取已保存的【处理流程】。",
     ...once,
     "",
-    ...gateLines(base, node),
+    ...gateLines(base, node, intervalMin),
     "",
     ...blocks,
     "",
-    ...fallbackLines(),
+    ...fallbackLines(intervalMin),
   ].join("\n");
 }
 
@@ -539,6 +573,7 @@ export function buildOnboarding({
   authRequired = false,
   token = "",
   receive = "poll",
+  pollIntervalMin = null,
 }) {
   const base = String(hubUrl ?? "").trim().replace(/\/+$/, "") || "http://127.0.0.1:8787";
   const skills = skillNamesFor(access, role).map((name) => ({
@@ -592,9 +627,10 @@ export function buildOnboarding({
     ].join("\n");
   } else if (receiveMode === "poll") {
     const shown = promptRole(role);
+    const intervalMin = pollIntervalMin || 5;
     const scheduleHint = actsAsLeader(role)
-      ? `每 5 分钟运行 a2a_check.py --hub ${base} --node ${node}。输出 IDLE 立即结束；输出 WORK 时取单与跟单两段【处理流程】都做。无法跑脚本时每 5 分钟直接执行【处理流程】。`
-      : `每 5 分钟运行 a2a_check.py --hub ${base} --node ${node}。输出 IDLE 立即结束；输出 WORK 再按【处理流程】取单收尾（register → poll?timeout=0 → claim → 本次运行内完成，超过 10 分钟发 heartbeat → complete/fail）。无法跑脚本时回退为每 5 分钟直接执行【处理流程】。`;
+      ? `每 ${intervalMin} 分钟运行 a2a_check.py --hub ${base} --node ${node}。输出 IDLE 立即结束；输出 WORK 时取单与跟单两段【处理流程】都做。无法跑脚本时每 ${intervalMin} 分钟直接执行【处理流程】。`
+      : `每 ${intervalMin} 分钟运行 a2a_check.py --hub ${base} --node ${node}。输出 IDLE 立即结束；输出 WORK 再按【处理流程】取单收尾（register → poll?timeout=0 → claim → 本次运行内完成，超过 10 分钟发 heartbeat → complete/fail）。无法跑脚本时回退为每 ${intervalMin} 分钟直接执行【处理流程】。`;
     const authNoteHttp = cred.mode === "token"
       ? "携带请求头 Authorization: Bearer $A2A_HUB_TOKEN（明文只在 prompt 的一次性接入里出现一次，请存进名为 A2A_HUB_TOKEN 的安全空间）"
       : authNote;
@@ -603,7 +639,7 @@ export function buildOnboarding({
       `一次性注册：POST ${base}/api/v1/agents/register ，body {"node":"${node}","role":"${shown}","kind":"agent","receive_mode":"http-poll"}`,
       `为自己创建定时任务。${scheduleHint}【定时指令】只有运行检查脚本那几行；完整处理步骤在 prompt 的【处理流程】中。`,
     ];
-    prompt = scheduledPrompt({ base, node, role, cred, skills });
+    prompt = scheduledPrompt({ base, node, role, cred, skills, intervalMin });
   }
   if (receiveMode === "longpoll") {
     const authNoteHttp = cred.mode === "token"
@@ -625,6 +661,7 @@ export function buildOnboarding({
       ? "携带请求头 Authorization: Bearer $A2A_HUB_TOKEN（明文只在 prompt 的一次性接入里出现一次，请存进名为 A2A_HUB_TOKEN 的安全空间）"
       : authNote;
     const shown = promptRole(role);
+    const intervalMin = pollIntervalMin || 30;
     const webhookStep = actsAsLeader(role)
       ? "中台用接收端配置的密钥调用 URL（默认 Authorization: Bearer，自定义头名则值为密钥原文），并附带 HMAC-SHA256 签名。task.assigned 用 poll?timeout=0 取单再 claim；task.updated 用 updates?new=1。门铃不含指令正文。不要保存 A2A_HUB_WEBHOOK_SECRET。"
       : "中台用接收端配置的密钥调用 URL（默认 Authorization: Bearer，自定义头名则值为密钥原文），并附带 HMAC-SHA256 签名。task.assigned 用 poll?timeout=0 取单再 claim。门铃不含指令正文。不要保存 A2A_HUB_WEBHOOK_SECRET。";
@@ -632,9 +669,9 @@ export function buildOnboarding({
       `一次性接入：把 Token 存进 A2A_HUB_TOKEN。密钥只配在接收端，不要让 Agent 再存一份。拉取协议 Skill（${authNoteHttp}；${UA_HEADER}）：${skills.map((s) => `GET ${s.url}`).join("、")}。下载 GET ${base}/api/v1/kit/a2a_check.py（无 python3 则 a2a_check.sh）。`,
       `一次性注册：POST ${base}/api/v1/agents/register ，body {"node":"${node}","role":"${shown}","kind":"agent","receive_mode":"webhook"}`,
       webhookStep,
-      `兜底：每 30 分钟运行一次 a2a_check.py --hub ${base} --node ${node}，防止漏推。`,
+      `兜底：每 ${intervalMin} 分钟运行一次 a2a_check.py --hub ${base} --node ${node}，防止漏推。`,
     ];
-    prompt = webhookPrompt({ base, node, role, cred, skills });
+    prompt = webhookPrompt({ base, node, role, cred, skills, intervalMin });
   }
 
   return {

@@ -72,9 +72,12 @@ export function enqueueOrUpdateInbox(configDir, item) {
   writeInbox(configDir, list);
 }
 
-export function popPendingInbox(configDir, { pop = false } = {}) {
+export function popPendingInbox(configDir, { pop = false, limit = 0 } = {}) {
   const list = readInbox(configDir);
-  const pending = list.filter((item) => item.status === "pending");
+  const pendingAll = list.filter((item) => item.status === "pending");
+  const n = Number(limit);
+  // limit 未传或 <= 0 时仍返回全部 pending。只截取时，pop 也只标这几条，其余留给下一轮。
+  const pending = Number.isFinite(n) && n > 0 ? pendingAll.slice(0, Math.floor(n)) : pendingAll;
   if (pop && pending.length > 0) {
     for (const p of pending) {
       p.status = "acked";

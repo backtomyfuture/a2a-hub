@@ -14,8 +14,8 @@
 
 - **Self-Hosted Standalone Hub (`busType: "sqlite"`)**: Run `ah daemon --role hub` on a persistent server (such as a Mac mini or Linux VPS) backed by Node >= 24's built-in `node:sqlite` (WAL mode) and zero third-party npm dependencies (`dependencies: {}`).
 - **Two Connection Modes Over Pure HTTP, Zero Open Node Ports**:
-  - **Host Daemon Nodes (`ah join`)**: Workstations, office Macs, or GPU hosts run a thin outbound daemon (`GET /api/v1/poll`) that wakes within milliseconds to execute local CLIs/scripts safely via `commands.json`.
-  - **Pure HTTP External Agents (Muse, Grok Bot, etc.)**: No daemon. The owner issues a per-agent token in the console (not the owner `AH_API_TOKEN`). `GET /.well-known/agent.json` is public; `/api/v1/skills*` and every other API call need that token. A timer runs the check script every 5 minutes: `IDLE` stops, `WORK` then calls `poll?timeout=0` or `updates?new=1`. If no script can run, the fallback is also every 5 minutes. A leader both claims and follows up. Each run starts with no prior context.
+  - **Host Daemon Nodes (`ah join`)**: Workstations, NUCs, office Macs, or GPU hosts run a thin outbound daemon (`GET /api/v1/poll`) that wakes within milliseconds to execute local CLIs/scripts safely via `commands.json`. Edge hosts with **`herdr`** installed automatically enable `context: "herdr"` multi-agent concurrency (default `maxConcurrent: 4`): each task gets an isolated Tab/Pane with dedicated environment variables, stays parked with its live interactive agent during `input-required` / `auth-required` (still holding its slot) for hot resume on reply/approval, and closes automatically on terminal state.
+  - **Pure HTTP External Agents (Muse, Grok Bot, etc.)**: No daemon. The owner issues a per-agent token in the console (not the owner `AH_API_TOKEN`). `GET /.well-known/agent.json` is public; `/api/v1/skills*` and every other API call need that token. Owners can configure a per-agent polling interval in minutes (`poll_interval_min`, default `5` min for scheduled check and `30` min for webhook fallback; supports 1–1440 min such as `60` for hourly agents), and the hub computes online status using `interval × 1.5`. A timer runs the check script at that cadence: `IDLE` stops, `WORK` then calls `poll?timeout=0` or `updates?new=1`. A leader both claims and follows up. Each run starts with no prior context.
 - **Built-in Web Console** (`http://<hub>:8787`, owner token):
   - **Needs you**: Home list of approvals, questions, and tasks worth a look.
   - **Agents**: Grouped by node, with admission, display names, and token rotate/revoke.
@@ -216,7 +216,7 @@ Configuration defaults to `~/.a2a-hub` (app installed under `~/.a2a-hub/app/`, o
 | | `ah loop ls [--json]` / `ah loop show <Loop_ID>` | Inspect active and completed loops and stage history |
 | | `ah loop cancel <Loop_ID> [--text …]` | Cancel a loop and its active task |
 | **Local Scheduling & Inbox** | `ah schedule ls \| add \| rm \| enable \| disable` | Manage local `schedules.json` cron jobs |
-| | `ah inbox [--pop] [--json]` / `ah inbox done \| ask \| fail \| auth` | Consume `agent_inbox.jsonl` and report results from standalone agents |
+| | `ah inbox [--pop] [--limit <n>] [--json]` / `ah inbox done \| ask \| fail \| auth` | Consume `agent_inbox.jsonl` and report results from standalone agents |
 
 ---
 
