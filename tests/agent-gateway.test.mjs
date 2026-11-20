@@ -422,6 +422,56 @@ test("HTTP Agent 网关：发现 / 注册 / 问答闭环 / 长轮询 / ed25519 �
       const listRes = await apiJson(baseUrl, "/api/v1/tasks?from=muse", { token: apiToken });
       assert.equal(listRes.status, 200);
       assert.equal(listRes.data.count, 3);
+
+      // 6. claim 的 lease_id 同节点并发保护：同 lease 幂等、不同 lease 活跃期 409、心跳超时后允许接管
+      const leaseTaskRes = await apiJson(baseUrl, "/api/v1/tasks", {
+        method: "POST",
+        token: apiToken,
+        body: { from: "muse", to: "grok-bot", cap: "research", text: "验证同节点并发租约" },
+      });
+      assert.equal(leaseTaskRes.status, 201);
+      const leaseTaskId = leaseTaskRes.data.task_id;
+
+      const cLease1 = await apiJson(baseUrl, `/api/v1/tasks/${leaseTaskId}/claim`, {
+        method: "POST",
+        token: apiToken,
+        body: { node: "grok-bot", lease_id: "run-round-1" },
+      });
+      assert.equal(cLease1.status, 200);
+      assert.equal(cLease1.data.lease_id, "run-round-1");
+
+      // 同 lease_id 重试幂等
+      const cLeaseRetry = await apiJson(baseUrl, `/api/v1/tasks/${leaseTaskId}/claim`, {
+        method: "POST",
+        token: apiToken,
+        body: { node: "grok-bot", lease_id: "run-round-1" },
+      });
+      assert.equal(cLeaseRetry.status, 200);
+      assert.equal(cLeaseRetry.data.already_claimed, true);
+      assert.equal(cLeaseRetry.data.lease_id, "run-round-1");
+
+      // 活跃期内另一轮次不同 lease_id 被 409 拦截
+      const cLeaseConflict = await apiJson(baseUrl, `/api/v1/tasks/${leaseTaskId}/claim`, {
+        method: "POST",
+        token: apiToken,
+        body: { node: "grok-bot", lease_id: "run-round-2" },
+      });
+      assert.equal(cLeaseConflict.status, 409);
+
+      // 心跳超 20 分钟后，另一轮次允许接管
+      const allTasks = await bus.listRecords(DEFAULT_TABLES.tasks);
+      const leaseRow = allTasks.find((t) => t.fields.Task_ID === leaseTaskId);
+      await bus.updateRecord(DEFAULT_TABLES.tasks, leaseRow.record_id, {
+        Heartbeat_At: new Date(Date.now() - 25 * 60_000).toISOString(),
+      });
+      const cLeaseTakeover = await apiJson(baseUrl, `/api/v1/tasks/${leaseTaskId}/claim`, {
+        method: "POST",
+        token: apiToken,
+        body: { node: "grok-bot", lease_id: "run-round-2" },
+      });
+      assert.equal(cLeaseTakeover.status, 200);
+      assert.equal(cLeaseTakeover.data.takeover, true);
+      assert.equal(cLeaseTakeover.data.lease_id, "run-round-2");
     } finally {
       await httpHandle.close();
       bus.close();

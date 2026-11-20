@@ -15,6 +15,7 @@ import { capIdOf } from "../config.mjs";
 import { agentCanSeeTask, assertAgentRoute } from "../hub/agent-access.mjs";
 import { admissionOf, actsAsLeader, httpError, parseCardMetadata, presetHttpCardFields, validateNodeName, validatePollIntervalMin } from "../hub/admission.mjs";
 import { alignNodeReceiveMode, removeHttpAgentSchedule, saveHttpAgentSchedule } from "../hub/capabilities.mjs";
+import { isStaleWorking } from "../hub/stale.mjs";
 import { rosterNodeVisible } from "./longpoll-broker.mjs";
 import { submitAgentReceipt } from "../inbox.mjs";
 import { DAEMON_VERSION } from "../kernel.mjs";
@@ -439,7 +440,24 @@ async function ensurePreflightAuth({ bus, task, taskMsgs, partsByParent, verifyK
   return { ready: false, pending: true, requestId: reqId };
 }
 
-async function claimTaskForNode({ bus, node, taskId, worker = "", verifyKey, onWake, view = {} }) {
+function normalizeLeaseId(raw) {
+  return String(raw ?? "").trim().slice(0, 128);
+}
+
+// 将 lease_id 合并进 Tasks.Metadata JSON，保留原有验收等字段，不新增表列。
+function withLeaseMetadata(rawMeta, leaseId) {
+  const prev = parseJson(rawMeta, {});
+  const obj = prev && typeof prev === "object" && !Array.isArray(prev) ? { ...prev } : {};
+  if (leaseId) obj.lease_id = leaseId;
+  return JSON.stringify(obj);
+}
+
+function leaseIdOfTask(task) {
+  const meta = parseJson(f1(task, "Metadata"), {});
+  return typeof meta?.lease_id === "string" ? meta.lease_id.trim() : "";
+}
+
+async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", verifyKey, onWake, view = {} }) {
   const [tasks, messages, parts] = await Promise.all([
     bus.listRecords(bus.tables.tasks),
     bus.listRecords(bus.tables.messages),
@@ -454,13 +472,40 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", verifyKey, onW
   const taskMsgs = msgByTask.get(taskId) ?? [];
   const st = f1(task, "Status");
   const claimedBy = f1(task, "Claimed_By");
+  const reqLease = normalizeLeaseId(leaseId);
 
   if (st === "working") {
     if (claimedBy !== node) throw httpError(409, `任务已被 ${claimedBy} 认领`);
+    const currentLease = leaseIdOfTask(task);
+    // 同节点并发保护：调用方带了 lease_id 且与当前租约不一致时，仅在心跳已超时后允许接管，活跃中返回 409。
+    if (reqLease && currentLease && reqLease !== currentLease) {
+      if (!isStaleWorking(f1(task, "Heartbeat_At"))) {
+        throw httpError(409, "任务正由同节点另一运行实例活跃执行中，请勿并发重复认领");
+      }
+      await bus.updateRecord(bus.tables.tasks, task.record_id, {
+        Heartbeat_At: nowIso(),
+        Metadata: withLeaseMetadata(f1(task, "Metadata"), reqLease),
+      });
+      onWake();
+      const instr = instructionOfTask(taskMsgs, partsByParent);
+      return {
+        ok: true,
+        takeover: true,
+        lease_id: reqLease,
+        task_id: taskId,
+        status: "working",
+        run_id: f1(task, "Latest_Run"),
+        instruction: instr.text,
+        instruction_attachments: attachmentsOfMsg(instr.msgId, partsByParent, view),
+        params: instr.params,
+        criteria: instr.criteria,
+      };
+    }
     const instr = instructionOfTask(taskMsgs, partsByParent);
     return {
       ok: true,
       already_claimed: true,
+      ...(currentLease ? { lease_id: currentLease } : {}),
       task_id: taskId,
       status: "working",
       run_id: f1(task, "Latest_Run"),
@@ -499,6 +544,7 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", verifyKey, onW
     };
     if (runId) updateFields.Latest_Run = runId;
     if (!f1(task, "Worker_Hint") && worker) updateFields.Worker_Hint = worker;
+    if (reqLease) updateFields.Metadata = withLeaseMetadata(f1(task, "Metadata"), reqLease);
     await bus.updateRecord(bus.tables.tasks, task.record_id, updateFields);
     onWake();
 
@@ -506,6 +552,7 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", verifyKey, onW
     return {
       ok: true,
       action: "execute",
+      ...(reqLease ? { lease_id: reqLease } : {}),
       task_id: taskId,
       status: "working",
       run_id: runId,
@@ -530,16 +577,19 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", verifyKey, onW
       }));
     if (!answers.length) throw httpError(409, "任务处于 input-required，尚无新答复");
 
-    await bus.updateRecord(bus.tables.tasks, task.record_id, {
+    const updateFields = {
       Status: "working",
       Heartbeat_At: nowIso(),
-    });
+    };
+    if (reqLease) updateFields.Metadata = withLeaseMetadata(f1(task, "Metadata"), reqLease);
+    await bus.updateRecord(bus.tables.tasks, task.record_id, updateFields);
     onWake();
     const instr = instructionOfTask(taskMsgs, partsByParent);
     return {
       ok: true,
       action: "resume",
       resume_reason: "answer",
+      ...(reqLease ? { lease_id: reqLease } : {}),
       task_id: taskId,
       status: "working",
       run_id: f1(task, "Latest_Run"),
@@ -557,10 +607,12 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", verifyKey, onW
     const decision = signedDecisionFor(taskId, taskMsgs, partsByParent, statusMsg, verifyKey);
     if (!decision) throw httpError(409, "任务仍在等待有效的 ed25519 审批决定");
 
-    await bus.updateRecord(bus.tables.tasks, task.record_id, {
+    const updateFields = {
       Status: "working",
       Heartbeat_At: nowIso(),
-    });
+    };
+    if (reqLease) updateFields.Metadata = withLeaseMetadata(f1(task, "Metadata"), reqLease);
+    await bus.updateRecord(bus.tables.tasks, task.record_id, updateFields);
     onWake();
     const instr = instructionOfTask(taskMsgs, partsByParent);
     return {
@@ -568,6 +620,7 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", verifyKey, onW
       action: "resume",
       resume_reason: "auth_decision",
       decision,
+      ...(reqLease ? { lease_id: reqLease } : {}),
       task_id: taskId,
       status: "working",
       run_id: f1(task, "Latest_Run"),
@@ -592,8 +645,9 @@ async function collectAgentMailbox({ bus, node, verifyKey, onWake, includeUpdate
 
   const actionable = [];
   const updates = [];
-  // poll 的 actionable 不含仍在 working 的租约。检查接口要用同一趟扫描把它叫醒，避免再扫一遍表。
+  // poll 的 actionable 不含仍在 working 的租约。check 仅在心跳超时的 staleWorking 非空时才唤醒，避免并发重入活跃任务。
   const working = [];
+  const staleWorking = [];
 
   for (const task of tasks) {
     const taskId = f1(task, "Task_ID");
@@ -651,6 +705,9 @@ async function collectAgentMailbox({ bus, node, verifyKey, onWake, includeUpdate
 
     if (target === node && st === "working" && claimed === node) {
       working.push(taskId);
+      if (isStaleWorking(f1(task, "Heartbeat_At"))) {
+        staleWorking.push(taskId);
+      }
     }
 
     if (includeUpdates && LEADER_UPDATE_STATUSES.has(st)) {
@@ -662,7 +719,7 @@ async function collectAgentMailbox({ bus, node, verifyKey, onWake, includeUpdate
     }
   }
 
-  return { actionable, updates, working };
+  return { actionable, updates, working, staleWorking };
 }
 
 // 与 GET updates 同一口径，含仍待处理的 input-required / auth-required。调用方决定要不要写水位。
@@ -1103,7 +1160,9 @@ export async function handleAgentGatewayRequest({
       });
       payload.tasks = mailbox.actionable.map((item) => item.task_id);
       payload.working = mailbox.working;
-      if (payload.tasks.length || payload.working.length) payload.work = true;
+      payload.stale_working = mailbox.staleWorking;
+      // 只有待认领/可恢复任务或心跳已超时的僵死 working 任务才置 work=true，避免下一轮并发重入活跃执行中的任务。
+      if (payload.tasks.length || payload.stale_working.length) payload.work = true;
     }
     if (scope.leader) {
       const watermark = await readUpdatesWatermark(bus, node);
@@ -1192,6 +1251,7 @@ export async function handleAgentGatewayRequest({
             node,
             taskId: t.task_id,
             worker: body.worker || "http-agent",
+            leaseId: body.lease_id || "",
             verifyKey,
             onWake,
             view,
@@ -1351,6 +1411,7 @@ export async function handleAgentGatewayRequest({
         node,
         taskId,
         worker: String(body.worker ?? "").trim(),
+        leaseId: body.lease_id || "",
         verifyKey,
         onWake,
         view,

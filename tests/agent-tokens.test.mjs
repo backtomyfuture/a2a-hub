@@ -138,9 +138,10 @@ test("onboarding：有 token 时内嵌明文，没有时用占位符；host/inbo
   assert.match(embedded.prompt, /poll\?timeout=0/);
   assert.match(embedded.prompt, /\/heartbeat/);
   // 提示词自包含，不再要求对方拉取协议 Skill；链接只在 onboarding.skills 里给机主参考。
+  // 不再提及 /.well-known/agent.json 或 /api/v1/health 鉴权例外，避免诱导定时任务每轮多打无信息量健康检查。
   assert.deepEqual(embedded.skills, [{ name: "a2a-worker", url: "https://hub.example.com/api/v1/skills/a2a-worker" }]);
-  assert.match(embedded.prompt, /\/\.well-known\/agent\.json/);
-  assert.match(embedded.prompt, /\/api\/v1\/health/);
+  assert.equal(embedded.prompt.includes("/.well-known/agent.json"), false);
+  assert.match(embedded.prompt, /无需请求 \/health/);
   assert.equal(embedded.prompt.includes("127.0.0.1"), false);
 
   const leader = buildOnboarding({

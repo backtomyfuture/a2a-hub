@@ -25,10 +25,10 @@ function capture(fn) {
   }
 }
 
-test("没有配置目录时用内存里的初始四条，不写文件", () => {
+test("没有配置目录时用内存里的初始六条，不写文件", () => {
   const loaded = loadAgentTemplates("");
   assert.deepEqual(loaded.errors, []);
-  assert.deepEqual(loaded.presets.map((item) => item.id), ["generic-poll", "workbuddy", "muse", "grok-bot"]);
+  assert.deepEqual(loaded.presets.map((item) => item.id), ["generic-poll", "workbuddy", "doubao", "qwen", "muse", "grok-bot"]);
 });
 
 test("种子文件的开场白填上占位符后，和程序默认提示词一致", () => {
@@ -98,14 +98,14 @@ test("文件不存在时写入初始四条；之后改过的内容不会被盖�
   });
 });
 
-test("坏文件不覆盖，告警后仍能用初始四条；空数组保持为空", async () => {
+test("坏文件不覆盖，告警后仍能用初始六条；空数组保持为空", async () => {
   await withTemp(async (dir) => {
     const file = path.join(dir, AGENT_TEMPLATES_FILE);
     fs.writeFileSync(file, "{", { mode: 0o600 });
     const broken = loadAgentTemplates(dir, { writeIfMissing: true });
     assert.match(broken.errors.join("\n"), /不是合法 JSON/);
     assert.equal(fs.readFileSync(file, "utf8"), "{");
-    assert.equal(broken.presets.length, 4);
+    assert.equal(broken.presets.length, 6);
     fs.writeFileSync(file, "[]");
     const empty = loadAgentTemplates(dir);
     assert.deepEqual(empty.presets, []);
