@@ -1141,3 +1141,43 @@ test("添加 Agent 时节点模板写入名片，注册不冲掉，轮换仍生�
     assert.match(conflict.data.error, /receive 与节点模板不一致/);
   });
 });
+
+test("配置目录的模板文件决定下拉项和 Step 3 提示词", async () => {
+  await withHubServer(async ({ baseUrl, apiToken, hubDir }) => {
+    const file = path.join(hubDir, "agent_templates.json");
+    const stored = JSON.parse(fs.readFileSync(file, "utf8"));
+    assert.ok(stored.some((item) => item.id === "workbuddy"));
+    stored.find((item) => item.id === "workbuddy").intro = "改过的 WorkBuddy 开场，节点 {{node}}。";
+    stored.push({
+      id: "coze",
+      label: "扣子",
+      receive: "poll",
+      interval: 15,
+      defaults: { node: "coze-cloud", displayName: "扣子助手" },
+      intro: "请在扣子里以节点 {{node}} 的身份，每 {{interval}} 分钟检查。",
+    });
+    fs.writeFileSync(file, JSON.stringify(stored, null, 2));
+
+    const page = await fetch(`${baseUrl}/`);
+    const html = await page.text();
+    assert.equal(page.status, 200);
+    assert.match(html, /扣子/);
+
+    const added = await apiJson(baseUrl, "/api/v1/admin/agents", {
+      method: "POST",
+      token: apiToken,
+      body: { node: "coze-cloud", access: "http", role: "worker", template_id: "coze", receive: "poll" },
+    });
+    assert.equal(added.status, 200);
+    assert.equal(added.data.onboarding.template_label, "扣子");
+    assert.match(added.data.onboarding.prompt, /请在扣子里以节点 coze-cloud/);
+    assert.match(added.data.onboarding.prompt, /\/api\/v1\/agents\/coze-cloud\/check/);
+
+    const buddy = await apiJson(baseUrl, "/api/v1/admin/onboarding?node=wb-edit&access=http&role=worker&template_id=workbuddy", {
+      token: apiToken,
+    });
+    assert.equal(buddy.status, 200);
+    assert.match(buddy.data.onboarding.prompt, /改过的 WorkBuddy 开场，节点 wb-edit/);
+    assert.match(buddy.data.onboarding.prompt, /\/api\/v1\/agents\/wb-edit\/check/);
+  });
+});

@@ -12,6 +12,7 @@
 | `node.json` | 节点身份、总线参数（`sqlite` / `http`）、长轮询与对账周期、角色 | 否 |
 | `commands.json` | 能力表：本机能干什么、怎么干 | 否 |
 | `schedules.json` | 定时调度表：本机定时任务计划（`id`, `cron`, `cap`, `text` 等） | 否 |
+| `agent_templates.json` | HTTP 节点模板目录：内置四条和后加的模板都在这一份里（0600） | 否 |
 | `app.env` | 机主 HTTP Bearer 口令 `AH_API_TOKEN`（owner），权限 600 | 绝不 |
 | `agent_tokens.json` | 分 Agent Token 账本（0600，version 1，只存 sha256 与展示前缀，无明文） | 绝不 |
 | `agent_webhooks.json` | HTTP Agent 门铃（0600，`version: 1`，`hooks[]` 含 URL 与 HMAC `secret` 明文；列表接口不返回 secret） | 绝不 |
@@ -22,7 +23,7 @@
 | `present_queue.jsonl` `present_bell` `present_queue.jsonl.lock` | 发给本机 Agent 的回执队列、门铃，以及队列锁。锁是临时文件；没有 `ah present` 在跑且守护进程空闲时可以删 | 否 |
 | `agent_inbox.jsonl` | `kind=agent` 节点的收件箱 | 否 |
 
-仓库里只有占位符样例：[`config/hub.standalone.example.json`](../config/hub.standalone.example.json)、[`config/node.remote.example.json`](../config/node.remote.example.json)、[`config/commands.example.json`](../config/commands.example.json)、[`config/schedules.example.json`](../config/schedules.example.json)。
+仓库里只有占位符样例：[`config/hub.standalone.example.json`](../config/hub.standalone.example.json)、[`config/node.remote.example.json`](../config/node.remote.example.json)、[`config/commands.example.json`](../config/commands.example.json)、[`config/schedules.example.json`](../config/schedules.example.json)、[`config/agent_templates.example.json`](../config/agent_templates.example.json)。
 
 ## 2. node.json
 
@@ -387,7 +388,30 @@ api backoff reason=http-429 kind=list retry=1/3 wait=2s
   - `ah setup --role hub --bus sqlite [--listen 0.0.0.0:8787] [--db-path ./hub.db] [--public-url http://...] [--api-token <token>] [--yes]`
   - `ah setup --role node --bus http --hub-url http://<HUB>:8787 --api-token <token> [--hub-key <pubkey>] [--yes]`
   - `ah setup --bus agent --agent-role leader --hub-url http://<HUB>:8787 --token-file ~/.a2a-hub-leader/token --node leader-1 --config ~/.a2a-hub-leader-1 --yes`
-- **纯 HTTP 外部 Agent（Muse Leader / Grok Bot 等无守护进程 Agent）**：在控制台添加并复制分 Agent Token，存进平台安全密钥空间 `A2A_HUB_TOKEN`。角色是 `worker`（只接单）或 `leader`（派单并接单）。`hybrid` 为旧值，等同 `leader`；新签发不再写出 `hybrid`。`access=http` 时选一种接收方式：定时检查（默认，`receive=poll`，名片 `Receive_Mode=http-poll`）、常驻长轮询（`longpoll` → `http-longpoll`）或 Webhook 门铃（`webhook`，必填对方的 URL 与密钥）。添加或注册时可配置分钟级轮询间隔 `poll_interval_min`（`1–1440` 整数分钟，定时检查默认 `5`，Webhook 兜底默认 `30`，支持 60 分钟等长周期），持久化在名片 `Metadata.poll_interval_min` 并动态写入接入提示词。接入提示词按节点模板 id（`template_id`）生成，取值是 `AGENT_TEMPLATE_PRESETS` 的 id：`generic-poll`、`workbuddy`、`muse`、`grok-bot`。它写入名片 `Metadata.template_id`，第三步和轮换 Token 都按这个 id 取同一套提示词。粗分类 `template` 仍是 `generic` / `muse` / `grok-bot`（默认 `generic`）：`generic` 为自包含通用版（定时检查直接用只读 `GET /api/v1/agents/:node/check` 判定有没有活，常驻长连接与 Webhook 也变体齐全），`muse` 面向临时云 VM（官方 `ah` + `ah service --ensure` + runtime hook 每 5 秒自愈换机重建），`grok-bot` 为 Webhook 门铃短指令（对方看不到原始请求体与签名头，不含验签与脚本）。`muse`→长轮询、`grok-bot`→Webhook，非 generic 时写入 `Metadata.template`。手动改了接收方式且与所选节点模板不一致时不写 `template_id`，提示词回到该接收方式的通用版。`generic` 与 `workbuddy` 的粗分类都是 `generic`，只靠 `template` 分不开。提示词自包含：不要求对方下载或运行任何脚本，也不要求伪装浏览器 UA；若 Hub 在 Cloudflare 之后，应在 Cloudflare 对该主机名 `/api/v1/*` 加一条 WAF 自定义 Skip 规则（跳过浏览器完整性检查等），否则 python 等非浏览器 UA 会被 403 / error 1010 拦在边缘。无需安装本地 `ah` 进程（`muse` 模板除外，它本来就装官方 `ah`）。控制台的在线判定统一按 **「轮询间隔 × 1.5」** 计算：显式配置了 `poll_interval_min` 时直接取 `poll_interval_min × 60s × 1.5`（如 60 分钟 → 90 分钟，不被 30 分钟名册闲置期限截断，也不被 3 分钟下限强行拉长）；未配置时，定时检查默认 5 × 1.5 = 7.5 分钟（观测到周期后按观测值 × 1.5，上限 30 分钟），Webhook 固定按 30 × 1.5 = 45 分钟。Hub 启动时预加载名片中的 `poll_interval_min` 至内存 Broker，确保重启后首次 Webhook 投递或 `updates` 调用均套用正确窗口。长轮询的宿主节点仍是 90 秒。三种方式怎么选、门铃怎么验签，见 [外部 HTTP Agent 手册](protocol-node-runbook.md)。
+- **纯 HTTP 外部 Agent（Muse Leader / Grok Bot 等无守护进程 Agent）**：在控制台添加并复制分 Agent Token，存进平台安全密钥空间 `A2A_HUB_TOKEN`。角色是 `worker`（只接单）或 `leader`（派单并接单）。`hybrid` 为旧值，等同 `leader`；新签发不再写出 `hybrid`。`access=http` 时选一种接收方式：定时检查（默认，`receive=poll`，名片 `Receive_Mode=http-poll`）、常驻长轮询（`longpoll` → `http-longpoll`）或 Webhook 门铃（`webhook`，必填对方的 URL 与密钥）。添加或注册时可配置分钟级轮询间隔 `poll_interval_min`（`1–1440` 整数分钟，定时检查默认 `5`，Webhook 兜底默认 `30`，支持 60 分钟等长周期），持久化在名片 `Metadata.poll_interval_min` 并动态写入接入提示词。接入提示词按节点模板 id（`template_id`）生成。模板目录是配置目录的 `agent_templates.json`（见 7.2.1），初始四条是 `generic-poll`、`workbuddy`、`muse`、`grok-bot`。它写入名片 `Metadata.template_id`，第三步和轮换 Token 都按这个 id 取同一套提示词。粗分类 `template` 仍是 `generic` / `muse` / `grok-bot`（默认 `generic`）：`generic` 为自包含通用版（定时检查直接用只读 `GET /api/v1/agents/:node/check` 判定有没有活，常驻长连接与 Webhook 也变体齐全），`muse` 面向临时云 VM（官方 `ah` + `ah service --ensure` + runtime hook 每 5 秒自愈换机重建），`grok-bot` 为 Webhook 门铃短指令（对方看不到原始请求体与签名头，不含验签与脚本）。`muse`→长轮询、`grok-bot`→Webhook，非 generic 时写入 `Metadata.template`。手动改了接收方式且与所选节点模板不一致时不写 `template_id`，提示词回到该接收方式的通用版。`generic` 与 `workbuddy` 的粗分类都是 `generic`，只靠 `template` 分不开。提示词自包含：不要求对方下载或运行任何脚本，也不要求伪装浏览器 UA；若 Hub 在 Cloudflare 之后，应在 Cloudflare 对该主机名 `/api/v1/*` 加一条 WAF 自定义 Skip 规则（跳过浏览器完整性检查等），否则 python 等非浏览器 UA 会被 403 / error 1010 拦在边缘。无需安装本地 `ah` 进程（`muse` 模板除外，它本来就装官方 `ah`）。控制台的在线判定统一按 **「轮询间隔 × 1.5」** 计算：显式配置了 `poll_interval_min` 时直接取 `poll_interval_min × 60s × 1.5`（如 60 分钟 → 90 分钟，不被 30 分钟名册闲置期限截断，也不被 3 分钟下限强行拉长）；未配置时，定时检查默认 5 × 1.5 = 7.5 分钟（观测到周期后按观测值 × 1.5，上限 30 分钟），Webhook 固定按 30 × 1.5 = 45 分钟。Hub 启动时预加载名片中的 `poll_interval_min` 至内存 Broker，确保重启后首次 Webhook 投递或 `updates` 调用均套用正确窗口。长轮询的宿主节点仍是 90 秒。三种方式怎么选、门铃怎么验签，见 [外部 HTTP Agent 手册](protocol-node-runbook.md)。
+
+### 7.2.1 节点模板目录 `agent_templates.json`
+
+HTTP 节点模板只有这一份文件。Hub 第一次启动时，如果配置目录里还没有它，会写入初始四条（通用、WorkBuddy、Muse、Grok Bot），权限 `0600`。之后改这四条、再追加新模板，都改这个文件，字段一样。控制台每次打开都重读，改完刷新即可，不用重启。
+
+某节点用的是哪一条，仍只记在名片 `Metadata.template_id`。文件里删掉一条之后，旧名片轮换 Token 时找不到这个 id，提示词回到该接收方式的通用版。删掉整个文件再启动，会重新写入初始四条；把数组清空则是一份空目录，不会自动补回。
+
+| 字段 | 作用 |
+|---|---|
+| `id` | 小写字母、数字、短横线。名片和第三步提示词都用它 |
+| `label` | 下拉框和节点卡片上的名字 |
+| `template` | `generic` / `muse` / `grok-bot`。决定程序拼哪一套协议步骤 |
+| `receive` | `poll` / `longpoll` / `webhook`。`muse` 固定长轮询，`grok-bot` 固定 Webhook |
+| `role` | `worker` 或 `leader` |
+| `interval` | 分钟，`1–1440`。长轮询用 `null` |
+| `hint` | 下拉框下面的一句说明 |
+| `defaults` | 向导预填：`node`、`displayName`、`description`、`adminNote`，Webhook 还可写 `webhookHeader`、`webhookUrlPlaceholder`、`webhookKeyPlaceholder` |
+| `intro` | 只换开场白。占位符 `{{base}}` `{{node}}` `{{role}}` `{{token}}` `{{interval}}`。后面的取单、认领、回报仍由程序接上 |
+| `prompt` | 整段提示词，同一套占位符。写了它就不再附协议步骤。和 `intro` 同时存在时用 `prompt` |
+
+`template` 仍只能是上面三个值，因为协议步骤在程序里。新平台若走同一套定时检查，用 `generic` 加自己的 `intro`。流程确实不同，再写 `prompt`。
+
+文件损坏或某一条不合法时，控制台顶部告警，`ah doctor` 也打印。整份损坏时不改文件，先用内存里的初始四条；某一条坏了就跳过那一条。占位示例见 [`config/agent_templates.example.json`](../config/agent_templates.example.json)。
 
 ### 7.3 LoopForge SOP 多阶段闭环 CLI（`ah loop`）
 

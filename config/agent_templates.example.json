@@ -1,0 +1,19 @@
+[
+  {
+    "id": "example-cloud",
+    "label": "示例云端 Agent",
+    "access": "http",
+    "template": "generic",
+    "receive": "poll",
+    "role": "worker",
+    "interval": 15,
+    "hint": "占位示例。真实目录在配置目录的 agent_templates.json：hub 首次启动写入通用、WorkBuddy、Muse、Grok Bot 四条，之后在同一份文件里改、往后追加。",
+    "defaults": {
+      "node": "example-cloud",
+      "displayName": "示例云端助手",
+      "description": "示例云端定时任务",
+      "adminNote": ""
+    },
+    "intro": "我是 {{base}} 这个任务中台的机主。请以节点 {{node}} 的身份，每 {{interval}} 分钟检查一次任务。下面是完整说明：不需要下载或运行任何脚本，不要修改 User-Agent。"
+  }
+]

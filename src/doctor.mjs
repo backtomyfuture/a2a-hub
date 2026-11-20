@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 import { loadConfig, DAEMON_VERSION } from "./kernel.mjs";
 import { capIdOf, capIdsOf, inferHerdrKind, normalizeCommands, resolveListenAddr, resolveTokenFilePath } from "./config.mjs";
 import { isHubPublicKey, readHubPublicKey } from "./approval-sign.mjs";
+import { AGENT_TEMPLATES_FILE, loadAgentTemplates } from "./hub/agent-templates.mjs";
 import { resolveScheduleTz } from "./hub/schedule.mjs";
 import { LocalScheduleService } from "./local-schedule.mjs";
 import { f1 } from "./bus/tables.mjs";
@@ -453,6 +454,19 @@ export function reportLocalSchedules(configDir, raw) {
   return 0;
 }
 
+// 只读。文件不存在时不创建：创建是 hub 启动的事。坏文件只告警，不让 doctor 非零退出。
+export function reportAgentTemplates(configDir) {
+  const file = path.join(configDir, AGENT_TEMPLATES_FILE);
+  if (!fs.existsSync(file)) return;
+  try {
+    const { presets, errors } = loadAgentTemplates(configDir);
+    for (const err of errors) info(`告警：${err}`);
+    if (!errors.length) ok(`节点模板 ${presets.length} 条（${AGENT_TEMPLATES_FILE}）`);
+  } catch (e) {
+    info(`告警：${AGENT_TEMPLATES_FILE} 检查失败（不阻断）：${e?.message ?? e}`);
+  }
+}
+
 function roleFrom(argv, opts, raw) {
   if (opts?.role === "node" || opts?.role === "hub") return opts.role;
   for (let i = 0; i < argv.length; i++) {
@@ -589,6 +603,7 @@ export async function doctor(configDir, appDir, opts = {}) {
     }
   }
   if (schedulesPresent) reportLocalSchedules(configDir, raw);
+  reportAgentTemplates(configDir);
 
   // 审批决定签名（标准 §8.3 第 5 条）。公钥不是秘密，可以打印；私钥只报在不在。
   if (role === "hub") {

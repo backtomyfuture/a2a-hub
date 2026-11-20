@@ -3,7 +3,9 @@
 
 import { AGENT_TEMPLATE_PRESETS } from "../hub/admission.mjs";
 
-export function renderWebConsoleHtml() {
+export function renderWebConsoleHtml({ presets = AGENT_TEMPLATE_PRESETS, templateError = "" } = {}) {
+  const templateJson = JSON.stringify(presets).replace(/</g, "\\u003c");
+  const templateErrorJson = JSON.stringify(String(templateError ?? "")).replace(/</g, "\\u003c");
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -1037,8 +1039,9 @@ export function renderWebConsoleHtml() {
 <div class="toast" id="toast"></div>
 
 <script>
-// 节点模板注册表（服务端数据驱动，可扩展；新增模板只需改 admission.mjs 的 AGENT_TEMPLATE_PRESETS）
-const AGENT_TEMPLATES = ${JSON.stringify(AGENT_TEMPLATE_PRESETS).replace(/</g, "\\u003c")};
+// 节点模板来自配置目录 agent_templates.json。内置四条和后加的都在那一份里。
+const AGENT_TEMPLATES = ${templateJson};
+const AGENT_TEMPLATE_ERROR = ${templateErrorJson};
 
 (() => {
   try {
@@ -3806,45 +3809,50 @@ function renderSchedules(d) {
 function render() {
   const d = state.data;
   const el = document.getElementById("content");
+  const banner = AGENT_TEMPLATE_ERROR
+    ? '<div class="err-banner" style="margin-bottom:12px;">' + esc(AGENT_TEMPLATE_ERROR) + '</div>'
+    : "";
   if (!d) {
-    el.innerHTML = '<div class="page-wrap"><div class="card muted">正在连接 Hub 中台...</div></div>';
+    el.innerHTML = banner + '<div class="page-wrap"><div class="card muted">正在连接 Hub 中台...</div></div>';
     return;
   }
   if (state.view !== "tasks" && state.filePreviewTaskId) {
     revokeAttachmentObjectUrls();
   }
-  if (state.view === "overview") el.innerHTML = renderOverview(d);
-  else if (state.view === "agents") el.innerHTML = renderAgents(d);
+  let html = "";
+  let prevReplyTaskId = "";
+  let prevReplyVal = "";
+  if (state.view === "overview") html = renderOverview(d);
+  else if (state.view === "agents") html = renderAgents(d);
   else if (state.view === "tasks") {
     const prevReplyEl = document.getElementById("replyTextBox");
-    const prevReplyTaskId = prevReplyEl && prevReplyEl.dataset ? prevReplyEl.dataset.taskId : "";
-    const prevReplyVal = prevReplyEl ? prevReplyEl.value : "";
-    el.innerHTML = renderTasks(d);
-    const nextReplyEl = document.getElementById("replyTextBox");
-    if (nextReplyEl && prevReplyTaskId && nextReplyEl.dataset && nextReplyEl.dataset.taskId === prevReplyTaskId && prevReplyVal) {
-      nextReplyEl.value = prevReplyVal;
-    }
-    if (state.selectedTaskDetail && state.selectedTaskDetail.task && state.replyDraftTaskId === state.selectedTaskDetail.task.task_id) {
-      renderDraftFileList("replyFileList", state.replyDraftFiles, "reply", state.replySubmitting);
-    }
-    hydrateTaskAttachmentPreviews();
-    const si = document.getElementById("taskSearchInput");
-    if (si) {
-      si.addEventListener("input", (e) => {
-        const pos = e.target.selectionStart;
-        state.search = e.target.value;
-        render();
-        const next = document.getElementById("taskSearchInput");
-        if (next) {
-          next.focus();
-          try { next.setSelectionRange(pos, pos); } catch {}
-        }
-      });
-    }
-  } else if (state.view === "loops") {
-    el.innerHTML = renderLoops(d);
-  } else if (state.view === "schedules") {
-    el.innerHTML = renderSchedules(d);
+    prevReplyTaskId = prevReplyEl && prevReplyEl.dataset ? prevReplyEl.dataset.taskId : "";
+    prevReplyVal = prevReplyEl ? prevReplyEl.value : "";
+    html = renderTasks(d);
+  } else if (state.view === "loops") html = renderLoops(d);
+  else if (state.view === "schedules") html = renderSchedules(d);
+  el.innerHTML = banner + html;
+  if (state.view !== "tasks") return;
+  const nextReplyEl = document.getElementById("replyTextBox");
+  if (nextReplyEl && prevReplyTaskId && nextReplyEl.dataset && nextReplyEl.dataset.taskId === prevReplyTaskId && prevReplyVal) {
+    nextReplyEl.value = prevReplyVal;
+  }
+  if (state.selectedTaskDetail && state.selectedTaskDetail.task && state.replyDraftTaskId === state.selectedTaskDetail.task.task_id) {
+    renderDraftFileList("replyFileList", state.replyDraftFiles, "reply", state.replySubmitting);
+  }
+  hydrateTaskAttachmentPreviews();
+  const si = document.getElementById("taskSearchInput");
+  if (si) {
+    si.addEventListener("input", (e) => {
+      const pos = e.target.selectionStart;
+      state.search = e.target.value;
+      render();
+      const next = document.getElementById("taskSearchInput");
+      if (next) {
+        next.focus();
+        try { next.setSelectionRange(pos, pos); } catch {}
+      }
+    });
   }
 }
 

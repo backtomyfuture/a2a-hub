@@ -22,6 +22,7 @@ stale_state.json
 schedule_state.json
 schedule_local_state.json
 schedules.json
+agent_templates.json
 retry_state.json
 approval_key.pem
 runs/

@@ -24,6 +24,25 @@ test("renderWebConsoleHtml 输出完整单页、零外链且内嵌 JS 语法无�
   assert.doesNotThrow(() => new vm.Script(scriptMatch[1], { filename: "web-ui-inline.js" }));
 });
 
+test("配置目录里的新模板和读取告警会进控制台页面", () => {
+  const html = renderWebConsoleHtml({
+    presets: [{
+      id: "coze",
+      label: "扣子",
+      access: "http",
+      template: "generic",
+      receive: "poll",
+      role: "worker",
+      interval: 15,
+      hint: "",
+      defaults: { node: "coze" },
+    }],
+    templateError: "agent_templates.json 不是合法 JSON",
+  });
+  assert.match(html, /扣子/);
+  assert.match(html, /agent_templates\.json 不是合法 JSON/);
+});
+
 test("控制台包含新术语结构、接收方式、添加能力、闭环分派与定时任务页，且无命令行参数残留", () => {
   const html = renderWebConsoleHtml();
 

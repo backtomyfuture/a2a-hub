@@ -33,6 +33,7 @@ import {
   validateRole,
   validateTemplate,
 } from "../hub/admission.mjs";
+import { consoleTemplatePresets, loadAgentTemplates } from "../hub/agent-templates.mjs";
 import { publicWebhook, validateWebhookHeader, validateWebhookKey, validateWebhookUrl, WebhookDispatcher } from "../hub/webhooks.mjs";
 import {
   alignNodeReceiveMode,
@@ -286,6 +287,8 @@ export async function startHubHttpServer({
     const hostHdr = String(req.headers.host ?? "").trim();
     return hostHdr ? `http://${hostHdr}` : `http://${connectHost}:${activePort}`;
   };
+  // 节点模板以配置目录的文件为准。没有文件时写入初始四条；之后每次请求重读，改文件不用重启。
+  const agentTemplates = () => loadAgentTemplates(cfg?.configDir || "", { writeIfMissing: Boolean(cfg?.configDir) });
 
   // 无机主 Token 且尚未签发任何 Agent Token 时保持免鉴权；一旦有任一种钥匙就关闭。
   const resolvePrincipal = (presented) => {
@@ -322,7 +325,11 @@ export async function startHubHttpServer({
 
     try {
       if (method === "GET" && (pathname === "/" || pathname === "/index.html")) {
-        sendHtml(res, 200, renderWebConsoleHtml());
+        const loaded = agentTemplates();
+        sendHtml(res, 200, renderWebConsoleHtml({
+          presets: consoleTemplatePresets(loaded.presets),
+          templateError: loaded.errors.join("；"),
+        }));
         return;
       }
 
@@ -1100,11 +1107,13 @@ export async function startHubHttpServer({
         let pollIntervalMin = null;
         let template = "generic";
         let templateId = "";
+        const { presets } = agentTemplates();
         if (access === "http") {
           const choice = resolveHttpOnboardingChoice({
             template: Object.hasOwn(body ?? {}, "template") ? body.template : undefined,
             receive: Object.hasOwn(body ?? {}, "receive") ? body.receive : undefined,
             templateId: body?.template_id,
+            presets,
           });
           template = choice.template;
           receive = choice.receive;
@@ -1188,6 +1197,7 @@ export async function startHubHttpServer({
           pollIntervalMin,
           template,
           templateId,
+          presets,
         });
         if (access === "http") broker?.setNodePollInterval?.(node, pollIntervalMin);
         const payload = { ok: true, node, card, onboarding };
@@ -1233,11 +1243,13 @@ export async function startHubHttpServer({
         );
         const access = validateAccess(reqUrl.searchParams.get("access"));
         const role = validateRole(reqUrl.searchParams.get("role"));
+        const { presets } = agentTemplates();
         const choice = access === "http"
           ? resolveHttpOnboardingChoice({
             template: reqUrl.searchParams.get("template"),
             receive: reqUrl.searchParams.get("receive"),
             templateId: reqUrl.searchParams.get("template_id"),
+            presets,
           })
           : { template: "generic", receive: "poll", templateId: "" };
         const pollIntervalMin = reqUrl.searchParams.has("poll_interval_min")
@@ -1253,6 +1265,7 @@ export async function startHubHttpServer({
           pollIntervalMin,
           template: choice.template,
           templateId: choice.templateId,
+          presets,
         });
         sendJson(res, 200, { onboarding });
         return;
@@ -1288,14 +1301,15 @@ export async function startHubHttpServer({
         }
         const scopes = Object.hasOwn(body, "scopes") ? body.scopes : undefined;
         const issued = tokenStore.rotate({ node, role, scopes });
+        const { presets } = agentTemplates();
         // 节点模板 id 优先于粗 template：WorkBuddy 和通用的粗分类都是 generic，只靠后者会生成同一段提示词。
         let templateId = "";
         if (Object.hasOwn(body, "template_id") && String(body.template_id ?? "").trim()) {
-          templateId = templatePresetById(body.template_id).id;
+          templateId = templatePresetById(body.template_id, presets).id;
         } else {
           for (const card of cards) {
             if (f1(card, "Node") !== node) continue;
-            const id = knownTemplateId(parseCardMetadata(card).template_id);
+            const id = knownTemplateId(parseCardMetadata(card).template_id, presets);
             if (id) { templateId = id; break; }
           }
         }
@@ -1311,7 +1325,7 @@ export async function startHubHttpServer({
         const storedReceive = nodeStoredReceiveMode(cards, node);
         let receive = storedReceive === "http-longpoll" ? "longpoll" : (storedReceive === "webhook" ? "webhook" : "poll");
         if (templateId && !Object.hasOwn(body, "template")) {
-          const preset = templatePresetById(templateId);
+          const preset = templatePresetById(templateId, presets);
           // 名片接收方式已经和建单时的模板不一致时，不再套用那套提示词。
           if (!storedReceive || preset.receive === receive) {
             template = preset.template;
@@ -1320,7 +1334,7 @@ export async function startHubHttpServer({
             templateId = "";
           }
         }
-        if (!templateId) templateId = inferTemplateId(template, receive);
+        if (!templateId) templateId = inferTemplateId(template, receive, presets);
         receive = receiveForTemplate(template, receive);
         let pollIntervalMin = null;
         for (const card of cards) {
@@ -1341,6 +1355,7 @@ export async function startHubHttpServer({
           pollIntervalMin,
           template,
           templateId,
+          presets,
         });
         sendJson(res, 200, { token: issued.token, onboarding });
         return;
@@ -1445,6 +1460,13 @@ export async function startHubHttpServer({
     } catch (e) {
       log("写入 hub_runtime.json 失败：" + (e?.message ?? e));
     }
+  }
+
+  try {
+    const seeded = loadAgentTemplates(cfg?.configDir || "", { writeIfMissing: Boolean(cfg?.configDir) });
+    for (const err of seeded.errors) log(err);
+  } catch (e) {
+    log("节点模板初始化失败：" + (e?.message ?? e));
   }
 
   log(`Hub HTTP & Web 控制台已启动：http://${host}:${boundPort} （本机访问：${localUrl}）`);
