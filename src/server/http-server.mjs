@@ -18,6 +18,7 @@ import {
   issuedRole,
   parseCardMetadata,
   presetHttpCardFields,
+  receiveForTemplate,
   receiveModeFor,
   validateAccess,
   validateAdmission,
@@ -26,6 +27,7 @@ import {
   validateProfileFields,
   validateReceive,
   validateRole,
+  validateTemplate,
 } from "../hub/admission.mjs";
 import { publicWebhook, validateWebhookHeader, validateWebhookKey, validateWebhookUrl, WebhookDispatcher } from "../hub/webhooks.mjs";
 import {
@@ -1092,8 +1094,10 @@ export async function startHubHttpServer({
         let webhookKey = "";
         let webhookHeader = "Authorization";
         let pollIntervalMin = null;
+        let template = "generic";
         if (access === "http") {
-          receive = validateReceive(body?.receive);
+          template = validateTemplate(body?.template);
+          receive = receiveForTemplate(template, validateReceive(body?.receive));
           pollIntervalMin = validatePollIntervalMin(body?.poll_interval_min, receive);
           if (receive === "webhook") {
             webhookUrl = validateWebhookUrl(body?.webhook_url);
@@ -1130,6 +1134,7 @@ export async function startHubHttpServer({
             availability: "offline",
             updatedAt: nowMinute(),
             pollIntervalMin,
+            template,
           });
           const existing = await bus.listRecords(bus.tables.agentCards);
           if (existing.some((r) => f1(r, "Cap_ID") === fields.Cap_ID)) {
@@ -1169,6 +1174,7 @@ export async function startHubHttpServer({
           token: issued?.token || "",
           receive,
           pollIntervalMin,
+          template,
         });
         if (access === "http") broker?.setNodePollInterval?.(node, pollIntervalMin);
         const payload = { ok: true, node, card, onboarding };
@@ -1214,7 +1220,8 @@ export async function startHubHttpServer({
         );
         const access = validateAccess(reqUrl.searchParams.get("access"));
         const role = validateRole(reqUrl.searchParams.get("role"));
-        const receive = access === "http" ? validateReceive(reqUrl.searchParams.get("receive")) : "poll";
+        const template = access === "http" ? validateTemplate(reqUrl.searchParams.get("template")) : "generic";
+        const receive = access === "http" ? receiveForTemplate(template, validateReceive(reqUrl.searchParams.get("receive"))) : "poll";
         const pollIntervalMin = reqUrl.searchParams.has("poll_interval_min")
           ? validatePollIntervalMin(reqUrl.searchParams.get("poll_interval_min"), receive)
           : undefined;
@@ -1226,6 +1233,7 @@ export async function startHubHttpServer({
           authRequired: Boolean(apiToken) || Boolean(tokenStore?.hasAny()),
           receive,
           pollIntervalMin,
+          template,
         });
         sendJson(res, 200, { onboarding });
         return;
@@ -1261,8 +1269,19 @@ export async function startHubHttpServer({
         }
         const scopes = Object.hasOwn(body, "scopes") ? body.scopes : undefined;
         const issued = tokenStore.rotate({ node, role, scopes });
+        // 模板优先取请求体，其次沿用名片里登记过的（建单时写进 Metadata），默认 generic。
+        let template = "generic";
+        if (Object.hasOwn(body, "template")) {
+          template = validateTemplate(body.template);
+        } else {
+          for (const card of cards) {
+            if (f1(card, "Node") !== node) continue;
+            const t = parseCardMetadata(card).template;
+            if (t) { template = t; break; }
+          }
+        }
         const storedReceive = nodeStoredReceiveMode(cards, node);
-        const receive = storedReceive === "http-longpoll" ? "longpoll" : (storedReceive === "webhook" ? "webhook" : "poll");
+        const receive = receiveForTemplate(template, storedReceive === "http-longpoll" ? "longpoll" : (storedReceive === "webhook" ? "webhook" : "poll"));
         let pollIntervalMin = null;
         for (const card of cards) {
           if (f1(card, "Node") !== node) continue;
@@ -1280,6 +1299,7 @@ export async function startHubHttpServer({
           token: issued.token,
           receive,
           pollIntervalMin,
+          template,
         });
         sendJson(res, 200, { token: issued.token, onboarding });
         return;

@@ -58,12 +58,15 @@ test("控制台包含新术语结构、接收方式、添加能力、闭环分�
   assert.match(html, /技术详情/);
   assert.match(html, /展开能力/);
 
-  // 三步添加 Agent 向导：接收方式三选一、host/inbox 常驻长连接说明、Webhook Secret 提示
+  // 三步添加 Agent 向导：接收方式预设（通用/WorkBuddy/Muse/Grok Bot/长连接/自建 Webhook）、host/inbox 常驻长连接说明、Webhook Secret 提示
   assert.match(html, /选择接入类型/);
   assert.match(html, /填写名字与角色/);
-  assert.match(html, /定时检查（poll，默认）/);
-  assert.match(html, /常驻长连接（longpoll）/);
-  assert.match(html, /Webhook 推送（webhook）/);
+  assert.match(html, /通用 · 定时检查（poll，默认）/);
+  assert.match(html, /WorkBuddy 云端版（定时任务）/);
+  assert.match(html, /Muse（临时云 VM，高保活）/);
+  assert.match(html, /Grok Bot（Webhook 门铃）/);
+  assert.match(html, /常驻长连接（longpoll，自建进程）/);
+  assert.match(html, /Webhook 推送（自建接收端）/);
   assert.match(html, /id="afPollIntervalRow"/);
   assert.match(html, /轮询间隔（分钟）/);
   assert.match(html, /id="afPollInterval"[^>]*type="number"[^>]*min="1"[^>]*max="1440"[^>]*value="5"/);

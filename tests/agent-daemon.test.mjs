@@ -96,9 +96,9 @@ test("resolveSkillsForHost：显式 agentRole 才覆盖原矩阵", () => {
   assert.deepEqual(resolveSkillsForHost({ agentRole: "hybrid" }), ["ah", "ah-inbox"]);
 });
 
-test("长轮询接入提示词带临时 VM 自愈，且 Token 仍只出现一次", () => {
+test("Muse 模板提示词带临时 VM 自愈，且 Token 仍只出现一次", () => {
   const secret = "aht_prompt_secret_once";
-  const longpoll = buildOnboarding({
+  const muse = buildOnboarding({
     hubUrl: "https://hub.example",
     node: "muse-vm",
     access: "http",
@@ -106,14 +106,31 @@ test("长轮询接入提示词带临时 VM 自愈，且 Token 仍只出现一次
     authRequired: true,
     token: secret,
     receive: "longpoll",
+    template: "muse",
   });
-  assert.match(longpoll.prompt, /每 5 秒/);
-  assert.match(longpoll.prompt, /ah service --system --config ~\/\.a2a-hub-muse-vm/);
-  assert.match(longpoll.prompt, /NODE_USE_ENV_PROXY=1/);
-  assert.match(longpoll.prompt, /\/tmp\/a2a-hub-muse-vm\.ready/);
-  assert.equal(longpoll.prompt.includes("每 5 分钟"), false);
-  assert.equal(longpoll.prompt.split(secret).length - 1, 1);
-  assert.match(longpoll.steps.join("\n"), /ah service --system/);
+  assert.match(muse.prompt, /每 5 秒/);
+  assert.match(muse.prompt, /ah service --ensure --config/);
+  assert.match(muse.prompt, /runtime hook/);
+  assert.match(muse.prompt, /\/tmp\/\.a2a-hub-muse-vm\.lock/);
+  assert.match(muse.prompt, /~\/\.a2a-hub-muse-vm\/agent\.token/);
+  assert.equal(muse.prompt.includes("每 5 分钟"), false);
+  assert.equal(muse.prompt.split(secret).length - 1, 1);
+  assert.match(muse.steps.join("\n"), /ah service --ensure/);
+  // 代理适配由 ah CLI 自重启解决，提示词不再要求对方手设 NODE_USE_ENV_PROXY。
+  assert.equal(muse.prompt.includes("NODE_USE_ENV_PROXY"), false);
+  // 通用长连接模板不再夹带 VM 自愈段，两套协议不混发。
+  const plain = buildOnboarding({
+    hubUrl: "https://hub.example",
+    node: "vps-1",
+    access: "http",
+    role: "worker",
+    authRequired: true,
+    token: secret,
+    receive: "longpoll",
+  });
+  assert.equal(plain.prompt.includes("ah service"), false);
+  assert.equal(plain.prompt.includes("ah join"), false);
+  assert.match(plain.prompt, /poll\?timeout=25/);
 });
 
 test("loadConfig：tokenFile 优先于环境里的 AH_API_TOKEN，且不建 HttpBus", async () => {

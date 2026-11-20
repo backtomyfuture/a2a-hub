@@ -149,7 +149,10 @@ function roleOf(configDir, opts = {}, fsImpl = fs) {
 function parseServiceCliOverrides(opts = {}) {
   let scope = opts.scope;
   let name = opts.name;
-  // 仅当由 ah service CLI 直接调用且未显式传入时，从 argv 补读 --system/--user/--name，避免影响测试框架参数。
+  let ensure = opts.ensure;
+  let remove = opts.remove;
+  let uninstall = opts.uninstall;
+  // 仅当由 ah service CLI 直接调用且未显式传入时，从 argv 补读 --system/--user/--name/--ensure，避免影响测试框架参数。
   const isAhServiceCli = path.basename(process.argv[1] || "") === "ah.mjs" && process.argv[2] === "service";
   if (isAhServiceCli) {
     const argv = process.argv.slice(3);
@@ -168,8 +171,17 @@ function parseServiceCliOverrides(opts = {}) {
         else if (argv[i].startsWith("--name=")) name = argv[i].slice("--name=".length);
       }
     }
+    if (ensure === undefined) ensure = argv.includes("--ensure");
+    if (remove === undefined) remove = argv.includes("--remove");
+    if (uninstall === undefined) uninstall = argv.includes("--uninstall");
   }
-  return { scope: scope ?? "auto", name: name ?? "" };
+  return {
+    scope: scope ?? "auto",
+    name: name ?? "",
+    ensure: Boolean(ensure),
+    remove: Boolean(remove),
+    uninstall: Boolean(uninstall),
+  };
 }
 
 const PROXY_ENV_KEYS = [
@@ -237,6 +249,195 @@ function renderServiceEnv(envObj) {
   return lines.length ? `${lines.join("\n")}\n` : "";
 }
 
+// 仅对 HTTPS_PROXY|HTTP_PROXY 做 sha256 指纹，供 --ensure 判定代理配置是否变化（不落明文到日志）。
+export function computeProxyFingerprint(env = process.env) {
+  const cleanHttps = String(env?.HTTPS_PROXY || env?.https_proxy || "").replace(/[\r\n]+/g, "");
+  const cleanHttp = String(env?.HTTP_PROXY || env?.http_proxy || "").replace(/[\r\n]+/g, "");
+  return crypto.createHash("sha256").update(`${cleanHttps}|${cleanHttp}`).digest("hex");
+}
+
+function parseServiceEnvFile(configDir, fsImpl = fs) {
+  const envPath = path.join(configDir, "service.env");
+  try {
+    const raw = fsImpl.readFileSync(envPath, "utf8");
+    const map = {};
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const eq = trimmed.indexOf("=");
+      if (eq <= 0) continue;
+      const k = trimmed.slice(0, eq).trim();
+      let v = trimmed.slice(eq + 1);
+      if (v.startsWith('"') && v.endsWith('"') && v.length >= 2) {
+        v = v.slice(1, -1).replace(/\\(.)/g, "$1");
+      }
+      map[k] = v;
+    }
+    return map;
+  } catch {
+    return null;
+  }
+}
+
+function defaultIsPidAlive(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e?.code === "EPERM";
+  }
+}
+
+function defaultReadProcessCmdline(pid, { platform = process.platform, fsImpl = fs, exec = execFileSync } = {}) {
+  if (platform === "linux") {
+    try {
+      const raw = fsImpl.readFileSync(`/proc/${pid}/cmdline`);
+      const text = String(raw).replace(/\0+/g, " ").trim();
+      if (text) return text;
+    } catch {
+      // 无 /proc 时回退 ps
+    }
+  }
+  if (platform === "win32") {
+    const ps = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    try {
+      return String(exec(ps, [
+        "-NoProfile", "-NonInteractive", "-Command",
+        `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine`,
+      ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }) ?? "").trim();
+    } catch {
+      return "";
+    }
+  }
+  try {
+    return String(exec("ps", ["-p", String(pid), "-o", "args="], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }) ?? "").trim();
+  } catch {
+    return "";
+  }
+}
+
+function readDaemonLockPid(configDir, fsImpl = fs) {
+  try {
+    const pid = Number(fsImpl.readFileSync(path.join(configDir, "daemon.lock"), "utf8").trim());
+    return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function isSystemdUnitActiveNow(unit, isUser, exec) {
+  const args = isUser ? ["--user", "is-active", unit] : ["is-active", unit];
+  try {
+    const out = String(exec("systemctl", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }) ?? "").trim();
+    return out === "active";
+  } catch {
+    return false;
+  }
+}
+
+// 重建或收敛切换模式前，先安全终止残留的直启 daemon（仅限 cmdline 确认为 ah.mjs daemon 的进程），避免抢占 daemon.lock。
+async function stopStandaloneDaemonIfAlive({ configDir, fsImpl, isPidAlive, readProcessCmdline, killFn, sleep }) {
+  const pid = readDaemonLockPid(configDir, fsImpl);
+  if (!pid || !isPidAlive(pid)) return;
+  const cmdline = readProcessCmdline(pid);
+  if (!isAhDaemonCommandLine(cmdline)) return;
+  try { killFn(pid, "SIGTERM"); } catch { return; }
+  for (let elapsed = 0; elapsed < 3000; elapsed += 200) {
+    await sleep(200);
+    if (!isPidAlive(pid)) break;
+  }
+  if (isPidAlive(pid)) {
+    try { killFn(pid, "SIGKILL"); } catch {}
+    await sleep(200);
+  }
+  if (!isPidAlive(pid)) {
+    try {
+      if (readDaemonLockPid(configDir, fsImpl) === pid) {
+        fsImpl.unlinkSync(path.join(configDir, "daemon.lock"));
+      }
+    } catch {}
+  }
+}
+
+async function spawnEnsureDaemon({
+  configDir,
+  appBin,
+  env,
+  homeDir,
+  currentFingerprint,
+  execPath,
+  fsImpl,
+  spawnFn,
+  isPidAlive,
+  sleep,
+}) {
+  // 启动前把当前代理指纹与已选模式写入 0600 service.env，供后续 --ensure 比对。
+  const envObj = {
+    ...collectServiceEnv(env, { includePath: true, home: homeDir }),
+    NODE_USE_ENV_PROXY: "1",
+    AH_PROXY_FINGERPRINT: currentFingerprint,
+    AH_SERVICE_MODE: "spawn",
+  };
+  writeServiceEnvFile(configDir, envObj, fsImpl);
+
+  let child;
+  try {
+    child = spawnFn(execPath, [appBin, "daemon", "--config", configDir], {
+      detached: true,
+      stdio: "ignore",
+      env: { ...env, NODE_USE_ENV_PROXY: "1" },
+    });
+    if (typeof child?.unref === "function") child.unref();
+  } catch (e) {
+    return { ok: false, error: `spawn 启动失败：${e?.message || e}` };
+  }
+
+  const pid = child?.pid;
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    return { ok: false, error: "spawn 未返回有效进程 PID" };
+  }
+
+  let exited = false;
+  let exitErr = "";
+  if (typeof child.once === "function") {
+    child.once("exit", (code, sig) => {
+      exited = true;
+      exitErr = `进程提前退出（code=${code ?? "null"}, signal=${sig ?? "null"}）`;
+    });
+    child.once("error", (err) => {
+      exited = true;
+      exitErr = err?.message || String(err);
+    });
+  }
+
+  const maxWaitMs = 10000;
+  const intervalMs = 500;
+  let elapsed = 0;
+  await sleep(intervalMs);
+  elapsed += intervalMs;
+
+  while (true) {
+    if (exited) {
+      return { ok: false, error: exitErr || "守护进程启动后即退出" };
+    }
+    if (!isPidAlive(pid)) {
+      return { ok: false, error: `守护进程（pid=${pid}）未能保持存活` };
+    }
+    if (readDaemonLockPid(configDir, fsImpl) === pid) {
+      return { ok: true, pid };
+    }
+    if (elapsed >= maxWaitMs) {
+      return { ok: true, pid };
+    }
+    await sleep(intervalMs);
+    elapsed += intervalMs;
+  }
+}
+
 function writeServiceEnvFile(configDir, envObj, fsImpl = fs) {
   const envPath = path.join(configDir, "service.env");
   const tmpPath = path.join(configDir, `.service.env.${process.pid}.${Date.now()}.tmp`);
@@ -269,6 +470,58 @@ function runWith(execFn, cmd, args, { ignore = false } = {}) {
   } catch (e) {
     if (ignore) return "";
     throw new Error(`${cmd} ${args.join(" ")} 失败：${(e.stderr || e.message || "").toString().slice(0, 300)}`);
+  }
+}
+
+function launchctlPrintOk(execFn, uid, label) {
+  try {
+    execFn("launchctl", ["print", `gui/${uid}/${label}`], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// bootout 是异步卸载：旧守护进程收到 SIGTERM 后还要逐个把节点能力标记为离线（涉及网络请求），
+// 实测要数秒才完全退出；退出前 bootstrap 会报 5: Input/output error，服务就停在已卸载状态。
+// 这里轮询 launchctl print 直到它抛错（服务已完全卸载）才放行；超时不抛错、只报告未确认，
+// 因为旧进程可能已死但 launchd 的 print 缓存未清，继续尝试 bootstrap 才是正确动作。
+export async function awaitLaunchdUnload(
+  execFn,
+  uid,
+  label,
+  { timeoutMs = 30000, intervalMs = 500, sleep = defaultSleep, now = () => Date.now() } = {},
+) {
+  const startedAt = now();
+  for (;;) {
+    if (!launchctlPrintOk(execFn, uid, label)) {
+      return { unloaded: true, elapsedMs: now() - startedAt };
+    }
+    const elapsedMs = now() - startedAt;
+    if (elapsedMs >= timeoutMs) return { unloaded: false, elapsedMs };
+    await sleep(intervalMs);
+  }
+}
+
+// bootstrap 成功后 launchd 的装载也是异步的，立刻 print 可能还看不到服务。
+// 这里轮询 print 确认服务真的可见（最多 10 秒）再算安装成功；
+// bootstrap 本身抛错则不重试——前面已经等过卸载，此时失败不是竞态，直接上抛让调用方处置。
+export async function bootstrapAndVerify(
+  execFn,
+  uid,
+  label,
+  plistPath,
+  { timeoutMs = 10000, intervalMs = 500, sleep = defaultSleep, now = () => Date.now() } = {},
+) {
+  runWith(execFn, "launchctl", ["bootstrap", `gui/${uid}`, plistPath]);
+  const startedAt = now();
+  for (;;) {
+    if (launchctlPrintOk(execFn, uid, label)) return;
+    const elapsedMs = now() - startedAt;
+    if (elapsedMs >= timeoutMs) {
+      throw new Error(`launchctl bootstrap 已提交，但 ${timeoutMs}ms 内 print 未确认服务 ${label} 已装载`);
+    }
+    await sleep(intervalMs);
   }
 }
 
@@ -642,7 +895,7 @@ function cleanupLegacyUnitsInDir({ dir, role, node, configDir, currentUnit, isUs
 
 export async function service(
   configDir,
-  { remove = false, role: explicitRole, scope: explicitScope, name: explicitName } = {},
+  { remove = false, ensure = false, uninstall = false, role: explicitRole, scope: explicitScope, name: explicitName } = {},
   appDir,
   _deps = {},
 ) {
@@ -653,18 +906,35 @@ export async function service(
   const homedirFn = _deps.homedir ?? (() => os.homedir());
   const userInfoFn = _deps.userInfo ?? (() => os.userInfo());
   const sleep = _deps.sleep ?? defaultSleep;
+  const now = _deps.now ?? (() => Date.now());
   const env = _deps.env ?? process.env;
   const fsImpl = _deps.fsImpl ?? fs;
   const systemUnitDir = _deps.systemUnitDir ?? "/etc/systemd/system";
   const execPath = _deps.execPath ?? process.execPath;
+  const isPidAlive = _deps.isPidAlive ?? defaultIsPidAlive;
+  const readProcessCmdline = _deps.readProcessCmdline ?? ((pid) => defaultReadProcessCmdline(pid, { platform, fsImpl, exec }));
+  const killFn = _deps.kill ?? ((pid, sig) => process.kill(pid, sig));
 
-  const parsedOverrides = parseServiceCliOverrides({ scope: explicitScope, name: explicitName });
+  const parsedOverrides = parseServiceCliOverrides({
+    scope: explicitScope,
+    name: explicitName,
+    ensure,
+    remove,
+    uninstall,
+  });
   if (parsedOverrides.error) {
     console.error(`✗ ${parsedOverrides.error}`);
     return 1;
   }
   const scope = String(parsedOverrides.scope || "auto").trim();
   const name = parsedOverrides.name ?? "";
+  const isEnsure = parsedOverrides.ensure;
+  const isRemove = parsedOverrides.remove;
+  const isUninstall = parsedOverrides.uninstall;
+  if (isEnsure && (isRemove || isUninstall)) {
+    console.error("✗ --ensure 与破坏性参数 --remove/--uninstall 互斥，不能同时指定");
+    return 1;
+  }
   if (scope !== "auto" && scope !== "system" && scope !== "user") {
     console.error(`✗ 非法 scope：${scope}（仅支持 auto | system | user）`);
     return 1;
@@ -675,34 +945,94 @@ export async function service(
   const appBin = path.join(appDir, "bin", "ah.mjs");
   const logPath = path.join(configDir, "daemon.log");
   const homeDir = homedirFn();
+  const currentFingerprint = computeProxyFingerprint(env);
+  const checkDaemonLockHealth = () => {
+    const pid = readDaemonLockPid(configDir, fsImpl);
+    if (!pid || !isPidAlive(pid)) return { alive: false, pid: null };
+    const cmdline = readProcessCmdline(pid);
+    if (!isAhDaemonCommandLine(cmdline)) return { alive: false, pid: null };
+    return { alive: true, pid };
+  };
 
   if (platform === "darwin") {
     const agentsDir = path.join(homeDir, "Library", "LaunchAgents");
     const label = selectAutostartName({ role, node, configDir, homeDir, kind: "launchd", name });
     const plistPath = path.join(agentsDir, `${label}.plist`);
     const uid = String(getuid());
-    if (remove) {
+    if (isRemove) {
       runWith(exec, "launchctl", ["bootout", `gui/${uid}/${label}`], { ignore: true });
       removeFile(plistPath, fsImpl);
       console.log(`已卸载自启：${label}`);
       return 0;
+    }
+    if (isEnsure) {
+      const savedEnv = parseServiceEnvFile(configDir, fsImpl);
+      const fingerprintUnchanged = Boolean(savedEnv && savedEnv.AH_PROXY_FINGERPRINT === currentFingerprint);
+      let launchdActive = false;
+      try {
+        exec("launchctl", ["print", `gui/${uid}/${label}`], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+        launchdActive = true;
+      } catch {
+        launchdActive = false;
+      }
+      const lockHealth = checkDaemonLockHealth();
+      if (fingerprintUnchanged && launchdActive) {
+        console.log(`ok: ${label} active (launchd, config=${configDir})`);
+        return 0;
+      }
+      if (fingerprintUnchanged && lockHealth.alive) {
+        console.log(`ok: daemon alive (pid=${lockHealth.pid}, mode=spawn, config=${configDir})`);
+        return 0;
+      }
+      await stopStandaloneDaemonIfAlive({ configDir, fsImpl, isPidAlive, readProcessCmdline, killFn, sleep });
+      try {
+        writeServiceEnvFile(configDir, {
+          ...collectServiceEnv(env, { includePath: true, home: homeDir }),
+          AH_PROXY_FINGERPRINT: currentFingerprint,
+          AH_SERVICE_MODE: "launchd",
+        }, fsImpl);
+        const plist = renderPlist({ label, appBin, configDir, role, logPath });
+        fsImpl.mkdirSync(path.dirname(plistPath), { recursive: true });
+        fsImpl.writeFileSync(plistPath, plist, { mode: 0o600 });
+        try { fsImpl.chmodSync(plistPath, 0o600); } catch {}
+        runWith(exec, "launchctl", ["bootout", `gui/${uid}/${label}`], { ignore: true });
+        // bootout 是异步卸载，旧守护进程退出清理要数秒；先等 print 报错确认完全卸载，
+        // 再 bootstrap 并用 print 验证装载，避免竞态下服务停在已卸载状态。
+        await awaitLaunchdUnload(exec, uid, label, { sleep, now });
+        await bootstrapAndVerify(exec, uid, label, plistPath, { sleep, now });
+        console.log(`ok: ${label} active (launchd, config=${configDir})`);
+        return 0;
+      } catch (launchdErr) {
+        const spawnRes = await spawnEnsureDaemon({
+          configDir,
+          appBin,
+          env,
+          homeDir,
+          currentFingerprint,
+          execPath,
+          fsImpl,
+          spawnFn,
+          isPidAlive,
+          sleep,
+        });
+        if (spawnRes.ok) {
+          console.log(`ok: daemon alive (pid=${spawnRes.pid}, mode=spawn, config=${configDir})`);
+          return 0;
+        }
+        console.error(`✗ service --ensure 收敛失败：launchd: ${launchdErr?.message || launchdErr}；${spawnRes.error}`);
+        return 1;
+      }
     }
     const plist = renderPlist({ label, appBin, configDir, role, logPath });
     fsImpl.mkdirSync(path.dirname(plistPath), { recursive: true });
     fsImpl.writeFileSync(plistPath, plist, { mode: 0o600 });
     try { fsImpl.chmodSync(plistPath, 0o600); } catch {}
     runWith(exec, "launchctl", ["bootout", `gui/${uid}/${label}`], { ignore: true });
-    // bootout 是异步卸载：旧进程还在退出时立刻 bootstrap 会报 5: Input/output error，
-    // 服务就停在已卸载状态。等几秒重试，最后一次仍失败才抛出。
-    for (let attempt = 1; ; attempt++) {
-      try {
-        runWith(exec, "launchctl", ["bootstrap", `gui/${uid}`, plistPath]);
-        break;
-      } catch (e) {
-        if (attempt >= 5) throw e;
-        await sleep(1000);
-      }
-    }
+    // bootout 是异步卸载：旧进程收到 SIGTERM 后还要做退出清理（标记能力离线，涉及网络请求），
+    // 实测约 5 秒才完全退出；退出前 bootstrap 会报 5: Input/output error，服务就停在已卸载状态。
+    // 先等 print 报错确认完全卸载（默认 30 秒上限），再 bootstrap 并用 print 验证装载。
+    await awaitLaunchdUnload(exec, uid, label, { sleep, now });
+    await bootstrapAndVerify(exec, uid, label, plistPath, { sleep, now });
     console.log(`自启已安装并启动：${label}（role: ${role}）`);
     console.log(`  plist：${plistPath}`);
     console.log(`  日志：${logPath}`);
@@ -733,7 +1063,7 @@ export async function service(
       return sudoAvailable;
     };
 
-    if (remove) {
+    if (isRemove) {
       if (scope === "system" && !isRoot && !checkHasSudo()) {
         console.error("✗ 卸载系统级 systemd 服务需要 root 或免密 sudo 权限");
         return 1;
@@ -787,9 +1117,13 @@ export async function service(
       return 0;
     }
 
-    const installUserUnit = async () => {
+    const installUserUnit = async ({ quietError = false } = {}) => {
       try {
-        const envObj = collectServiceEnv(env, { includePath: true });
+        const envObj = {
+          ...collectServiceEnv(env, { includePath: true }),
+          AH_PROXY_FINGERPRINT: currentFingerprint,
+          AH_SERVICE_MODE: "user",
+        };
         writeServiceEnvFile(configDir, envObj, fsImpl);
         const text = renderSystemdUnit({
           role,
@@ -812,25 +1146,32 @@ export async function service(
 
         const activeCheck = await checkSystemdActive(unit, true, { execFileSync: exec, sleep });
         if (!activeCheck.ok) {
-          console.error(`✗ systemd 用户服务 ${unit} 启动后未能处于 active 状态（状态：${activeCheck.status}）`);
-          return 1;
+          const msg = `systemd 用户服务 ${unit} 启动后未能处于 active 状态（状态：${activeCheck.status}）`;
+          if (!quietError) console.error(`✗ ${msg}`);
+          return { code: 1, error: msg };
         }
         console.log(`ok: ${unit} active (user, config=${configDir})`);
-        return 0;
+        return { code: 0, error: "" };
       } catch (e) {
-        console.error(`✗ 安装 systemd 用户服务 ${unit} 失败：${e?.message || e}`);
-        return 1;
+        const msg = `安装 systemd 用户服务 ${unit} 失败：${e?.message || e}`;
+        if (!quietError) console.error(`✗ ${msg}`);
+        return { code: 1, error: msg };
       }
     };
 
-    const installSystemUnit = async () => {
+    const installSystemUnit = async ({ quietError = false } = {}) => {
       if (!isRoot && !checkHasSudo()) {
-        console.error("✗ 安装系统级 systemd 服务需要 root 或免密 sudo 权限");
-        return 1;
+        const msg = "安装系统级 systemd 服务需要 root 或免密 sudo 权限";
+        if (!quietError) console.error(`✗ ${msg}`);
+        return { code: 1, error: msg };
       }
       const info = userInfoFn();
       const curUser = info?.username || "";
-      const envObj = collectServiceEnv(env, { includePath: true, home: homeDir });
+      const envObj = {
+        ...collectServiceEnv(env, { includePath: true, home: homeDir }),
+        AH_PROXY_FINGERPRINT: currentFingerprint,
+        AH_SERVICE_MODE: "system",
+      };
       try {
         writeServiceEnvFile(configDir, envObj, fsImpl);
         const text = renderSystemdUnit({
@@ -876,22 +1217,99 @@ export async function service(
 
         const activeCheck = await checkSystemdActive(unit, false, { execFileSync: exec, sleep });
         if (!activeCheck.ok) {
-          console.error(`✗ systemd 系统服务 ${unit} 启动后未能处于 active 状态（状态：${activeCheck.status}）`);
-          return 1;
+          const msg = `systemd 系统服务 ${unit} 启动后未能处于 active 状态（状态：${activeCheck.status}）`;
+          if (!quietError) console.error(`✗ ${msg}`);
+          return { code: 1, error: msg };
         }
         console.log(`ok: ${unit} active (system, config=${configDir})`);
-        return 0;
+        return { code: 0, error: "" };
       } catch (e) {
-        console.error(`✗ 安装 systemd 系统服务 ${unit} 失败：${e?.message || e}`);
-        return 1;
+        const msg = `安装 systemd 系统服务 ${unit} 失败：${e?.message || e}`;
+        if (!quietError) console.error(`✗ ${msg}`);
+        return { code: 1, error: msg };
       }
     };
 
+    // --ensure 独立分支：先做健康与代理指纹校验，不健康或指纹变化时按 system -> user -> spawn 顺序收敛。
+    if (isEnsure) {
+      const savedEnv = parseServiceEnvFile(configDir, fsImpl);
+      const fingerprintUnchanged = Boolean(savedEnv && savedEnv.AH_PROXY_FINGERPRINT === currentFingerprint);
+      const sysActive = scope !== "user" ? isSystemdUnitActiveNow(unit, false, exec) : false;
+      const userActive = scope !== "system" ? isSystemdUnitActiveNow(unit, true, exec) : false;
+      const lockHealth = scope === "auto" ? checkDaemonLockHealth() : { alive: false, pid: null };
+
+      if (fingerprintUnchanged) {
+        if (sysActive) {
+          console.log(`ok: ${unit} active (system, config=${configDir})`);
+          return 0;
+        }
+        if (userActive) {
+          console.log(`ok: ${unit} active (user, config=${configDir})`);
+          return 0;
+        }
+        if (lockHealth.alive) {
+          console.log(`ok: daemon alive (pid=${lockHealth.pid}, mode=spawn, config=${configDir})`);
+          return 0;
+        }
+      }
+
+      const failures = [];
+      if (scope === "auto" || scope === "system") {
+        if (isRoot || checkHasSudo()) {
+          // 若当前由 user unit 持有 daemon.lock，切向 system unit 前先停掉 user unit 防止锁冲突。
+          if (userActive) {
+            runWith(exec, "systemctl", ["--user", "stop", unit], { ignore: true });
+          } else if (!sysActive) {
+            await stopStandaloneDaemonIfAlive({ configDir, fsImpl, isPidAlive, readProcessCmdline, killFn, sleep });
+          }
+          const sysRes = await installSystemUnit({ quietError: true });
+          if (sysRes.code === 0) return 0;
+          failures.push(`system: ${sysRes.error}`);
+        } else {
+          failures.push("system: 无 root 或免密 sudo 权限");
+        }
+      }
+
+      if (scope === "auto" || scope === "user") {
+        if (!userActive) {
+          await stopStandaloneDaemonIfAlive({ configDir, fsImpl, isPidAlive, readProcessCmdline, killFn, sleep });
+        }
+        const userRes = await installUserUnit({ quietError: true });
+        if (userRes.code === 0) return 0;
+        failures.push(`user: ${userRes.error}`);
+      }
+
+      if (scope === "auto") {
+        // 若此前是 systemd 管理但本次收敛退到 spawn（极少见），或此前是直启 daemon 且代理指纹变化，先释放旧进程锁。
+        await stopStandaloneDaemonIfAlive({ configDir, fsImpl, isPidAlive, readProcessCmdline, killFn, sleep });
+        const spawnRes = await spawnEnsureDaemon({
+          configDir,
+          appBin,
+          env,
+          homeDir,
+          currentFingerprint,
+          execPath,
+          fsImpl,
+          spawnFn,
+          isPidAlive,
+          sleep,
+        });
+        if (spawnRes.ok) {
+          console.log(`ok: daemon alive (pid=${spawnRes.pid}, mode=spawn, config=${configDir})`);
+          return 0;
+        }
+        failures.push(`spawn: ${spawnRes.error}`);
+      }
+
+      console.error(`✗ service --ensure 收敛失败：${failures.join("；")}`);
+      return 1;
+    }
+
     if (scope === "user") {
-      return installUserUnit();
+      return (await installUserUnit()).code;
     }
     if (scope === "system") {
-      return installSystemUnit();
+      return (await installSystemUnit()).code;
     }
 
     // scope === "auto"：非 root 先探测 user session；否则探测 system；仅完全无 systemd 环境时才退回后台 spawn。
@@ -905,7 +1323,7 @@ export async function service(
       }
     }
     if (hasUserSession) {
-      return installUserUnit();
+      return (await installUserUnit()).code;
     }
 
     if (isRoot || checkHasSudo()) {
@@ -920,7 +1338,7 @@ export async function service(
         if (isNoSystemdError(e)) hasSystemd = false;
       }
       if (hasSystemd) {
-        return installSystemUnit();
+        return (await installSystemUnit()).code;
       }
     }
 
@@ -945,7 +1363,45 @@ export async function service(
   }
 
   if (platform === "win32") {
-    return registerWindowsService({ configDir, role, node, appBin, logPath, remove, name });
+    if (isEnsure) {
+      const savedEnv = parseServiceEnvFile(configDir, fsImpl);
+      const fingerprintUnchanged = Boolean(savedEnv && savedEnv.AH_PROXY_FINGERPRINT === currentFingerprint);
+      const lockHealth = checkDaemonLockHealth();
+      if (fingerprintUnchanged && lockHealth.alive) {
+        console.log(`ok: daemon alive (pid=${lockHealth.pid}, mode=${savedEnv?.AH_SERVICE_MODE || "win32"}, config=${configDir})`);
+        return 0;
+      }
+      await stopStandaloneDaemonIfAlive({ configDir, fsImpl, isPidAlive, readProcessCmdline, killFn, sleep });
+      try {
+        writeServiceEnvFile(configDir, {
+          ...collectServiceEnv(env, { includePath: true, home: homeDir }),
+          AH_PROXY_FINGERPRINT: currentFingerprint,
+          AH_SERVICE_MODE: "win32",
+        }, fsImpl);
+        const code = await registerWindowsService({ configDir, role, node, appBin, logPath, remove: false, name });
+        if (code === 0) return 0;
+      } catch (winErr) {
+        const spawnRes = await spawnEnsureDaemon({
+          configDir,
+          appBin,
+          env,
+          homeDir,
+          currentFingerprint,
+          execPath,
+          fsImpl,
+          spawnFn,
+          isPidAlive,
+          sleep,
+        });
+        if (spawnRes.ok) {
+          console.log(`ok: daemon alive (pid=${spawnRes.pid}, mode=spawn, config=${configDir})`);
+          return 0;
+        }
+        console.error(`✗ service --ensure 收敛失败：win32: ${winErr?.message || winErr}；${spawnRes.error}`);
+        return 1;
+      }
+    }
+    return registerWindowsService({ configDir, role, node, appBin, logPath, remove: isRemove, name });
   }
 
   console.log(`暂不支持在 ${platform} 上自动注册自启；请用任务计划程序手动安排：`);

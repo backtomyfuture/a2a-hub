@@ -137,7 +137,8 @@ test("onboarding：有 token 时内嵌明文，没有时用占位符；host/inbo
   assert.equal(embedded.prompt.includes("<AH_API_TOKEN>"), false);
   assert.match(embedded.prompt, /poll\?timeout=0/);
   assert.match(embedded.prompt, /\/heartbeat/);
-  assert.match(embedded.prompt, /\/api\/v1\/skills\/a2a-worker/);
+  // 提示词自包含，不再要求对方拉取协议 Skill；链接只在 onboarding.skills 里给机主参考。
+  assert.deepEqual(embedded.skills, [{ name: "a2a-worker", url: "https://hub.example.com/api/v1/skills/a2a-worker" }]);
   assert.match(embedded.prompt, /\/\.well-known\/agent\.json/);
   assert.match(embedded.prompt, /\/api\/v1\/health/);
   assert.equal(embedded.prompt.includes("127.0.0.1"), false);
@@ -468,7 +469,8 @@ test("HTTP：机主不受影响，Agent 按角色隔离，冒充与撤单受绑�
     });
     assert.equal(reissued.status, 200);
     assert.match(reissued.data.token, /^aht_/);
-    assert.match(reissued.data.onboarding.prompt, /ah service --system/);
+    assert.match(reissued.data.onboarding.prompt, /poll\?timeout=25/);
+    assert.match(reissued.data.onboarding.prompt, /"receive_mode":"http-longpoll"/);
     assert.equal((await apiJson(baseUrl, "/api/v1/agents/muse-lp/updates?timeout=0", { token: reissued.data.token })).status, 200);
   });
 });

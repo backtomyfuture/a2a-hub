@@ -20,7 +20,24 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
-import { Kernel, loadConfig, DAEMON_VERSION } from "../src/kernel.mjs";
+import { spawnSync } from "node:child_process";
+
+// Node 24 的全局 fetch 只在进程启动前读到 NODE_USE_ENV_PROXY=1 才走环境代理，运行中改 process.env 无效；
+// Muse 等 VM 出站必须走代理，所以在加载任何子命令之前带着该变量原地自重启一次（靠它防止循环）。
+const PROXY_ENV_KEYS = ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"];
+if (process.env.NODE_USE_ENV_PROXY !== "1" && PROXY_ENV_KEYS.some((k) => process.env[k])) {
+  const child = spawnSync(process.execPath, [fileURLToPath(import.meta.url), ...process.argv.slice(2)], {
+    stdio: "inherit",
+    env: { ...process.env, NODE_USE_ENV_PROXY: "1" },
+  });
+  if (child.error) {
+    console.error(`ah: 带代理环境自重启失败：${child.error.message}`);
+    process.exit(1);
+  }
+  process.exit(child.signal ? 128 + (os.constants.signals[child.signal] || 0) : (child.status ?? 1));
+}
+
+const { Kernel, loadConfig, DAEMON_VERSION } = await import("../src/kernel.mjs");
 
 const APP_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -261,6 +278,9 @@ function parseJoinCliArgs(rest) {
 function serviceOptions(rest, role) {
   let hasSystem = false;
   let hasUser = false;
+  const hasEnsure = rest.includes("--ensure");
+  const hasRemove = rest.includes("--remove");
+  const hasUninstall = rest.includes("--uninstall");
   let name;
   let seenName = false;
   for (let i = 0; i < rest.length; i++) {
@@ -285,7 +305,11 @@ function serviceOptions(rest, role) {
   if (hasSystem && hasUser) {
     throw new Error("不能同时指定 --system 与 --user");
   }
-  const opts = { remove: rest.includes("--remove"), role };
+  if (hasEnsure && (hasRemove || hasUninstall)) {
+    const conflict = hasRemove && hasUninstall ? "--remove/--uninstall" : hasRemove ? "--remove" : "--uninstall";
+    throw new Error(`--ensure 与破坏性参数 ${conflict} 互斥，不能同时指定`);
+  }
+  const opts = { remove: hasRemove, ensure: hasEnsure, uninstall: hasUninstall, role };
   if (hasSystem) opts.scope = "system";
   else if (hasUser) opts.scope = "user";
   if (seenName) opts.name = name ?? "";
@@ -301,7 +325,7 @@ const USAGE_LINES = [
   "  ah reconcile [--config <dir>]  单次回表认领/对账后退出（不长驻；不停派、不改写命令表外的手工名片）",
   "  ah inventory [--config <dir>]  只读盘点本节点名片与任务，不写入",
   "  ah doctor  [--config <dir>] [--role node|hub]  本机自检",
-  "  ah service [--config <dir>] [--role node|hub] [--system|--user] [--name <unit>]  注册开机自启（--remove 卸载）",
+  "  ah service [--config <dir>] [--role node|hub] [--system|--user] [--name <unit>] [--ensure]  注册开机自启（--ensure 幂等自愈；--remove 卸载）",
   "  ah update  [--check] [--skip-skill] [--config <dir>]  自更新程序本体（git pull + 依赖重装 + 软链/Skill 补齐）",
   "  ah inbox   [--pop] [--limit <n>] [--json]    读取专属 Agent 收件箱（--pop 提取并标为 acked；--limit 只取前 n 条 pending）",
   "  ah inbox done --task <Task_ID> --text <处理结果> [--artifact <路径或URL>]... [--check <id>=<pass|fail|blocked>[:<证据>]]",
