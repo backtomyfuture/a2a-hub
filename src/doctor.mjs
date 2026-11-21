@@ -487,7 +487,7 @@ function roleFrom(argv, opts, raw) {
 
 // 有 herdr 能力时核对 Socket：ping、协议版本，以及快照里脱离账本的 ah- Agent。
 // 只报告，不关 Pane / Worktree。socket 不可达算问题，因为这种节点认领会在运行期失败。
-async function auditHerdrSocket(configDir, flat, opts = {}) {
+export async function auditHerdrSocket(configDir, flat, opts = {}) {
   const usesHerdr = Object.values(flat || {}).some((entry) => entry?.context === "herdr");
   if (!usesHerdr) return 0;
   let socket = null;
@@ -497,8 +497,9 @@ async function auditHerdrSocket(configDir, flat, opts = {}) {
       socketPath: String(opts.herdrSocketPath ?? "").trim(),
       session: String(opts.herdrSession ?? "").trim(),
       timeoutMs: 3000,
+      autoStart: false, // doctor must not change the condition it diagnoses.
     });
-    const pong = await socket.ping({ timeoutMs: 3000 });
+    const pong = await socket.ensureServerRunning({ autoStart: false, timeoutMs: 3000 });
     ok(`Herdr socket 可达（${socket.source}，protocol ${pong.protocol}，${pong.version ?? "未知版本"}）`);
     const snapRes = await socket.call("session.snapshot", {}, { timeoutMs: 3000 });
     const snap = snapRes?.snapshot ?? snapRes ?? {};
@@ -533,7 +534,7 @@ async function auditHerdrSocket(configDir, flat, opts = {}) {
       problems++;
     } else {
       // 守护没开时不让 ah setup 失败；配了 herdr 能力的节点仍会在这里看到原因。
-      info(`Herdr socket 未接通（${e?.message ?? e}）。herdr 能力要等守护进程起来才能派发`);
+      info(`Herdr socket 未接通（${e?.message ?? e}）。只读诊断，未自动启动；正常派发仅对未送达的连接失败尝试懒启动`);
     }
   } finally {
     try { socket?.close(); } catch { /* 没连上 */ }
