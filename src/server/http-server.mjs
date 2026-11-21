@@ -763,6 +763,7 @@ export async function startHubHttpServer({
           source: body.source || body.from || "web",
           to: body.to || "",
           worker: body.worker || "",
+          requested_model: body.requested_model ?? null,
           cap: body.cap || "",
           text: body.text || "",
           params: body.params,
@@ -1174,6 +1175,7 @@ export async function startHubHttpServer({
             pollIntervalMin,
             template,
             templateId,
+            model: templateId ? templatePresetById(templateId, presets) : {},
           });
           const existing = await bus.listRecords(bus.tables.agentCards);
           if (existing.some((r) => f1(r, "Cap_ID") === fields.Cap_ID)) {

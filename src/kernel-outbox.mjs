@@ -2,6 +2,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { modelAuditOf } from "./receipt.mjs";
 import { acceptanceLine } from "./acceptance.mjs";
 import { planArtifactItem, uploadPendingItems } from "./attachments.mjs";
 import { f1 } from "./bus/tables.mjs";
@@ -132,6 +133,7 @@ export const outboxMethods = {
       log("later 在 failed 上忽略");
     }
     const box = {
+      model: modelAuditOf(f1(task, "Metadata")),
       taskId: f1(task, "Task_ID"),
       outcome: info.outcome,
       res: info.res ?? null,
@@ -313,9 +315,9 @@ export const outboxMethods = {
     if (content) {
       await this.createPart(box.msgId, "message", 1, "text", { text: content }, box.tokens.partText);
     }
-    if (box.acceptance) {
+    if (box.acceptance || box.model) {
       await this.createPart(box.msgId, "message", 2, "data", {
-        data: JSON.stringify({ acceptance: box.acceptance }),
+        data: JSON.stringify({ ...(box.acceptance ? { acceptance: box.acceptance } : {}), ...(box.model ? { model: box.model } : {}) }),
       }, box.tokens.partData);
     }
   },

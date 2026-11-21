@@ -9,7 +9,7 @@ import { parseCriteria } from "../acceptance.mjs";
 import { controlKeysIn } from "../config.mjs";
 import { f1 } from "../bus/tables.mjs";
 import { appendFileParts, normalizeAttachments } from "../attachments.mjs";
-import { admissionOf } from "./admission.mjs";
+import { assertModelOverride, undispatchableReason, workerModelOfCards } from "./admission.mjs";
 
 const APPROVALS = new Set(["auto", "notify", "approve"]);
 // 与 src/kernel.mjs 的 HOP_LIMIT 对齐。超过 8 的单节点会直接熔断，这里不落表。
@@ -113,7 +113,7 @@ function buildInstructionData(params, criteria) {
 
 export function parseCreateArgv(argv) {
   const out = {
-    configDir: "", from: "", source: "", to: "", cap: "", worker: "", text: "", paramsRaw: undefined, criteriaRaw: undefined, context: "", ref: "", approval: "", idempotencyKey: "", files: [],
+    configDir: "", from: "", source: "", to: "", cap: "", worker: "", requested_model: null, text: "", paramsRaw: undefined, criteriaRaw: undefined, context: "", ref: "", approval: "", idempotencyKey: "", files: [],
   };
   const take = (i, flag) => {
     const value = argv[i + 1];
@@ -128,6 +128,7 @@ export function parseCreateArgv(argv) {
     else if (flag === "--to") out.to = take(i, flag);
     else if (flag === "--cap" || flag === "--skill") out.cap = take(i, flag);
     else if (flag === "--worker") out.worker = take(i, flag);
+    else if (flag === "--model") out.requested_model = take(i, flag);
     else if (flag === "--text") out.text = take(i, flag);
     else if (flag === "--params") out.paramsRaw = take(i, flag);
     else if (flag === "--criteria") out.criteriaRaw = take(i, flag);
@@ -156,23 +157,6 @@ function splitRefs(raw) {
 
 function cardText(card, name) {
   return String(f1(card, name) ?? "").trim();
-}
-
-// 标准 §10.1：只接受 Dispatchable=Yes。目标离线（Availability=offline）仍可正常建单入队。
-// 返回空数组表示可派；否则是写进错误里的原因，调用方据此在写表前拒绝。
-function undispatchableReason(card) {
-  const reasons = [];
-  const dispatchable = String(f1(card, "Dispatchable") ?? "");
-  if (dispatchable !== "Yes") {
-    reasons.push(dispatchable === "No"
-      ? "已停派（Dispatchable=No）"
-      : `不可派（Dispatchable=${dispatchable || "未设置"}，需要 Yes）`);
-  }
-  const admission = admissionOf(card);
-  if (admission !== "admitted") {
-    reasons.push(`未接纳（Admission=${admission}），请在 Web 控制台「节点 → 待接纳」中接纳`);
-  }
-  return reasons;
 }
 
 function rejectBlocked(cards, lead) {
@@ -216,6 +200,7 @@ export async function resolveDispatchTarget({ bus, to = "", cap = "", worker = "
   let node = rawTo;
   let skill = rawCap;
   let workerHint = rawWorker;
+  let targetCard = null;
 
   // 若总线提供了 AgentCards 表，尝试自动解析能力与节点并按名册校验
   if (bus?.tables?.agentCards) {
@@ -295,6 +280,7 @@ export async function resolveDispatchTarget({ bus, to = "", cap = "", worker = "
       const isOnline = (card) => String(f1(card, "Availability") ?? "").toLowerCase() !== "offline";
       const sorted = usable.slice().sort((a, b) => (isOnline(b) ? 1 : 0) - (isOnline(a) ? 1 : 0));
       const chosen = sorted[0];
+      targetCard = chosen;
       skill = cardText(chosen, "Skill_ID") || skill;
       if (!node) node = cardText(chosen, "Node");
     };
@@ -305,11 +291,12 @@ export async function resolveDispatchTarget({ bus, to = "", cap = "", worker = "
     // 1. 若提供了 cap：尝试在 AgentCards 中精确查找 Cap_ID 或 Skill_ID
     if (skill) {
       const requested = skill;
-      const matchCap = cards.find((card) => cardText(card, "Cap_ID") === requested);
+      const matchCap = cards.find((card) => cardText(card, "Cap_ID") === requested && (!node || cardText(card, "Node") === node));
       if (matchCap) {
         if (undispatchableReason(matchCap).length) {
           rejectBlocked([matchCap], "指定的能力不可派");
         }
+        targetCard = matchCap;
         skill = cardText(matchCap, "Skill_ID") || requested;
         if (!node) node = cardText(matchCap, "Node");
         // 按 Cap_ID 点名的是一张具体名片，Worker 跟着名片走。
@@ -331,6 +318,7 @@ export async function resolveDispatchTarget({ bus, to = "", cap = "", worker = "
               rejectBlocked(extractedMatches, "指定的能力不可派");
             }
             skill = extracted;
+            if (extractedUsable.length) adoptSkill(extractedMatches, "指定的能力不可派");
           }
         }
       }
@@ -360,14 +348,15 @@ export async function resolveDispatchTarget({ bus, to = "", cap = "", worker = "
           return 50 + online;
         };
         const sorted = usable.slice().sort((a, b) => priority(b) - priority(a));
-        skill = String(f1(sorted[0], "Skill_ID") ?? "").trim();
+        targetCard = sorted[0];
+        skill = String(f1(targetCard, "Skill_ID") ?? "").trim();
       }
     }
   }
 
   if (!node) throw new Error("task create 需要 --to <node>（或提供可在 AgentCards 反查到节点的 --cap/--skill）");
   if (!skill) throw new Error(`task create 未指定 --cap/--skill，且目标节点 ${node} 未登记任何可用能力`);
-  return { node, skill, workerHint };
+  return { node, skill, workerHint, targetCard };
 }
 
 function cardMeta(card) {
@@ -439,7 +428,7 @@ function positiveSec(raw, fallback) {
 }
 
 export async function createTask({
-  bus, from = "", source = "", to, cap, worker = "", text = "", params, criteria, context = "", ref = "", approval = "", idempotencyKey = "", now = new Date(), validateTarget = true,
+  bus, from = "", source = "", to, cap, worker = "", requested_model = null, text = "", params, criteria, context = "", ref = "", approval = "", idempotencyKey = "", now = new Date(), validateTarget = true,
   attachments, fileStore = null, queueTimeoutSec = 0, leaseTtlSec = 0, waitTimeoutSec = 0,
 }) {
   if (!bus?.tables?.messages || !bus.tables.parts || !bus.tables.tasks) {
@@ -448,7 +437,8 @@ export async function createTask({
   const data = buildInstructionData(params, criteria);
   // 附件校验也在第一笔写之前：hub:// 不存在或外部 URL 非法时不留半截消息。
   const files = normalizeAttachments(attachments, { fileStore });
-  const { node, skill, workerHint } = await resolveDispatchTarget({ bus, to, cap, worker, validateTarget });
+  const { node, skill, workerHint, targetCard } = await resolveDispatchTarget({ bus, to, cap, worker, validateTarget });
+  if (!bus.tables.agentCards) assertModelOverride(requested_model, null);
   let policy = pacePolicy({ cls: "host" });
   if (bus.tables.agentCards) {
     let cards = [];
@@ -457,6 +447,10 @@ export async function createTask({
     } catch (e) {
       throw new Error(`读取 AgentCards 以确定超时失败：${e?.message ?? e}`);
     }
+    // 与解析阶段选中的同一张卡/Worker 做准入，不能再任取第一张匹配卡。
+    const target = targetCard && cards.find((c) => c.record_id === targetCard.record_id);
+    if (targetCard && (!target || ["Node", "Worker", "Skill_ID", "Cap_ID"].some((key) => cardText(target, key) !== cardText(targetCard, key)) || undispatchableReason(target).length)) throw new Error("拒绝建单：目标名片已变更或不可派");
+    assertModelOverride(requested_model, workerModelOfCards(cards, target));
     policy = defaultTaskPolicy(cards, node);
   }
   const sender = String(from || source || "hub").trim();
@@ -569,6 +563,9 @@ export async function createTask({
   if (workerHint) taskFields.Worker_Hint = workerHint;
   // 超时/租约只进 Metadata，不加 Tasks 列。调用方传入的正数优先，0 或缺省用目标节点接收方式的默认值。
   taskFields.Metadata = JSON.stringify({
+    ...(requested_model !== null ? { requested_model } : {}),
+    ...(targetCard ? { dispatch_target: { node, worker: cardText(targetCard, "Worker"), skill,
+      cap_id: cardText(targetCard, "Cap_ID") } } : {}),
     queue_timeout_sec: positiveSec(queueTimeoutSec, policy.queueTimeoutSec),
     lease_ttl_sec: positiveSec(leaseTtlSec, policy.leaseTtlSec),
     wait_timeout_sec: positiveSec(waitTimeoutSec, policy.waitTimeoutSec),

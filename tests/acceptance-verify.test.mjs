@@ -517,7 +517,12 @@ test("未配 verify 且无清单的回归：result 不带 Seq 2 acceptance DataP
       const resultMsg = (await mock.findRecords(TABLES.messages, "Task_ID", "TASK-PLAIN"))
         .find((m) => f1(m, "Kind") === "result");
       const parts = await mock.findRecords(TABLES.parts, "Parent_ID", f1(resultMsg, "Msg_ID"));
-      assert.equal(parts.length, 1);
+      assert.equal(parts.length, 2);
+      const audit = JSON.parse(f1(parts.find((p) => f1(p, "Kind") === "data"), "Data"));
+      assert.equal(Object.hasOwn(audit, "acceptance"), false);
+      assert.deepEqual(audit.model, {
+        requested_model: null, default_model: null, effective_model: null, model_source: "cli_default",
+      });
       assert.equal(f1(parts[0], "Kind"), "text");
     } finally {
       reap(dir, kernels);

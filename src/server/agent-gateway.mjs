@@ -13,13 +13,15 @@ import { pickSignedDecision, publicKeyOf } from "../approval-sign.mjs";
 import { f1 } from "../bus/tables.mjs";
 import { capIdOf } from "../config.mjs";
 import { agentCanSeeTask, assertAgentRoute } from "../hub/agent-access.mjs";
-import { admissionOf, actsAsLeader, httpError, parseCardMetadata, presetHttpCardFields, validateNodeName, validatePollIntervalMin } from "../hub/admission.mjs";
+import { assertModelOverride, parseCardModel, workerModelOfCards, workerPeerCards, WORKER_MODEL_KEYS, undispatchableReason, isGatewayExecutionCard, admissionOf, actsAsLeader, httpError, parseCardMetadata, presetHttpCardFields, validateNodeName, validatePollIntervalMin } from "../hub/admission.mjs";
 import { alignNodeReceiveMode, removeHttpAgentSchedule, saveHttpAgentSchedule } from "../hub/capabilities.mjs";
 import { isStaleWorking } from "../hub/stale.mjs";
 import { rosterNodeVisible } from "./longpoll-broker.mjs";
 import { submitAgentReceipt } from "../inbox.mjs";
 import { readTaskMeta, withRefreshedLease } from "../kernel-util.mjs";
-import { DAEMON_VERSION } from "../kernel.mjs";
+import { modelAuditOf } from "../receipt.mjs";
+import { workerCardFields } from "../hub/cards.mjs";
+import { DAEMON_VERSION, taskDispatchBinding, taskModelDecision } from "../kernel.mjs";
 
 const LEADER_UPDATE_STATUSES = new Set([
   "completed",
@@ -375,6 +377,8 @@ function buildTaskBrief(task, taskMsgs, partsByParent, artsByTask, view = {}) {
     from_node: fromNode,
     source: f1(task, "Source"),
     target_node: f1(task, "Target_Node"),
+    model: modelAuditOf(f1(task, "Metadata")),
+    requested_model: metadata?.requested_model ?? null,
     worker_hint: f1(task, "Worker_Hint"),
     skill_id: f1(task, "Skill_ID"),
     approval_class: f1(task, "Approval_Class") || "auto",
@@ -480,6 +484,34 @@ function leaseIdOfTask(task) {
   return typeof meta?.lease_id === "string" ? meta.lease_id.trim() : "";
 }
 
+function gatewayTaskCard(cards, task, worker = "") {
+  let binding;
+  try { binding = taskDispatchBinding(task); } catch (e) { throw httpError(400, e.message); }
+  const mine = cards.filter((c) => f1(c, "Node") === f1(task, "Target_Node"));
+  const named = mine.some((c) => f1(c, "Worker"));
+  const pinned = binding ? binding.worker : f1(task, "Worker_Hint");
+  // 未命名旧 HTTP Worker 的 worker 参数只是运行实例标签，不是另一个已注册 Worker。
+  if (worker && ((pinned && worker !== pinned) || (binding && !pinned && named))) throw httpError(400, "worker_not_found：调用 Worker 与任务绑定不一致");
+  let selected;
+  if (binding) {
+    selected = mine.find((c) => f1(c, "Worker") === binding.worker && f1(c, "Skill_ID") === binding.skill
+      && (!binding.cap_id || f1(c, "Cap_ID") === binding.cap_id));
+  } else {
+    const hint = pinned || worker;
+    const candidates = mine.filter((c) => ((!hint && named) || f1(c, "Worker") === (named ? hint : ""))
+      && (f1(c, "Skill_ID") === (f1(task, "Skill_ID") || "agent") || f1(c, "Cap_ID") === f1(task, "Skill_ID")));
+    selected = candidates.find((c) => undispatchableReason(c).length === 0) || candidates[0];
+  }
+  if (!selected) throw httpError(400, "worker_not_found：目标 Worker/能力名片不存在，禁止套用其它 Worker 的模型配置");
+  return selected;
+}
+
+function assertGatewayWorker(cards, selected) {
+  if (workerPeerCards(cards, selected).some((c) => !isGatewayExecutionCard(c))) {
+    throw httpError(400, "execution_backend_not_supported：该 Worker 不是已确认的 HTTP Agent，请由本地 Kernel 执行");
+  }
+}
+
 async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", verifyKey, onWake, view = {} }) {
   const [tasks, messages, parts] = await Promise.all([
     bus.listRecords(bus.tables.tasks),
@@ -491,9 +523,26 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
   const target = f1(task, "Target_Node");
   if (target !== node) throw httpError(403, `任务目标节点是 ${target}，不是 ${node}`);
 
+  const st = f1(task, "Status");
+  const cards = await bus.listRecords(bus.tables.agentCards);
+  const selected = gatewayTaskCard(cards, task, worker);
+  assertGatewayWorker(cards, selected);
+  const selectedWorker = f1(selected, "Worker") || f1(task, "Worker_Hint") || worker;
+  const initial = st === "submitted";
+  if (initial && undispatchableReason(selected).length) throw httpError(403, undispatchableReason(selected).join("；"));
+  const frozen = modelAuditOf(f1(task, "Metadata"));
+  const spec = initial || !frozen ? workerModelOfCards(cards, selected) : {};
+  let model;
+  try { model = taskModelDecision(task, st === "working" && !frozen ? {} : spec); }
+  catch (e) { throw httpError(400, e.message); }
+  // 已运行/中断任务只交还既有租约及快照；配置更新不能重算或截断旧 turn。
+  if (initial || !frozen) assertModelOverride(model.requested_model, spec);
+  const metadata = readTaskMeta(f1(task, "Metadata"));
+  if (!metadata.ok) throw httpError(400, "任务 Metadata 无法读取");
+  const modelMetadata = JSON.stringify({ ...metadata.meta, model });
+
   const { msgByTask, partsByParent } = groupByTask(messages, parts, []);
   const taskMsgs = msgByTask.get(taskId) ?? [];
-  const st = f1(task, "Status");
   const claimedBy = f1(task, "Claimed_By");
   const reqLease = normalizeLeaseId(leaseId);
 
@@ -506,7 +555,7 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
         throw httpError(409, "任务正由同节点另一运行实例活跃执行中，请勿并发重复认领");
       }
       const takeoverFields = { Heartbeat_At: nowIso() };
-      const takeoverMeta = metadataForClaim(f1(task, "Metadata"), reqLease);
+      const takeoverMeta = metadataForClaim(modelMetadata, reqLease);
       if (takeoverMeta) takeoverFields.Metadata = takeoverMeta;
       await bus.updateRecord(bus.tables.tasks, task.record_id, takeoverFields);
       onWake();
@@ -515,6 +564,7 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
         ok: true,
         takeover: true,
         lease_id: reqLease,
+        model,
         task_id: taskId,
         status: "working",
         run_id: f1(task, "Latest_Run"),
@@ -524,11 +574,15 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
         criteria: instr.criteria,
       };
     }
+    if (!modelAuditOf(f1(task, "Metadata"))) {
+      await bus.updateRecord(bus.tables.tasks, task.record_id, { Metadata: modelMetadata });
+    }
     const instr = instructionOfTask(taskMsgs, partsByParent);
     return {
       ok: true,
       already_claimed: true,
       ...(currentLease ? { lease_id: currentLease } : {}),
+      model,
       task_id: taskId,
       status: "working",
       run_id: f1(task, "Latest_Run"),
@@ -555,7 +609,7 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
         Run_ID: runId,
         Task_Ref: taskId,
         Node: node,
-        Worker: worker || f1(task, "Worker_Hint") || "http-agent",
+        Worker: selectedWorker || "http-agent",
         Started_At: nowIso(),
       });
     }
@@ -566,8 +620,8 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
       Heartbeat_At: nowIso(),
     };
     if (runId) updateFields.Latest_Run = runId;
-    if (!f1(task, "Worker_Hint") && worker) updateFields.Worker_Hint = worker;
-    const claimMeta = metadataForClaim(f1(task, "Metadata"), reqLease);
+    if (!f1(task, "Worker_Hint") && selectedWorker) updateFields.Worker_Hint = selectedWorker;
+    const claimMeta = metadataForClaim(modelMetadata, reqLease);
     if (claimMeta) updateFields.Metadata = claimMeta;
     await bus.updateRecord(bus.tables.tasks, task.record_id, updateFields);
     onWake();
@@ -577,6 +631,7 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
       ok: true,
       action: "execute",
       ...(reqLease ? { lease_id: reqLease } : {}),
+      model,
       task_id: taskId,
       status: "working",
       run_id: runId,
@@ -605,7 +660,7 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
       Status: "working",
       Heartbeat_At: nowIso(),
     };
-    const resumeMeta = metadataForClaim(f1(task, "Metadata"), reqLease);
+    const resumeMeta = metadataForClaim(modelMetadata, reqLease);
     if (resumeMeta) updateFields.Metadata = resumeMeta;
     await bus.updateRecord(bus.tables.tasks, task.record_id, updateFields);
     onWake();
@@ -615,6 +670,7 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
       action: "resume",
       resume_reason: "answer",
       ...(reqLease ? { lease_id: reqLease } : {}),
+      model,
       task_id: taskId,
       status: "working",
       run_id: f1(task, "Latest_Run"),
@@ -636,7 +692,7 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
       Status: "working",
       Heartbeat_At: nowIso(),
     };
-    const authMeta = metadataForClaim(f1(task, "Metadata"), reqLease);
+    const authMeta = metadataForClaim(modelMetadata, reqLease);
     if (authMeta) updateFields.Metadata = authMeta;
     await bus.updateRecord(bus.tables.tasks, task.record_id, updateFields);
     onWake();
@@ -647,6 +703,7 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
       resume_reason: "auth_decision",
       decision,
       ...(reqLease ? { lease_id: reqLease } : {}),
+      model,
       task_id: taskId,
       status: "working",
       run_id: f1(task, "Latest_Run"),
@@ -667,6 +724,7 @@ async function collectAgentMailbox({ bus, node, verifyKey, onWake, includeUpdate
     bus.listRecords(bus.tables.parts),
     bus.tables.artifacts ? bus.listRecords(bus.tables.artifacts) : Promise.resolve([]),
   ]);
+  const cards = await bus.listRecords(bus.tables.agentCards);
   const { msgByTask, partsByParent, artsByTask } = groupByTask(messages, parts, artifacts);
 
   const actionable = [];
@@ -683,6 +741,15 @@ async function collectAgentMailbox({ bus, node, verifyKey, onWake, includeUpdate
     const taskMsgs = msgByTask.get(taskId) ?? [];
 
     if (target === node) {
+      try {
+        const selected = gatewayTaskCard(cards, task);
+        assertGatewayWorker(cards, selected);
+        if (st === "submitted") {
+          if (undispatchableReason(selected).length) continue;
+          const spec = workerModelOfCards(cards, selected);
+          assertModelOverride(taskModelDecision(task, spec).requested_model, spec);
+        }
+      } catch { continue; }
       if (st === "submitted") {
         if (f1(task, "Approval_Class") === "approve") {
           const reqMsg = preflightAuthRequest(taskMsgs, partsByParent);
@@ -1001,25 +1068,65 @@ export async function handleAgentGatewayRequest({
     }
 
     const existingCards = await bus.listRecords(bus.tables.agentCards);
-    const saved = [];
-    const admissionMap = {};
+    const prepared = [];
+    const groups = new Map();
+    const capIds = new Set();
     for (const spec of capSpecs) {
       const skillId = String(spec?.skill_id ?? spec?.skill ?? "").trim();
       if (!skillId) throw httpError(400, "caps 每项必须包含 skill_id");
       const specWorker = identityOnly ? "" : String(spec?.worker ?? worker ?? "").trim();
       const capKey = specWorker ? `${specWorker}/${skillId}` : skillId;
-      // 身份名片固定 CAP-<node>-agent，不跟调用方的 cap_prefix 走。
-      const capId = identityOnly
-        ? capIdOf("agent", {}, node)
-        : (String(spec?.cap_id ?? "").trim()
-          || capIdOf(capKey, { ...(specWorker ? { worker: specWorker, skill: skillId } : {}) }, capPrefix));
-
+      const capId = identityOnly ? capIdOf("agent", {}, node)
+        : (String(spec?.cap_id ?? "").trim() || capIdOf(capKey, { ...(specWorker ? { worker: specWorker, skill: skillId } : {}) }, capPrefix));
+      if (capIds.has(capId)) throw httpError(400, `重复 Cap_ID：${capId}`);
+      capIds.add(capId);
+      const previous = existingCards.find((r) => f1(r, "Node") === node && f1(r, "Cap_ID") === capId);
+      if (previous && f1(previous, "Worker") !== specWorker) throw httpError(400, "worker_model_conflict：Cap_ID 已归属其它 Worker");
+      let group = groups.get(specWorker);
+      if (!group) {
+        const peers = existingCards.filter((c) => f1(c, "Node") === node && f1(c, "Worker") === specWorker);
+        if (peers.some((c) => !isGatewayExecutionCard(c))) throw httpError(400, "execution_backend_conflict：不能用 HTTP 注册改写宿主 Worker");
+        group = { peers, patch: {}, skills: [], hasSkills: false };
+        groups.set(specWorker, group);
+      }
+      const patch = {};
+      for (const key of [...WORKER_MODEL_KEYS, "skills"]) {
+        if (Object.hasOwn(body, key)) patch[key] = body[key];
+        if (Object.hasOwn(spec, key)) patch[key] = spec[key];
+      }
+      let normalized;
+      try { normalized = workerCardFields(patch, { remote: true }); }
+      catch (e) { throw httpError(400, e.message); }
+      for (const key of WORKER_MODEL_KEYS) {
+        if (!Object.hasOwn(patch, key)) continue;
+        if (Object.hasOwn(group.patch, key) && group.patch[key] !== normalized[key]) throw httpError(400, `worker_model_conflict：Worker ${specWorker || "(本尊)"} 的 ${key} 声明矛盾`);
+        group.patch[key] = normalized[key];
+      }
+      if (Object.hasOwn(patch, "skills")) { group.hasSkills = true; group.skills.push(...normalized.skills); }
+      prepared.push({ spec, skillId, specWorker, capId });
+    }
+    for (const [name, group] of groups) {
+      const old = group.peers.map((c) => workerCardFields(parseCardModel(c), { remote: true }));
+      const raw = { ...group.patch };
+      for (const key of WORKER_MODEL_KEYS) {
+        if (Object.hasOwn(raw, key)) continue;
+        if (old.some((m) => m[key] !== old[0][key])) throw httpError(400, `worker_model_conflict：Worker ${name || "(本尊)"} 的旧 ${key} 需显式统一`);
+        if (old.length) raw[key] = old[0][key];
+      }
+      raw.skills = [...new Set(group.hasSkills ? group.skills : old.flatMap((m) => m.skills))];
+      group.model = workerCardFields(raw, { remote: true });
+    }
+    const saved = [];
+    const admissionMap = {};
+    for (const { spec, skillId, specWorker, capId } of prepared) {
+      const workerModel = groups.get(specWorker).model;
       const storedRole = identityOnly ? "leader" : role;
       // 身份名片新建时直接 admitted。更新不写 Admission / Display_Name / Admin_Note，避免盖掉机主决定。
       const preset = identityOnly
         ? presetHttpCardFields({
           node,
           role: "leader",
+          model: workerModel,
           receiveMode,
           description: String(spec?.description ?? spec?.desc ?? nodeDesc),
           availability: "online",
@@ -1055,7 +1162,7 @@ export async function handleAgentGatewayRequest({
           Node_Desc: nodeDesc,
           Zone: zone,
           Updated_At: nowMinute(),
-          Metadata: JSON.stringify(withPoll({ kind, role: storedRole, mode: receiveMode, worker: specWorker })),
+          Metadata: JSON.stringify(withPoll({ kind, role: storedRole, mode: receiveMode, worker: specWorker, worker_model: workerModel })),
         };
 
       const match = existingCards.find((r) => f1(r, "Node") === node && f1(r, "Cap_ID") === capId);
@@ -1068,6 +1175,7 @@ export async function handleAgentGatewayRequest({
         const meta = withPoll(preset
           ? { kind: "agent", role: "leader", mode: receiveMode, preset: true }
           : { kind, role: storedRole, mode: receiveMode, worker: specWorker });
+        meta.worker_model = workerModel;
         fields.Metadata = JSON.stringify(keepOwnerFlags(f1(match, "Metadata"), meta));
         const resUpd = await bus.updateRecord(bus.tables.agentCards, match.record_id, fields);
         const current = resUpd?.record ?? match;
@@ -1078,6 +1186,15 @@ export async function handleAgentGatewayRequest({
         const created = resRec?.record;
         admissionMap[capId] = admissionOf(created ?? fields);
         saved.push({ record_id: created?.record_id ?? resRec?.record_id ?? "", ...fields });
+      }
+    }
+
+    // 未重报的兼容 Skill 卡也投影同一 Worker 策略；不改变其权限/接纳字段。
+    for (const group of groups.values()) {
+      for (const card of group.peers) {
+        if (capIds.has(f1(card, "Cap_ID"))) continue;
+        const meta = parseJson(f1(card, "Metadata"), {});
+        await bus.updateRecord(bus.tables.agentCards, card.record_id, { Metadata: JSON.stringify({ ...meta, worker_model: group.model }) });
       }
     }
 
@@ -1159,6 +1276,7 @@ export async function handleAgentGatewayRequest({
       }
       grouped.get(node).caps.push({
         cap_id: f1(c, "Cap_ID"),
+        ...workerCardFields(parseCardModel(c), { remote: true }),
         worker: f1(c, "Worker"),
         skill_id: f1(c, "Skill_ID"),
         skill_name: f1(c, "Skill_Name"),
@@ -1533,6 +1651,8 @@ export async function handleAgentGatewayRequest({
       artifacts = normalizeAttachments(body.artifacts, { fileStore });
     }
     try {
+      const receiptTask = (await bus.listRecords(bus.tables.tasks)).find((t) => f1(t, "Task_ID") === taskId);
+      const model = modelAuditOf(f1(receiptTask, "Metadata"));
       const receipt = await submitAgentReceipt({
         bus,
         node,
@@ -1546,6 +1666,7 @@ export async function handleAgentGatewayRequest({
       });
       onWake();
       sendJson(res, 200, {
+        model,
         ok: true,
         task_id: receipt.taskId,
         msg_id: receipt.msgId,

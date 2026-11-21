@@ -1,4 +1,5 @@
 // 节点配置、执行控制键拒收与超时夹紧。凭据只从本机 node.json、tokenFile 或 env 文件读取。
+import { modelArgsSupported } from "./receipt.mjs";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -13,7 +14,7 @@ const EXEC_CONTROL_KEYS = new Set([
   "command", "cmd", "cwd", "context", "agent", "worker", "mode",
   "side_effect", "approval_class", "permissions", "permission",
   "shell", "env", "executable", "argv", "bin", "max_timeout_sec",
-  "verify", "verify_timeout_sec",
+  "verify", "verify_timeout_sec", "model", "requested_model", "default_model", "effective_model", "model_source", "active_model", "supports_model_override", "harness", "skills", "dispatch_target",
   "herdr_kind", "herdr_args", "herdr_env", "herdr_session", "herdr_workspace",
 ]);
 
@@ -26,6 +27,30 @@ export function controlKeysIn(params) {
     if (EXEC_CONTROL_KEYS.has(lk)) bad.push(k);
   }
   return bad;
+}
+
+// 模型标识是不透明字符串，配置与 API 边界只做结构校验。
+export function modelString(value, label = "model") {
+  if (value == null) return null;
+  if (typeof value !== "string" || !value.trim() || value.length > 512 || /[\x00-\x1f\x7f]/.test(value)) {
+    throw new Error(`${label} 必须是非空模型字符串（最多 512 字符，无控制字符），或 null`);
+  }
+  return value;
+}
+
+export function canExecuteModel(entry = {}) {
+  return modelArgsSupported(entry, String(entry.harness || inferHerdrKind(entry)).trim());
+}
+
+export function workerModelFields(entry = {}, { remote = false } = {}) {
+  const harness = String(entry.harness || inferHerdrKind(entry)).trim();
+  return {
+    harness,
+    default_model: modelString(entry.default_model, "default_model"),
+    active_model: null,
+    supports_model_override: remote ? entry.supports_model_override === true : canExecuteModel(entry) && entry.supports_model_override !== false,
+    skills: Array.isArray(entry.skills) ? [...entry.skills] : [],
+  };
 }
 
 // 先要求有限正数，否则回退条目默认；再收紧到 [1, max]，避免 NaN 或超长超时占住主循环。
@@ -49,6 +74,7 @@ const WORKER_NAME = /^[A-Za-z0-9._-]+$/;
 // 启动方式只归 Worker 管，技能条目不能改写。
 const LAUNCH_KEYS = new Set([
   "command", "resume_command", "mode", "context", "cwd", "workers", "cap_id", "worker", "skill",
+  "harness", "default_model", "supports_model_override", "skills",
   "env", "herdr_kind", "herdr_args", "herdr_env", "herdr_session", "herdr_workspace",
 ]);
 const APPROVAL_RANK = { "": 0, auto: 0, notify: 1, auto_notify: 1, approve: 2 };
@@ -150,7 +176,11 @@ export function normalizeCommands(raw, onProblem = () => {}) {
             onProblem(`Worker ${name}：mode=${JSON.stringify(w.mode)} 非法（Worker 只认 agent / json）`);
           } else {
             // herdr Worker 只配了 herdr_kind 时补等效占位 command，保证下游检查与展示兼容。
-            workers[name] = hasCmd ? w : { ...w, command: `${herdrKind} {prompt}` };
+            try {
+              const model = workerModelFields({ ...w, worker: name });
+              workers[name] = { ...w, harness: model.harness, default_model: model.default_model, skills: model.skills };
+              if (!hasCmd) workers[name].command = `${herdrKind} {prompt}`;
+            } catch (e) { onProblem(`Worker ${name}：${e.message}`); }
           }
         }
       }
@@ -188,8 +218,8 @@ export function normalizeCommands(raw, onProblem = () => {}) {
 // 任务行的 Worker × Skill 在归一后的能力表里对应哪一项；空串表示本机没有这项能力。
 // 指定了 Worker 就是硬约束，不换别的 Worker 代跑。没指定时节点本尊优先，否则取第一个登记了该技能的 Worker。
 export function resolveCapKey(commands, skill, worker = "") {
-  const s = String(skill ?? "").trim();
   const w = String(worker ?? "").trim();
+  const s = String(skill ?? "").trim() || (w ? "agent" : "");
   if (!s || !isEntry(commands)) return "";
   if (w) {
     const key = capKey(w, s);
@@ -413,6 +443,7 @@ export function loadConfig(configDir, opts = {}) {
     // 只给节点本地定时调度读。缺省由 resolveScheduleTz 解释成 Asia/Shanghai，这里不套宿主机时区。
     tz: cfg.tz,
     maxConcurrent: Number.isInteger(Number(cfg.maxConcurrent)) && Number(cfg.maxConcurrent) >= 1 ? Number(cfg.maxConcurrent) : 4,
+    herdrSocketPath: String(cfg.herdrSocketPath ?? "").trim(),
     herdrSession: String(cfg.herdrSession ?? "").trim(),
     herdrWorkspace: String(cfg.herdrWorkspace ?? "").trim() || "a2a-hub",
     busType,

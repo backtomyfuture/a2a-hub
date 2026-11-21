@@ -2,6 +2,48 @@
 import { normalizeJsonChecks, parseCheckLine } from "./acceptance.mjs";
 import { log } from "./kernel-util.mjs";
 
+export function modelAuditOf(rawMetadata) {
+  let meta = rawMetadata;
+  if (typeof meta === "string") { try { meta = JSON.parse(meta); } catch { return null; } }
+  const m = meta?.model;
+  if (!m || !["override", "worker_default", "cli_default"].includes(m.model_source)) return null;
+  if (!["requested_model", "default_model", "effective_model"].every((k) =>
+    Object.hasOwn(m, k) && (m[k] === null || typeof m[k] === "string"))) return null;
+  return Object.freeze({ requested_model: m.requested_model, default_model: m.default_model,
+    effective_model: m.effective_model, model_source: m.model_source });
+}
+
+// 执行适配器只知道原生 CLI 参数，不维护任何模型标识表。
+const MODEL_FLAGS = Object.freeze({ claude: "--model", codex: "--model", grok: "--model" });
+export function modelArgs(harness, model) {
+  if (model === null) return [];
+  const flag = Object.hasOwn(MODEL_FLAGS, harness) ? MODEL_FLAGS[harness] : null;
+  if (!flag) throw new Error(`model_execution_not_supported: ${harness || "unknown harness"}`);
+  return [flag, model];
+}
+
+function modelArgsSlot(command) {
+  const marker = "{model_args}";
+  if (typeof command !== "string" || command.split(marker).length !== 2) return false;
+  const at = command.indexOf(marker);
+  if (!/\s/.test(command[at - 1] || "") || !/^(?:\s|$)/.test(command.slice(at + marker.length))) return false;
+  if (/(?:^|\s)['"]?--model(?:[=\s'"]|$)/.test(command)) return false;
+  let quote = "";
+  for (let i = 0; i < at; i++) {
+    const c = command[i];
+    if (c === "\\" && quote !== "'") { i++; continue; }
+    if (quote) { if (c === quote) quote = ""; }
+    else if (c === "'" || c === '"' || c === "`") quote = c;
+  }
+  return !quote;
+}
+
+export function modelArgsSupported(entry, harness) {
+  return entry.context !== "herdr" && entry.mode !== "inbox"
+    && Object.hasOwn(MODEL_FLAGS, harness) && modelArgsSlot(entry.command)
+    && (!entry.resume_command || modelArgsSlot(entry.resume_command));
+}
+
 const MAX_ARTIFACTS = 20;
 const JSON_RECEIPT_KEYS = new Set(["summary", "artifact", "artifacts", "artifact_name", "need_input", "need_auth", "usage", "session", "later", "checks"]);
 const USAGE_CAP = 1e12;
@@ -505,10 +547,14 @@ export function substituteCommand(template, vars = {}) {
     let hit = "";
     if (!seen.has("prompt") && text.startsWith("{prompt}", i)) hit = "prompt";
     else if (!seen.has("session") && text.startsWith("{session}", i)) hit = "session";
+    else if (!seen.has("model_args") && text.startsWith("{model_args}", i)) hit = "model_args";
     if (hit) {
       seen.add(hit);
       const value = vars[hit];
-      out += value == null ? `{${hit}}` : shellQuote(value);
+      if (hit === "model_args") {
+        if (!Array.isArray(value) || value.some((v) => typeof v !== "string")) throw new Error("model_args 必须是字符串数组");
+        out += value.map(shellQuote).join(" ");
+      } else out += value == null ? `{${hit}}` : shellQuote(value);
       i += hit.length + 2;
       continue;
     }

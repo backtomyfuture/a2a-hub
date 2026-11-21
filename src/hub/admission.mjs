@@ -1,7 +1,8 @@
 // 名片接纳与新 Agent 接入引导纯函数：归一化 Admission、校验管理请求参数、构造 onboarding 指引。
 
 import { f1 } from "../bus/tables.mjs";
-import { capIdOf } from "../config.mjs";
+import { workerCardFields } from "./cards.mjs";
+import { modelString, capIdOf } from "../config.mjs";
 
 export const ADMISSION_VALUES = Object.freeze(["admitted", "pending", "rejected"]);
 export const ACCESS_VALUES = Object.freeze(["http", "host", "inbox"]);
@@ -189,6 +190,16 @@ function minuteStamp(date = new Date()) {
   return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())} ${p(date.getHours())}:${p(date.getMinutes())}`;
 }
 
+export function assertModelOverride(requestedModel, card) {
+  let requested;
+  try { requested = modelString(requestedModel, "requested_model"); }
+  catch (e) { throw httpError(400, e.message); }
+  if (requested !== null && card?.supports_model_override !== true) {
+    throw httpError(400, "model_override_not_supported：目标 Worker 不支持单次模型覆盖");
+  }
+  return requested;
+}
+
 // HTTP Agent 的默认可派单名片。Leader 与 Worker 同一张形状，差别只在 Metadata.role。
 export function presetHttpCardFields({
   node,
@@ -202,10 +213,11 @@ export function presetHttpCardFields({
   pollIntervalMin,
   template = "",
   templateId = "",
+  model = {},
 } = {}) {
   const storedRole = role === "hybrid" ? "leader" : role;
   const interval = pollIntervalForCard(receiveMode, pollIntervalMin);
-  const meta = { kind: "agent", role: storedRole, mode: receiveMode, preset: true };
+  const meta = { kind: "agent", role: storedRole, mode: receiveMode, preset: true, worker_model: workerCardFields(model, { remote: true }) };
   if (interval > 0) meta.poll_interval_min = interval;
   // 粗分类只在非默认时落盘。节点模板 id 单独记下，轮换 Token 时才能回到同一套 Step 3 提示词。
   // generic 与 WorkBuddy 的粗分类都是 generic，只靠 template 分不开。
@@ -396,13 +408,14 @@ function storedPollIntervalMin(raw) {
 
 export function parseCardMetadata(card) {
   const rawMeta = card?.fields !== undefined ? f1(card, "Metadata") : card?.Metadata;
-  const empty = { kind: "", role: "", manual: false, preset: false, poll_interval_min: null, template: "", template_id: "" };
+  const empty = { kind: "", mode: "", role: "", manual: false, preset: false, poll_interval_min: null, template: "", template_id: "" };
   if (!rawMeta) return empty;
   try {
     const meta = typeof rawMeta === "object" ? rawMeta : JSON.parse(String(rawMeta));
     if (!meta || typeof meta !== "object" || Array.isArray(meta)) return empty;
     return {
       kind: meta.kind == null ? "" : String(meta.kind),
+      mode: meta.mode == null ? "" : String(meta.mode),
       role: meta.role == null ? "" : String(meta.role),
       manual: meta.manual === true,
       preset: meta.preset === true,
@@ -415,9 +428,54 @@ export function parseCardMetadata(card) {
   }
 }
 
+export function parseCardModel(card) {
+  const raw = f1(card, "Metadata");
+  try { return (typeof raw === "string" ? JSON.parse(raw) : raw)?.worker_model || {}; }
+  catch { return {}; }
+}
+
+// 名片派发门禁在建单与首次认领时共用；离线不等于停派。
+export function undispatchableReason(card) {
+  const reasons = [];
+  const dispatchable = String(f1(card, "Dispatchable") ?? "");
+  if (dispatchable !== "Yes") reasons.push(dispatchable === "No"
+    ? "已停派（Dispatchable=No）" : `不可派（Dispatchable=${dispatchable || "未设置"}，需要 Yes）`);
+  const admission = admissionOf(card);
+  if (admission !== "admitted") reasons.push(`未接纳（Admission=${admission}），请在 Web 控制台「节点 → 待接纳」中接纳`);
+  return reasons;
+}
+
+const HTTP_RECEIVE_MODES = new Set(["poll", "longpoll", "http-poll", "http-longpoll", "webhook"]);
+export function isGatewayExecutionCard(card) {
+  const { kind, mode } = parseCardMetadata(card);
+  const receive = String(f1(card, "Receive_Mode") || "");
+  return kind === "agent" && HTTP_RECEIVE_MODES.has(mode || receive)
+    && (!receive || HTTP_RECEIVE_MODES.has(receive));
+}
+
+export const WORKER_MODEL_KEYS = Object.freeze(["harness", "default_model", "supports_model_override"]);
+export function workerPeerCards(cards, selected) {
+  if (!selected) return [];
+  // 旧宿主根能力不是同一个 Agent Worker，不能把独立 shell/json 条目合并。
+  if (!f1(selected, "Worker") && !isGatewayExecutionCard(selected)) return [selected];
+  return cards.filter((c) => f1(c, "Node") === f1(selected, "Node") && f1(c, "Worker") === f1(selected, "Worker"));
+}
+
+export function workerModelOfCards(cards, selected) {
+  const peers = workerPeerCards(cards, selected);
+  const models = peers.map((c) => workerCardFields(parseCardModel(c), { remote: true }));
+  const model = models[0] || workerCardFields({}, { remote: true });
+  if (models.some((m) => WORKER_MODEL_KEYS.some((key) => m[key] !== model[key]))) {
+    throw httpError(400, `worker_model_conflict：${f1(selected, "Node")}/${f1(selected, "Worker") || "(本尊)"} 的名片模型策略矛盾，请一致重新注册`);
+  }
+  // skills 是非阻塞元数据，不用它判定模型策略冲突。
+  return { ...model, skills: [...new Set(models.flatMap((m) => m.skills))] };
+}
+
 export function formatAgentCard(c) {
   const { kind, role, manual, preset, poll_interval_min, template, template_id } = parseCardMetadata(c);
   return {
+    ...workerCardFields(parseCardModel(c), { remote: true }),
     record_id: c.record_id,
     cap_id: f1(c, "Cap_ID"),
     node: f1(c, "Node"),
@@ -883,6 +941,7 @@ export function buildOnboarding({
     prompt = fillPromptPlaceholders(preset.prompt, promptCtx);
   }
 
+  steps.push("模型配置：推荐为 Worker 显式设置 default_model。只有确实能执行 claim.model.effective_model 时才声明 supports_model_override=true；不能执行时应拒绝，禁止静默忽略。active_model 未观测时为 null。");
   return {
     access,
     role,

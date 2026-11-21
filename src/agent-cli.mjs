@@ -66,6 +66,7 @@ export async function agentTaskCreate(cfg, args, { params, criteria } = {}) {
       to: args.to,
       cap: args.cap,
       worker: args.worker,
+      requested_model: args.requested_model,
       text: args.text,
       params,
       criteria,

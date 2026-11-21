@@ -15,13 +15,14 @@ import { runDetachedCommand } from "./proc.mjs";
 import { createTask } from "./hub/create.mjs";
 import { PresentService } from "./hub/present.mjs";
 import { enqueueOrUpdateInbox, readInbox, markInboxStatus } from "./inbox.mjs";
-import { TERMINAL_STATUSES, annotateElapsed, approvalRank, formatStats, heartbeatFields, log, nowStr } from "./kernel-util.mjs";
+import { TERMINAL_STATUSES, annotateElapsed, approvalRank, formatStats, heartbeatFields, readTaskMeta, log, nowStr } from "./kernel-util.mjs";
 import { approvalMethods } from "./kernel-approval.mjs";
 import { directMethods } from "./kernel-direct.mjs";
 import { herdrMethods } from "./kernel-herdr.mjs";
 import { metadataMethods } from "./kernel-metadata.mjs";
 import { outboxMethods } from "./kernel-outbox.mjs";
 import {
+  modelAuditOf, modelArgs,
   InvalidReceipt,
   NeedAuth,
   NeedInput,
@@ -37,7 +38,7 @@ import {
   saveRetryWatermark,
 } from "./retry-state.mjs";
 import { clearSessionId, readSessionId, writeSessionId } from "./session-store.mjs";
-import { capIdOf, capIdsOf, capKey, clampTimeoutSec, controlKeysIn, inferHerdrKind, loadConfig, normalizeCommands, receiveModeOf, resolveCapKey } from "./config.mjs";
+import { modelString, canExecuteModel, workerModelFields, capIdOf, capIdsOf, capKey, clampTimeoutSec, controlKeysIn, inferHerdrKind, loadConfig, normalizeCommands, receiveModeOf, resolveCapKey } from "./config.mjs";
 import { LocalScheduleService } from "./local-schedule.mjs";
 
 export {
@@ -55,6 +56,45 @@ export {
 } from "./retry-state.mjs";
 export { readSessionId } from "./session-store.mjs";
 export { clampTimeoutSec, controlKeysIn, loadConfig, receiveModeOf } from "./config.mjs";
+
+export function resolveModelDecision(requestedModel, worker = {}) {
+  const requested_model = modelString(requestedModel, "requested_model");
+  const default_model = modelString(worker.default_model, "default_model");
+  return Object.freeze({ requested_model, default_model,
+    effective_model: requested_model ?? default_model ?? null,
+    model_source: requested_model !== null ? "override" : default_model !== null ? "worker_default" : "cli_default" });
+}
+
+// 认领后只用已持久化快照，避免重试、续跑或重启被新的 Worker 默认值改变。
+export function taskModelDecision(task, worker = {}) {
+  const raw = f1(task, "Metadata");
+  const frozen = modelAuditOf(raw);
+  const parsed = readTaskMeta(raw);
+  if (!parsed.ok) throw new Error("model_metadata_invalid: Metadata 必须是 JSON 对象");
+  if (frozen) {
+    const expected = resolveModelDecision(frozen.requested_model, { default_model: frozen.default_model });
+    if (Object.keys(expected).some((key) => expected[key] !== frozen[key])) throw new Error("model_audit_invalid: 不一致的模型审计快照");
+    return frozen;
+  }
+  if (Object.hasOwn(parsed.meta, "model")) throw new Error("model_audit_invalid: 无法解析既有模型快照，禁止重新解析默认值");
+  return resolveModelDecision(parsed.meta.requested_model, worker);
+}
+
+// Worker_Hint 兼容保留旧 Skill-only 的空值；实际选中身份在 Metadata 中固定。
+export function taskDispatchBinding(task) {
+  const parsed = readTaskMeta(f1(task, "Metadata"));
+  if (!parsed.ok) throw new Error("dispatch_binding_invalid: Metadata 必须是 JSON 对象");
+  const binding = parsed.meta.dispatch_target;
+  if (binding === undefined) return null;
+  const hint = f1(task, "Worker_Hint");
+  if (!binding || typeof binding !== "object" || Array.isArray(binding)
+    || !["node", "worker", "skill", "cap_id"].every((k) => typeof binding[k] === "string")
+    || binding.node !== f1(task, "Target_Node") || binding.skill !== f1(task, "Skill_ID")
+    || (binding.worker && hint && hint !== binding.worker)) {
+    throw new Error("dispatch_binding_invalid: 目标绑定与任务身份不一致");
+  }
+  return binding;
+}
 
 export const DAEMON_VERSION = "node-1.2.0";
 const HOP_LIMIT = 8;
@@ -589,6 +629,7 @@ export class Kernel {
     const { qa, turns, files } = await this.collectDialogue(task, extraAnswers);
     return this.writeRunInput(task, {
       task_id: f1(task, "Task_ID"),
+      model: taskModelDecision(task, this.commands[this.capKeyOf(task)]),
       title: f1(task, "Title"),
       instruction: await this.instructionText(task),
       params,
@@ -668,19 +709,26 @@ export class Kernel {
       sessionId = readSessionId(this.cfg.configDir, f1(task, "Task_ID"));
       if (sessionId) command = resumeCmd;
     }
+    const decision = taskModelDecision(task, entry);
+    const model = workerModelFields(entry);
+    if ((decision.requested_model !== null && !model.supports_model_override)
+      || (decision.effective_model !== null && !canExecuteModel(entry))) {
+      throw new Error("model_execution_not_supported: configure a verified harness and {model_args} template (Herdr requires M2)");
+    }
+    const nativeModelArgs = modelArgs(model.harness, decision.effective_model);
     const timeout = clampTimeoutSec(params?.timeout_sec, entry);
     const cwd = entry.cwd || this.cfg.configDir;
     const mode = entry.mode ?? "agent";
     if (mode === "json") {
       const dialogue = await this.collectDialogue(task, extraAnswers);
       const envelope = { ...params, _hub: {
-        task_id: f1(task, "Task_ID"), title: f1(task, "Title"),
+        task_id: f1(task, "Task_ID"), title: f1(task, "Title"), model: decision,
         skill: entry.skill || skill, instruction: await this.instructionText(task),
         qa: dialogue.qa, turns: dialogue.turns, files: dialogue.files,
         approvals: await this.collectApprovedAuths(task),
       } };
       return {
-        command: substituteCommand(command, { session: sessionId || undefined }),
+        command: substituteCommand(command, { session: sessionId || undefined, model_args: nativeModelArgs }),
         stdinText: JSON.stringify(envelope),
         timeout, cwd, mode,
       };
@@ -690,6 +738,7 @@ export class Kernel {
     const prompt = this.buildPrompt(inputPath, entry, hasCriteria);
     const wantsPrompt = command.includes("{prompt}");
     command = substituteCommand(command, {
+      model_args: nativeModelArgs,
       prompt: wantsPrompt ? prompt : undefined,
       session: sessionId || undefined,
     });
@@ -733,6 +782,13 @@ export class Kernel {
 
   // 任务行的 Worker_Hint × Skill_ID 在本机能力表里对应哪一项。空串表示没有这项能力。
   capKeyOf(task) {
+    let binding;
+    try { binding = taskDispatchBinding(task); } catch { return ""; }
+    if (binding) {
+      // 空 Worker 同样是明确本尊绑定，不可回退到别的 Worker。
+      const key = binding.worker ? `${binding.worker}/${binding.skill}` : binding.skill;
+      return this.commands[key] ? key : "";
+    }
     return resolveCapKey(this.commands, f1(task, "Skill_ID"), f1(task, "Worker_Hint"));
   }
 
@@ -772,6 +828,7 @@ export class Kernel {
       // a2a 子对象（一份 A2A 名片本就是一个 JSON 文档）。先双写——JSON 与旧列并存，
       // 观察一个登记周期后由迁移删列，届时这里同步停写旧列。
       Metadata: JSON.stringify({
+        worker_model: workerModelFields(entry),
         kind: this.cfg.kind || "host",
         mode: entry?.mode || "agent",
         a2a: {
@@ -1093,6 +1150,9 @@ export class Kernel {
       return;
     }
     const claim = { Status: "working", Claimed_By: this.cfg.node, ...heartbeatFields(f1(task, "Metadata")) };
+    const claimMeta = readTaskMeta(claim.Metadata ?? f1(task, "Metadata")).meta;
+    claimMeta.model = taskModelDecision(task, this.commands[skill]);
+    claim.Metadata = JSON.stringify(claimMeta);
     // 认领时回填实际选中的 Worker。此后的重试、回收重跑与问答续跑都钉在它上面（标准 §2）。
     const picked = this.commands[skill]?.worker;
     if (picked && !String(f1(task, "Worker_Hint") ?? "").trim()) claim.Worker_Hint = picked;
@@ -1338,6 +1398,17 @@ export class Kernel {
       if (!(await this.updateTaskState(task, { Status: "rejected" }, gate))) return false;
       this.clearRetry(taskId);
       log("rejected (no capability) " + taskId);
+      return false;
+    }
+    try {
+      const entry = this.commands[skill];
+      const model = taskModelDecision(task, entry);
+      if ((model.requested_model !== null && !workerModelFields(entry).supports_model_override) || (model.effective_model !== null && !canExecuteModel(entry))) {
+        throw new Error("model_execution_not_supported：该 Worker 尚不支持模型参数执行（Herdr 需等待 M2）；请配置已验证的 harness 和 {model_args}");
+      }
+    } catch (e) {
+      await this.writeMessage(task, "notice", `拒收：${e.message}`);
+      await this.updateTaskState(task, { Status: "rejected" }, gate);
       return false;
     }
     const params = await this.getParams(task);
