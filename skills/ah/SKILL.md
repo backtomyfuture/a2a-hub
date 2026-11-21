@@ -33,6 +33,7 @@ ah task create \
   --to <Target_Node> \
   [--worker <Worker>] \
   [--cap <Skill_ID 或 Cap_ID>] \
+  [--schedule <Schedule_ID>] \
   [--text "<清晰可执行的指令说明>"] \
   [--file <本地文件路径>]... \
   [--params '<JSON字符串或@文件>'] \
@@ -113,7 +114,7 @@ ah task reply --task <Task_ID> [--text "<补充信息或明确选择>"] [--file 
 # 实时查看状态、最新消息与产物
 ah task show <Task_ID>
 
-# 全链时间线溯源（Tasks / Messages / Parts / Runs / Artifacts / 验收结论）
+# 全链时间线溯源（Tasks / Messages / Parts / Artifacts / 验收结论）
 ah task why <Task_ID> [--json]
 
 # 撤销尚未终态的任务（非 hub 节点只能撤本节点发起的单）

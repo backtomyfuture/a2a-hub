@@ -17,7 +17,6 @@ export const TABLES = {
   tasks: "tbl_tasks",
   messages: "tbl_messages",
   parts: "tbl_parts",
-  runs: "tbl_runs",
   artifacts: "tbl_artifacts",
   agentCards: "tbl_cards",
 };

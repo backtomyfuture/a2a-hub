@@ -8,7 +8,7 @@ import { planArtifactItem, uploadPendingItems } from "./attachments.mjs";
 import { f1 } from "./bus/tables.mjs";
 import { guessMime } from "./files-client.mjs";
 import { parseHubFileUri } from "./hub/files.mjs";
-import { TERMINAL_STATUSES, annotateElapsed, log, nowStr } from "./kernel-util.mjs";
+import { TERMINAL_STATUSES, log, nowStr } from "./kernel-util.mjs";
 
 function verifyFailedNoticeText(box) {
   const head = acceptanceLine(box.acceptance) || "验收未通过：verify 执行失败";
@@ -120,7 +120,6 @@ export const outboxMethods = {
 
   async closeSettledOutbox(task, box, { dropped = false } = {}) {
     await this.noteUsageOnce(task, box);
-    await this.noteLaterOnce(task, box);
     if (!dropped) await this.noteAcceptanceOnce(task, box);
     this.dropSession(box.taskId);
     this.deleteOutbox(box.taskId);
@@ -129,9 +128,6 @@ export const outboxMethods = {
 
   // 命令已经跑完就先落盘。之后任何写表失败都靠这份文件补齐，不再执行一次。
   beginOutbox(task, info) {
-    if (info.outcome !== "succeeded" && info.res?.later) {
-      log("later 在 failed 上忽略");
-    }
     const box = {
       model: modelAuditOf(f1(task, "Metadata")),
       taskId: f1(task, "Task_ID"),
@@ -147,18 +143,12 @@ export const outboxMethods = {
       msgId: "",
       usage: Object.prototype.hasOwnProperty.call(info, "usage") ? (info.usage ?? null) : (info.res?.usage ?? null),
       usage_noted: false,
-      // 只有完成回执才把预约放进出箱。提问和失败的 later 在解析时已经记日志丢掉。
-      later: info.outcome === "succeeded" && info.res?.later
-        ? { at: info.res.later.at, about: info.res.later.about }
-        : null,
-      later_noted: false,
       acceptance: info.acceptance ?? null,
       acceptance_noted: false,
       verifyEvidence: info.verifyEvidence ?? "",
       tokens: {
         artifact: randomUUID(),
         artifactPart: randomUUID(),
-        run: randomUUID(),
         message: randomUUID(),
         partText: randomUUID(),
         partData: randomUUID(),
@@ -192,7 +182,7 @@ export const outboxMethods = {
   async ensurePlan(task, box) {
     box.tokens ??= {};
     let dirty = false;
-    for (const k of ["artifact", "artifactPart", "run", "message", "partText", "partData"]) {
+    for (const k of ["artifact", "artifactPart", "message", "partText", "partData"]) {
       if (!box.tokens[k]) {
         box.tokens[k] = randomUUID();
         dirty = true;
@@ -208,7 +198,6 @@ export const outboxMethods = {
     }
     const taskId = box.taskId || f1(task, "Task_ID");
     const msgs = await this.listMessages(taskId);
-    const runs = await this.runsOf(taskId);
     const arts = (await this.bus.listRecords(this.T.artifacts)).filter((a) => f1(a, "Task_ID") === taskId);
     if (!box.artifacts?.length) box.artId = "";
     else {
@@ -223,9 +212,8 @@ export const outboxMethods = {
       });
       box.artId = box.artifacts[0].artId;
     }
-    // 认领时已经开过 Run 的，沿用那个 Run_ID，收尾改为更新而不是再编号。
     if (!box.runId) {
-      box.runId = `${taskId}-R${this.nextSuffix(runs.map((r) => f1(r, "Run_ID")), /-R(\d+)$/)}`;
+      box.runId = this.nextRunId(task, msgs);
     }
     if (!box.msgId) {
       const seq = this.nextMsgSeq(msgs);
@@ -258,40 +246,6 @@ export const outboxMethods = {
     }
   },
 
-  async ensureRun(task, box) {
-    const finished = nowStr();
-    const failed = box.outcome !== "succeeded";
-    const outcome = failed ? "failed" : "succeeded";
-    let error = "";
-    if (box.outcome === "verify_failed") {
-      const v = box.acceptance?.verify;
-      const verdict = v?.verdict || "fail";
-      const codePart = v?.exit_code == null ? "" : ` 退出码 ${v.exit_code}`;
-      error = `验收未通过：verify ${verdict}${codePart}`;
-    } else if (failed) {
-      error = `回执无效：${box.error || ""}；原始输出：${box.raw || ""}`;
-    }
-    const errorLog = annotateElapsed(error, box.started, finished);
-    const row = await this.findBy(this.T.runs, "Run_ID", box.runId);
-    if (row) {
-      const closed = String(f1(row, "Finished_At") ?? "").trim() && f1(row, "Outcome") === outcome;
-      if (!closed) {
-        await this.bus.updateRecord(this.T.runs, row.record_id, {
-          Finished_At: finished, Outcome: outcome, Error_Log: errorLog,
-        });
-      }
-      this._openRunIds.delete(box.taskId);
-      return;
-    }
-    await this.bus.createRecord(this.T.runs, {
-      Run_ID: box.runId, Task_Ref: box.taskId, Node: this.cfg.node,
-      Worker: f1(task, "Worker_Hint") || "daemon",
-      Outcome: outcome, Error_Log: errorLog,
-      Started_At: box.started, Finished_At: finished,
-    }, box.tokens.run);
-    this._openRunIds.delete(box.taskId);
-  },
-
   async ensureResultMessage(task, box) {
     const failed = box.outcome !== "succeeded";
     const content = box.outcome === "verify_failed"
@@ -322,7 +276,7 @@ export const outboxMethods = {
     }
   },
 
-  // Artifacts → Runs → Messages/Parts → Tasks。任一步失败都留着 outbox，下次只补缺的。
+  // Artifacts → Messages/Parts → Tasks。任一步失败都留着 outbox，下次只补缺的。
   async submitOutbox(task, box) {
     box = await this.ensurePlan(task, box);
     const current = await this.bus.getRecord(this.T.tasks, task.record_id);
@@ -337,15 +291,14 @@ export const outboxMethods = {
     // 终态冲突已处理完才上传，免得替一张已被取消的单白传一遍。
     await this.uploadBoxFiles(box);
     await this.ensureArtifact(current, box);
-    await this.ensureRun(current, box);
     await this.ensureResultMessage(current, box);
     if (st === want) {
       await this.closeSettledOutbox(current, box);
       return;
     }
     const fields = box.outcome === "succeeded"
-      ? { Status: "completed", Latest_Run: box.runId, Heartbeat_At: "", Status_Msg: "" }
-      : { Status: "failed", Latest_Run: box.runId, Heartbeat_At: "" };
+      ? { Status: "completed", Heartbeat_At: "", Status_Msg: "" }
+      : { Status: "failed", Heartbeat_At: "" };
     // submitted 时认领可能已被清掉，不能要求 Claimed_By；working 仍由 taskForWrite 核对所有权。
     const ok = await this.updateTaskState(current, fields, ["working", "submitted"], false);
     if (!ok) {

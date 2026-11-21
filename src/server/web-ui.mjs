@@ -3438,18 +3438,6 @@ function renderTasks(d) {
       }
     }
 
-    if (det.runs && det.runs.length) {
-      detailHtml += '<details class="tech-details"><summary>执行台账 (' + det.runs.length + ' 次运行)</summary><div style="display:flex;flex-direction:column;gap:8px;margin-top:8px;">';
-      for (const r of det.runs) {
-        detailHtml += '<div class="card mono" style="padding:10px 12px;">'
-          + '<div>' + esc(r.run_id) + ' · 节点=' + esc(r.node) + ' · 结果=<strong>' + esc(r.outcome) + '</strong></div>'
-          + '<div class="muted">' + esc(r.started_at) + ' → ' + esc(r.finished_at || "-") + '</div>'
-          + (r.error_log ? '<div style="color:var(--red-text);margin-top:4px;white-space:pre-wrap;">' + esc(r.error_log) + '</div>' : '')
-          + '</div>';
-      }
-      detailHtml += '</div></details>';
-    }
-
     detailHtml += '<details class="tech-details"><summary>任务技术详情</summary><div class="tech-kv mono">'
       + '<div>Task_ID: ' + esc(t.task_id) + '</div>'
       + '<div>Context_ID: ' + esc(t.context_id || "-") + '</div>'
@@ -3474,7 +3462,7 @@ function renderSchedules(d) {
   let html = '<div class="page-wrap">';
   html += '<div class="toolbar">'
     + '<div><div class="section-title">定时任务（只读总览）</div>'
-    + '<div class="section-sub">计划在各节点本地管理，用 ah schedule 修改；HTTP 节点也可主动上报计划供集中观测。</div></div>'
+    + '<div class="section-sub">各 Agent 自行管理并调度定时任务，通过 PUT /api/v1/agents/:node/schedules/:id 自报计划；每次执行自动落入 Tasks 表并在下方实时关联。</div></div>'
     + '<button class="btn sm" data-action="refresh-schedules">刷新计划</button>'
     + '</div>';
 
@@ -3490,7 +3478,7 @@ function renderSchedules(d) {
 
   const list = state.schedules || [];
   if (!list.length) {
-    html += '<div class="card muted">当前没有已登记的定时任务。计划在各节点本地管理，用 <span class="mono">ah schedule</span> 修改后会自动镜像到中台。</div>';
+    html += '<div class="card muted">当前没有已登记的定时任务。Agent 可在注册或通过 <span class="mono">PUT /api/v1/agents/:node/schedules/:id</span> 上报定时计划，每次执行自动关联 Task 记录。</div>';
     html += '</div>';
     return html;
   }

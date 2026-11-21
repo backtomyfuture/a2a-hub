@@ -11,7 +11,6 @@ import { Kernel } from "../src/kernel.mjs";
 import { ApprovalService } from "../src/hub/approval.mjs";
 import { HubRuntime } from "../src/hub/index.mjs";
 import { PresentService } from "../src/hub/present.mjs";
-import { ScheduleService } from "../src/hub/schedule.mjs";
 import { StaleService } from "../src/hub/stale.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";
 import { MockBus } from "./mocks/mock-bus.mjs";
@@ -232,8 +231,6 @@ test("direct 命令结束后由下一轮扫表收口为 completed", async () => 
       assert.equal(f1(result, "From_Node"), "node-a");
       const parts = await mock.findRecords(TABLES.parts, "Parent_ID", f1(result, "Msg_ID"));
       assert.equal(parts.some((part) => f1(part, "Kind") === "text" && String(f1(part, "Text")).includes("ok")), true);
-      const run = (await mock.findRecords(TABLES.runs, "Task_Ref", "TASK-DONE-1"))[0];
-      assert.equal(f1(run, "Outcome"), "succeeded");
       assert.equal(fs.existsSync(path.join(dir, "runs", "TASK-DONE-1", "entry.json")), false);
       assert.equal(fs.existsSync(path.join(dir, "runs", "TASK-DONE-1", "stdout.txt")), false);
     } finally {
@@ -284,9 +281,6 @@ test("守护重启后续上仍在跑的进程，不第二次 spawn", async () =>
       await next.sweepOnce();
       assert.equal(f1(await taskOf(mock, "TASK-KEEP-1"), "Status"), "completed");
       assert.equal(fs.readFileSync(count, "utf8"), "1");
-      const runs = await mock.findRecords(TABLES.runs, "Task_Ref", "TASK-KEEP-1");
-      assert.equal(runs.length, 1);
-      assert.equal(f1(runs[0], "Outcome"), "succeeded");
     } finally {
       reap(dir, kernels);
     }
@@ -324,7 +318,6 @@ test("进程在守护缺席时已经退出且退出码文件还在，重启后�
       await next.sweepOnce();
       assert.equal(f1(await taskOf(mock, "TASK-EXIT-1"), "Status"), "completed");
       assert.equal(fs.readFileSync(count, "utf8"), "1");
-      assert.equal((await mock.findRecords(TABLES.runs, "Task_Ref", "TASK-EXIT-1")).length, 1);
     } finally {
       reap(dir, kernels);
     }
@@ -371,8 +364,6 @@ test("进程被 SIGKILL 且没有退出码文件时按执行失败计入 Retry_C
       assert.equal(fs.readFileSync(count, "utf8"), "1");
       const watermark = JSON.parse(fs.readFileSync(path.join(dir, "retry_state.json"), "utf8"));
       assert.ok(watermark["TASK-KILL-1"].not_before > Date.now());
-      const run = (await mock.findRecords(TABLES.runs, "Task_Ref", "TASK-KILL-1"))[0];
-      assert.equal(f1(run, "Outcome"), "failed");
     } finally {
       reap(dir, kernels);
     }
@@ -505,13 +496,7 @@ test("hub 的审批、呈递、陈旧回收和定时扫描不被 direct 命令�
         statePath: path.join(dir, "stale_state.json"),
         log: () => {},
       });
-      const schedule = new ScheduleService({
-        bus: mock,
-        tz: "Asia/Shanghai",
-        statePath: path.join(dir, "schedule_state.json"),
-        log: () => {},
-      });
-      const runtime = new HubRuntime({ cfg, approval, present, stale, schedule, log: () => {} });
+      const runtime = new HubRuntime({ cfg, approval, present, stale, log: () => {} });
       kernels.push(runtime.kernel);
       await seedTask(mock, { Task_ID: "TASK-HUB-1", Context_ID: "CTX-HUB-1" });
       await seedTask(mock, { Task_ID: "TASK-HUB-2", Context_ID: "CTX-HUB-2" });
@@ -524,12 +509,10 @@ test("hub 的审批、呈递、陈旧回收和定时扫描不被 direct 命令�
       const approved = await approval.scan();
       const presented = await present.scan();
       const staled = await stale.scan();
-      const scheduled = await schedule.scan();
       assert.ok(Date.now() - scanned < 1000);
       assert.equal(typeof approved, "number");
       assert.equal(typeof presented, "number");
       assert.equal(typeof staled, "number");
-      assert.equal(typeof scheduled, "number");
       const entry = entryOf(dir, "TASK-HUB-1");
       assert.equal(await alive(entry.pid), true);
       assert.equal(f1(await taskOf(mock, "TASK-HUB-1"), "Status"), "working");

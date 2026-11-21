@@ -114,17 +114,6 @@ function clip(text, limit) {
   return value.slice(0, limit).trimEnd() + "…";
 }
 
-function runOf(runs, task) {
-  const latest = String(f1(task, "Latest_Run") ?? "");
-  if (latest) {
-    const hit = runs.find((row) => String(f1(row, "Run_ID") ?? "") === latest);
-    if (hit) return hit;
-  }
-  const taskId = String(f1(task, "Task_ID") ?? "");
-  const mine = runs.filter((row) => String(f1(row, "Task_Ref") ?? "") === taskId);
-  return mine.length ? mine[mine.length - 1] : null;
-}
-
 export function presentBody({ taskId, title, status, statusMsg, target, message, outcome, error, acceptance }) {
   // 验收失败与执行失败都是 failed。标题前缀只在 verify 本身未通过时加上，L2 自检失败不改状态、也不换这个标题。
   const verifyFailed = status === "failed" && acceptance?.overall === "fail" && acceptance?.verify;
@@ -269,7 +258,6 @@ export class PresentService {
     if (!pending.length) return 0;
 
     const parts = await this.bus.listRecords(this.bus.tables.parts);
-    const runs = await this.bus.listRecords(this.bus.tables.runs);
     let sent = 0;
     for (const item of pending) {
       const msg = latestMessage(messages, item.taskId, item.status);
@@ -285,13 +273,12 @@ export class PresentService {
         }
         continue;
       }
-      const run = runOf(runs, item.task);
       const taskMsgs = messages.filter((m) => String(f1(m, "Task_ID") ?? "") === item.taskId);
       const instr = taskMsgs.find((m) => f1(m, "Kind") === "instruction");
       const fromNode = instr ? String(f1(instr, "From_Node") ?? "").trim() : String(f1(item.task, "Source") ?? "");
       const msgBody = msg ? messageText(parts, f1(msg, "Msg_ID")) : "";
-      const outcome = run ? String(f1(run, "Outcome") ?? "") : "";
-      const error = run ? String(f1(run, "Error_Log") ?? "") : "";
+      const outcome = item.status === "completed" ? "succeeded" : (item.status === "input-required" ? "paused" : "failed");
+      const error = item.status === "failed" || item.status === "rejected" || item.status === "canceled" ? msgBody : "";
       const title = String(f1(item.task, "Title") ?? "");
       const targetNode = String(f1(item.task, "Target_Node") ?? "");
       const source = String(f1(item.task, "Source") ?? "");

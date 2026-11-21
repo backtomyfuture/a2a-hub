@@ -11,7 +11,6 @@
 |---|---|---|
 | `node.json` | 节点身份、总线参数（`sqlite` / `http`）、长轮询与对账周期、角色 | 否 |
 | `commands.json` | 能力表：本机能干什么、怎么干 | 否 |
-| `schedules.json` | 定时调度表：本机定时任务计划（`id`, `cron`, `cap`, `text` 等） | 否 |
 | `agent_templates.json` | HTTP 节点模板目录：内置四条和后加的模板都在这一份里（0600） | 否 |
 | `app.env` | 机主 HTTP Bearer 口令 `AH_API_TOKEN`（owner），权限 600 | 绝不 |
 | `agent_tokens.json` | 分 Agent Token 账本（0600，version 1，只存 sha256 与展示前缀，无明文） | 绝不 |
@@ -20,11 +19,11 @@
 | `hub.db` / `hub.db-wal` / `hub.db-shm` | `role=hub` SQLite WAL 主数据库文件 | 绝不 |
 | `runs/<Task_ID>/` | 每次执行的输入、输出与在途账本（`entry.json`、`session.json`） | 否 |
 | `sessions/<Context_ID>.json` | 同一 `Context_ID` 跨任务自动续接的多轮 CLI `Session_ID` 持久化文件（0600） | 否 |
-| `retry_state.json` `approval_state.json` `present_state.json` `stale_state.json` `schedule_local_state.json` | 节点私有状态与水位，非协议字段 | 否 |
+| `retry_state.json` `approval_state.json` `present_state.json` `stale_state.json` | 节点私有状态与水位，非协议字段 | 否 |
 | `present_queue.jsonl` `present_bell` `present_queue.jsonl.lock` | 发给本机 Agent 的回执队列、门铃，以及队列锁。锁是临时文件；没有 `ah present` 在跑且守护进程空闲时可以删 | 否 |
 | `agent_inbox.jsonl` | `kind=agent` 节点的收件箱 | 否 |
 
-仓库里只有占位符样例：[`config/hub.standalone.example.json`](../config/hub.standalone.example.json)、[`config/node.remote.example.json`](../config/node.remote.example.json)、[`config/commands.example.json`](../config/commands.example.json)、[`config/schedules.example.json`](../config/schedules.example.json)、[`config/agent_templates.example.json`](../config/agent_templates.example.json)。
+仓库里只有占位符样例：[`config/hub.standalone.example.json`](../config/hub.standalone.example.json)、[`config/node.remote.example.json`](../config/node.remote.example.json)、[`config/commands.example.json`](../config/commands.example.json)、[`config/agent_templates.example.json`](../config/agent_templates.example.json)。
 
 ## 2. node.json
 
@@ -134,9 +133,9 @@ Worker 条目与节点本尊的技能条目可用的字段：
 
 内核只认结构，不猜自然语言。完整语法见标准 §9。
 
-- **agent 模式**：最后一个完整围栏若是 ```` ```agent-ask ````，表示提问（任务转 `input-required`）；若是 ```` ```agent-auth ````，表示执行中请求批准（块内写明动作、对象与风险，任务转 `auth-required`）。二者只认最后一个，空的 `agent-auth` 是无效回执。围栏外整行的 `ARTIFACT:` / `ARTIFACT_NAME:` / `USAGE:` / `SESSION:` / `LATER:` / `CHECK:` 分别表示产物、用量、会话、预约复查、清单自检。`CHECK: <id> <pass|fail|blocked>[ | <证据>]` 只在回执收口为完成时收下；提问、审批和无效回执上的自检忽略并记日志。同一 `id` 多行取最后一行。围栏内伪造的行不生效。`agent-auth` 在进程退出后才解析，拦不住已经做完的副作用；要在动作前停住，用 `ah inbox auth`。
-- **json 模式**：只认 stdout 最后一行 JSON：`summary`、`artifact`、`artifact_name`、`need_input`、`need_auth`，可选 `usage`、`session`、`later`、`checks`。`checks` 形如 `{"<id>":{"verdict":"pass|fail|blocked","evidence":"…"}}`，值也可以直接是判定字符串。`need_input` 与 `need_auth` 不能同时出现。未知顶层键忽略并记日志。提问、审批和无效回执上的 `checks` 忽略并记日志。
-- `usage` 累计到 `Tasks.Metadata.usage`；`session` 存本机 `runs/<Task_ID>/session.json`（同时按 `Context_ID` 持久到 `sessions/<Context_ID>.json`，供后续同上下文新任务自动续接，不进总线）；`later` 在任务完成时生效，由 hub 到点在同一 `Context_ID` 新建复查任务。
+- **agent 模式**：最后一个完整围栏若是 ```` ```agent-ask ````，表示提问（任务转 `input-required`）；若是 ```` ```agent-auth ````，表示执行中请求批准（块内写明动作、对象与风险，任务转 `auth-required`）。二者只认最后一个，空的 `agent-auth` 是无效回执。围栏外整行的 `ARTIFACT:` / `ARTIFACT_NAME:` / `USAGE:` / `SESSION:` / `CHECK:` 分别表示产物、用量、会话、清单自检。`CHECK: <id> <pass|fail|blocked>[ | <证据>]` 只在回执收口为完成时收下；提问、审批和无效回执上的自检忽略并记日志。同一 `id` 多行取最后一行。围栏内伪造的行不生效。`agent-auth` 在进程退出后才解析，拦不住已经做完的副作用；要在动作前停住，用 `ah inbox auth`。
+- **json 模式**：只认 stdout 最后一行 JSON：`summary`、`artifact`、`artifact_name`、`need_input`、`need_auth`，可选 `usage`、`session`、`checks`。`checks` 形如 `{"<id>":{"verdict":"pass|fail|blocked","evidence":"…"}}`，值也可以直接是判定字符串。`need_input` 与 `need_auth` 不能同时出现。未知顶层键忽略并记日志。提问、审批和无效回执上的 `checks` 忽略并记日志。
+- `usage` 累计到 `Tasks.Metadata.usage`；`session` 存本机 `runs/<Task_ID>/session.json`（同时按 `Context_ID` 持久到 `sessions/<Context_ID>.json`，供后续同上下文新任务自动续接，不进总线）。
 
 ### 验收
 
@@ -165,7 +164,7 @@ L2 是建单时冻在首条 instruction DataPart 的 `acceptance.criteria`（`ah
 **步骤**：
 
 1. **升级本机守护进程**：`ah update`，按平时的方式重启守护进程。跑 `ah doctor --config <dir>`，能看到「N 个 Worker、M 项技能」这样的分组输出和针对旧条目的迁移提示，说明已是新代码。更直接的判断是版本号：`ah -v` 应打印 `node-0.8.0` 或更高；守护进程重启后，名册（AgentCards）里本节点名片的 `Daemon_Version` 也会是这个值。
-2. **清空在途任务**：`ah inventory --config <dir>` 确认本节点没有 `submitted`、`working`、`input-required`、`auth-required` 的任务，有就等它们结束、答复或撤掉。不清空的后果：以旧 Skill_ID 寻址的任务迁移后会被拒收并带 notice（不会静默跑错），但会白丢一次执行或一轮问答。另外通过 Web 控制台或接口看一下有没有目标是本节点、已 `completed`、`Metadata` 里有 `later` 但还没有 `later_fired` 的任务，有就等它触发后再迁，否则 hub 会因为找不到旧 Skill_ID 而一直建单失败。
+2. **清空在途任务**：`ah inventory --config <dir>` 确认本节点没有 `submitted`、`working`、`input-required`、`auth-required` 的任务，有就等它们结束、答复或撤掉。不清空的后果：以旧 Skill_ID 寻址的任务迁移后会被拒收并带 notice（不会静默跑错），但会白丢一次执行或一轮问答。
 3. **备份**：`cp <dir>/commands.json <dir>/commands.json.bak`。
 4. **改写 `commands.json`**，改前改后如下（只用占位命令）。
 
@@ -209,86 +208,22 @@ L2 是建单时冻在首条 instruction DataPart 的 `acceptance.criteria`（`ah
 | 能力键 | `agy-agent` | `agy/agent` |
 | Cap_ID | `CAP-<前缀>-agy-agent` | `CAP-<前缀>-agy-agent`（旧键恰好是 `<W>-agent` 形式时不变） |
 
-**Cap_ID 规律**：旧键不是 `<x>-agent` 形式的（比如键叫 `claude`、`cap_id` 是 `CAP-<前缀>-claude`），迁移后 Cap_ID 变为 `CAP-<前缀>-claude-agent`；旧卡由对账自动置 `Dispatchable=No`，引用旧 Cap_ID 的 `schedules.json` 要同步改 `cap`。
+**Cap_ID 规律**：旧键不是 `<x>-agent` 形式的（比如键叫 `claude`、`cap_id` 是 `CAP-<前缀>-claude`），迁移后 Cap_ID 变为 `CAP-<前缀>-claude-agent`；旧卡由对账自动置 `Dispatchable=No`。
 
 **用某个 Agent 跑的专门任务**（比如旧平表里一个用 agy 跑的 `ops` 条目）：迁成专长技能 `"ops": { "workers": ["agy"], "name": "<名称>", "desc": "<说明>" }`，Cap_ID 变为 `CAP-<前缀>-agy-ops`，`--cap ops` 照样能用。确定性脚本（`mode: json`）不用动，它本来就是节点本尊技能。
 
 **回滚**：把备份拷回去，守护进程热加载后名片原地改回。回滚前同样要先清空在途任务。
 
-## 5. 定时调度：schedules.json 与双时钟
+## 5. 定时任务自报与集中观测
 
-自 v3.6 起，定时调度下沉至各节点本地（时钟不再由 hub 独占）。Rules 表中的调度列降为节点单向同步的只读观察镜像。
+中台本身不再内置 cron 触发引擎或 `schedules.json`；各 Agent 自行管理本地定时器，中台只负责**集中声明展示、自动关联执行任务（Task）、异常告警**：
 
-### 5.1 调度架构与双时钟
-
-- **终端类节点（`kind: host` 与 hub 所在机）**：由 `ah daemon` 内置的分钟定时器驱动，读取配置目录下的 `schedules.json`，到点以 `Status=submitted` 建单入总线，并立刻置本进程唤醒标志，走统一认领链路（在途账本、心跳、单并发、审批下限）。
-- **Agent 类节点（`kind: agent`，本机有守护进程）**：使用 Agent 自身定时器到点调用 `ah task begin` 建单，由本机守护进程认领写入收件箱，Agent 处理完后调用 `ah inbox done`。云端 Muse / Grok 不走这条，见 [外部 HTTP Agent 手册](protocol-node-runbook.md)。
-
-### 5.2 schedules.json 字段表与示例
-
-计划保存在配置目录的 `schedules.json`（权限 0600，不进仓库、不进总线）。占位符样例见 [`config/schedules.example.json`](../config/schedules.example.json)。
-
-```jsonc
-{
-  "schedules": [
-    {
-      "id": "DAILY-BRIEFING",
-      "enabled": true,
-      "cron": "50 8 * * *",
-      "cap": "daily-briefing",
-      "text": "生成今日早报并汇总天气与热点",
-      "approval_class": "auto"
-    }
-  ]
-}
-```
-
-| 字段 | 说明 |
-|---|---|
-| `id` | 计划唯一标识，如 `DAILY-BRIEFING` |
-| `enabled` | 是否启用（布尔值，`true` / `false`） |
-| `cron` | 五段标准 cron 表达式（分 时 日 月 周），按 `node.json` 的 `tz` 墙钟解析 |
-| `cap` | 本机能力 ID，必须存在于本机 `commands.json`（或 `agent`） |
-| `text` | 任务指令正文 |
-| `approval_class` | 可选（`auto` / `notify` / `approve`），写入任务行的审批级别；认领时与 `commands.json` 的 `approval_class` 下限取更严者，只收紧不放宽 |
-
-> [!WARNING]
-> 指令与数据严格分离：`schedules.json` 中严禁出现 `command` / `cwd` / `context` / `agent` / `mode` 等执行控制键，出现则整条计划拒收。
-
-### 5.3 状态与基线（schedule_local_state.json）
-
-配置目录下的 `schedule_local_state.json` 记录每条计划的 `{cron, last_fired, last_task}` 基线水位，以及已向 Rules 镜像同步的 ID 集合 `mirrored_ids`。
-- **基线优先于补期**：新建计划、修改 `cron` 表达式或状态文件损坏/缺失时，首次扫描仅将水位线锚定在最近一期，不建单；从下一期起才触发。
-- **只补最近一期**：停机或错过多期时只触发最近一期；节点关机或睡眠期间未执行的期次不做代偿。
-- **幂等防重**：幂等键为 `sched:<Node_ID>:<Schedule_ID>:<期次键>`，查重命中已有任务时只补水位线，不重复建单。
-
-### 5.4 CLI 调度管理
-
-```bash
-ah schedule ls [--config <dir>] [--json]                                                  # 查看本机计划
-ah schedule add --id <id> --cron "<五段>" --cap <cap_id> --text <指令> [--approval auto|notify|approve] [--disabled]  # 添加计划并刷新镜像
-ah schedule rm <id> [--config <dir>]                                                     # 删除计划（镜像标 No）
-ah schedule enable <id> [--config <dir>]                                                 # 启用计划
-ah schedule disable <id> [--config <dir>]                                                # 停用计划
-ah schedule register --id <id> --cron "<五段>" --cap <cap_id> [--text <指令>]              # 仅登记 Rules 观察镜像
-ah task begin --schedule <id> [--period <期次键>] [--cap <cap_id>] [--text <指令>]        # Agent 类自带时钟到点触发建单（--text 缺省为「定时任务 <id>」）
-```
-
-### 5.5 Agent 类自带时钟接入示例
-
-本机独立 Agent（`kind: agent`）自带定时器时的接入流程：
-1. **登记镜像**：`ah schedule register --id AGENT-MORNING --cron "0 9 * * *" --cap agent --text "每日早间同步"`
-2. **到点建单**：Agent 定时器触发时运行 `ah task begin --schedule AGENT-MORNING --text "每日早间同步"`
-3. **认领接单**：本节点 `ah daemon` 认领该任务写入 `agent_inbox.jsonl`
-4. **处理并交付**：Agent 读取收件箱，完成后调用 `ah inbox done --task <Task_ID> --text "已完成同步"`
-
-### 5.6 Rules 观察镜像与自检
-
-- **单向观察镜像**：节点将本机每条计划镜像为 Rules 一行（`Rule_ID=<Node_ID>:<Schedule_ID>`）。任何节点**绝不从 Rules 读计划触发任务**，手动修改 Rules **不影响本地实际执行**。
-- **升级顺序：先升级 hub，再升级各节点。** 旧版本 hub 仍会把 Rules 里 `Enabled=Yes` 且 `Schedule` 非空的行当成计划建单；新版节点一旦写入镜像行，就会被旧 hub 误触发，造成同一计划双跑。迁移存量计划（如 `SCHED-HUB-MORNING`）时，先把 Rules 旧行 `Enabled` 置 No，再用 `ah schedule add` 在对应节点落计划。
-- **已知限制：定时任务中途提问需要人答复。** 本地定时任务的发起方是本节点自己，`question` 会原路回给本节点并进入 `present_queue.jsonl`，需要本机 Agent 消费后执行 `ah task reply`。无人值守时任务会停在 `input-required`。没写 `wait_timeout_sec` 时，hub 的陈旧告警只处理 `working` 与无人认领的 `submitted`；建单写入该键后，挂起超时会回收。无人值守的计划请选不会提问的能力。
-- **`ah doctor` 增检**：存在 `schedules.json` 时，自检会逐条验证 cap 存在性、cron 表达式合法性、时区 `tz` 合法性与控制键拦截。若有异常仅打印告警，不改变 doctor 退出码，不阻断守护进程启动。时区检查放开至所有含有 `schedules.json` 的节点。
-- **只读总览**：机主用 `GET /api/v1/schedules` 或控制台「定时任务」页看各节点镜像（cron、下次触发、上次任务、异常）。改计划仍用本机 `ah schedule`。HTTP Agent 可 `PUT /api/v1/agents/:node/schedules/:id` 自报计划，中台只展示、不据此触发。详见 §7.6。
+- **自报方式**：
+  1. HTTP Agent 可在 `POST /api/v1/agents/register` 传入 `schedules` 数组；
+  2. 也可随时通过 `PUT /api/v1/agents/:node/schedules/:id` 申报或更新单条计划（保存在该节点主 `AgentCard` 的 `Metadata.schedules`，`DELETE` 同路径可删除）。
+- **一步落入 `Tasks` 表（推荐）**：当 Agent 执行完成一次定时任务时，调用 `PUT /api/v1/agents/:node/schedules/:id` 并带上 `run: { status, text, title?, artifact? }`，中台会一步生成 `Source="cron"`、`Metadata.schedule_id=<id>` 的 A2A `Task` + `Messages` + `Parts`（及可选 `Artifacts`），同步更新 `last_fired`。
+- **CLI / 标准建单关联**：若通过 CLI 或普通派单接口触发周期性任务，可传 `ah task create --schedule <id> --source cron ...` 或 `POST /api/v1/tasks` 的 `schedule_id` 字段，同样自动关联到该计划。
+- **只读总览与 `missed` 异常**：机主用 `GET /api/v1/schedules` 或控制台「定时任务」页按节点查看所有计划、`next_fire_at`、`last_task`（可点击打开任务详情）与 `anomaly`（`node-offline` / `failed` / `missed`；当启用中的计划超过 `interval_min * 1.5` 分钟未触发即标 `missed`）。详见 §7.6。
 
 ## 6. CLI 速查
 
@@ -299,22 +234,16 @@ ah task begin --schedule <id> [--period <期次键>] [--cap <cap_id>] [--text <�
 | `ah up` / `ah join <url>` | 一键初始化 SQLite Hub 或接入远端 HTTP 节点，自动配置 Token、公钥与自启 |
 | `ah setup [--role node\|hub] [--bus sqlite\|http\|agent] [--kind host\|agent] [--agent] [--agent-role worker\|leader] [--token-file <path>] [--wake longpoll\|poll] [--skip-skill]` | 交互/非交互初始化。`bus=agent` 时把凭据路径写入 `tokenFile`，不把明文 Token 写入 `node.json` 或 `app.env`，也不生成 `commands.json` |
 | `ah daemon [--role node\|hub]` | 常驻守护进程 |
-| `ah doctor [--role node\|hub]` | 只读自检：配置合法性、连通性、能力登记、本地计划 |
+| `ah doctor [--role node\|hub]` | 只读自检：配置合法性、连通性、能力登记 |
 | `ah service [--role node\|hub] [--system\|--user] [--name <unit>] [--remove]` | 注册（或卸载）开机自启：macOS launchd `ah-<role>.<node>` / Linux systemd `ah-<role>-<node>.service` / Windows 任务计划 `ah-<role>-<node>`（非默认配置目录追加配置路径 SHA-256 前 8 位摘要）。`--user` 为用户级；`--system` 为系统级（Linux VM 换机自愈用这一条，并带上当前代理环境与 `NODE_USE_ENV_PROXY=1`）。`--name` 指定 unit 名。日志在配置目录 `daemon.log`。失败返回非 0，输出不含凭据 |
 | `ah update [--check] [--skip-skill]` | 自更新程序本体：git pull、依赖重装、入口与 Skill 补齐；不碰配置目录。`--check` 只看远端有没有新版本。tarball 安装请重跑 install.sh（Windows 为 install.ps1） |
 | `ah reconcile` | 单次回表认领与对账后退出 |
 | `ah inventory` | 只读盘点本节点名片与任务 |
-| `ah task create --to <node> [--worker <worker>] [--cap <cap_id 或技能名>] [--text …] [--file <路径>]... [--params <json 或 @文件>] [--criteria <json 或 @文件>] [--idempotency-key <键>] [--from <node>]` | 派单。写表前按 AgentCards 名册校验 `--to` 与 `--cap`。`--criteria` 写入首条 instruction 的验收清单；`--file` 可重复（有附件时 `--text` 可省） |
+| `ah task create --to <node> [--worker <worker>] [--cap <cap_id 或技能名>] [--schedule <id>] [--text …] [--file <路径>]... [--params <json 或 @文件>] [--criteria <json 或 @文件>] [--idempotency-key <键>] [--from <node>]` | 派单。写表前按 AgentCards 名册校验 `--to` 与 `--cap`。`--criteria` 写入首条 instruction 的验收清单；`--schedule` 关联定时计划 ID（默认 `Source=cron`）；`--file` 可重复（有附件时 `--text` 可省） |
 | `ah task reply --task <id> [--text …] [--file <路径>]...` | 答复 `input-required` 的追问，原任务续跑；`--file` 可重复（有附件时 `--text` 可省） |
 | `ah task show <id>` | 看状态与产物 |
-| `ah task why <id> [--json]` | 只读时间线：任务行、消息、Runs、Artifacts、本机待补交状态、调度幂等来源、验收 |
+| `ah task why <id> [--json]` | 只读时间线：任务行、消息、Artifacts、本机待补交状态、定时来源、验收 |
 | `ah task cancel --task <id> [--text …]` | 撤单。发起方只撤自己的单，hub 可撤任意单；终态报错且不改状态 |
-| `ah task begin --schedule <id> [--period <期次键>] [--cap <cap_id>] [--text <指令>]` | Agent 类自带时钟到点触发建单（经 submitted 入总线由本节点认领；`--text` 缺省为「定时任务 <id>」） |
-| `ah schedule ls [--config <dir>] [--json]` | 列出本机定时调度计划 |
-| `ah schedule add --id <id> --cron "<五段>" --cap <cap_id> --text <指令> [--approval auto\|notify\|approve] [--disabled]` | 添加本机计划并同步镜像 |
-| `ah schedule rm <id> [--config <dir>]` | 删除本机计划（镜像行标 No） |
-| `ah schedule enable\|disable <id> [--config <dir>]` | 启用/停用本机计划 |
-| `ah schedule register --id <id> --cron "<五段>" --cap <cap_id> [--text <指令>]` | 登记 Agent 观察镜像（不写本机计划） |
 | `ah present [--pop] [--task <Task_ID>] [--wait <秒>]` | 读取本机发起任务的回执队列。`--wait` 阻塞到出现匹配回执（超时退出码 2）；`--pop` 只移除本次输出的条目 |
 | `ah inbox [--pop] [--limit <n>] [--json]` | `kind=agent` 接单（`--limit <n>` 可限制本次弹出条数） |
 | `ah inbox done\|ask\|fail\|auth --task <id> --text …` | 完单（可重复 `--artifact <路径或URL>`、`--check <id>=<pass\|fail\|blocked>[:证据]`）、追问（可重复 `--file`）、失败、执行中请求审批回执（可重复 `--file`） |
@@ -443,7 +372,7 @@ HTTP 节点模板只有这一份文件。Hub 第一次启动时，如果配置�
 
 「+ 添加 Agent」是三步向导：选择接入类型、填写名字与角色、获取密钥与接入指引。接入类型为云端 HTTP、宿主机 `ah join` 或本机独立 Agent inbox；角色为执行方 `worker` 或派单并接单的 `leader`。`hybrid` 为旧值，等同 `leader`，向导不再提供。云端 HTTP 再选接收方式：定时检查（默认）、常驻长连接、Webhook 推送（要填对方的 URL、密钥，以及可选请求头名）。云端 HTTP 的 worker 与 leader 都预建一张已接纳的默认 `agent` 名片（`CAP-<node>-agent`，`Dispatchable=Yes`，`role` 写成 `leader` 或 `worker`），`Receive_Mode` 按接收方式写入。宿主机与 inbox 不预建卡，由守护进程登记后进入待接纳。云端 HTTP 会同时签发分 Agent Token，明文只在这一次响应和提示词里出现。选了 Webhook 时，响应里的 `webhook` 只有 `url`、`header`、`secret_mask`，不含明文密钥。宿主机与 inbox 的提示词仍用机主 Token 占位符 `<AH_API_TOKEN>`（`ah join` 认的是机主钥匙），并说明这是 `ah daemon` 出站常驻长连接，接入后到「节点 → 待接纳」接纳。定时检查的提示词是脚本门控版：每 5 分钟跑检查脚本，`IDLE` 立即结束，`WORK` 才执行【处理流程】；跑不了脚本时也是每 5 分钟。Leader 的提示词同时包含接单和跟单。常驻长连接的提示词是进程内循环 `poll?timeout=25`（Leader 每轮再拉 `updates?new=1`），断线按 1 / 3 / 8 / 30 秒退避，不建定时任务。Webhook 提示词说明中台用接收端配置的密钥调用 URL，自建接收端可以验签（5 分钟时间窗），并每 30 分钟跑一次检查脚本兜底；不要保存 `A2A_HUB_WEBHOOK_SECRET`。Token 优先存进平台安全密钥空间，名称 `A2A_HUB_TOKEN`，明文只在提示词里出现一次。每次运行无上下文；worker 与接单中的 leader 须在同一次运行内做完所认领任务。接收方式只在添加时选定，控制台不再提供切换。HTTP 节点卡片副标题写上接收方式（如「云端 HTTP 节点 · Webhook 推送 · 执行方 (Worker)」）。所有节点只保留一行「接收方式」。Webhook 这一行右侧是投递徽标和「管理」；弹窗里看 URL、请求头、密钥掩码、最近投递时间与状态、最近错误，以及「Agent 每 30 分钟用检查脚本兜底一次，防止漏推，这不是第二种接收方式」。可改 URL、密钥（留空不变）和请求头，并有「测试」。`DELETE /api/v1/admin/webhooks/:node` 去掉推送配置，并把名片改回 `http-poll`。宿主与 inbox 固定为 ah daemon 常驻长连接。Hub 启动时给 `agent_tokens.json` 里还没有名片的 leader / hybrid 补建那张可派单身份名片，已有名片的 `Admission` 不覆盖。Hub 地址优先取 `node.json` 的 `publicUrl`；未配置时取本次请求的 `Host` 头（`http://<Host>`），没有 `Host` 时回退本机监听地址。在 Hub 本机用 `127.0.0.1` 打开控制台时，务必配置 `publicUrl`，否则远端拿到的地址不可达。Hub 放在 Cloudflare 之后时，浏览器完整性检查会以 `403` / `error code: 1010` 拦下 curl、python-requests、node 等默认 UA，所以云端 HTTP 提示词与 `a2a-leader` / `a2a-worker` Skill 都要求每个请求带浏览器 `User-Agent`，远端节点的 `HttpBus` 与 Webhook 出站也固定发送同一串浏览器 UA。
 
-「定时任务」页只读，调用 `GET /api/v1/schedules`，按节点分组展示 cron、下次触发、指向的能力、启用状态、上次任务（可进任务详情）和异常标记。页顶说明：计划在各节点本地管理，用 `ah schedule` 修改。HTTP Agent 自报的计划 `source` 为 `http-agent`，中台不据此触发。
+「定时任务」页只读，调用 `GET /api/v1/schedules`，按节点分组展示 cron、下次触发、指向的能力、启用状态、上次任务（`last_task`，可点击进任务详情）和异常标记。各 Agent 自行管理并调度定时任务，通过 `PUT /api/v1/agents/:node/schedules/:id`（或注册时 `schedules`）自报计划，中台不据此触发。
 
 管理 API（与其他 `/api/v1/*` 一样要 Bearer Token）：
 
@@ -502,13 +431,13 @@ HTTP 节点模板只有这一份文件。Hub 第一次启动时，如果配置�
 
 `agent_webhooks.json` 由 `src/hub/webhooks.mjs` 读写。字段见 [标准 §10.3](standard.md)。不要把真实 URL 或 `secret` 写进仓库、日志或提示词以外的回复。
 
-定时任务汇总读 Rules 镜像行（`Rule_ID=<Node>:<Schedule_ID>`），不改本机 `schedules.json`：
+定时任务汇总读取各节点名片 `Metadata.schedules` 并自动关联 `Tasks` 中的最近执行记录（中台不主动触发 cron）：
 
 | 方法与路径 | 谁能调用 | 作用 |
 |---|---|---|
-| `GET /api/v1/schedules` | 仅机主 | `{schedules:[{rule_id, node, schedule_id, cron, tz, cap, text, enabled, last_fired, next_fire_at, source, note, last_task, anomaly}]}`。`source` 为 `node`（守护进程镜像）或 `http-agent`（Note 含「http-agent 自报」）。`last_task` 为 `{task_id, status, updated_at}` 或 `null`，按幂等键 `sched:<Node>:<Schedule_ID>:<期次键>`、Note 里的「上次运行」、或同前缀最近一条关联。`next_fire_at` 为 ISO 或空字符串。`anomaly` 先看节点离线（`node-offline`），再看最近任务 `failed`/`rejected`（`failed`），再看启用中的计划该触发却超过 10 分钟没有 `Last_Fired`（`missed`） |
-| `PUT /api/v1/agents/:node/schedules/:id` | 该节点自己的 Agent Token（任何角色）或机主 | body `{cron, tz?, cap?, text?, enabled?}`。`id` 只允许字母、数字、短横线或下划线，最长 64。写入 Rules 镜像，Note 为「http-agent 自报」（有时区则加 `tz=`）。响应 `{ok, rule_id, at}`。中台不按这行建单 |
-| `DELETE` 同路径 | 同上 | 删除该镜像行。不存在则 404 |
+| `GET /api/v1/schedules` | 仅机主 | `{schedules:[{rule_id, node, schedule_id, cron, tz, interval_min, cap, text, enabled, last_fired, next_fire_at, source, note, last_task, anomaly}]}`。`last_task` 为 `{task_id, status, updated_at}` 或 `null`，按 `Metadata.schedule_id` 或幂等键前缀 `sched:<Node>:<Schedule_ID>:` 关联最近一条。`anomaly` 先判离线（`node-offline`），再判最近任务失败/拒收（`failed`），再判启用中的计划距上次触发（或登记时间）超过 `interval_min * 1.5` 分钟（`missed`） |
+| `PUT /api/v1/agents/:node/schedules/:id` | 该节点自己的 Agent Token（任何角色）或机主 | body `{cron, tz?, interval_min?, cap?, text?, enabled?, last_fired?, note?, run?}`。`id` 只允许字母、数字、短横线或下划线，最长 64。写入主名片 `Metadata.schedules`；若同时传入 `run: { status?, text?, title?, instruction?, artifact?, artifacts?, fired_at? }`，则一步生成 `Source="cron"`、`Metadata.schedule_id` 的 A2A `Task` 并刷新 `last_fired`（响应附带 `task_id` 与 `status`） |
+| `DELETE` 同路径 | 同上 | 从名片 `Metadata.schedules` 删除该条计划。不存在则 404 |
 
 ## 8. 附件与文件存储
 

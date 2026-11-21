@@ -311,7 +311,6 @@ test("驳回后任务 canceled，节点不会认领", async () => {
     assert.equal(f1(task, "Status"), "canceled");
     assert.equal(String(f1(task, "Claimed_By") ?? ""), "");
     assert.equal(fs.existsSync(marker), false);
-    assert.equal((await mock.findRecords(TABLES.runs, "Task_Ref", "TASK-NO-1")).length, 0);
     assert.equal((await authRequests(mock, "TASK-NO-1")).length, 1);
     const decision = (await mock.listRecords(TABLES.messages)).find((row) =>
       f1(row, "Kind") === "auth_decision" && f1(row, "Task_ID") === "TASK-NO-1");

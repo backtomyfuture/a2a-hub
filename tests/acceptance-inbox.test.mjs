@@ -61,13 +61,6 @@ async function seedWorkingInboxTask(mock, dir, { taskId = "TASK-INBOX-ACC-1", cr
       Data: JSON.stringify({ acceptance: { criteria } }),
     });
   }
-  await mock.createRecord(TABLES.runs, {
-    Run_ID: `${taskId}-R1`,
-    Task_Ref: taskId,
-    Node: "node-a",
-    Worker: "daemon",
-    Started_At: "2026-01-15T09:00:05+0800",
-  });
   const created = await mock.createRecord(TABLES.tasks, {
     Task_ID: taskId,
     Title: "验收任务",
@@ -76,7 +69,6 @@ async function seedWorkingInboxTask(mock, dir, { taskId = "TASK-INBOX-ACC-1", cr
     Skill_ID: "agent",
     Status: "working",
     Claimed_By: "node-a",
-    Latest_Run: `${taskId}-R1`,
     Context_ID: "CTX-ACC-1",
     Hop_Count: 0,
     Retry_Count: 0,

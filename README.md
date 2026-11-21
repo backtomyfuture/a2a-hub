@@ -34,7 +34,7 @@ flowchart LR
     WEB["Web 控制台 / CLI (ah)"] --> HUB
     subgraph HUB["常驻中台 Hub（如 Mac mini :8787）"]
         direction TB
-        SQL[("SQLite WAL 总线\ntasks · messages · parts · runs\nartifacts · agentCards · rules")]
+        SQL[("SQLite WAL 总线\ntasks · messages · parts\nartifacts · agentCards")]
         API["HTTP REST API + LongPollBroker + agent-gateway\nGET /.well-known/agent.json · ed25519 签名"]
         SQL <--> API
     end
@@ -208,13 +208,12 @@ node bin/ah.mjs daemon
 | | `ah service [--role node\|hub] [--remove]` | 注册或卸载用户级开机自启（launchd / systemd / Windows 任务计划） |
 | | `ah inventory` | 只读盘点本节点名片与按状态汇总的任务 |
 | | `ah reconcile` | 单次对账巡检后退出 |
-| **任务与呈递** | `ah task create --to <node> [--worker <W>] [--cap <skill>] --text …` | 校验名册并向指定节点/Worker 派单 |
+| **任务与呈递** | `ah task create --to <node> [--worker <W>] [--cap <skill>] [--schedule <id>] --text …` | 校验名册并向指定节点/Worker 派单（支持 `--schedule` 关联定时计划） |
 | | `ah present [--wait <秒>] [--task <ID>] [--pop]` | 读取或阻塞等待本机 `present_queue.jsonl` 结果与提问 |
 | | `ah task reply --task <ID> --text …` | 回复 `input-required` 追问并恢复原任务执行 |
 | | `ah task cancel --task <ID> [--text …]` | 撤回未终态任务 |
 | | `ah task why <ID> [--json]` | 只读排障：完整时间线、验收结论与本地在途/重投账本 |
-| **本地调度与 Agent** | `ah schedule ls \| add \| rm \| enable \| disable` | 管理节点本地 `schedules.json` 定时任务 |
-| | `ah inbox [--pop] [--limit <n>] [--json]` / `ah inbox done \| ask \| fail \| auth` | 独立 Agent 节点读取收件箱与回报状态 |
+| **独立 Agent** | `ah inbox [--pop] [--limit <n>] [--json]` / `ah inbox done \| ask \| fail \| auth` | 独立 Agent 节点读取收件箱与回报状态（定时计划通过 `/agents/:node/schedules/:id` 自报并在控制台集中观测） |
 
 ---
 
@@ -233,7 +232,7 @@ node bin/ah.mjs daemon
 
 | 文档 | 内容 |
 |---|---|
-| [docs/configuration.md](docs/configuration.md) | 配置目录、`node.json` / `commands.json` / `schedules.json`、独立中台与多轮上下文配置、CLI 速查 |
+| [docs/configuration.md](docs/configuration.md) | 配置目录、`node.json` / `commands.json`、独立中台、定时自报与多轮上下文配置、CLI 速查 |
 | [docs/architecture.md](docs/architecture.md) | 架构分层、SQLite/HTTP 长轮询传输、Web 控制台、多轮 Session 续接与故障模型 |
 | [docs/standard.md](docs/standard.md) | **中台标准规范**：表模型、A2A 八态机、审批与验收协议 |
 | [docs/hub-integration.md](docs/hub-integration.md) | Hub 职责、建单约束、结果呈递与审批流 |

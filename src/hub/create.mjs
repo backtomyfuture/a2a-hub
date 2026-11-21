@@ -113,7 +113,7 @@ function buildInstructionData(params, criteria) {
 
 export function parseCreateArgv(argv) {
   const out = {
-    configDir: "", from: "", source: "", to: "", cap: "", worker: "", requested_model: null, text: "", paramsRaw: undefined, criteriaRaw: undefined, context: "", ref: "", approval: "", idempotencyKey: "", files: [],
+    configDir: "", from: "", source: "", to: "", cap: "", worker: "", requested_model: null, text: "", paramsRaw: undefined, criteriaRaw: undefined, context: "", ref: "", approval: "", idempotencyKey: "", scheduleId: "", files: [],
   };
   const take = (i, flag) => {
     const value = argv[i + 1];
@@ -136,6 +136,7 @@ export function parseCreateArgv(argv) {
     else if (flag === "--ref") out.ref = take(i, flag);
     else if (flag === "--approval") out.approval = take(i, flag);
     else if (flag === "--idempotency-key") out.idempotencyKey = take(i, flag);
+    else if (flag === "--schedule") out.scheduleId = take(i, flag);
     else if (flag === "--file") out.files.push(take(i, flag));
     else throw new Error("无法识别的参数：" + flag);
     if (flag.startsWith("--")) i++;
@@ -428,7 +429,7 @@ function positiveSec(raw, fallback) {
 }
 
 export async function createTask({
-  bus, from = "", source = "", to, cap, worker = "", requested_model = null, text = "", params, criteria, context = "", ref = "", approval = "", idempotencyKey = "", now = new Date(), validateTarget = true,
+  bus, from = "", source = "", to, cap, worker = "", requested_model = null, text = "", params, criteria, context = "", ref = "", approval = "", idempotencyKey = "", scheduleId = "", now = new Date(), validateTarget = true,
   attachments, fileStore = null, queueTimeoutSec = 0, leaseTtlSec = 0, waitTimeoutSec = 0,
 }) {
   if (!bus?.tables?.messages || !bus.tables.parts || !bus.tables.tasks) {
@@ -453,8 +454,9 @@ export async function createTask({
     assertModelOverride(requested_model, workerModelOfCards(cards, target));
     policy = defaultTaskPolicy(cards, node);
   }
+  const sched = String(scheduleId ?? "").trim();
   const sender = String(from || source || "hub").trim();
-  const taskSource = String(source || from || "hub").trim();
+  const taskSource = String(source || (sched ? "cron" : "") || from || "hub").trim();
   const approvalClass = String(approval ?? "").trim();
   if (approvalClass && !APPROVALS.has(approvalClass)) {
     throw new Error("--approval 只能是 auto、notify 或 approve");
@@ -564,6 +566,7 @@ export async function createTask({
   // 超时/租约只进 Metadata，不加 Tasks 列。调用方传入的正数优先，0 或缺省用目标节点接收方式的默认值。
   taskFields.Metadata = JSON.stringify({
     ...(requested_model !== null ? { requested_model } : {}),
+    ...(sched ? { schedule_id: sched } : {}),
     ...(targetCard ? { dispatch_target: { node, worker: cardText(targetCard, "Worker"), skill,
       cap_id: cardText(targetCard, "Cap_ID") } } : {}),
     queue_timeout_sec: positiveSec(queueTimeoutSec, policy.queueTimeoutSec),

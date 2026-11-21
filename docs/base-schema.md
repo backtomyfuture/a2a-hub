@@ -20,8 +20,6 @@ Task：一件工作的信封与状态机，一行一任务
 | Approval_Class | select | approve 类须走审批流（选项：auto / notify / approve） |
 | Hop_Count | number | 派生层数，>8 熔断 |
 | Idempotency_Key | text | 建单幂等键：来源+业务键 |
-| Latest_Run | text | 最新一条 Run 的 Run_ID |
-| Presented | select | 结果是否已呈递给操作者（选项：Yes / No） |
 | Claimed_By | text | 认领租约：当前持有节点 |
 | Heartbeat_At | text | 认领心跳；20 分钟无心跳视为放弃、可回收 |
 | Retry_Count | number | 失败重试计数，上限 2 |
@@ -64,21 +62,6 @@ Part：消息与产物的内容块，一行一块，text/file/data 三型
 | Mime_Type | text |  |
 | Data | text | data 块的 JSON：任务参数、审批决定等走这里 |
 
-## runs
-
-每次执行的起止、结果与报错
-
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| Run_ID | text | 主字段。形如 <Task_ID>-R<序号> |
-| Task_Ref | text |  |
-| Node | text |  |
-| Worker | text | 本次执行实际使用的 Worker；节点本尊直接执行记 daemon |
-| Error_Log | text | 失败信息；沟通内容不写这里，去 messages |
-| Started_At | text |  |
-| Finished_At | text |  |
-| Outcome | select | paused＝等补信息暂停，不计失败（选项：succeeded / failed / paused） |
-
 ## artifacts
 
 Artifact：交付物登记，内容为其 FilePart，修订＝同名新 ID
@@ -120,22 +103,3 @@ AgentCard 规范化展开：一行一项能力
 | Admission | select | 机主接纳状态；缺省、空或其他值按 pending。只由 Hub 管理 API 写（选项：admitted / pending / rejected） |
 | Display_Name | text | 机主显示名，可空，不超过 64 字符。只由 Hub 管理 API 写 |
 | Admin_Note | text | 机主备注，可空，不超过 500 字符。只由 Hub 管理 API 写 |
-
-## rules
-
-路由、审批策略与定时观察镜像
-
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| Rule_ID | text | 主字段。主字段 |
-| Match_Type | text | 按 Skill_ID 或标签匹配 |
-| Target_Node | text |  |
-| Worker_Hint | text |  |
-| Skill_ID | text |  |
-| Approval_Class | select | 选项：auto / notify / approve |
-| Priority | number | 多规则命中时按优先级取一 |
-| Enabled | select | 是否生效（选项：Yes / No） |
-| Note | text |  |
-| Schedule | text |  |
-| Text | text |  |
-| Last_Fired | text |  |

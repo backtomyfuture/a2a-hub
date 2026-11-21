@@ -175,12 +175,6 @@ test("呈递在验收失败时带索引，正文首行是验收未通过", async
       status: "failed",
       receipt: { msgId, kind: "notice", text: "验收未通过：执行式验收未通过", acceptance },
     });
-    await bus.createRecord(TABLES.runs, {
-      Run_ID: "RUN-ACC-1",
-      Task_Ref: taskId,
-      Outcome: "failed",
-      Error_Log: "verify exit 2",
-    });
     await seedTask(bus, "TASK-EXEC-FAIL", {
       status: "failed",
       receipt: { msgId: "MSG-TASK-EXEC-FAIL-02", kind: "notice", text: "命令退出码 1" },

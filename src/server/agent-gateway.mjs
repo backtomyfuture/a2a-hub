@@ -14,7 +14,7 @@ import { f1 } from "../bus/tables.mjs";
 import { capIdOf } from "../config.mjs";
 import { agentCanSeeTask, assertAgentRoute } from "../hub/agent-access.mjs";
 import { assertModelOverride, parseCardModel, workerModelOfCards, workerPeerCards, WORKER_MODEL_KEYS, undispatchableReason, isGatewayExecutionCard, admissionOf, actsAsLeader, httpError, parseCardMetadata, presetHttpCardFields, validateNodeName, validatePollIntervalMin } from "../hub/admission.mjs";
-import { alignNodeReceiveMode, removeHttpAgentSchedule, saveHttpAgentSchedule } from "../hub/capabilities.mjs";
+import { alignNodeReceiveMode, normalizeScheduleSpecs, removeHttpAgentSchedule, saveHttpAgentSchedule } from "../hub/capabilities.mjs";
 import { isStaleWorking } from "../hub/stale.mjs";
 import { rosterNodeVisible } from "./longpoll-broker.mjs";
 import { submitAgentReceipt } from "../inbox.mjs";
@@ -88,7 +88,21 @@ function keepOwnerFlags(rawMeta, next) {
     const kept = Number(prev.poll_interval_min);
     if (Number.isInteger(kept) && kept >= 1 && kept <= 1440) out.poll_interval_min = kept;
   }
+  // 重新注册时留下名片上已登记的 schedules；若调用方在注册体中传入 schedules 数组则同步更新。
+  if (Array.isArray(prev.schedules) && prev.schedules.length && !Array.isArray(out.schedules)) {
+    out.schedules = prev.schedules;
+  }
   return out;
+}
+
+function localRunIdOf(task, taskMsgs) {
+  const taskId = f1(task, "Task_ID");
+  const retry = Number(f1(task, "Retry_Count")) || 0;
+  const paused = (taskMsgs || []).filter((m) => {
+    const k = f1(m, "Kind");
+    return k === "question" || k === "auth_request";
+  }).length;
+  return `${taskId}-R${paused + retry + 1}`;
 }
 
 function updatesWatermarkKey(node) {
@@ -386,7 +400,6 @@ function buildTaskBrief(task, taskMsgs, partsByParent, artsByTask, view = {}) {
     heartbeat_at: f1(task, "Heartbeat_At"),
     context_id: f1(task, "Context_ID"),
     status_msg: statusMsg,
-    latest_run: f1(task, "Latest_Run"),
     instruction: instr.text,
     instruction_attachments: attachmentsOfMsg(instr.msgId, partsByParent, view),
     params: instr.params,
@@ -567,7 +580,7 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
         model,
         task_id: taskId,
         status: "working",
-        run_id: f1(task, "Latest_Run"),
+        run_id: localRunIdOf(task, taskMsgs),
         instruction: instr.text,
         instruction_attachments: attachmentsOfMsg(instr.msgId, partsByParent, view),
         params: instr.params,
@@ -585,7 +598,7 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
       model,
       task_id: taskId,
       status: "working",
-      run_id: f1(task, "Latest_Run"),
+      run_id: localRunIdOf(task, taskMsgs),
       instruction: instr.text,
       instruction_attachments: attachmentsOfMsg(instr.msgId, partsByParent, view),
       params: instr.params,
@@ -600,26 +613,13 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
       if (!gate.ready) throw httpError(409, "任务需机主批准后才能认领（已转为 auth-required）");
     }
 
-    let runId = "";
-    if (bus.tables.runs) {
-      const runs = await bus.listRecords(bus.tables.runs);
-      const mine = runs.filter((r) => f1(r, "Task_Ref") === taskId);
-      runId = `${taskId}-R${nextSuffix(mine.map((r) => f1(r, "Run_ID")), /-R(\d+)$/)}`;
-      await bus.createRecord(bus.tables.runs, {
-        Run_ID: runId,
-        Task_Ref: taskId,
-        Node: node,
-        Worker: selectedWorker || "http-agent",
-        Started_At: nowIso(),
-      });
-    }
+    const runId = localRunIdOf(task, taskMsgs);
 
     const updateFields = {
       Status: "working",
       Claimed_By: node,
       Heartbeat_At: nowIso(),
     };
-    if (runId) updateFields.Latest_Run = runId;
     if (!f1(task, "Worker_Hint") && selectedWorker) updateFields.Worker_Hint = selectedWorker;
     const claimMeta = metadataForClaim(modelMetadata, reqLease);
     if (claimMeta) updateFields.Metadata = claimMeta;
@@ -673,7 +673,7 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
       model,
       task_id: taskId,
       status: "working",
-      run_id: f1(task, "Latest_Run"),
+      run_id: localRunIdOf(task, taskMsgs),
       instruction: instr.text,
       instruction_attachments: attachmentsOfMsg(instr.msgId, partsByParent, view),
       params: instr.params,
@@ -706,7 +706,7 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
       model,
       task_id: taskId,
       status: "working",
-      run_id: f1(task, "Latest_Run"),
+      run_id: localRunIdOf(task, taskMsgs),
       instruction: instr.text,
       instruction_attachments: attachmentsOfMsg(instr.msgId, partsByParent, view),
       params: instr.params,
@@ -1068,6 +1068,15 @@ export async function handleAgentGatewayRequest({
     }
 
     const existingCards = await bus.listRecords(bus.tables.agentCards);
+    const existingNodeSchedules = existingCards
+      .filter((r) => f1(r, "Node") === node)
+      .flatMap((r) => {
+        const s = parseJson(f1(r, "Metadata"), {})?.schedules;
+        return Array.isArray(s) ? s : [];
+      });
+    const declaredSchedules = Object.hasOwn(body, "schedules") && body.schedules !== undefined
+      ? normalizeScheduleSpecs(body.schedules, { existing: existingNodeSchedules, defaultTz: cfg?.tz })
+      : null;
     const prepared = [];
     const groups = new Map();
     const capIds = new Set();
@@ -1166,6 +1175,7 @@ export async function handleAgentGatewayRequest({
         };
 
       const match = existingCards.find((r) => f1(r, "Node") === node && f1(r, "Cap_ID") === capId);
+      const isPrimary = capId === prepared[0].capId;
       if (match) {
         // 重新注册只刷新在线字段。机主写过的接纳/显示名不在更新字段里；
         // manual/preset 留在 Metadata，否则控制台添加的能力再注册后就删不掉。
@@ -1176,12 +1186,17 @@ export async function handleAgentGatewayRequest({
           ? { kind: "agent", role: "leader", mode: receiveMode, preset: true }
           : { kind, role: storedRole, mode: receiveMode, worker: specWorker });
         meta.worker_model = workerModel;
+        if (isPrimary && declaredSchedules !== null) meta.schedules = declaredSchedules;
         fields.Metadata = JSON.stringify(keepOwnerFlags(f1(match, "Metadata"), meta));
         const resUpd = await bus.updateRecord(bus.tables.agentCards, match.record_id, fields);
         const current = resUpd?.record ?? match;
         admissionMap[capId] = admissionOf(current);
         saved.push({ record_id: match.record_id, ...fields });
       } else {
+        if (isPrimary && declaredSchedules !== null) {
+          const baseMeta = parseJson(fields.Metadata, {});
+          fields.Metadata = JSON.stringify({ ...baseMeta, schedules: declaredSchedules });
+        }
         const resRec = await bus.createRecord(bus.tables.agentCards, fields);
         const created = resRec?.record;
         admissionMap[capId] = admissionOf(created ?? fields);
@@ -1681,7 +1696,7 @@ export async function handleAgentGatewayRequest({
     return true;
   }
 
-  // HTTP Agent 自报计划，只写 Rules 镜像，中台不据此触发。
+  // HTTP Agent 自报计划，写入名片 Metadata.schedules，中台只观测不据此触发。
   const schedMatch = pathname.match(/^\/api\/v1\/agents\/([^/]+)\/schedules\/([^/]+)$/);
   if (schedMatch && (method === "PUT" || method === "DELETE")) {
     let nodeRaw = "";
@@ -1703,7 +1718,9 @@ export async function handleAgentGatewayRequest({
       return true;
     }
     const body = await readJsonBody(req);
-    const result = await saveHttpAgentSchedule({ bus, node, scheduleId, body });
+    const result = await saveHttpAgentSchedule({
+      bus, node, scheduleId, body, fileStore, hubNode: cfg?.node || "hub",
+    });
     sendJson(res, 200, result);
     return true;
   }

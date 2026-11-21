@@ -73,20 +73,6 @@
      "primary": false
     },
     {
-     "name": "Latest_Run",
-     "type": "text",
-     "primary": false
-    },
-    {
-     "name": "Presented",
-     "type": "select",
-     "primary": false,
-     "options": [
-      "Yes",
-      "No"
-     ]
-    },
-    {
      "name": "Claimed_By",
      "type": "text",
      "primary": false
@@ -255,57 +241,6 @@
      "name": "Data",
      "type": "text",
      "primary": false
-    }
-   ]
-  },
-  {
-   "name": "runs",
-   "role": "每次执行的起止、结果与报错",
-   "fields": [
-    {
-     "name": "Run_ID",
-     "type": "text",
-     "primary": true
-    },
-    {
-     "name": "Task_Ref",
-     "type": "text",
-     "primary": false
-    },
-    {
-     "name": "Node",
-     "type": "text",
-     "primary": false
-    },
-    {
-     "name": "Worker",
-     "type": "text",
-     "primary": false
-    },
-    {
-     "name": "Error_Log",
-     "type": "text",
-     "primary": false
-    },
-    {
-     "name": "Started_At",
-     "type": "text",
-     "primary": false
-    },
-    {
-     "name": "Finished_At",
-     "type": "text",
-     "primary": false
-    },
-    {
-     "name": "Outcome",
-     "type": "select",
-     "primary": false,
-     "options": [
-      "succeeded",
-      "failed",
-      "paused"
-     ]
     }
    ]
   },
@@ -481,81 +416,6 @@
     },
     {
      "name": "Admin_Note",
-     "type": "text",
-     "primary": false
-    }
-   ]
-  },
-  {
-   "name": "rules",
-   "role": "路由、审批策略与定时观察镜像",
-   "fields": [
-    {
-     "name": "Rule_ID",
-     "type": "text",
-     "primary": true
-    },
-    {
-     "name": "Match_Type",
-     "type": "text",
-     "primary": false
-    },
-    {
-     "name": "Target_Node",
-     "type": "text",
-     "primary": false
-    },
-    {
-     "name": "Worker_Hint",
-     "type": "text",
-     "primary": false
-    },
-    {
-     "name": "Skill_ID",
-     "type": "text",
-     "primary": false
-    },
-    {
-     "name": "Approval_Class",
-     "type": "select",
-     "primary": false,
-     "options": [
-      "auto",
-      "notify",
-      "approve"
-     ]
-    },
-    {
-     "name": "Priority",
-     "type": "number",
-     "primary": false
-    },
-    {
-     "name": "Enabled",
-     "type": "select",
-     "primary": false,
-     "options": [
-      "Yes",
-      "No"
-     ]
-    },
-    {
-     "name": "Note",
-     "type": "text",
-     "primary": false
-    },
-    {
-     "name": "Schedule",
-     "type": "text",
-     "primary": false
-    },
-    {
-     "name": "Text",
-     "type": "text",
-     "primary": false
-    },
-    {
-     "name": "Last_Fired",
      "type": "text",
      "primary": false
     }

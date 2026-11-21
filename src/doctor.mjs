@@ -11,8 +11,6 @@ import { loadConfig, DAEMON_VERSION } from "./kernel.mjs";
 import { canExecuteModel, capIdOf, capIdsOf, normalizeCommands, resolveListenAddr, resolveTokenFilePath } from "./config.mjs";
 import { isHubPublicKey, readHubPublicKey } from "./approval-sign.mjs";
 import { AGENT_TEMPLATES_FILE, loadAgentTemplates } from "./hub/agent-templates.mjs";
-import { resolveScheduleTz } from "./hub/schedule.mjs";
-import { LocalScheduleService } from "./local-schedule.mjs";
 import { f1 } from "./bus/tables.mjs";
 import { selectAutostartName } from "./service.mjs";
 
@@ -402,51 +400,6 @@ export function describeCommands(cmds, flat, capPrefix, kind) {
   return { summary, layout, hints };
 }
 
-// schedules.json 不存在时什么都不打印。存在时复用 LocalScheduleService 的读取和拒收口径，
-// 只告警，不计入 problems：坏计划不能让 doctor 非零退出，也不能挡住守护进程启动。
-export function reportLocalSchedules(configDir, raw) {
-  const file = path.join(configDir, "schedules.json");
-  if (!fs.existsSync(file)) return 0;
-  const warn = (msg) => info("告警：" + msg);
-  try {
-    const configured = raw && Object.prototype.hasOwnProperty.call(raw, "tz") && String(raw.tz ?? "").trim() !== "";
-    try {
-      const tz = resolveScheduleTz(raw?.tz);
-      if (configured) ok(`定时调度时区：${tz}（node.json 的 tz，与宿主机时区无关）`);
-      else info(`定时调度时区：${tz}（未配置 tz，默认 Asia/Shanghai）`);
-    } catch (e) {
-      warn(`定时调度时区非法（node.json 的 tz=${JSON.stringify(raw?.tz)}）：${e.message}。本地调度会整体停用，不回退宿主机时区`);
-    }
-    const caps = capIdsFromCommands(configDir, raw?.capPrefix ?? raw?.node ?? "");
-    const svc = new LocalScheduleService({
-      schedulesPath: file,
-      tz: raw?.tz,
-      commandsOf: () => caps,
-      log: () => {},
-    });
-    const loaded = svc._readFile();
-    if (loaded.missing) return 0;
-    if (loaded.broken) {
-      warn(`schedules.json 损坏，本地调度整体停用：${loaded.broken}`);
-      return 0;
-    }
-    const seen = new Set();
-    loaded.list.forEach((entry, index) => {
-      const reason = svc._rejectReason(entry, seen, caps);
-      const brief = scheduleBrief(entry, index);
-      if (reason) {
-        warn(`${brief}；${reason}`);
-        return;
-      }
-      seen.add(String(entry.id).trim());
-      ok(brief);
-    });
-  } catch (e) {
-    warn(`schedules.json 检查失败（不阻断）：${e?.message ?? e}`);
-  }
-  return 0;
-}
-
 // 只读。文件不存在时不创建：创建是 hub 启动的事。坏文件只告警，不让 doctor 非零退出。
 export function reportAgentTemplates(configDir) {
   const file = path.join(configDir, AGENT_TEMPLATES_FILE);
@@ -581,21 +534,6 @@ export async function doctor(configDir, appDir, opts = {}) {
     problems++;
   }
 
-  // 没有本地计划时，时区仍只跟 hub 的旧口径有关，非法值计问题。
-  // 有 schedules.json 时改由 reportLocalSchedules 覆盖到任何角色，并且只告警。
-  const schedulesPresent = fs.existsSync(path.join(configDir, "schedules.json"));
-  if (role === "hub" && raw && !schedulesPresent) {
-    const configured = Object.prototype.hasOwnProperty.call(raw, "tz") && String(raw.tz ?? "").trim() !== "";
-    try {
-      const tz = resolveScheduleTz(raw.tz);
-      if (configured) ok(`定时调度时区：${tz}（node.json 的 tz，与宿主机时区无关）`);
-      else info(`定时调度时区：${tz}（未配置 tz，hub 默认 Asia/Shanghai）`);
-    } catch (e) {
-      bad(`定时调度时区非法（node.json 的 tz=${JSON.stringify(raw.tz)}）：${e.message}。本轮调度会跳过，直到改成合法 IANA 名`);
-      problems++;
-    }
-  }
-  if (schedulesPresent) reportLocalSchedules(configDir, raw);
   reportAgentTemplates(configDir);
 
   // 审批决定签名（标准 §8.3 第 5 条）。公钥不是秘密，可以打印；私钥只报在不在。

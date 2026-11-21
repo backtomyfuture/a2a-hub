@@ -187,3 +187,22 @@ POST /api/v1/tasks/{taskId}/fail
 { "node": "grok-bot", "text": "目标数据源鉴权失效，无法读取所需上下文" }
 ```
 - 同样支持可选 `artifacts[]`。注意：一旦进入 `completed` / `failed` / `canceled` / `rejected` 终态，严禁再次修改该任务。
+
+---
+
+## 六、自带定时器的计划自报 (`PUT /api/v1/agents/{node}/schedules/{id}`)
+
+如果 Worker 自身携带 cron / 定时器并希望在 Hub 控制台集中观测与记录执行结果，可在 `POST /api/v1/agents/register` 传入 `schedules` 数组，或在执行后调用：
+```http
+PUT /api/v1/agents/grok-bot/schedules/daily-brief
+```
+```json
+{
+  "cron": "0 9 * * *",
+  "tz": "Asia/Shanghai",
+  "cap": "agent",
+  "text": "每日早报汇总",
+  "run": { "status": "completed", "text": "今日早报已完成" }
+}
+```
+- 不传 `run` 仅更新名片 `Metadata.schedules`；传入 `run` 会同步生成一条 `Source="cron"`、`Metadata.schedule_id` 的 A2A `Task` 并关联至控制台「定时任务」页的 `last_task`。删除计划调 `DELETE` 同路径。

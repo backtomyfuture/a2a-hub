@@ -164,7 +164,7 @@ POST /api/v1/tasks/{taskId}/reply
 
 ### 3. 全量查询与撤销自己发起的任务
 - 筛选查单：`GET /api/v1/tasks?from=muse&status=working&limit=50`
-- 查单条完整明细（含 Messages / Runs / Artifacts）：`GET /api/v1/tasks/{taskId}`
+- 查单条完整明细（含 Messages / Artifacts）：`GET /api/v1/tasks/{taskId}`
 - 取消未终态任务：`POST /api/v1/tasks/{taskId}/cancel`，请求体 `{ "from": "muse", "text": "需求变更，终止该任务" }`（注意：中台仅允许任务发起方或 Hub 取消）。
 
 ### 4. 上传中台托管文件 (`POST /api/v1/files`)

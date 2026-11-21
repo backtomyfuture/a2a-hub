@@ -332,17 +332,11 @@ const USAGE_LINES = [
   "  ah inbox ask  --task <Task_ID> --text <补充提问> [--file <路径>]...",
   "  ah inbox fail --task <Task_ID> --text <失败原因>",
   "  ah inbox auth --task <Task_ID> --text <具体动作、对象与风险> [--file <路径>]...",
-  "  ah task create --to <node> [--worker <worker>] [--model <opaque-id>] [--cap/--skill <cap_id>] [--text <指令>] [--from <node>] [--params <json 或 @文件>] [--criteria <json 数组或 @文件>] [--idempotency-key <键>] [--file <路径>]...",
+  "  ah task create --to <node> [--worker <worker>] [--model <opaque-id>] [--cap/--skill <cap_id>] [--text <指令>] [--from <node>] [--params <json 或 @文件>] [--criteria <json 数组或 @文件>] [--schedule <计划ID>] [--idempotency-key <键>] [--file <路径>]...",
   "  ah task reply  --task <Task_ID> [--text <答复内容>] [--file <路径>]...",
   "  ah task show   <Task_ID>",
   "  ah task why    <Task_ID> [--config <dir>] [--json]",
   "  ah task cancel --task <Task_ID> [--text <说明>] [--config <dir>]",
-  "  ah task begin  --schedule <id> [--period <期次键>] [--cap <cap_id>] [--text <指令>]  Agent 定时触发",
-  "  ah schedule ls [--config <dir>] [--json]  列出本机定时调度计划",
-  "  ah schedule add --id <id> --cron \"<五段>\" --cap <cap_id> --text <指令> [--approval auto|notify|approve] [--disabled]  添加本机定时计划",
-  "  ah schedule rm <id> [--config <dir>]  删除本机计划",
-  "  ah schedule enable|disable <id> [--config <dir>]  启用/停用本机计划",
-  "  ah schedule register --id <id> --cron \"<五段>\" --cap <cap_id> [--text <指令>]  登记 Agent 观察镜像（不写本机计划）",
   "  ah present [--pop] [--task <Task_ID>] [--wait <秒>]  读取本机结果呈递队列"
 ];
 
@@ -515,7 +509,7 @@ if (wantsHelp) {
       const taskId = await createTask({
         bus: cfg.bus,
         from: args.from || cfg.node,
-        source: args.source || args.from || cfg.node,
+        source: args.source || (args.scheduleId ? "cron" : "") || args.from || cfg.node,
         to: args.to,
         cap: args.cap,
         worker: args.worker,
@@ -527,6 +521,7 @@ if (wantsHelp) {
         ref: args.ref,
         approval: args.approval,
         idempotencyKey: args.idempotencyKey,
+        scheduleId: args.scheduleId,
         validateTarget: true,
         attachments,
       });
@@ -768,11 +763,8 @@ if (wantsHelp) {
         process.exitCode = 1;
       }
     }
-  } else if (sub === "begin") {
-    const { handleTaskBegin } = await import("../src/schedule-cli.mjs");
-    process.exitCode = await handleTaskBegin(rest.slice(1), { configDir: configDirFrom(rest) });
   } else {
-    console.error("用法：ah task create | reply | show | why | cancel | begin");
+    console.error("用法：ah task create | reply | show | why | cancel");
     process.exitCode = 1;
   }
 } else if (cmd === "inbox") {
@@ -968,9 +960,6 @@ if (wantsHelp) {
 } else if (cmd === "present") {
   const { handlePresentCli } = await import("../src/present-queue.mjs");
   process.exitCode = await handlePresentCli(rest, { configDir: configDirFrom(rest) });
-} else if (cmd === "schedule") {
-  const { handleScheduleCli } = await import("../src/schedule-cli.mjs");
-  process.exitCode = await handleScheduleCli(rest, { configDir: configDirFrom(rest) });
 } else if (cmd === "update") {
   const { update } = await import("../src/update.mjs");
   process.exitCode = await update(APP_DIR, {

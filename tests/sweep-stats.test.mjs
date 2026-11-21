@@ -10,7 +10,6 @@ import { HubRuntime } from "../src/hub/index.mjs";
 import { ApprovalService } from "../src/hub/approval.mjs";
 import { PresentService } from "../src/hub/present.mjs";
 import { StaleService } from "../src/hub/stale.mjs";
-import { ScheduleService } from "../src/hub/schedule.mjs";
 import { MockBus } from "./mocks/mock-bus.mjs";
 import { TABLES, withTemp } from "./helpers.mjs";
 
@@ -108,10 +107,10 @@ test.describe("扫表统计行", { concurrency: false }, () => {
     });
   });
 
-  test("hub 四段各一行，失败段 ok=0 且保留原文案", async () => {
+  test("hub 三段各一行，失败段 ok=0 且保留原文案", async () => {
     await withTemp(async (dir) => {
       fs.writeFileSync(path.join(dir, "commands.json"), "{}\n", { mode: 0o600 });
-      const tables = { ...TABLES, rules: "tbl_rules" };
+      const tables = { ...TABLES };
       const mock = new MockBus({ tables });
       const cfg = {
         node: "node-a",
@@ -146,11 +145,10 @@ test.describe("扫表统计行", { concurrency: false }, () => {
         statePath: path.join(dir, "stale_state.json"),
         log,
       });
-      const schedule = new ScheduleService({ bus: mock, log });
-      const runtime = new HubRuntime({ cfg, approval, present, stale, schedule, log });
+      const runtime = new HubRuntime({ cfg, approval, present, stale, log });
       await runtime.scanSections();
-      const scans = lines.filter((line) => /^scan (approval|present|stale|schedule) /.test(line));
-      assert.deepEqual(scans.map((line) => line.split(" ")[1]), ["approval", "present", "stale", "schedule"]);
+      const scans = lines.filter((line) => /^scan (approval|present|stale) /.test(line));
+      assert.deepEqual(scans.map((line) => line.split(" ")[1]), ["approval", "present", "stale"]);
       for (const line of scans) {
         assert.match(line, /ms=\d+ ok=1 /);
       }
@@ -159,11 +157,11 @@ test.describe("扫表统计行", { concurrency: false }, () => {
       await runtime.scanSections();
       const text = lines.join("\n");
       assert.match(text, /present scan failed: present broke/);
-      const again = lines.filter((line) => /^scan (approval|present|stale|schedule) /.test(line));
-      assert.equal(again.length, 4);
+      const again = lines.filter((line) => /^scan (approval|present|stale) /.test(line));
+      assert.equal(again.length, 3);
       const failed = again.find((line) => line.startsWith("scan present "));
       assert.match(failed, /ok=0/);
-      for (const name of ["approval", "stale", "schedule"]) {
+      for (const name of ["approval", "stale"]) {
         const line = again.find((item) => item.startsWith(`scan ${name} `));
         assert.match(line, /ok=1/);
       }

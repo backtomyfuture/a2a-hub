@@ -11,7 +11,6 @@ import { readEnvFile, resolveListenAddr } from "../config.mjs";
 import { ApprovalService } from "./approval.mjs";
 import { PresentService } from "./present.mjs";
 import { StaleService } from "./stale.mjs";
-import { ScheduleService } from "./schedule.mjs";
 import { FileRetentionService, FileStore } from "./files.mjs";
 import { ExternalNotifier } from "./notifier.mjs";
 import { WebhookDispatcher } from "./webhooks.mjs";
@@ -135,7 +134,6 @@ export async function hubDoctor(configDir) {
   try {
     const present = await import("./present.mjs");
     const stale = await import("./stale.mjs");
-    const schedule = await import("./schedule.mjs");
     if (typeof present.PresentService !== "function" || typeof present.presentKey !== "function") {
       bad("结果呈递模块不可用");
       problems++;
@@ -148,15 +146,7 @@ export async function hubDoctor(configDir) {
     } else {
       ok("陈旧告警与回收：working 心跳超过 20 分钟或为空先告警，告警后宽限 30 分钟无心跳则置 failed；Metadata 里的租约到期、排队超时与挂起超时也会回收。没写这些秒数时，submitted 超过 20 分钟只告警。约每 60 秒巡检一次，状态在 stale_state.json");
     }
-    if (typeof schedule.ScheduleService !== "function" || typeof schedule.parseCron !== "function") {
-      bad("定时调度模块不可用");
-      problems++;
-    } else {
-      ok("定时调度由各节点本地执行（schedules.json＋本地时钟），hub 不再按 Rules 建单；hub 只处理 later 复查。Rules 的计划行是节点写的只读观察镜像。");
-    }
-    if (!raw?.tables?.rules) {
-      info("Rules 观察镜像将跳过");
-    }
+    ok("定时任务观察：计划声明存于 AgentCards.Metadata.schedules，每次定时执行自动关联 Tasks 记录供控制台集中看板展示");
   } catch (e) {
     bad("呈递或告警模块加载失败：" + e.message);
     problems++;
@@ -256,12 +246,8 @@ export async function runHub(cfg, log = logLine, hooks = {}) {
     statePath: path.join(cfg.configDir, "stale_state.json"),
     log,
   });
-  const schedule = new ScheduleService({
-    bus: cfg.bus,
-    log,
-  });
 
-  const runtime = new HubRuntime({ cfg, approval, present, stale, schedule, log });
+  const runtime = new HubRuntime({ cfg, approval, present, stale, log });
   let httpHandle = null;
   let fileStore = null;
   let fileRetention = null;
@@ -313,12 +299,11 @@ export async function runHub(cfg, log = logLine, hooks = {}) {
 }
 
 export class HubRuntime {
-  constructor({ cfg, approval, present, stale, schedule, log, createWaker, retryMs }) {
+  constructor({ cfg, approval, present, stale, log, createWaker, retryMs }) {
     this.cfg = cfg;
     this.approval = approval;
     this.present = present;
     this.stale = stale;
-    this.schedule = schedule;
     this.log = log;
     this.createWaker = createWaker ?? null;
     this.kernel = new Kernel(this.cfg);
@@ -401,9 +386,6 @@ export class HubRuntime {
     this.stopStaleWatch();
     clearTimeout(this._kickTimer);
     this._kickTimer = null;
-    // 分钟定时器挂在内核上。这里清掉，避免 hub 退出后它还握着进程。
-    try { this.kernel?.stopMinuteTimer(); }
-    catch (e) { this.log("停止分钟定时器失败：" + (e?.message ?? e)); }
     this.closeConnection();
     this.wakeNow();
     if (typeof this._onStop === "function") {
@@ -536,7 +518,6 @@ export class HubRuntime {
       ["approval", () => this.approval?.scan()],
       ["present", () => this.present?.scan()],
       ["stale", () => this.stale?.scan()],
-      ["schedule", () => this.schedule?.scan()],
     ];
     for (const [name, job] of jobs) {
       const t0 = Date.now();
@@ -553,37 +534,33 @@ export class HubRuntime {
   }
 
   async run() {
-    this.log(`hub daemon starting on ${this.cfg.node}（对账 ${this.sweepSec()}s，SQLite + HTTP 长轮询事件驱动；含能力登记与接单、审批、呈递、陈旧告警、later 复查；本机计划由内核本地调度）`);
-    // hub 不走 Kernel.run。分钟定时器仍要起：到点经 kernel._notifyWake 抬这里的 _wakeFlag。
-    this.kernel?.startMinuteTimer();
+    this.log(`hub daemon starting on ${this.cfg.node}（对账 ${this.sweepSec()}s，SQLite + HTTP 长轮询事件驱动；含能力登记与接单、审批、呈递、陈旧告警）`);
     this.noteHubPresence();
     this.startStaleWatch();
     try {
-    try {
-      await this.cfg.bus.tenantToken();
-    } catch (e) {
-      this.log("initial token failed (will retry in loop): " + (e?.message ?? e));
-    }
-    for (;;) {
-      if (this._stopped) return;
-      this._wakeFlag = false;
-      this.refreshOwner();
-      if (!this._wsUp) {
-        this.log("hub 事件唤醒器尚未就绪：本轮先执行对账扫表，同时继续等待/重连事件通道。");
-      }
       try {
-        await this.kernel.sweepOnce();
+        await this.cfg.bus.tenantToken();
       } catch (e) {
-        this.log("kernel sweep error: " + (e?.message ?? e));
+        this.log("initial token failed (will retry in loop): " + (e?.message ?? e));
       }
-      await this.scanSections();
-      if (this._wakeFlag) continue;
-      await this.waitWake();
-    }
+      for (;;) {
+        if (this._stopped) return;
+        this._wakeFlag = false;
+        this.refreshOwner();
+        if (!this._wsUp) {
+          this.log("hub 事件唤醒器尚未就绪：本轮先执行对账扫表，同时继续等待/重连事件通道。");
+        }
+        try {
+          await this.kernel.sweepOnce();
+        } catch (e) {
+          this.log("kernel sweep error: " + (e?.message ?? e));
+        }
+        await this.scanSections();
+        if (this._wakeFlag) continue;
+        await this.waitWake();
+      }
     } finally {
       this.stopStaleWatch();
-      try { this.kernel?.stopMinuteTimer(); }
-      catch (e) { this.log("停止分钟定时器失败：" + (e?.message ?? e)); }
     }
   }
 }

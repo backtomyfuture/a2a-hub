@@ -127,10 +127,10 @@ function nowIso() {
 const TERMINAL_STATUSES = new Set(["completed", "failed", "canceled", "rejected"]);
 
 const OP_SPEC = {
-  done: { msgKind: "result", outcome: "succeeded", taskStatus: "completed" },
-  ask: { msgKind: "question", outcome: "paused", taskStatus: "input-required" },
-  fail: { msgKind: "notice", outcome: "failed", taskStatus: "failed" },
-  auth: { msgKind: "auth_request", outcome: "paused", taskStatus: "auth-required" },
+  done: { msgKind: "result", taskStatus: "completed" },
+  ask: { msgKind: "question", taskStatus: "input-required" },
+  fail: { msgKind: "notice", taskStatus: "failed" },
+  auth: { msgKind: "auth_request", taskStatus: "auth-required" },
 };
 
 function inboxOutboxPath(configDir, taskId) {
@@ -186,22 +186,6 @@ function nextMsgSeqFrom(msgs) {
     if (n > max) max = n;
   }
   return max + 1;
-}
-
-// 没有 Finished_At、也没有 Outcome，才是认领时打开、尚未关账的执行段。
-function runIsOpen(row) {
-  if (!row) return false;
-  if (String(f1(row, "Finished_At") ?? "").trim()) return false;
-  if (String(f1(row, "Outcome") ?? "").trim()) return false;
-  return true;
-}
-
-// 摘要留在 result 的 TextPart。Outcome 是单选，fail 的原因进 Error_Log，ask 与内核 NeedInput 一样记一笔暂停原因。
-function errorLogFor(op, text) {
-  if (op === "fail") return String(text ?? "").slice(0, 800);
-  if (op === "ask") return ("input-required: " + String(text ?? "").slice(0, 400)).slice(0, 800);
-  if (op === "auth") return ("auth-required: " + String(text ?? "").slice(0, 400)).slice(0, 800);
-  return "";
 }
 
 function assertOwner(task, node) {
@@ -357,24 +341,13 @@ async function buildPlan({
     f.token = randomUUID();
   });
 
-  // 认领时内核已经开过 Run。没关账就更新那一行；已 paused 说明这是续跑后的新执行段，另开一行。
-  // inbox 的 resumeCheck 只把任务放回 working 并重新入队，不开 Run；新段只能在本文件的下一次回执里开。
-  let runId = "";
-  let runMode = "create";
-  let startedAt = createdAt;
-  if (bus.tables.runs) {
-    const runs = await bus.listRecords(bus.tables.runs);
-    const latest = String(f1(task, "Latest_Run") ?? "").trim();
-    const open = latest ? runs.find((r) => f1(r, "Run_ID") === latest) : null;
-    if (runIsOpen(open)) {
-      runId = latest;
-      runMode = "update";
-      startedAt = String(f1(open, "Started_At") ?? "") || createdAt;
-    } else {
-      const mine = runs.filter((r) => f1(r, "Task_Ref") === taskId);
-      runId = `${taskId}-R${nextSuffix(mine.map((r) => f1(r, "Run_ID")), /-R(\d+)$/)}`;
-    }
-  }
+  // 用中断消息数与重试次数派生稳定 runId，专供动态审批 scope 去重，不读写单独 Runs 表。
+  const pausedCount = taskMsgs.filter((m) => {
+    const k = f1(m, "Kind");
+    return k === "question" || k === "auth_request";
+  }).length;
+  const retry = Number(f1(task, "Retry_Count")) || 0;
+  const runId = `${taskId}-R${pausedCount + retry + 1}`;
 
   return {
     v: 1,
@@ -396,19 +369,10 @@ async function buildPlan({
     artId: first?.artId ?? "",
     artifacts: artItems,
     runId,
-    runMode,
-    worker: String(f1(task, "Worker_Hint") || "daemon"),
-    startedAt,
-    runUpdate: {
-      Finished_At: createdAt,
-      Outcome: spec.outcome,
-      Error_Log: errorLogFor(op, body),
-    },
     taskStatus: spec.taskStatus,
     tokens: {
       artifact: first?.tokens.artifact ?? randomUUID(),
       artifactPart: first?.tokens.artifactPart ?? randomUUID(),
-      run: randomUUID(),
       message: randomUUID(),
       partText: randomUUID(),
       partData: randomUUID(),
@@ -469,32 +433,6 @@ async function ensureArtifact(bus, plan, node) {
   }
 }
 
-async function ensureRun(bus, plan, node) {
-  if (!plan.runId || !bus.tables.runs) return;
-  const row = await findRow(bus, bus.tables.runs, "Run_ID", plan.runId);
-  const want = plan.runUpdate;
-  if (row) {
-    const closed = String(f1(row, "Finished_At") ?? "").trim() && f1(row, "Outcome") === want.Outcome;
-    if (closed) return;
-    await bus.updateRecord(bus.tables.runs, row.record_id, {
-      Finished_At: want.Finished_At,
-      Outcome: want.Outcome,
-      Error_Log: want.Error_Log,
-    });
-    return;
-  }
-  await bus.createRecord(bus.tables.runs, {
-    Run_ID: plan.runId,
-    Task_Ref: plan.taskId,
-    Node: node,
-    Worker: plan.worker || "daemon",
-    Error_Log: want.Error_Log,
-    Started_At: plan.startedAt || plan.createdAt,
-    Finished_At: want.Finished_At,
-    Outcome: want.Outcome,
-  }, plan.tokens.run);
-}
-
 async function ensureMessage(bus, plan, node) {
   const fields = {
     Msg_ID: plan.msgId,
@@ -550,7 +488,6 @@ function taskFieldsOf(plan) {
     Status: plan.taskStatus,
     Status_Msg: plan.msgId,
   };
-  if (plan.runId) fields.Latest_Run = plan.runId;
   // ask 只把任务送进 input-required。done/fail 才清心跳；重新呈递靠新终态的
   // presentKey（与旧键不同），不再写 Presented 列（v3.5 已废弃，见标准 §10.2）。
   if (plan.op !== "ask") {
@@ -629,7 +566,7 @@ function receiptOf(plan) {
   return base;
 }
 
-// 顺序对齐内核：Artifacts → Runs → Messages/Parts → Tasks。任一步失败都留着计划，下次只补缺。
+// 顺序对齐内核：Artifacts → Messages/Parts → Tasks。任一步失败都留着计划，下次只补缺。
 async function commitInboxReceipt({
   bus, configDir, node, taskId, text, artifact, artifacts, attachments, localFiles, op,
   reportedChecks = {}, hasCheckFlags = false, getFileClient = null, baseDirs = [], logFn = log,
@@ -666,7 +603,6 @@ async function commitInboxReceipt({
   // 上传结果每成功一项就写回计划文件，失败时下一轮只补缺的，不重复上传已完成的。
   await resolvePlanUploads(plan, { getFileClient, persist: (p) => saveInboxOutbox(configDir, p), logFn });
   await ensureArtifact(bus, plan, node);
-  await ensureRun(bus, plan, node);
   await ensureMessage(bus, plan, node);
   const taskRecordId = await ensureTask(bus, plan, node);
   if (plan.op === "done" && plan.acceptance) {
@@ -697,7 +633,6 @@ export async function submitAgentReceipt({
     reportedChecks: reported, hasCheckFlags, detectLocal: false, logFn,
   });
   await ensureArtifact(bus, plan, node);
-  await ensureRun(bus, plan, node);
   await ensureMessage(bus, plan, node);
   const taskRecordId = await ensureTask(bus, plan, node);
   if (plan.op === "done" && plan.acceptance) {

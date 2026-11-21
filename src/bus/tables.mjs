@@ -4,10 +4,8 @@ export const DEFAULT_TABLES = Object.freeze({
   tasks: "tasks",
   messages: "messages",
   parts: "parts",
-  runs: "runs",
   artifacts: "artifacts",
   agentCards: "agentCards",
-  rules: "rules",
 });
 
 export const KNOWN_TABLE_KEYS = Object.freeze(Object.keys(DEFAULT_TABLES));

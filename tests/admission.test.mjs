@@ -30,7 +30,6 @@ import { AgentTokenStore } from "../src/hub/agent-tokens.mjs";
 import { createTask } from "../src/hub/create.mjs";
 import { inventory } from "../src/inventory.mjs";
 import { BROWSER_USER_AGENT } from "../src/kernel-util.mjs";
-import { LocalScheduleService } from "../src/local-schedule.mjs";
 import { startHubHttpServer } from "../src/server/http-server.mjs";
 import { LongPollBroker } from "../src/server/longpoll-broker.mjs";
 import { TABLES, withTemp } from "./helpers.mjs";
@@ -485,8 +484,8 @@ test("派单门：未接纳（pending/缺省）与 rejected 拒单且不写表�
   assert.ok(taskId.startsWith("TASK-"));
 });
 
-test("派单门：指定 --worker 时未接纳同样拒单，且 local-schedule 受门禁约束", async () => {
-  await withTemp(async (dir) => {
+test("派单门：指定 --worker 时未接纳同样拒单", async () => {
+  await withTemp(async () => {
     const mock = new MockBus({ tables: TABLES });
     const rec = await mock.createRecord(TABLES.agentCards, {
       Cap_ID: "CAP-a-beta-agent",
@@ -503,41 +502,6 @@ test("派单门：指定 --worker 时未接纳同样拒单，且 local-schedule 
     await mock.updateRecord(TABLES.agentCards, rec.record.record_id, { Admission: "admitted" });
     const okId = await createTask({ bus: mock, to: "node-a", worker: "beta", text: "x" });
     assert.ok(okId);
-
-    // local-schedule 路径同样走 createTask 门禁
-    const schedCard = await mock.createRecord(TABLES.agentCards, {
-      Cap_ID: "CAP-sched",
-      Node: "node-a",
-      Skill_ID: "sched",
-      Dispatchable: "Yes",
-      Availability: "online",
-    });
-    fs.writeFileSync(path.join(dir, "schedules.json"), JSON.stringify({
-      schedules: [{ id: "S1", enabled: true, cron: "0 9 * * *", cap: "CAP-sched", text: "定时" }],
-    }), { mode: 0o600 });
-    fs.writeFileSync(path.join(dir, "schedule_local_state.json"), JSON.stringify({
-      schedules: { S1: { cron: "0 9 * * *", last_fired: "2026-01-15T09:00:00+0800" } },
-    }), { mode: 0o600 });
-    const logs = [];
-    const svc = new LocalScheduleService({
-      bus: mock,
-      node: "node-a",
-      tz: "Asia/Shanghai",
-      schedulesPath: path.join(dir, "schedules.json"),
-      statePath: path.join(dir, "schedule_local_state.json"),
-      now: () => Date.parse("2026-01-16T01:30:00.000Z"),
-      log: (line) => logs.push(String(line)),
-      createTask,
-      commandsOf: () => new Set(["CAP-sched"]),
-      notify: () => {},
-    });
-    await svc.tick();
-    assert.equal(logs.some((l) => l.includes("未接纳（Admission=pending）")), true);
-
-    await mock.updateRecord(TABLES.agentCards, schedCard.record.record_id, { Admission: "admitted" });
-    await svc.tick();
-    const tasks = await mock.listRecords(TABLES.tasks);
-    assert.equal(tasks.some((t) => f1(t, "Skill_ID") === "sched"), true);
   });
 });
 

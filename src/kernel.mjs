@@ -25,7 +25,6 @@ import {
   InvalidReceipt,
   NeedAuth,
   NeedInput,
-  laterClausePresent,
   parseAgentReceipt,
   parseJsonReceipt,
   substituteCommand,
@@ -38,13 +37,11 @@ import {
 } from "./retry-state.mjs";
 import { clearSessionId, readContextSessionId, readSessionId, writeContextSessionId, writeSessionId } from "./session-store.mjs";
 import { modelString, canExecuteModel, workerModelFields, capIdOf, capIdsOf, capKey, clampTimeoutSec, controlKeysIn, loadConfig, normalizeCommands, receiveModeOf, resolveCapKey } from "./config.mjs";
-import { LocalScheduleService } from "./local-schedule.mjs";
 
 export {
   addUsage,
   parseAgentReceipt,
   parseJsonReceipt,
-  parseLaterInstant,
   substituteCommand,
 } from "./receipt.mjs";
 export {
@@ -97,15 +94,6 @@ export function taskDispatchBinding(task) {
 
 export const DAEMON_VERSION = "node-1.2.0";
 const HOP_LIMIT = 8;
-
-// 对齐到下一整分钟。正好卡在整分时再等满一分钟，避免 0 延迟把回调打成紧循环。
-function msUntilNextMinute(nowMs) {
-  const ms = Number(nowMs);
-  if (!Number.isFinite(ms)) return 60_000;
-  const rem = Math.floor(ms) % 60_000;
-  if (rem < 0) return 60_000;
-  return rem === 0 ? 60_000 : 60_000 - rem;
-}
 const MAX_RETRIES = 2;
 // 节点本地回收与 hub 陈旧告警共用这一分钟数，必须与 src/hub/stale.mjs 的 STALE_MIN 相等
 // （相等，不是小于）。hub 真正收成 failed 还要再加宽限 STALE_GRACE_MIN。
@@ -161,12 +149,9 @@ export class Kernel {
     this._commandsEverLoaded = false;
     this._capsReady = false;
     this._round = null;
-    this._openRunIds = new Map();
     // 同一时刻只保留一条 direct 命令，避免收口写和别的扫表写同一张表。
     this._directFlight = null;
     this._sweepBusy = false;
-    this._minuteTimer = null;
-    this._minuteTimerOn = false;
     // 挂起任务首次被本进程看到的时刻，键为 Task_ID＋Status_Msg：同一任务再次提问或申请审批要重新计时。
     this._pendingSince = new Map();
     // 文件客户端懒创建一次：只有真要上传 / 下载附件时才打开 FileStore 或建 HTTP 客户端。
@@ -178,18 +163,6 @@ export class Kernel {
       statePath: path.join(this.cfg.configDir, "present_state.json"),
       queuePath: path.join(this.cfg.configDir, "present_queue.jsonl"),
       log,
-    });
-    // 没有 schedules.json 时 tick 直接返回。node 与 hub 共用这一份，hub 只是包着同一个 Kernel。
-    this.localSchedule = new LocalScheduleService({
-      bus: this.bus,
-      node: this.cfg.node,
-      tz: this.cfg.tz,
-      schedulesPath: path.join(this.cfg.configDir, "schedules.json"),
-      statePath: path.join(this.cfg.configDir, "schedule_local_state.json"),
-      log,
-      createTask,
-      commandsOf: () => capIdsOf(this.commands, this.cfg.capPrefix),
-      notify: () => this.pulseWake(),
     });
     this._hookBus();
     this.loadCommands();
@@ -416,32 +389,15 @@ export class Kernel {
     return msgId;
   }
 
-  // 已有未结束的 Run（认领时开的行）就关行，避免收尾再插一条。没有才按最大序号新建。
-  async writeRun(task, outcome, started, error = "") {
-    const finished = nowStr();
-    const open = await this.unfinishedRun(task);
-    const errorLog = annotateElapsed(error, open?.started || started, finished);
-    if (open) {
-      await this.bus.updateRecord(this.T.runs, open.recordId, {
-        Finished_At: finished, Outcome: outcome, Error_Log: errorLog,
-      });
-      this._openRunIds.delete(f1(task, "Task_ID"));
-      return open.runId;
-    }
+  // 按消息流中断次数和重试次数本地推导稳定执行段编号（用于账本及动态审批 scope，不落单独 Runs 表）。
+  nextRunId(task, msgs = []) {
     const taskId = f1(task, "Task_ID");
-    const runs = await this.runsOf(taskId);
-    const runId = `${taskId}-R${this.nextSuffix(runs.map((r) => f1(r, "Run_ID")), /-R(\d+)$/)}`;
-    await this.bus.createRecord(this.T.runs, {
-      Run_ID: runId, Task_Ref: taskId, Node: this.cfg.node,
-      Worker: f1(task, "Worker_Hint") || "daemon", Outcome: outcome,
-      Error_Log: errorLog, Started_At: started, Finished_At: finished,
-    });
-    return runId;
-  }
-
-  async runsOf(taskId) {
-    const rows = await this.bus.listRecords(this.T.runs);
-    return rows.filter((r) => f1(r, "Task_Ref") === taskId);
+    const retry = Number(f1(task, "Retry_Count")) || 0;
+    const pausedCount = (msgs || []).filter((m) => {
+      const k = f1(m, "Kind");
+      return k === "question" || k === "auth_request";
+    }).length;
+    return `${taskId}-R${pausedCount + retry + 1}`;
   }
 
   // 编号取已有最大序号 + 1。用行数 + 1 会在缺号（例如已有 01 和 05）时撞上 03。
@@ -463,39 +419,6 @@ export class Kernel {
       if (n > max) max = n;
     }
     return max + 1;
-  }
-
-  async unfinishedRun(task) {
-    const taskId = f1(task, "Task_ID");
-    const hinted = this._openRunIds.get(taskId) || f1(task, "Latest_Run");
-    if (!hinted) return null;
-    const row = await this.findBy(this.T.runs, "Run_ID", hinted);
-    if (!row) return null;
-    if (String(f1(row, "Finished_At") ?? "").trim()) return null;
-    if (String(f1(row, "Outcome") ?? "").trim()) return null;
-    return { runId: hinted, recordId: row.record_id, started: f1(row, "Started_At") || "" };
-  }
-
-  // 认领进入 working 后立刻开一行。没有 Status 列，用 Started_At 且尚无 Finished_At 表示 running。
-  async openRun(task, started) {
-    const taskId = f1(task, "Task_ID");
-    const open = await this.unfinishedRun(task);
-    if (open) {
-      this._openRunIds.set(taskId, open.runId);
-      return open.runId;
-    }
-    const runs = await this.runsOf(taskId);
-    const runId = `${taskId}-R${this.nextSuffix(runs.map((r) => f1(r, "Run_ID")), /-R(\d+)$/)}`;
-    await this.bus.createRecord(this.T.runs, {
-      Run_ID: runId, Task_Ref: taskId, Node: this.cfg.node,
-      Worker: f1(task, "Worker_Hint") || "daemon",
-      Started_At: started, Error_Log: "",
-    });
-    const ok = await this.updateTaskState(task, { Latest_Run: runId }, ["working"], true);
-    if (!ok) throw new Error("认领已丢失，Run 行已开但未写入 Latest_Run");
-    if (task.fields) task.fields.Latest_Run = runId;
-    this._openRunIds.set(taskId, runId);
-    return runId;
   }
 
   // ---------- 执行：命令模板两种模式 ----------
@@ -789,8 +712,6 @@ export class Kernel {
 
   interpretCommandResult(mode, p) {
     if (p.code !== 0) {
-      // 非零退出不是完成回执。预约即使写在输出里也不收，只留日志。
-      if (laterClausePresent(mode, p.stdout)) log("later 在 failed 上忽略");
       const label = mode === "json" ? "command" : "agent";
       throw new Error(`${label} exit ${p.code}: ${(p.stderr || p.stdout || "").slice(0, 500)}`);
     }
@@ -1083,10 +1004,9 @@ export class Kernel {
             const claimedTime = item.claimed_at ? (typeof item.claimed_at === "number" ? item.claimed_at : Date.parse(item.claimed_at)) : Date.now();
             const elapsedSec = (Date.now() - claimedTime) / 1000;
             if (elapsedSec > timeoutSec) {
-              const rid = await this.writeRun(current, "failed", nowStr(), `inbox task timed out over ${timeoutSec}s`);
               await this.writeMessage(current, "notice", "本尊超时未处理");
               const ok = await this.updateTaskState(current, {
-                Status: "failed", Latest_Run: rid, Heartbeat_At: "", Claimed_By: "",
+                Status: "failed", Heartbeat_At: "", Claimed_By: "",
               }, ["working"], true);
               if (ok) this.clearRetry(taskId);
               markInboxStatus(this.cfg.configDir, taskId, "failed", { reason: "timeout" });
@@ -1111,12 +1031,10 @@ export class Kernel {
           const retries = Number(f1(current, "Retry_Count")) || 0;
           const taskId = f1(current, "Task_ID");
           if (retries >= MAX_RETRIES) {
-            const rid = await this.writeRun(current, "failed", nowStr(),
-              `heartbeat stale over ${STALE_MIN}min; retry count ${retries} reached limit ${MAX_RETRIES}`);
             await this.writeMessage(current, "notice",
               `心跳超过 ${STALE_MIN} 分钟无更新，且 Retry_Count=${retries} 已达上限 ${MAX_RETRIES}，任务终止，不再回到 submitted。`);
             const ok = await this.updateTaskState(current, {
-              Status: "failed", Latest_Run: rid, Heartbeat_At: "", Claimed_By: "",
+              Status: "failed", Heartbeat_At: "", Claimed_By: "",
             }, ["working"], true);
             if (ok) {
               this.clearRetry(taskId);
@@ -1245,7 +1163,7 @@ export class Kernel {
     const started = nowStr();
     let openRunId = "";
     try {
-      openRunId = await this.openRun(task, started);
+      openRunId = this.nextRunId(task, await this.listMessages(taskId));
       const params = await this.getParams(task);
       if (extraAnswers) params._answers = extraAnswers;
 
@@ -1307,10 +1225,9 @@ export class Kernel {
       }
       if (!(await this.taskForWrite(task, ["working"], true))) return;
       if (e instanceof NeedInput) {
-        const rid = await this.writeRun(task, "paused", started, "input-required: " + String(e.message).slice(0, 400));
         const mid = await this.writeMessage(task, "question", String(e.message));
         if (!(await this.updateTaskState(task, {
-          Status: "input-required", Latest_Run: rid, Status_Msg: mid, Heartbeat_At: "",
+          Status: "input-required", Status_Msg: mid, Heartbeat_At: "",
         }, ["working"], true))) return;
         await this.applyUsage(task, e.usage ?? null);
         this.clearRetry(taskId);
@@ -1321,10 +1238,9 @@ export class Kernel {
           e = new Error("动态审批缺少稳定 runId");
         } else {
           try {
-            const rid = await this.writeRun(task, "paused", started, "auth-required: " + String(e.message).slice(0, 400));
             const mid = await this.writeDynamicAuthRequest(task, String(e.message), scope);
             if (!(await this.updateTaskState(task, {
-              Status: "auth-required", Latest_Run: rid, Status_Msg: mid, Heartbeat_At: "",
+              Status: "auth-required", Status_Msg: mid, Heartbeat_At: "",
             }, ["working"], true))) return;
             await this.applyUsage(task, e.usage ?? null);
             this.clearRetry(taskId);
@@ -1337,13 +1253,12 @@ export class Kernel {
       }
       if (!(e instanceof NeedInput) && !(e instanceof NeedAuth)) {
         const retries = Number(f1(task, "Retry_Count")) || 0;
-        const rid = await this.writeRun(task, "failed", started, String(e.message ?? e).slice(0, 800));
         if (retries < MAX_RETRIES) {
           const next = retries + 1;
           // 先写水位再回到 submitted，避免下一轮扫表在文件落地前把任务认领走。
           const until = this.armRetry(taskId, next);
           if (!(await this.updateTaskState(task, {
-            Status: "submitted", Latest_Run: rid, Claimed_By: "", Heartbeat_At: "",
+            Status: "submitted", Claimed_By: "", Heartbeat_At: "",
             Retry_Count: next,
           }, ["working"], true))) return;
           await this.applyUsage(task, null);
@@ -1351,7 +1266,7 @@ export class Kernel {
         } else {
           await this.writeMessage(task, "notice", "执行失败且已达重试上限：" + String(e.message ?? e).slice(0, 500));
           if (!(await this.updateTaskState(task, {
-            Status: "failed", Latest_Run: rid, Heartbeat_At: "",
+            Status: "failed", Heartbeat_At: "",
           }, ["working"], true))) return;
           await this.applyUsage(task, null);
           this.dropSession(taskId);
@@ -1420,10 +1335,8 @@ export class Kernel {
     }
     const hop = Number(f1(task, "Hop_Count")) || 0;
     if (hop > HOP_LIMIT) {
-      const rid = await this.writeRun(task, "failed", nowStr(),
-        `hop count ${hop} exceeds limit ${HOP_LIMIT} (circuit breaker)`);
       await this.writeMessage(task, "notice", `熔断：Hop_Count=${hop} 超过上限 ${HOP_LIMIT}，任务终止。`);
-      if (!(await this.updateTaskState(task, { Status: "failed", Latest_Run: rid }, gate))) return false;
+      if (!(await this.updateTaskState(task, { Status: "failed" }, gate))) return false;
       this.clearRetry(taskId);
       log("circuit-broken " + taskId);
       return false;
@@ -1542,10 +1455,9 @@ export class Kernel {
     this.dropSession(taskId);
     if (ownedWorking) {
       const current = fresh;
-      const rid = await this.writeRun(current, "failed", nowStr(), "审批续跑前复核未通过");
       await this.writeMessage(current, "notice", "续跑前复核未通过：审批决定不再是批准，或任务已被撤单。已停止执行。");
       const ok = await this.updateTaskState(current, {
-        Status: "failed", Latest_Run: rid, Heartbeat_At: "",
+        Status: "failed", Heartbeat_At: "",
       }, ["working"], true);
       if (ok) this.clearRetry(taskId);
       log(`auth resume aborted ${taskId}`);
@@ -1760,14 +1672,6 @@ export class Kernel {
       log("能力名片未登记，本轮不派发任务");
       return;
     }
-    // 先建本轮到期的 submitted，下面的 listRecords 才能在同一轮认领。
-    if (this.localSchedule) {
-      try {
-        await this.localSchedule.tick();
-      } catch (e) {
-        log("local schedule tick error: " + (e?.message ?? e));
-      }
-    }
     const caps = await this.myCapabilities();
     const tasks = await this.bus.listRecords(this.T.tasks);
     for (const t of tasks) {
@@ -1793,13 +1697,6 @@ export class Kernel {
     if (flight && (flight.localExited || (flight.exitPath && fs.existsSync(flight.exitPath)))) {
       await this.pokeFlight(flight);
     }
-    if (this.localSchedule) {
-      try {
-        await this.localSchedule.observe(tasks);
-      } catch (e) {
-        log("schedule mirror error: " + (e?.message ?? e));
-      }
-    }
     if (this.cfg.role !== "hub" && this.present) {
       try {
         await this.present.scan();
@@ -1814,7 +1711,6 @@ export class Kernel {
 
   requestStop() {
     this._stopping = true;
-    this.stopMinuteTimer();
     this._wakeFlag = true;
     this.waker?.stop();
     const waiter = this._directFlight?.waiter;
@@ -1875,80 +1771,21 @@ export class Kernel {
       await this.markOffline();
       return;
     }
-    // once 对账不挂分钟定时器，避免一次运行把进程留住。
-    this.startMinuteTimer();
-    try {
-      this.startEventReceiver();
-      for (;;) {
-        // 唤醒标志在扫表前消费：本次扫表会看到最新状态，扫表之后
-        // 再到的事件由 waitWake 立刻响应，不会被误清。
-        if (this._stopping) break;
-        this._wakeFlag = false;
-        try {
-          await this.sweepOnce();
-        } catch (e) {
-          log("poll error: " + e.message);
-        }
-        if (this._stopping) break;
-        await this.waitWake();
+    this.startEventReceiver();
+    for (;;) {
+      // 唤醒标志在扫表前消费：本次扫表会看到最新状态，扫表之后
+      // 再到的事件由 waitWake 立刻响应，不会被误清。
+      if (this._stopping) break;
+      this._wakeFlag = false;
+      try {
+        await this.sweepOnce();
+      } catch (e) {
+        log("poll error: " + e.message);
       }
-    } finally {
-      this.stopMinuteTimer();
+      if (this._stopping) break;
+      await this.waitWake();
     }
     await this.markOffline();
-  }
-
-  startMinuteTimer() {
-    if (this._minuteTimerOn || this._stopping) return;
-    this._minuteTimerOn = true;
-    this._armMinuteTimer();
-  }
-
-  stopMinuteTimer() {
-    this._minuteTimerOn = false;
-    if (this._minuteTimer) {
-      clearTimeout(this._minuteTimer);
-      this._minuteTimer = null;
-    }
-  }
-
-  _armMinuteTimer() {
-    if (!this._minuteTimerOn || this._stopping) return;
-    let delay = typeof this._minuteDelayMs === "function"
-      ? Number(this._minuteDelayMs())
-      : msUntilNextMinute(Date.now());
-    if (!Number.isFinite(delay) || delay < 1) delay = msUntilNextMinute(Date.now());
-    this._minuteTimer = setTimeout(() => {
-      this._minuteTimer = null;
-      try {
-        if (this._stopping || !this._minuteTimerOn) return;
-        // 没到期就不扫表。空转叫醒会把 Tasks 和 hub 的整表扫描放大到每分钟一次。
-        this._onMinute();
-      } catch (e) {
-        log("minute timer failed: " + (e?.message ?? e));
-      }
-      try {
-        if (!this._stopping && this._minuteTimerOn) this._armMinuteTimer();
-      } catch (e) {
-        log("minute timer rearm failed: " + (e?.message ?? e));
-      }
-    }, delay);
-    // 不靠这个定时器撑住事件循环。waitWake 自己有睡眠；停的时候再清掉，避免退出后还响。
-    this._minuteTimer.unref?.();
-  }
-
-  // 定时器回调本体。只做本地到期判断，真有事才抬唤醒标志。
-  _onMinute() {
-    let due = false;
-    try {
-      const raw = typeof this._scheduleNowMs === "function" ? Number(this._scheduleNowMs()) : Date.now();
-      const nowMs = Number.isFinite(raw) ? raw : Date.now();
-      due = this.localSchedule?.hasDue?.(nowMs) === true;
-    } catch (e) {
-      log("minute timer failed: " + (e?.message ?? e));
-      return;
-    }
-    if (due) this.pulseWake();
   }
 }
 

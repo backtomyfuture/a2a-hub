@@ -1,4 +1,4 @@
-// 定时任务只读列表，以及 HTTP Agent 自报计划（中台不触发）。
+// 定时任务只读总览、AgentCard.Metadata.schedules 声明与一步写 Task（中台不触发 cron）。
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -9,7 +9,6 @@ import { DEFAULT_TABLES, f1 } from "../src/bus/tables.mjs";
 import { listSchedules } from "../src/hub/capabilities.mjs";
 import { startHubHttpServer } from "../src/server/http-server.mjs";
 import { LongPollBroker } from "../src/server/longpoll-broker.mjs";
-import { formatOccurrenceKey, latestOccurrence, parseCron } from "../src/schedule-cron.mjs";
 import { withTemp } from "./helpers.mjs";
 
 async function apiJson(baseUrl, pathname, { method = "GET", token = "", body } = {}) {
@@ -59,46 +58,73 @@ async function withHub(fn) {
   });
 }
 
-test("列表异常：离线优先，其次最近任务失败，再其次超过 10 分钟未触发", () => {
+test("列表异常与 interval_min * 1.5：离线优先，其次最近任务失败，再其次超时漏触发", () => {
   const now = new Date("2026-11-18T04:30:00.000Z");
-  const tz = "Asia/Shanghai";
-  const due = latestOccurrence(parseCron("0 * * * *"), new Date(now.getTime() - 10 * 60 * 1000), tz);
-  const dueKey = formatOccurrenceKey(due, tz);
-  const rules = [
+  const cards = [
     {
       fields: {
-        Rule_ID: "bot:hourly",
-        Target_Node: "bot",
-        Skill_ID: "agent",
-        Schedule: "0 * * * *",
-        Text: "巡检",
-        Enabled: "Yes",
-        Last_Fired: "",
-        Note: "http-agent 自报；tz=Asia/Shanghai",
+        Node: "bot",
+        Cap_ID: "CAP-bot-agent",
+        Availability: "online",
+        Metadata: JSON.stringify({
+          schedules: [
+            {
+              id: "hourly",
+              cron: "0 * * * *",
+              tz: "Asia/Shanghai",
+              cap: "agent",
+              text: "超时未巡检",
+              enabled: true,
+              last_fired: "2026-11-18T02:00:00.000Z",
+              source: "http-agent",
+              updated_at: "2026-11-18T01:00:00.000Z",
+            },
+            {
+              id: "recent",
+              cron: "0 * * * *",
+              tz: "Asia/Shanghai",
+              cap: "agent",
+              text: "正常刚跑过",
+              enabled: true,
+              last_fired: "2026-11-18T03:30:00.000Z",
+              source: "http-agent",
+              updated_at: "2026-11-18T01:00:00.000Z",
+            },
+            {
+              id: "bad",
+              cron: "0 * * * *",
+              tz: "Asia/Shanghai",
+              cap: "agent",
+              text: "失败的一轮",
+              enabled: true,
+              last_fired: "2026-11-18T04:00:00.000Z",
+              source: "http-agent",
+              updated_at: "2026-11-18T01:00:00.000Z",
+            },
+          ],
+        }),
       },
     },
     {
       fields: {
-        Rule_ID: "bot:bad",
-        Target_Node: "bot",
-        Skill_ID: "agent",
-        Schedule: "0 * * * *",
-        Text: "失败的一轮",
-        Enabled: "Yes",
-        Last_Fired: dueKey,
-        Note: "http-agent 自报；tz=Asia/Shanghai",
-      },
-    },
-    {
-      fields: {
-        Rule_ID: "desk:night",
-        Target_Node: "desk",
-        Skill_ID: "brief",
-        Schedule: "0 9 * * *",
-        Text: "早报",
-        Enabled: "Yes",
-        Last_Fired: dueKey,
-        Note: "尚未运行；同步于 2026-11-18T12:00:00+0800",
+        Node: "desk",
+        Cap_ID: "CAP-desk-brief",
+        Availability: "offline",
+        Metadata: JSON.stringify({
+          schedules: [
+            {
+              id: "night",
+              cron: "0 9 * * *",
+              tz: "Asia/Shanghai",
+              cap: "brief",
+              text: "早报",
+              enabled: true,
+              last_fired: "2026-11-18T04:00:00.000Z",
+              source: "node",
+              updated_at: "2026-11-18T01:00:00.000Z",
+            },
+          ],
+        }),
       },
     },
   ];
@@ -106,22 +132,22 @@ test("列表异常：离线优先，其次最近任务失败，再其次超过 1
     {
       fields: {
         Task_ID: "TASK-BAD",
+        Target_Node: "bot",
         Status: "failed",
-        Idempotency_Key: `sched:bot:bad:${dueKey}`,
+        Idempotency_Key: "sched:bot:bad:2026-11-18T04:00:00.000Z",
+        Metadata: JSON.stringify({ schedule_id: "bad" }),
         Updated_At: "2026-11-18T04:00:00.000Z",
       },
     },
   ];
-  const cards = [
-    { fields: { Node: "bot", Availability: "online" } },
-    { fields: { Node: "desk", Availability: "offline" } },
-  ];
-  const listed = listSchedules({ rules, tasks, cards, connected: [], now, hubNode: "mac-mini-hub" });
+  const listed = listSchedules({ tasks, cards, connected: [], now, hubNode: "mac-mini-hub" });
   const byId = Object.fromEntries(listed.map((item) => [item.schedule_id, item]));
   assert.equal(byId.hourly.anomaly, "missed");
   assert.equal(byId.hourly.source, "http-agent");
   assert.equal(byId.hourly.tz, "Asia/Shanghai");
+  assert.equal(byId.hourly.interval_min, 60);
   assert.ok(byId.hourly.next_fire_at);
+  assert.equal(byId.recent.anomaly, "");
   assert.equal(byId.bad.anomaly, "failed");
   assert.equal(byId.bad.last_task.task_id, "TASK-BAD");
   assert.equal(byId.bad.last_task.status, "failed");
@@ -130,7 +156,7 @@ test("列表异常：离线优先，其次最近任务失败，再其次超过 1
   assert.equal(byId.night.source, "node");
 });
 
-test("机主只读列表；Agent 只能写自己的计划，不能看总表", async () => {
+test("机主只读总览；Agent 自报进 AgentCard，run 一步生成 Task，register 可带或保留 schedules", async () => {
   await withHub(async ({ baseUrl, apiToken, bus }) => {
     const added = await apiJson(baseUrl, "/api/v1/admin/agents", {
       method: "POST",
@@ -155,10 +181,8 @@ test("机主只读列表；Agent 只能写自己的计划，不能看总表", as
     });
     assert.equal(put.status, 200);
     assert.equal(put.data.rule_id, "grok-bot:daily");
-    const ruleRow = (await bus.listRecords(DEFAULT_TABLES.rules)).find((row) => f1(row, "Rule_ID") === "grok-bot:daily");
-    await bus.updateRecord(DEFAULT_TABLES.rules, ruleRow.record_id, {
-      Last_Fired: formatOccurrenceKey(new Date(), "Asia/Shanghai"),
-    });
+    assert.equal(put.data.schedule_id, "daily");
+    assert.equal(put.data.task_id, undefined);
 
     const other = await apiJson(baseUrl, "/api/v1/agents/other-bot/schedules/daily", {
       method: "PUT",
@@ -174,17 +198,54 @@ test("机主只读列表；Agent 只能写自己的计划，不能看总表", as
     });
     assert.equal(badCron.status, 400);
 
-    const leader = await apiJson(baseUrl, "/api/v1/admin/tokens/muse/rotate", {
+    // 附带 run 时，一步落 Task 并关联 last_task
+    const putWithRun = await apiJson(baseUrl, "/api/v1/agents/grok-bot/schedules/daily", {
+      method: "PUT",
+      token: workerToken,
+      body: {
+        cron: "0 9 * * *",
+        tz: "Asia/Shanghai",
+        cap: "agent",
+        text: "早报",
+        enabled: true,
+        run: { status: "completed", text: "今天早报已完成", title: "每日早报 11-21" },
+      },
+    });
+    assert.equal(putWithRun.status, 200);
+    assert.match(putWithRun.data.task_id, /^TASK-/);
+    assert.equal(putWithRun.data.status, "completed");
+
+    const tasks = await bus.listRecords(DEFAULT_TABLES.tasks);
+    const createdTask = tasks.find((row) => f1(row, "Task_ID") === putWithRun.data.task_id);
+    assert.ok(createdTask);
+    assert.equal(f1(createdTask, "Source"), "cron");
+    assert.equal(f1(createdTask, "Status"), "completed");
+    assert.equal(JSON.parse(f1(createdTask, "Metadata")).schedule_id, "daily");
+
+    // Leader 通过 /agents/register 带上 schedules，再空着重新注册应保留
+    const leaderAdded = await apiJson(baseUrl, "/api/v1/admin/agents", {
       method: "POST",
       token: apiToken,
-      body: { role: "leader" },
+      body: { node: "muse", access: "http", role: "leader" },
     });
-    const leaderPut = await apiJson(baseUrl, "/api/v1/agents/muse/schedules/watch", {
-      method: "PUT",
-      token: leader.data.token,
-      body: { cron: "*/15 * * * *", cap: "agent", text: "看更新", enabled: false },
+    assert.equal(leaderAdded.status, 200);
+    const leaderToken = leaderAdded.data.token;
+    const regSched = await apiJson(baseUrl, "/api/v1/agents/register", {
+      method: "POST",
+      token: leaderToken,
+      body: {
+        node: "muse",
+        role: "leader",
+        schedules: [{ id: "watch", cron: "*/15 * * * *", cap: "agent", text: "看更新", enabled: false }],
+      },
     });
-    assert.equal(leaderPut.status, 200);
+    assert.equal(regSched.status, 200);
+    const regKeep = await apiJson(baseUrl, "/api/v1/agents/register", {
+      method: "POST",
+      token: leaderToken,
+      body: { node: "muse", role: "leader" },
+    });
+    assert.equal(regKeep.status, 200);
 
     const listed = await apiJson(baseUrl, "/api/v1/schedules", { token: apiToken });
     assert.equal(listed.status, 200);
@@ -193,14 +254,20 @@ test("机主只读列表；Agent 只能写自己的计划，不能看总表", as
     assert.equal(daily.source, "http-agent");
     assert.equal(daily.cron, "0 9 * * *");
     assert.equal(daily.tz, "Asia/Shanghai");
+    assert.equal(daily.interval_min, 1440);
     assert.equal(daily.cap, "agent");
     assert.equal(daily.text, "早报");
     assert.equal(daily.enabled, true);
     assert.equal(daily.node, "grok-bot");
     assert.equal(daily.anomaly, "");
+    assert.equal(daily.last_task?.task_id, putWithRun.data.task_id);
+    assert.equal(daily.last_task?.status, "completed");
     assert.ok(daily.next_fire_at);
+
     const watch = listed.data.schedules.find((item) => item.schedule_id === "watch");
+    assert.ok(watch);
     assert.equal(watch.enabled, false);
+    assert.equal(watch.interval_min, 15);
     assert.equal(watch.source, "http-agent");
 
     const removed = await apiJson(baseUrl, "/api/v1/agents/grok-bot/schedules/daily", {

@@ -51,7 +51,7 @@ text{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Noto Sans CJK S
 <rect class="item" x="36" y="184" width="142" height="36" rx="8"/>
 <text x="107" y="207" class="r" text-anchor="middle">Web 控制台 / HTTP</text>
 <rect class="item" x="36" y="230" width="142" height="36" rx="8"/>
-<text x="107" y="253" class="r" text-anchor="middle">本机定时计划 / Loop</text>
+<text x="107" y="253" class="r" text-anchor="middle">定时自报 · 扇出协作</text>
 <rect class="more" x="36" y="282" width="142" height="32" rx="8"/>
 <circle class="dot" cx="95" cy="298" r="2.4"/>
 <circle class="dot" cx="107" cy="298" r="2.4"/>
@@ -79,23 +79,23 @@ text{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Noto Sans CJK S
 
 <rect class="chip" x="264" y="224" width="388" height="38" rx="9"/>
 <rect class="tag" x="272" y="230" width="128" height="26" rx="6"/>
-<text x="336" y="247.5" class="tn" text-anchor="middle">Messages · Parts</text>
-<text x="412" y="247.5" class="td">指令与数据分离，内容块只追加、防注入</text>
+<text x="336" y="247.5" class="tn" text-anchor="middle">Messages</text>
+<text x="412" y="247.5" class="td">对话与回执只追加，Ref_Task_IDs 表达派生关联</text>
 
 <rect class="chip" x="264" y="270" width="388" height="38" rx="9"/>
 <rect class="tag" x="272" y="276" width="128" height="26" rx="6"/>
-<text x="336" y="293.5" class="tn" text-anchor="middle">Runs · Artifacts</text>
-<text x="412" y="293.5" class="td">每次执行的台账与产物指针，大成果不塞回执</text>
+<text x="336" y="293.5" class="tn" text-anchor="middle">Parts</text>
+<text x="412" y="293.5" class="td">text / file / data 内容块，指令与数据严格分离</text>
 
 <rect class="chip" x="264" y="316" width="388" height="38" rx="9"/>
 <rect class="tag" x="272" y="322" width="128" height="26" rx="6"/>
-<text x="336" y="339.5" class="tn" text-anchor="middle">AgentCards</text>
-<text x="412" y="339.5" class="td">三层能力名片：谁在线、会干什么、哪种接入模式</text>
+<text x="336" y="339.5" class="tn" text-anchor="middle">Artifacts</text>
+<text x="412" y="339.5" class="td">交付产物与指针登记，大成果不塞回执正文</text>
 
 <rect class="chip" x="264" y="362" width="388" height="38" rx="9"/>
 <rect class="tag" x="272" y="368" width="128" height="26" rx="6"/>
-<text x="336" y="385.5" class="tn" text-anchor="middle">Rules</text>
-<text x="412" y="385.5" class="td">本机计划只读观察镜像与路由策略</text>
+<text x="336" y="385.5" class="tn" text-anchor="middle">AgentCards</text>
+<text x="412" y="385.5" class="td">三层能力名片 · 定时计划 Metadata.schedules</text>
 
 <!-- 2 & 3: 认领与回写 -->
 <path class="conn" d="M672 190H712"/>
@@ -143,7 +143,7 @@ text{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Noto Sans CJK S
 
 <rect class="plug" x="246" y="464" width="692" height="104" rx="14"/>
 <text x="266" y="492" class="h2">hub（枢纽 · 单进程超集）</text>
-<text x="444" y="492" class="s">Web 控制台签名审批、呈递、回收、SOP Loop 与可选提醒</text>
+<text x="444" y="492" class="s">Web 控制台签名审批、呈递、回收、定时看板与可选提醒</text>
 <rect class="item" x="266" y="510" width="158" height="36" rx="8"/>
 <text x="345" y="533" class="r" text-anchor="middle">ed25519 签名审批</text>
 <rect class="item" x="434" y="510" width="158" height="36" rx="8"/>
@@ -151,7 +151,7 @@ text{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Noto Sans CJK S
 <rect class="item" x="602" y="510" width="158" height="36" rx="8"/>
 <text x="681" y="533" class="r" text-anchor="middle">陈旧任务回收</text>
 <rect class="item" x="770" y="510" width="158" height="36" rx="8"/>
-<text x="849" y="533" class="r" text-anchor="middle">Loop · 预约复查</text>
+<text x="849" y="533" class="r" text-anchor="middle">定时总览 · 外部提醒</text>
 
 <text x="480" y="606" class="s" text-anchor="middle">宿主节点、独立 Agent 与云端 Agent 均只出站连接；总线在，活就不丢。</text>
 </svg>

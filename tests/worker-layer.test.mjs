@@ -130,8 +130,8 @@ test("名片登记带 Worker 列，Skill_ID 是技能名而不是能力键", asy
   });
 });
 
-// 红线：指定的 Worker 执行，Runs.Worker 记实际执行者。
-test("指定 Worker 的任务由该 Worker 执行，Runs.Worker 如实记录", async () => {
+// 红线：指定的 Worker 执行。
+test("指定 Worker 的任务由该 Worker 执行", async () => {
   await withTemp(async (dir) => {
     const { mock, kernel } = setup(dir, layered());
     await seedTask(mock, { Task_ID: "TASK-W-1", Skill_ID: "review", Worker_Hint: "alpha" });
@@ -139,8 +139,6 @@ test("指定 Worker 的任务由该 Worker 执行，Runs.Worker 如实记录", a
     const task = await taskOf(mock, "TASK-W-1");
     assert.equal(f1(task, "Status"), "completed");
     assert.equal(f1(task, "Worker_Hint"), "alpha");
-    const run = (await mock.listRecords(TABLES.runs)).find((r) => f1(r, "Task_Ref") === "TASK-W-1");
-    assert.equal(f1(run, "Worker"), "alpha");
   });
 });
 
@@ -156,7 +154,7 @@ test("未指定 Worker 时取默认并回填 Worker_Hint", async () => {
   });
 });
 
-// 红线：节点本尊直接执行的能力不回填 Worker，Runs.Worker 记 daemon。
+// 红线：节点本尊直接执行的能力不回填 Worker。
 test("节点本尊的能力不回填 Worker_Hint", async () => {
   await withTemp(async (dir) => {
     const { mock, kernel } = setup(dir, layered());
@@ -165,8 +163,6 @@ test("节点本尊的能力不回填 Worker_Hint", async () => {
     const task = await taskOf(mock, "TASK-W-3");
     assert.equal(f1(task, "Status"), "completed");
     assert.equal(f1(task, "Worker_Hint"), "");
-    const run = (await mock.listRecords(TABLES.runs)).find((r) => f1(r, "Task_Ref") === "TASK-W-3");
-    assert.equal(f1(run, "Worker"), "daemon");
   });
 });
 
@@ -180,7 +176,6 @@ test("指定了本机没有的 Worker × Skill 直接 rejected，不执行", asy
     for (const id of ["TASK-W-4", "TASK-W-5"]) {
       assert.equal(f1(await taskOf(mock, id), "Status"), "rejected");
     }
-    assert.equal((await mock.listRecords(TABLES.runs)).length, 0);
     const notices = await mock.findRecords(TABLES.messages, "Kind", "notice");
     assert.equal(notices.length, 2);
   });
@@ -193,7 +188,6 @@ test("Worker 的审批下限对它的专长技能生效", async () => {
     await seedTask(mock, { Task_ID: "TASK-W-6", Skill_ID: "review", Worker_Hint: "beta" });
     await kernel.run({ once: true });
     assert.equal(f1(await taskOf(mock, "TASK-W-6"), "Status"), "auth-required");
-    assert.equal((await mock.listRecords(TABLES.runs)).length, 0);
   });
 });
 

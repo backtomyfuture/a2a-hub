@@ -17,7 +17,7 @@
 flowchart TB
     OP["操作者 / Web 控制台"] --> HUB["hub 角色（逻辑角色 · Mac mini 常驻 :8787）<br/>意图理解 · 拆解 · 路由 · 审批签名 · 结果呈递"]
     HUB -->|"建单：先写 instruction 消息＋Parts<br/>最后写 Tasks 行（任务行＝触发信号）"| BUS
-    BUS["SQLite WAL 总线 + HTTP API (LongPollBroker + agent-gateway)<br/>Tasks · Messages · Parts · Runs · Artifacts · AgentCards · Rules"]
+    BUS["SQLite WAL 总线 + HTTP API (LongPollBroker + agent-gateway)<br/>Tasks · Messages · Parts · Artifacts · AgentCards"]
     BUS <-->|"GET /api/v1/poll 长轮询（毫秒级唤醒）<br/>＋低频对账扫表兜底"| N1
     BUS <-->|"同上（agent_inbox.jsonl）"| N2
     BUS <-->|"GET /api/v1/agents/{node}/poll & /updates<br/>POST /api/v1/tasks/{id}/claim|complete|..."| N3
@@ -37,8 +37,7 @@ flowchart TB
    失败重试与跳数熔断；纯 HTTP 外部 Agent 经由 Hub 提供的 `agent-gateway` 网关
    （`/claim`、`/heartbeat`、`/ask`、`/auth`、`/complete`、`/fail`）获得一致的
    幂等校验与状态守卫。
-3. **三层分离。** 沟通归 Messages（只追加）、状态与成果归 Tasks /
-   Artifacts、执行细节归 Runs（纯台账）。
+3. **职责边界清晰（纯 5 表 A2A 模型）**：沟通与回执归 `Messages` / `Parts`（只追加）、状态与成果归 `Tasks` / `Artifacts`、能力与定时自报声明归 `AgentCards`；在途进程仅保存在执行节点本机 `runs/<Task_ID>/entry.json` 账本，不再维护独立的线上 `Runs` 或 `Rules` 表。
 4. **能力按「可达资产」定义，不按所装软件。** 能力注册表
    （AgentCards）每个 Worker 一张名片，专长技能另起一行，本尊脚本技能
    单列。路由只查表；节点只接自己登记且可派发的能力，表外任务明确拒收
@@ -91,17 +90,16 @@ flowchart TB
 1. 调用方（CLI / Web 控制台 / Muse 等 Leader Agent）建单时先写 instruction 消息与
    Parts（参数在 DataPart），**最后写 Tasks 行**（`submitted`）。如果需要同时调度多个节点并行协同，可传 `to: ["node-a", "node-b"]` 批量扇出，共享同一个 `Context_ID`。
 2. 目标节点被长轮询（或短轮询对账）唤醒，校验能力与幂等键，置 `working`、写
-   `Claimed_By` 与心跳，Runs 开行。
-3. 需要补信息：写 question 消息 → 置 `input-required`，执行段以
-   `Outcome=paused` 关行；控制台或发起方呈递后，答复以 `answer` 消息
+   `Claimed_By` 与心跳。
+3. 需要补信息：写 question 消息 → 置 `input-required`；控制台或发起方呈递后，答复以 `answer` 消息
    追加在**原任务**上，目标续跑——禁止为答复新开任务。
 4. 需要批准：写 `auth_request` → 置 `auth-required`；机主在 Web 控制台或审批 API 操作后，hub 角色用私钥签名并写 `auth_decision`（DataPart 载决定）。认领前
    （`Claimed_By` 为空）的批准回置 `submitted`，节点再认领执行；执行中
    （`working → auth-required`，`Claimed_By` 非空）的批准保持 `auth-required`，
    由原节点或外部 Agent 验签后切回 `working` 从断点续跑；驳回则 `canceled` / `rejected`。
 5. 交付：若配了 `verify` 则先执行 L1 验收，产物登记 Artifacts（内容为其 FilePart）→ 写 result 消息（Seq 2 写入验收摘要 DataPart）→
-   置 `completed`，Runs 以 `succeeded` 关行。
-6. 失败：Runs 以 `failed` 关行并记 Error_Log；未达重试上限（2）回
+   置 `completed`。
+6. 失败：未达重试上限（2）回
    `submitted` 重认领，达上限置 `failed` 并写 `notice`（`verify` 未通过不回 `submitted`，直接 `failed`）。
 7. **Leader 扇出与 `Context_ID` 多轮记忆续接**：当已有任务进入终态，Leader（或发起方）在**同一 `Context_ID`** 下向同一 Worker 发起后续任务（`Ref_Task_IDs` 指回前任）时，宿主机守护进程自动读取本地 `sessions/<Context_ID>.json` 复用上一轮 CLI `Session_ID`（走 `resume_command`）并向 `runs/<Task_ID>/input.json` 注入 `context_history`，无需复杂静态 DAG 状态机即可实现多轮连续编排。全链路受 `Hop_Count > 8` 熔断保护。
 

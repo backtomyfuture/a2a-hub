@@ -293,10 +293,6 @@ test("verify 非 0 → failed，notice 首行「验收未通过」、含输出�
       assert.equal(Number(f1(task, "Retry_Count")), 0);
       assert.equal(fs.readFileSync(countPath, "utf8"), "1");
 
-      const run = (await mock.findRecords(TABLES.runs, "Task_Ref", "TASK-V-FAIL"))[0];
-      assert.equal(f1(run, "Outcome"), "failed");
-      assert.match(f1(run, "Error_Log"), /^验收未通过：verify fail 退出码 2/);
-
       const art = (await mock.findRecords(TABLES.artifacts, "Task_ID", "TASK-V-FAIL"))[0];
       assert.equal(f1(art, "Is_Final"), "No");
 
@@ -349,10 +345,6 @@ test("verify 超时（verify_timeout_sec=1，sleep 5）→ failed 且判 timeout
       const task = await taskOf(mock, "TASK-V-TMO");
       assert.equal(f1(task, "Status"), "failed");
       assert.equal(Number(f1(task, "Retry_Count")), 0);
-
-      const run = (await mock.findRecords(TABLES.runs, "Task_Ref", "TASK-V-TMO"))[0];
-      assert.equal(f1(run, "Outcome"), "failed");
-      assert.match(f1(run, "Error_Log"), /^验收未通过：verify timeout/);
 
       const notice = (await mock.findRecords(TABLES.messages, "Task_ID", "TASK-V-TMO"))
         .find((m) => f1(m, "Kind") === "notice");

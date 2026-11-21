@@ -274,15 +274,6 @@ export class StaleService {
         Seq: 1, Kind: "text", Text: noticeText, File_URI: "", File_Name: "", Mime_Type: "", Data: "",
       });
     }
-    const runs = await this.bus.listRecords(this.bus.tables.runs);
-    for (const run of runs) {
-      if (String(f1(run, "Task_Ref") ?? "") !== taskId) continue;
-      if (String(f1(run, "Finished_At") ?? "").trim()) continue;
-      await this.bus.updateRecord(this.bus.tables.runs, run.record_id, {
-        Finished_At: nowIso(), Outcome: "failed",
-        Error_Log: runErr,
-      });
-    }
     await this.bus.updateRecord(this.bus.tables.tasks, fresh.record_id, {
       Status: "failed", Status_Msg: msgId, Claimed_By: "", Heartbeat_At: "",
     });

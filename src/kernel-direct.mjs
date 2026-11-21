@@ -242,20 +242,19 @@ export const directMethods = {
       return;
     }
     const retries = Number(f1(current, "Retry_Count")) || 0;
-    const rid = await this.writeRun(current, "failed", flight.started || nowStr(), String(err?.message ?? err).slice(0, 800));
     let ok = false;
     if (retries < MAX_RETRIES) {
       const next = retries + 1;
       const until = this.armRetry(taskId, next);
       ok = await this.updateTaskState(current, {
-        Status: "submitted", Latest_Run: rid, Claimed_By: "", Heartbeat_At: "",
+        Status: "submitted", Claimed_By: "", Heartbeat_At: "",
         Retry_Count: next,
       }, ["working"], true);
       if (ok) log(`failed, will retry ${taskId} after ${new Date(until).toISOString()}: ${String(err?.message ?? err).slice(0, 200)}`);
     } else {
       await this.writeMessage(current, "notice", "执行失败且已达重试上限：" + String(err?.message ?? err).slice(0, 500));
       ok = await this.updateTaskState(current, {
-        Status: "failed", Latest_Run: rid, Heartbeat_At: "",
+        Status: "failed", Heartbeat_At: "",
       }, ["working"], true);
       if (ok) {
         this.clearRetry(taskId);
@@ -280,10 +279,9 @@ export const directMethods = {
       return;
     }
     const message = "无法确认在途进程组是否已结束。为避免副作用被执行第二次，任务终止且不回到 submitted。";
-    const rid = await this.writeRun(current, "failed", flight.started || nowStr(), message);
     await this.writeMessage(current, "notice", message);
     const ok = await this.updateTaskState(current, {
-      Status: "failed", Latest_Run: rid, Heartbeat_At: "",
+      Status: "failed", Heartbeat_At: "",
     }, ["working"], true);
     if (ok) {
       this.clearRetry(taskId);
@@ -529,10 +527,9 @@ export const directMethods = {
       }
       if (e instanceof NeedInput) {
         this.persistSession(taskId, e.session, f1(current, "Context_ID"));
-        const rid = await this.writeRun(current, "paused", flight.started, "input-required: " + String(e.message).slice(0, 400));
         const mid = await this.writeMessage(current, "question", String(e.message));
         const ok = await this.updateTaskState(current, {
-          Status: "input-required", Latest_Run: rid, Status_Msg: mid, Heartbeat_At: "",
+          Status: "input-required", Status_Msg: mid, Heartbeat_At: "",
         }, ["working"], true);
         if (ok) {
           await this.applyUsage(current, e.usage ?? null);
@@ -546,16 +543,15 @@ export const directMethods = {
       }
       if (e instanceof NeedAuth) {
         this.persistSession(taskId, e.session, f1(current, "Context_ID"));
-        // token 用账本里的 runId。writeRun 在已 paused 时会新建下一行，拿它的返回值会发出第二张卡。
+        // token 用账本里的 runId。确保同一任务多条动态请求使用不同的 scope。
         if (!String(flight.runId ?? "").trim()) {
           await this.failExecution(current, flight, new Error("动态审批缺少稳定 runId"));
           return;
         }
         try {
-          const rid = await this.writeRun(current, "paused", flight.started, "auth-required: " + String(e.message).slice(0, 400));
           const mid = await this.writeDynamicAuthRequest(current, String(e.message), flight.runId);
           const ok = await this.updateTaskState(current, {
-            Status: "auth-required", Latest_Run: rid, Status_Msg: mid, Heartbeat_At: "",
+            Status: "auth-required", Status_Msg: mid, Heartbeat_At: "",
           }, ["working"], true);
           if (ok) {
             await this.applyUsage(current, e.usage ?? null);
@@ -862,7 +858,7 @@ export const directMethods = {
     const startedMs = Date.now();
     let runId = "";
     try {
-      runId = await this.openRun(task, started);
+      runId = this.nextRunId(task, await this.listMessages(taskId));
       await this.launchDirect(task, extraAnswers, started, startedMs, runId, resume);
     } catch (e) {
       if (this._directFlight?.taskId === taskId) {

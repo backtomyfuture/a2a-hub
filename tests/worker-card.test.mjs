@@ -10,15 +10,12 @@ import { fileURLToPath } from "node:url";
 import { f1 } from "../src/bus/tables.mjs";
 import { capIdOf, capIdsOf, capKey, loadConfig, normalizeCommands, resolveCapKey } from "../src/config.mjs";
 import { createTask } from "../src/hub/create.mjs";
-import { ScheduleService } from "../src/hub/schedule.mjs";
 import { Kernel } from "../src/kernel.mjs";
-import { LocalScheduleService } from "../src/local-schedule.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";
 import { MockBus } from "./mocks/mock-bus.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ECHO = `${JSON.stringify(process.execPath)} ${JSON.stringify(path.join(ROOT, "src", "executors", "echo.mjs"))}`;
-const LATER_NOW = Date.parse("2026-06-15T00:00:00.000Z");
 
 // 两个 json 型 Worker，都用 echo 当启动模板。与 tests/worker-layer.test.mjs 的 layered() 同形。
 function layered() {
@@ -160,94 +157,6 @@ test("不变式：每个 Worker 恰好一张名片，专长技能都能找到同
     const local = cards.find((row) => f1(row, "Skill_ID") === "local");
     assert.ok(local);
     assert.equal(classify(local), "self-skill");
-  });
-});
-
-test("R2：本地计划引用 CAP-<前缀>-<Worker>-agent 能按期建单并由该 Worker 执行", async () => {
-  await withTemp(async (dir) => {
-    const { mock, kernel } = setup(dir, {
-      workers: {
-        alpha: { command: ECHO, mode: "json", timeout_sec: 30 },
-        beta: { command: ECHO, mode: "json", timeout_sec: 30 },
-      },
-    });
-    await kernel.run({ once: true });
-    await admitAll(mock);
-    // 不写内核默认识别的 schedules.json。建单用注入时钟，认领那一轮若再 tick 会按真实时钟多补一张。
-    const schedulesPath = path.join(dir, "plan-r2.json");
-    const statePath = path.join(dir, "plan-r2-state.json");
-    fs.writeFileSync(schedulesPath, JSON.stringify({
-      schedules: [{ id: "p1", enabled: true, cron: "* * * * *", cap: "CAP-test-beta-agent", text: "x" }],
-    }, null, 1), { mode: 0o600 });
-    const now = { value: Date.parse("2026-01-15T01:30:00.000Z") };
-    const logs = [];
-    const svc = new LocalScheduleService({
-      bus: mock,
-      node: "node-a",
-      tz: "Asia/Shanghai",
-      schedulesPath,
-      statePath,
-      now: () => now.value,
-      log: (line) => logs.push(String(line)),
-      createTask,
-      commandsOf: () => capIdsOf(kernel.commands, kernel.cfg.capPrefix),
-      notify: () => {},
-    });
-    await svc.tick();
-    assert.equal((await mock.listRecords(TABLES.tasks)).length, 0, logs.join("\n"));
-    now.value += 60_000;
-    await svc.tick();
-    const created = await mock.listRecords(TABLES.tasks);
-    assert.equal(created.length, 1, logs.join("\n"));
-    assert.equal(f1(created[0], "Skill_ID"), "agent");
-    assert.equal(f1(created[0], "Worker_Hint"), "beta");
-    assert.equal(f1(created[0], "Source"), "cron");
-    await kernel.run({ once: true });
-    const task = await taskOf(mock, f1(created[0], "Task_ID"));
-    assert.equal(f1(task, "Claimed_By"), "node-a");
-    const run = (await mock.listRecords(TABLES.runs)).find((row) => f1(row, "Task_Ref") === f1(created[0], "Task_ID"));
-    assert.equal(f1(run, "Worker"), "beta");
-  });
-});
-
-test("R3：Worker 通用任务到期的 LATER 复查单仍建得出来", async () => {
-  await withTemp(async (dir) => {
-    const { mock, kernel } = setup(dir, {
-      workers: {
-        alpha: { command: ECHO, mode: "json", timeout_sec: 30 },
-        beta: { command: ECHO, mode: "json", timeout_sec: 30 },
-      },
-    });
-    await kernel.run({ once: true });
-    await admitAll(mock);
-    await seedTask(mock, {
-      Task_ID: "TASK-R3",
-      Skill_ID: "agent",
-      Worker_Hint: "beta",
-      Status: "completed",
-      Hop_Count: 2,
-      Context_ID: "CTX-R3",
-      Metadata: JSON.stringify({ later: { at: "2026-06-01T00:00:00Z", about: "看一眼" } }),
-    });
-    const svc = new ScheduleService({
-      bus: mock,
-      log: () => {},
-      now: () => LATER_NOW,
-      tz: "Asia/Shanghai",
-      statePath: path.join(dir, "schedule_state.json"),
-      role: "hub",
-    });
-    await svc.scan();
-    const child = (await mock.listRecords(TABLES.tasks)).find((row) => f1(row, "Idempotency_Key") === "later:TASK-R3");
-    assert.ok(child);
-    assert.equal(f1(child, "Skill_ID"), "agent");
-    assert.equal(f1(child, "Worker_Hint"), "beta");
-    assert.equal(f1(child, "Hop_Count"), 3);
-    const msg = (await mock.findRecords(TABLES.messages, "Task_ID", f1(child, "Task_ID")))
-      .find((row) => f1(row, "Kind") === "instruction");
-    assert.equal(f1(msg, "Ref_Task_IDs"), "TASK-R3");
-    const marked = JSON.parse(f1(await taskOf(mock, "TASK-R3"), "Metadata"));
-    assert.equal(marked.later_fired.task_id, f1(child, "Task_ID"));
   });
 });
 

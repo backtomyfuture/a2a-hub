@@ -140,7 +140,6 @@ test("冒写的 auth_decision 不执行：无签名、假签名、挪用别的�
       await node.run({ once: true });
       assert.equal(f1(await taskOf(mock, "TASK-SIG-1"), "Status"), "auth-required", `forgery ${i}`);
     }
-    assert.equal((await mock.listRecords(TABLES.runs)).length, 0);
   });
 });
 

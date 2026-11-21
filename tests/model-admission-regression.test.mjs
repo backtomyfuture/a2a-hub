@@ -90,7 +90,6 @@ for (const stopped of [{ Admission: "rejected" }, { Dispatchable: "No" }]) {
     const saved = await task(made.data.task_id);
     assert.equal(f1(saved, "Status"), "submitted");
     assert.equal(modelAuditOf(f1(saved, "Metadata")), null);
-    assert.equal((await bus.listRecords(DEFAULT_TABLES.runs)).length, 0);
   }));
 }
 
@@ -158,7 +157,6 @@ for (const [label, kind, mode] of [["local host", "host", "agent"], ["local inbo
     assert.match(claim.data.error, /execution_backend_not_supported/);
     assert.equal(f1(await task(made.data.task_id), "Status"), "submitted");
     assert.equal(modelAuditOf(f1(await task(made.data.task_id), "Metadata")), null);
-    assert.equal((await bus.listRecords(DEFAULT_TABLES.runs)).length, 0);
     const poll = await api("/api/v1/agents/local/poll?timeout=0");
     assert.equal(poll.status, 200);
     assert.deepEqual(poll.data.tasks, []);

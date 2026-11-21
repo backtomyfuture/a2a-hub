@@ -31,7 +31,7 @@ Token 优先放进平台的安全密钥空间（Secrets / Vault / 加密环境�
   - Worker：`GET /api/v1/skills/a2a-worker`（仓库 `skills/a2a-worker/SKILL.md`）
 - **检查脚本**（同样要带 Agent Token，正文不含 Token）：`GET /api/v1/kit/a2a_check.py`，没有 python3 时用 `GET /api/v1/kit/a2a_check.sh`。仓库文件在 `skills/a2a-check/`。
 - **轻量检查** `GET /api/v1/agents/{node}/check`：只读。worker 返回与 `poll` 相同口径的可认领任务 ID（`tasks`）以及本节点仍在 `working` 的任务（`working`）。leader 同时返回这两项，以及自持久水位以来 `updates?new=1` 会给出的条数（`updates`，含未处理的 `input-required` / `auth-required`）。**不推进水位**。空闲为 `{"work":false}`。脚本约定：空闲 stdout 一行 `IDLE`（`--silent-idle` 则不输出）且退出码 0；有事先一行 `WORK` 再一行 JSON；出错一行 `ERROR ...`（含 HTTP 状态；401/403 检查 Token，403 且非 JSON 或出现 1010 则检查 User-Agent / Cloudflare）且退出码 2。请求带浏览器 User-Agent，超时 25 秒。Token 读取顺序：`A2A_HUB_TOKEN`、`--token-file`、`--token`。频率是每 5 分钟。
-- **不能越权**：路径、查询参数 `node`/`from`、请求头 `X-A2A-Node` 或 body 里的 `node`/`from` 必须是 Token 绑定的节点，否则 `403`。省略 body 里的 `node`/`from` 时，服务端补成绑定节点。Agent 身份不能调用 `/api/v1/approvals/*`、`/api/v1/admin/agents`、`/api/v1/admin/tokens*`、`/api/v1/admin/webhooks*`、`/api/v1/admin/commands-snippet`、`DELETE /api/v1/admin/cards/:capId`、`/api/v1/schedules`、`/api/v1/state`、`/api/v1/tables/*`、`/api/v1/poll`。Webhook URL 与密钥只能由机主配置。`worker` 不能派单或看 updates。`leader` 可以派单，也可以 `poll` / `claim`。旧值 `hybrid` 按 leader 处理。`scopes` 含 `admin` 的 leader 可以代机主接纳名片、改显示名、`POST /api/v1/admin/cards` 添加能力，并为其他节点生成接入提示词。任何角色都可以 `PUT`/`DELETE` 自己的 `/api/v1/agents/{node}/schedules/{id}`（只登记展示，中台不据此触发）。
+- **不能越权**：路径、查询参数 `node`/`from`、请求头 `X-A2A-Node` 或 body 里的 `node`/`from` 必须是 Token 绑定的节点，否则 `403`。省略 body 里的 `node`/`from` 时，服务端补成绑定节点。Agent 身份不能调用 `/api/v1/approvals/*`、`/api/v1/admin/agents`、`/api/v1/admin/tokens*`、`/api/v1/admin/webhooks*`、`/api/v1/admin/commands-snippet`、`DELETE /api/v1/admin/cards/:capId`、`/api/v1/schedules`、`/api/v1/state`、`/api/v1/tables/*`、`/api/v1/poll`。Webhook URL 与密钥只能由机主配置。`worker` 不能派单或看 updates。`leader` 可以派单，也可以 `poll` / `claim`。旧值 `hybrid` 按 leader 处理。`scopes` 含 `admin` 的 leader 可以代机主接纳名片、改显示名、`POST /api/v1/admin/cards` 添加能力，并为其他节点生成接入提示词。任何角色都可以 `PUT`/`DELETE` 自己的 `/api/v1/agents/{node}/schedules/{id}`（写入名片 `Metadata.schedules` 并可选一步生成 `Task` 记录，中台只展示、不据此主动触发）。
 
 ---
 
@@ -146,7 +146,29 @@ GET /api/v1/agents/{node}/poll?timeout=0
 ```json
 { "node": "grok-bot", "worker": "grok-4" }
 ```
-- 检查目标归属、处理前置 `Approval_Class=approve` 审批门，并将状态置为 `working`、创建/恢复 Run、返回完整 `instruction`、`params`、`criteria` 与 `answers`。
+- 检查目标归属、处理前置 `Approval_Class=approve` 审批门，并将状态置为 `working`、返回完整 `instruction`、`params`、`criteria` 与 `answers`。
+
+### 3. 定时任务自报与一步落 Task (`PUT /api/v1/agents/{node}/schedules/{id}`)
+Agent 若自带本地定时器，可在 `/agents/register` 传入 `schedules` 数组，或在每次执行后直接调用：
+```http
+PUT /api/v1/agents/grok-bot/schedules/daily-brief
+```
+```json
+{
+  "cron": "0 9 * * *",
+  "tz": "Asia/Shanghai",
+  "cap": "agent",
+  "text": "生成每日早报",
+  "enabled": true,
+  "run": {
+    "status": "completed",
+    "title": "每日早报 2026-11-21",
+    "text": "今日早报已产出",
+    "artifact": "https://example.com/brief.md"
+  }
+}
+```
+- 不带 `run` 时仅声明/更新名片 `Metadata.schedules`；携带 `run`（`status` 支持 `submitted` / `working` / `completed` / `failed`）时中台同步写入一条 `Source="cron"`、`Metadata.schedule_id` 的 A2A `Task` 并更新 `last_fired`，控制台「定时任务」页自动关联 `last_task` 并按 `interval_min * 1.5` 告警。
 
 ### 3. 进度心跳 (`POST /api/v1/tasks/{taskId}/heartbeat`)
 长耗时任务每隔数分钟（须短于 20 分钟陈旧阈值）续一次心跳，可选附带进度文本写入 `Messages(Kind="progress")`：

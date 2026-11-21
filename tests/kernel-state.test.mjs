@@ -113,8 +113,6 @@ test("submitted 认领 echo 后 completed，result 与 Parts 齐全", async () =
     const parts = await mock.findRecords(TABLES.parts, "Parent_ID", f1(result, "Msg_ID"));
     assert.equal(parts.length >= 1, true);
     assert.match(f1(parts.find((part) => f1(part, "Kind") === "text"), "Text"), /echo from node "TASK-ECHO-1"/);
-    const run = (await mock.findRecords(TABLES.runs, "Task_Ref", "TASK-ECHO-1"))[0];
-    assert.equal(f1(run, "Outcome"), "succeeded");
     const mutated = mock.journal.filter((item) =>
       (item.op === "update") && (item.table === TABLES.messages || item.table === TABLES.parts));
     assert.equal(mutated.length, 0);
@@ -140,7 +138,7 @@ test("任务参数含控制键时 rejected 且不执行", async () => {
   });
 });
 
-// 红线：Hop_Count > 8 只写 failed 台账和 notice，不执行。
+// 红线：Hop_Count > 8 只写 failed 与 notice，不执行。
 test("Hop_Count 超过 8 时熔断为 failed 且不执行", async () => {
   await withTemp(async (dir) => {
     const marker = path.join(dir, "ran");
@@ -155,9 +153,11 @@ test("Hop_Count 超过 8 时熔断为 failed 且不执行", async () => {
     const task = await taskOf(mock, "TASK-HOP-1");
     assert.equal(f1(task, "Status"), "failed");
     assert.equal(fs.existsSync(marker), false);
-    const run = (await mock.findRecords(TABLES.runs, "Task_Ref", "TASK-HOP-1"))[0];
-    assert.equal(f1(run, "Outcome"), "failed");
-    assert.match(f1(run, "Error_Log"), /hop count 9/i);
+    const note = (await mock.findRecords(TABLES.messages, "Task_ID", "TASK-HOP-1"))
+      .find((m) => f1(m, "Kind") === "notice");
+    assert.ok(note);
+    const text = f1((await mock.findRecords(TABLES.parts, "Parent_ID", f1(note, "Msg_ID")))[0], "Text");
+    assert.match(text, /Hop_Count=9/i);
   });
 });
 
@@ -213,7 +213,6 @@ test("执行失败后退避水位挡住下一轮认领", async () => {
     const twice = await taskOf(mock, "TASK-RETRY-1");
     assert.equal(f1(twice, "Status"), "submitted");
     assert.equal(Number(f1(twice, "Retry_Count")), 1);
-    assert.equal((await mock.findRecords(TABLES.runs, "Task_Ref", "TASK-RETRY-1")).length, 1);
   });
 });
 

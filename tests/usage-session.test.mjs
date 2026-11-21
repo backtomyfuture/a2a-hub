@@ -172,12 +172,7 @@ async function untilStatus(kernel, mock, taskId, status, { punch = false, phase 
     await sleep(20);
   }
   const phaseText = phase && fs.existsSync(phase) ? fs.readFileSync(phase, "utf8") : "";
-  let reason = "";
-  try {
-    const runs = await mock.findRecords(TABLES.runs, "Task_Ref", taskId);
-    reason = runs.map((row) => f1(row, "Error_Log")).filter(Boolean).join(" | ");
-  } catch { /* 诊断拿不到台账时仍抛原来的状态 */ }
-  throw new Error(`want ${status} got ${last} phase=${JSON.stringify(phaseText)} reason=${reason}`);
+  throw new Error(`want ${status} got ${last} phase=${JSON.stringify(phaseText)}`);
 }
 
 test("agent 的 USAGE 与 SESSION 只认围栏外整行", () => {

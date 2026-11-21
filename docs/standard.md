@@ -7,30 +7,28 @@
 ## 0. 总原则
 
 1. **A2A 数据模型 + 统一 SQLite / HTTP 总线**：借 A2A 的数据模型组织任务、消息、内容块与能力名片；通信统一收敛到 Hub 托管的 SQLite WAL 总线与 HTTP 网关，宿主节点通过出站长轮询或定时轮询接入，无守护进程的纯 HTTP 外部 Agent 通过 `agent-gateway` REST 端点接入，见 §10.3。
-2. **三层分离**：沟通归 Messages、状态与成果归 Tasks/Artifacts、执行细节归 Runs。任何一层不许再兼另一层的职。
+2. **纯 5 表职责清晰**：沟通与回执归 `Messages` / `Parts`（只追加）、状态与成果归 `Tasks` / `Artifacts`、能力名片与定时声明归 `AgentCards`。不另设独立的 `Runs` 或 `Rules` 逻辑表。
 3. **节点只出不进、Hub 显式鉴权**：边缘执行节点与外部 Agent 只发起出站 HTTP 请求，不开监听端口、不做端口映射与反向隧道、不暴露所在局域网。唯一例外是机主为某个 HTTP Agent 配置了 Webhook：Hub 向该 URL 出站 POST 一条门铃（§10.3），URL 只能由机主填写，Agent 不能自报。Hub 按 `listen` 配置绑定 HTTP 服务（默认 `0.0.0.0:8787`），对除健康探针（`/api/v1/health`）、静态首页（`/`）与自发现名片（`/.well-known/agent.json`）外的 `/api/*` 路由执行 Bearer Token 鉴权（`AH_API_TOKEN`）。
 4. **机主审批红线**：涉及对外发消息、删改数据、花钱、提交表单、改权限的动作，最终只认机主本人批准并由 Hub 签名的审批决定。任务行与本机 `approval_class` 是认领前的静态门；执行中由执行方按实际动作再发起 `auth-required`（§8.3）。
 5. **凭据与敏感原文不入表、不进载荷**；结果回传统一「摘要＋指针」。
-6. **hub 是 node 的单进程超集**：枢纽（hub）是一组逻辑职责，也是普通执行节点（node）的超集——单进程、单配置目录（默认 `~/.a2a-hub`）即可同时承载，无需再拆两个进程。由 `ah daemon --role node|hub` 承载；省略 `--role` 时读该配置目录 `node.json` 的 `role`，缺省 node。`role=hub` 既像普通节点一样读取 `commands.json`、登记 `AgentCards`、认领并执行指派给自己的任务（含定时任务），又同时运行 `SqliteBus`、HTTP 网关（REST API + `LongPollBroker` + `agent-gateway` + Web 控制台）、`ApprovalService`（ed25519 签名）、`PresentService`、`StaleService`、`ScheduleService` 与可选 `ExternalNotifier`（§10.1）。
+6. **hub 是 node 的单进程超集**：枢纽（hub）是一组逻辑职责，也是普通执行节点（node）的超集——单进程、单配置目录（默认 `~/.a2a-hub`）即可同时承载，无需再拆两个进程。由 `ah daemon --role node|hub` 承载；省略 `--role` 时读该配置目录 `node.json` 的 `role`，缺省 node。`role=hub` 既像普通节点一样读取 `commands.json`、登记 `AgentCards`、认领并执行指派给自己的任务，又同时运行 `SqliteBus`、HTTP 网关（REST API + `LongPollBroker` + `agent-gateway` + Web 控制台）、`ApprovalService`（ed25519 签名）、`PresentService`、`StaleService` 与可选 `ExternalNotifier`（§10.1）。
 7. **发起方身份与回执原路返回**：任何节点或 Agent 都可以作为任务入口。`ah task create` 默认以发起节点作为首条 `instruction` 消息的 `From_Node` 与 `Tasks.Source`。执行节点写回执消息（`result`、`question`、`notice` 等）时，`To_Node` 原路指向该任务首条 `instruction` 消息的 `From_Node`（回退 `Source` || `"hub"`）；唯独 `auth_request` 的 `To_Node` 固定为 `"hub"`。结果呈递按「谁发起、回给谁」原则落入发起节点的本地 `present_queue.jsonl`（纯 HTTP Leader 经 `/api/v1/agents/:node/updates` 拉取）；可选通过 `ExternalNotifier`（如飞书群机器人 Webhook、Bark、Telegram 或通用 Webhook）推送精简提醒与控制台深链（§8.5）。
 
 8. **三层寻址：Node / Worker / Skill**：Node 是工作节点（一台机器上的一个守护进程或接入端点，管网络位置、认领租约与心跳）；Worker 是节点上的执行者（一个 Agent CLI，管启动模板、续接命令、执行语境与无头权限）；Skill 是这个 Worker 能做的一类任务（管名称、说明、副作用等级与审批下限）。任务行用 `Target_Node` / `Worker_Hint` / `Skill_ID` 三列寻址，名片一行是 Node × Worker × Skill。Worker 留空表示由节点本尊直接执行：脚本类能力由守护进程直接拉起，独立 Agent 节点（§10.4）的本尊即 Worker。三层的名字都只是本机 `commands.json` 白名单里的选择键，不携带命令内容（§9）。名册里每个 Worker 有且只有一张 **Worker 名片**（`Skill_ID=agent` 的那一行），代表该 Worker 在册及其通用执行，不是一项技能；Worker 的专长技能各占一行，挂在它的名片下。
 
 界面和提示词用中文说法，API 字段与表字段不改名：节点 = Node（`node` / `Target_Node`），Agent = Worker（`Skill_ID=agent` 的名片，或一个 HTTP Agent 本身），能力 = Skill（`Skill_ID` 不是 `agent`）。控制台按「节点 → Agent → 能力」展示；节点本尊直接执行、Worker 为空且 `Skill_ID` 不是 `agent` 的能力归在「节点直属能力」。旧称「名片墙」改为「节点」。
 
-## 1. 对象总览（七张核心逻辑表：A2A 主干＋本地扩展列）
+## 1. 对象总览（五张纯 A2A 核心逻辑表：A2A 主干＋本地扩展列）
 
-字段分两类：**A2A 原生**字段按协议原义使用；**本地扩展**字段是共享总线运营所必需、A2A 点对点模型不建模的部分（寻址、认领租约、熔断、幂等、呈递），在各表规范中以（扩展）标明。除此之外的本地需求一律进原生 Metadata 字段，不再新增列。
+字段分两类：**A2A 原生**字段按协议原义使用；**本地扩展**字段是共享总线运营所必需、A2A 点对点模型不建模的部分（寻址、认领租约、熔断、幂等），在各表规范中以（扩展）标明。除此之外的本地需求一律进原生 Metadata 字段，不再新增列。
 
 | 表 | 对应 A2A 对象 | 职责 |
 |---|---|---|
 | Tasks | Task | 一件工作的信封与状态机：一行一任务 |
 | Messages | Message（挂在 Task.history 上） | 任务内全部对话轮次：只追加，一行一消息（正文在 Parts） |
 | Parts | Part | 消息与产物的内容块：一行一块，text/file/data 三型 |
-| Runs | （本地台账表） | 每次执行的起止、结果、报错 |
 | Artifacts | Artifact | 交付物登记：内容为其 FilePart，修订＝同名新 ID |
-| AgentCards | AgentCard（规范化展开） | 一行是一张 Worker 名片或一项技能：节点、技能、名片元数据、接收方式 |
-| Rules | （本地镜像与规则表） | 节点本地定时计划的只读观察镜像与路由策略表 |
+| AgentCards | AgentCard（规范化展开） | 一行是一张 Worker 名片或一项技能：节点、技能、名片元数据（含 `schedules`）、接收方式 |
 
 ## 2. Tasks 规范
 
@@ -42,7 +40,7 @@
 - ★ Status_Msg（扩展）：当前状态附带的消息指针（进入 input-required / auth-required 时，指向提问/待批的那条 Messages 的 Msg_ID）——A2A 中为 TaskStatus 内嵌 message，表形态以指针等价实现。
 - ★ Metadata：A2A 原生自由字段（JSON）；非核心本地信息放这里，不再新增列。
 - **任务参数不在 Tasks 上**（v3 删除 Payload）：初始指令与参数写首条 instruction 消息，其 DataPart（Kind=data）承载参数 JSON（A2A 原生形态）。
-- （扩展）Target_Node / Worker_Hint / Skill_ID / Title / Source / Approval_Class / Hop_Count / Idempotency_Key / Claimed_By / Heartbeat_At / Retry_Count / Latest_Run / Presented：总线运营字段，定义沿用 v1/v2（守护进程与呈递管线维护其中一部分）。Worktree 已于 v3.5 删除（执行环境私事不入总线）；Presented 为过渡遗留，代码切换为只读 Tasks.Metadata 的呈递键后删除（见 §10.2）。
+- （扩展）Target_Node / Worker_Hint / Skill_ID / Title / Source / Approval_Class / Hop_Count / Idempotency_Key / Claimed_By / Heartbeat_At / Retry_Count：总线运营字段，定义沿用 v1/v2（守护进程与呈递管线维护其中一部分）。Worktree、Presented 与 Latest_Run 均已移除，执行与呈递键只放本机文件或 `Tasks.Metadata`。
 - ★ Worker_Hint（扩展，v3.7 定义语义，文本）：指定由目标节点上的哪个 Worker 执行。**写了就是硬约束**：目标节点没有登记「该 Worker × 该 Skill」这项能力时，任务置 rejected＋notice，不换别的 Worker 代跑（失败要响）。留空表示由节点取默认：该 Skill 有节点本尊直接执行的条目时用它，否则取本机 `commands.json` 里第一个登记了该 Skill 的 Worker。节点认领时把实际选中的 Worker 回填到本列，此后的失败重试、心跳回收重跑与问答续跑都钉在同一个 Worker 上；节点本尊直接执行时保持留空。列名沿用 Worker_Hint，语义以本条为准。
 - 任务派生关联写 Messages.Ref_Task_IDs（v3 起 Tasks 侧删除该列，见 §3）。
 
@@ -108,25 +106,19 @@
 
 唤醒语义：消息即唤醒信号。Hub 每次写操作提交后推进单调递增 `seq` 游标，并通过 `LongPollBroker` 向挂起连接推送唤醒：宿主守护进程节点经出站 `GET /api/v1/poll` 长轮询（或 `poll` 定时扫表）唤醒；纯 HTTP 外部 Agent 经 `/api/v1/agents/:node/poll` 或 `/updates`（短轮询或长轮询）拉取；`hub` 角色在进程内直连订阅 `LongPollBroker` 并保留低频对账扫表兜底（§10.3）。内容一律从总线表或网关拉取，节点本地保存已读/处理水位，避免多方写冲突。
 
-## 4. Runs 规范（瘦身）
+## 4. 执行重试与本机在途账本（无独立 Runs 表）
 
-只记执行台账，**不再承担回执与回复正文**：
+每次执行的沟通语意与失败原因直接落在 Messages（`result` / `notice` / `question` / `auth_request`）与 Tasks（`Status` / `Status_Msg` / `Retry_Count`），不再维护单独的线上 `Runs` 表：
 
-- Run_ID / Task_Ref / Node / Started_At / Finished_At：沿用。
-- ★ Worker（v3.7 定义语义）：本次执行实际使用的 Worker 名，取认领时回填后的 Tasks.Worker_Hint；节点本尊直接执行（脚本、inbox）记 `daemon`。
-- ★ Outcome：`succeeded` / `failed` / `paused`（paused＝本次执行段因等补信息或等机主批准而暂停，配合 input-required / auth-required，不计失败）。
-- Error_Log：失败信息。
-- ~~Receipt~~：**删除**。resolve/ask/notice/later 的沟通语义由 Tasks 状态＋Messages 承担；执行方要说话，去 Messages 写。
-- ~~Summary~~：**删除**。执行内部备注如需保留，写 Run 的 Error_Log 或本机日志，不进中台。
-- **用量不在本表**。Runs 没有 Metadata，也不为此加列。执行者可选上报的用量累加在 Tasks.Metadata 的 `usage` 键（§9）；没上报就是没上报，节点不估算。
-- 重试沿用 v1：执行失败且 Retry_Count<2 回 submitted 重认领；心跳超时回收与执行失败共用同一 Retry_Count 预算（§8.4）。
-- **节点私有重试水位（不是协议字段）**：执行失败或心跳超时回收、且未达重试上限、即将回到 submitted 时，执行节点先在本机配置目录写入 `retry_state.json`（权限 0600，仅本节点可读）。文件按 Task_ID 记录 `not_before`：从 60 秒起按 2 的幂增加，上限 10 分钟。本节点在 `not_before` 之前不认领该任务，也不增加 Retry_Count。水位不进总线、不加 Tasks 列、不写 Metadata。文件缺失或损坏时按没有水位处理，只记日志，守护进程不因此退出。任务成功、进入终态或已达重试上限时删掉对应条目。回执无效仍直接 failed，不写这条水位，也不重试。
+- 动态执行段编号由任务号、已有暂停（`question`/`auth_request`）次数与 `Retry_Count` 共同确定（如 `<Task_ID>-R<n>`），配合 `client_token` 保障同段重试幂等。
+- 重试沿用 v1：执行失败且 `Retry_Count < 2` 回 `submitted` 重认领；心跳超时回收与执行失败共用同一 `Retry_Count` 预算（§8.4）。
+- **节点私有重试水位（不是协议字段）**：执行失败或心跳超时回收、且未达重试上限、即将回到 `submitted` 时，执行节点先在本机配置目录写入 `retry_state.json`（权限 0600，仅本节点可读）。文件按 `Task_ID` 记录 `not_before`：从 60 秒起按 2 的幂增加，上限 10 分钟。本节点在 `not_before` 之前不认领该任务，也不增加 `Retry_Count`。水位不进总线、不加 Tasks 列、不写 Metadata。文件缺失或损坏时按没有水位处理，只记日志，守护进程不因此退出。任务成功、进入终态或已达重试上限时删掉对应条目。回执无效仍直接 `failed`，不写这条水位，也不重试。
 - **执行与提交分开算**：计入重试的「执行失败」只指执行本身失败（命令非零退出、超时）。以下情况不计入重试、不重新执行、不重做副作用：
-  - 回执无效（无法按 §9 回执约定解析）：直接 Status=failed＋notice 说明原因（附原始输出摘要），Runs 记 failed；
-  - 提交失败（向总线登记产物、写 Runs、写消息或改状态中途失败）：只补齐未完成的提交，已写入的行按其 ID 查重、不重复追加；补齐完成后按原回执进入应有状态；
-  - 独立 Agent 宣告失败（`ah inbox fail`，见 §10.4）：由 Agent 本尊明确做出无法完成的判断，直接 Status=failed＋notice，Runs 记 failed，不重试、不回 submitted。
+  - 回执无效（无法按 §9 回执约定解析）：直接 Status=failed＋notice 说明原因（附原始输出摘要）；
+  - 提交失败（向总线登记产物、写消息或改状态中途失败）：只补齐未完成的提交，已写入的行按其 ID 查重、不重复追加；补齐完成后按原回执进入应有状态；
+  - 独立 Agent 宣告失败（`ah inbox fail`，见 §10.4）：由 Agent 本尊明确做出无法完成的判断，直接 Status=failed＋notice，不重试、不回 `submitted`。
 - **在途执行账本与单并发（不是协议字段；只覆盖 `context=direct` 的 json/agent 命令）**：inbox 模式不在此列，仍按现行路径只入队。direct 命令在 spawn 之前把账本写到执行节点配置目录 `runs/<Task_ID>/entry.json`（权限 0600，先写临时文件再改名）。账本只记任务号、尝试次数（当时的 Retry_Count）、状态（`launching` / `running` / `exited`）、pid / 进程组、启动时间、超时秒数、stdout / stderr / 退出码文件路径，以及用于辨别 pid 复用的进程启动时间戳；取不到启动时间戳就记 null。账本不进总线、不加列、不写 Metadata，也不放凭据或指令正文。子进程的标准输出与标准错误写入该目录下的文件，由一层包装在进程结束时把退出码原子写入退出码文件，避免守护进程消失后管道断裂把子进程打死。读取输出时仍只保留头部 64KiB 与尾部 1MiB。超时从账本里的启动时间接着算，到点由守护进程向该进程组先发 SIGTERM，宽限后再 SIGKILL，不因守护重启把超时重新算满。
-  - 同一节点同一时刻只跑一条 direct 命令。已有在途命令时，本轮不再认领新任务；inbox 心跳、续跑检查和 hub 的审批、呈递、陈旧回收、定时建单照常进行。命令的结果（outbox、Artifacts、Runs、Messages/Parts、Tasks 状态）只在扫表的收口阶段串行写入。
+  - 同一节点同一时刻只跑一条 direct 命令。已有在途命令时，本轮不再认领新任务；inbox 心跳、续跑检查和 hub 的审批、呈递、陈旧回收照常进行。命令的结果（outbox、Artifacts、Messages/Parts、Tasks 状态）只在扫表的收口阶段串行写入。
   - 重启或下一轮扫表时，对本节点 `Claimed_By` 且仍为 working 的任务：账本在且进程组仍存活，只续 `Heartbeat_At`，不第二次 spawn，不加 Retry_Count，结束后按 §9 解析回执并提交；账本在、进程已结束且退出码文件在，直接读输出提交，不重跑；账本在、进程已确认死亡且没有退出码文件，按执行失败处理（计入 Retry_Count 与重试水位，达上限则 failed＋notice），不得当成成功；无法确认进程组是否已死时，不得认定死亡后重跑，保持 working 并继续续心跳，直到按账本启动时间走到超时，由超时机制收口；没有账本的旧 working 任务仍按 §8.4 心跳回收。有存活在途账本的任务，心跳回收不得把它送回 submitted。成功落总线之后删掉该任务账本目录里的输出文件，`input.json` 仍按 §9 保留。
   - **局限**：pid 在进程退出后可能被系统复用。账本用进程启动时间戳区分；对不上就不当作仍在跑的那一次，也不向复用后的新进程发信号。启动时间戳取不到（记 null）时无法做这层区分，宁可继续当作在途并等到超时，也不在无法确认时重跑。超时信号仍发往账本记录的进程组；若该组号已被无关进程占用，存在误伤可能，此情况下不得改成重跑。
 
@@ -180,55 +172,38 @@ Cap_ID 推导口径（守护进程登记时）：节点本尊的能力为条目�
 **名片同时是地址**：
 
 - Worker 名片的 Cap_ID 是 `CAP-<capPrefix>-<W>-agent`。用 `Skill_ID=agent` 加 `Worker_Hint=W` 寻址它的通用执行。
-- 本地计划、later 复查、`ah task create` 的 `--worker` 校验和自动挑选，都引用这张名片，所以守护进程不得省略它。
+- `ah task create` 的 `--worker` 校验和自动挑选都引用这张名片，所以守护进程不得省略它。
 - **`Worker` 列是路由键**：内核用它拼能力键，建单时它会被写进 `Worker_Hint`。只能填本机 `commands.json` 里 `workers` 下的名字，不得写展示名或别名。独立 Agent 节点想要展示名，就写它 `agent` 条目的 `name`。
 
 **不加 Metadata 标记的理由**：判定所需的信息已经在路由键三列里；再加标记就多了一个可能和路由键不一致的事实来源，v3.7 节点也不会写它，展示方无论如何都要实现按列判定。
 
 `Skill_ID` 值 `agent` 保留给 Worker 名片。
 
-## 7. Rules 规范
+## 7. 定时任务观测与 Task 记录（AgentCard.Metadata.schedules）
 
-沿用 v1：Rule_ID、Match_Type、Skill_ID、Target_Node、Worker_Hint、Approval_Class、Priority、Enabled、Note。路由按 Skill_ID＋tags 匹配能力行（v2 起 Skill_ID 视为技能 id，与 Nodes.Skill_ID 对齐）。规则变更只改表。
+定时调度完全由各 Agent / 节点自治驱动；中台不维护独立的 `Rules` 表，也不代为运行 cron 调度器：
 
-**定时调度（v3.6 节点本地调度与 Rules 观察镜像）**：定时调度下沉至节点本地驱动（时钟不再由 hub 独占）；Rules 表中的调度列降级为各节点单向写入的只读观察镜像，供全网总览页查看。
-
-- **双时钟来源**：
-  1. 终端类节点（`kind: host` 与 hub 所在机）：由 `ah daemon` 内置的分钟定时器驱动，读取配置目录下的 `schedules.json`（权限 0600，不进仓库、不进总线）；
-  2. Agent 类节点（`kind: agent`，如 Muse、Grok 等自带 cron 定时器的独立 Agent）：由 Agent 自身时钟到点调用 `ah task begin` 触发。
-- **本地计划定义（`schedules.json`）**：结构为 `{"schedules": [{id, enabled, cron, cap, text, approval_class?}]}`。
-  - 文件缺失视为无计划；文件损坏则本地调度整体停用并记日志（§10.5），守护进程不退出；
-  - 单条计划缺少必填字段、cron 不可解析、或 `cap` 在本机 `commands.json` 中不存在时，仅停用该条并记日志；
-  - 计划定义中出现 `command` / `cwd` / `context` / `agent` / `mode` 等执行控制键时，整条拒收。
-- **时区与期次键**：按节点本地 `node.json` 的 `tz`（IANA 时区名，缺省 `Asia/Shanghai`）墙钟计算期次，与宿主机时区及系统 `TZ` 环境变量无关。非法 `tz` 记日志并停用本地调度，不回退宿主机时区。期次键格式沿用带时区偏移的分钟级文本：`YYYY-MM-DDThh:mm:ss±HHMM`（如 `2026-11-09T08:50:00+0800`，偏移不带冒号）。期次搜索窗口 8 天。
-- **状态与基线（`schedule_local_state.json`，权限 0600）**：记录每条计划的 `{cron, last_fired, last_task}` 及 `mirrored_ids`。**基线优先于补期**：新建计划、修改 `cron` 表达式、状态文件缺失或损坏时，首次扫描仅将水位线锚定在最近一期，不建单；从下一期起才触发。状态文件写失败本轮不建单。
-- **触发与补期语义**：已有基线且 `last_fired` 不等于最近一期期次键时触发；停机或错过多期时只补最近一期。节点关机或睡眠期间未执行的期次不做代偿。
-- **建单与认领流转（严禁直写 working）**：
-  - 到点建单走标准建单写序（首条 instruction 消息 → Parts → Tasks 行），`Status=submitted`，`Source=cron`，`From_Node`＝`Target_Node`＝本节点；
-  - `Approval_Class` 取计划配置与本机 `commands.json` 对应能力的 `approval_class` 下限中更严者（只收紧不放宽）；
-  - 建单成功后立即置本进程唤醒标志（`_wakeFlag = true`），由本节点现有认领链路接管并流转到 `working`（若生效审批级别为 `approve` 则认领前由节点置 `auth-required`）。严禁跳过 submitted 直写 `working`，以保证在途执行账本、心跳、单并发管控、重试退避与机主审批红线完整生效；
-  - 多节点配置相同 Schedule_ID 时，各自独立建单并独立执行一份；
-  - 已知限制：本地定时任务的发起方是本节点，执行中提问（`input-required`）的 `question` 原路回给本节点，须由本机 Agent 经 `ah task reply` 答复。任务没写 `wait_timeout_sec` 时，陈旧告警不覆盖 `input-required`；建单按接收方式写入该键后，挂起超时会回收。无人值守的计划应选择不会提问的能力。
-- **幂等与防重**：幂等键格式为 `sched:<Node_ID>:<Schedule_ID>:<期次键>`。触发建单前先按幂等键查验总线 Tasks 表，已有同键任务则只补写本地状态水位线、不重复建单（双保险防重）。
-- **Agent 类自带时钟与 `ah task begin`**：Agent 定时器到点调用 `ah task begin --schedule <id> [--period <期次键>] [--cap <cap>] --text <指令>`。默认 `--cap agent`、`--from`＝`--to`＝本节点、`Source=cron`，生成同格式幂等键建单为 `submitted`，由本节点守护进程认领进入收件箱（`agent_inbox.jsonl`），Agent 处理完后调用 `ah inbox done|ask|fail` 交付结果。同键重复调用输出已有 Task_ID，不重复建单。
-- **Rules 观察镜像**：Rules 表中的 `Schedule`、`Text`、`Last_Fired` 等列降级为「节点单向写入的只读观察镜像」，仅供全网总览页展示：
-  - 节点将本机每条计划镜像为 Rules 一行：`Rule_ID` 固定为 `<Node_ID>:<Schedule_ID>`；`Target_Node` 为本节点；`Skill_ID` 为 cap；`Schedule` 为 cron；`Text` 为指令；`Enabled`（Yes/No）反映本机计划启用状态；`Last_Fired` 记录最近期次键；`Note` 记录上次运行任务与状态及「同步于 <时间戳>」；
-  - 节点严格只写属于自己的镜像行（`Rule_ID` 以 `<本节点>:` 开头），不读也不改其他节点的镜像行；
-  - **任何节点不从 Rules 读计划来触发**；在总线 Rules 表中手动修改任何字段，绝不影响各节点本地计划的实际执行；
-  - 独立 Agent 类节点可通过 `ah schedule register` 登记镜像行（仅写 Rules 镜像，不写入本机 schedules.json，不触发任务）；
-  - 同步时机：守护启动、计划变更、触发建单、上次任务收口终态，以及每 15 分钟对账周期刷新一次「同步于」。若配置缺少 `tables.rules` 映射，跳过镜像并记日志，不影响调度。
+- **声明方式**：
+  1. HTTP Agent 可在 `POST /api/v1/agents/register` 传入 `schedules: [{id, cron, tz?, interval_min?, cap?, text?, enabled?, last_fired?, note?}]`，或调用 `PUT|DELETE /api/v1/agents/:node/schedules/:id` 增删改单条计划；
+  2. 计划数组保存在该节点主 `AgentCard`（优先 `Skill_ID=agent`）的 `Metadata.schedules`（纯 JSON 字段，不新增列）。再次调用 `/register` 不带 `schedules` 时保留已登记的计划；`DELETE /api/v1/agents/:node/schedules/:id` 仅删除该条。
+- **执行留痕（生成标准 A2A Task）**：每次定时执行可通过两种等价方式在 `Tasks` 留痕：
+  1. **一步声明+建单**：`PUT /api/v1/agents/:node/schedules/:id` 携带 `run: { status, text, title?, instruction?, artifact?, artifacts?, artifact_name?, fired_at?, idempotency_key? }`（`status` 取 `submitted` / `working` / `completed` / `failed`，默认 `completed`），中台同步写入 `Source="cron"`、`Tasks.Metadata.schedule_id=<id>`、`Idempotency_Key="sched:<node>:<id>:<fired_at>"` 的 A2A `Task` + `Messages` + `Parts`（及可选 `Artifacts`），并自动刷新该计划的 `last_fired`；
+  2. **标准建单接口**：`POST /api/v1/tasks` 传 `schedule_id` 或 `ah task create --schedule <id>`（写入 `Metadata.schedule_id`，默认 `Source="cron"`）。
+- **只读总览与异常检测（`GET /api/v1/schedules`）**：
+  - 仅机主可访问。聚合全部名片的 `Metadata.schedules`，计算下次触发时间 `next_fire_at`（支持 5 段 cron 与 `tz`，缺省 `Asia/Shanghai`），并自动匹配关联 `Task` 返回 `last_task: { task_id, status, updated_at }`。
+  - `anomaly` 优先级：`node-offline`（节点离线） → `failed`（`last_task` 为 `failed`/`rejected`） → `missed`（启用中且当前时间减去最近触发时间（或无执行记录时减去登记时间）大于 `interval_min * 1.5` 分钟；`interval_min` 可显式声明或由 5 段 cron 自动推算）。
 
 ## 8. 通信协议（标准往返）
 
 ### 8.1 一件多轮任务的标准时序
 
 1. 发起方建单：Tasks 一行（submitted、Context_ID 新生成或沿用）＋Messages 一条 instruction（任务参数放该消息的 DataPart）。
-2. 目标节点认领：Status=submitted→working，写 Claimed_By/心跳；Runs 开一行。
+2. 目标节点认领：Status=submitted→working，写 Claimed_By/心跳。
 3. 执行中要补信息：Messages 写 question → Status=input-required（Status_Msg 指向该消息）。**到此执行方停手，不算失败。**
 4. 发起方/机主答复：Messages 追加 answer（In_Reply_To=question 的 Msg_ID）→ Status 回 working，执行方续跑。**不许新开任务答问题。**
-5. 执行中要机主批准：Messages 写带 `scope=dynamic` 的 auth_request → Status=auth-required（保留 Claimed_By，清空心跳，Runs 记 paused）。**到此停手，不算失败。** 机主批准后原节点核验签名决定，再切回 working 续跑（`resume=true`）。同一任务可以多次这样暂停。
-6. 交付：产物登记 Artifacts → Messages 写 result（Artifact_Ref 指向产物）→ Status=completed，Runs 关行（Outcome=succeeded）。这一串提交中途失败的，只补齐缺失的部分，不重新执行（§4）。
-7. 失败（仅指执行本身失败，§4）：Runs 关行（Outcome=failed＋Error_Log）；未达重试上限回 submitted 重认领，达上限 Status=failed＋Messages 写 notice 说明。
+5. 执行中要机主批准：Messages 写带 `scope=dynamic` 的 auth_request → Status=auth-required（保留 Claimed_By，清空心跳）。**到此停手，不算失败。** 机主批准后原节点核验签名决定，再切回 working 续跑（`resume=true`）。同一任务可以多次这样暂停。
+6. 交付：产物登记 Artifacts → Messages 写 result（Artifact_Ref 指向产物）→ Status=completed。这一串提交中途失败的，只补齐缺失的部分，不重新执行（§4）。
+7. 失败（仅指执行本身失败，§4）：未达重试上限回 submitted 重认领，达上限 Status=failed＋Messages 写 notice 说明。
 
 ### 8.2 派生与熔断
 
@@ -237,9 +212,9 @@ Cap_ID 推导口径（守护进程登记时）：节点本尊的能力为条目�
 
 ### 8.3 审批（auth-required）
 
-- **生效审批级别**＝任务行 Approval_Class 与节点本地下限中更严格者（auto < notify < approve）。节点可在本机 commands.json 的能力条目用 `approval_class` 声明下限；v3.7 起 Worker 条目与 Skill 条目都可以声明，本地下限取二者中更严者（不同 Worker 的无头权限差别很大，Worker 的下限不能被 Skill 放松）；本地下限只收紧、不放宽，任务行未标或标得更松时按下限办。本地下限只存在于执行节点本机。hub 不在 submitted 阶段代写 auth_request：行级 `Approval_Class=approve` 与本机下限都由目标节点在认领前拦截。`later` 复查与节点本地定时计划仍按既有规则把 `approve` 写进行，不因停掉抢跑而放宽。
+- **生效审批级别**＝任务行 Approval_Class 与节点本地下限中更严格者（auto < notify < approve）。节点可在本机 commands.json 的能力条目用 `approval_class` 声明下限；v3.7 起 Worker 条目与 Skill 条目都可以声明，本地下限取二者中更严者（不同 Worker 的无头权限差别很大，Worker 的下限不能被 Skill 放松）；本地下限只收紧、不放宽，任务行未标或标得更松时按下限办。本地下限只存在于执行节点本机。hub 不在 submitted 阶段代写 auth_request：行级 `Approval_Class=approve` 与本机下限都由目标节点在认领前拦截。
 - **认领前静态门**：生效级别为 approve 时，执行方在认领前（任务仍为 submitted，或问答续跑时仍为 input-required）写一条不带 `scope=dynamic` 的 auth_request（`client_token` 只由 Task_ID 派生；To_Node=`hub`，From_Node=目标节点名），Status 置 auth-required，Status_Msg 指向该消息，然后停手。`Claimed_By` 为空时尚未进入 working。已有静态请求时不另写：已有有效 approve 则继续认领，尚无决定则停在 auth-required。动态请求不参与这条匹配，一次动态批准不能代替静态下限，一次动态驳回也不能把静态门卡死。
-- **执行中动态审批**：任务已是 working 且 `Claimed_By` 为本节点时，执行方可以按实际待执行动作再写 auth_request。正文是具体动作、对象与风险，另附 DataPart `{"scope":"dynamic","run_id":"<本次执行段 id>"}`。`client_token` 由 Task_ID 与该 `run_id` 派生，仍是 UUID 形状；同一次执行段重试必须用同一个 `run_id`，不得随机换一把。direct 账本在启动时就把 `run_id` 写入 `entry.json`，收口重试读回同一把。inbox 没有这本账，用 `ah inbox auth`，`run_id` 在第一次生成 outbox 计划时固化。状态改为 auth-required 时保留 `Claimed_By`、清空心跳，Runs 记 paused。同一任务可以多次动态请求。
+- **执行中动态审批**：任务已是 working 且 `Claimed_By` 为本节点时，执行方可以按实际待执行动作再写 auth_request。正文是具体动作、对象与风险，另附 DataPart `{"scope":"dynamic","run_id":"<本次执行段 id>"}`。`client_token` 由 Task_ID 与该 `run_id` 派生，仍是 UUID 形状；同一次执行段重试必须用同一个 `run_id`，不得随机换一把。direct 账本在启动时就把 `run_id` 写入 `entry.json`，收口重试读回同一把。inbox 没有这本账，用 `ah inbox auth`，`run_id` 在第一次生成 outbox 计划时固化。状态改为 auth-required 时保留 `Claimed_By`、清空心跳。同一任务可以多次动态请求。
 - **host 无头 CLI 的软约束**：`agent-auth` / `need_auth` 在命令进程退出后才解析。已经配成自动放行的 CLI 可能在写出围栏之前就做完副作用。这条回执是停手约定，不是执行前的硬拦截。真正要在动作之前停住的，用 inbox 的 `ah inbox auth`：它在写总线之前就把本地条目标成 `waiting-auth`，批准后才回到收件箱。
 - **input-required 上的静态门**：问答续跑时若静态门把任务改成 auth-required，此时 `Claimed_By` 已经非空。批准后不回 submitted，由原节点以 `resume=true` 续跑（与执行中动态审批同一条恢复路径），避免把已经问过的轮次整段重跑。
 - 枢纽（hub 角色，§10.1）只给已经是 auth-required 且 Status_Msg 非空的任务受理审批（在 Web 控制台或 `POST /api/v1/approvals/:taskId/decide` 呈现，并可选经 `ExternalNotifier` 发送提醒），不在 submitted 阶段代写 auth_request。机主确认后，枢纽写 auth_decision（决定值放其 DataPart：{"decision": "approve"} 或 {"decision": "reject"}，In_Reply_To 指向所批的 auth_request）。`Claimed_By` 为空则批准后把 Status 置回 submitted，并保留 Status_Msg。`Claimed_By` 非空则不改 Status、不改 Status_Msg，由原节点（或网关 `/claim`）核验后切回 working。驳回仍写 auth_decision、notice，并把 Status 置为 canceled（注：当前 `ApprovalService` 在认领前与执行中驳回均置 `canceled`，详见 `src/hub/approval.mjs`）。同一 Status_Msg 下已有一条验签通过的决定（批准或驳回）时，再次操作不再写第二条、也不改任务行。未通过验签的行不算已处理。
@@ -259,7 +234,7 @@ Cap_ID 推导口径（守护进程登记时）：节点本尊的能力为条目�
 
 - 建单靠 Idempotency_Key、消息靠 Msg_ID、认领靠 Claimed_By＋心跳回收（20 分钟无心跳视为放弃）——沿 v1。
 - **Idempotency_Key 语义**：同一 Idempotency_Key 在状态非 failed/canceled 的任务中只执行一次。节点认领前查重：已有同键任务处于其他任一状态（含进行中、中断态、completed、rejected）的，新任务置 rejected＋notice，notice 写明原任务的 Task_ID 并以 Ref_Task_IDs 指向它；同键任务全部为 failed/canceled 时可以执行。Idempotency_Key 为空的任务不查重。同键多单的执行者以先被目标守护进程处理到的那一单为准，不保证与建单顺序一致。客户端用同一 Idempotency_Key 重试必须保证指令文本一致；同键不同文本视为客户端错误，执行结果不作保证。
-- **心跳回收计入重试**：working 任务超过 20 分钟无心跳即回收，每回收一次 Retry_Count 加一，与执行失败共用 §4 的重试上限；未达上限回 submitted 重认领，已达上限则 Status=failed＋Messages 写 notice 说明（Runs 记 failed），不再回收为 submitted。本节点 direct 在途账本仍可能对应活进程（进程组还在，或无法确认已死）时，不得按本条送回 submitted，只续心跳，规则见 §4。
+- **心跳回收计入重试**：working 任务超过 20 分钟无心跳即回收，每回收一次 Retry_Count 加一，与执行失败共用 §4 的重试上限；未达上限回 submitted 重认领，已达上限则 Status=failed＋Messages 写 notice 说明，不再回收为 submitted。本节点 direct 在途账本仍可能对应活进程（进程组还在，或无法确认已死）时，不得按本条送回 submitted，只续心跳，规则见 §4。
 - **心跳写入有最小间隔**：不得每轮扫表无条件写（每次写都会触发全网记录变更事件）；写心跳的最坏间隔（最小间隔＋两次扫表的最长间隔＋扫表耗时）必须严格小于 20 分钟。本实现最小间隔 90 秒：加上对账周期 900 秒是 990 秒，距 20 分钟还剩 210 秒留给扫表耗时。扫表耗时没有硬上界，210 秒只是余量。
 - 同表写操作保持串行＋退避重试：SQLite 后端（`SqliteBus`）开启 WAL 模式与 `busy_timeout = 5000`，并用 `idempotency_tokens` 表按 `client_token` 去重；远端 HTTP 节点（`HttpBus`）在遇到 HTTP 429 / 500 / 502 / 503 或瞬时网络错误时按 `0 / 1 / 3 / 8` 秒退避重试。Messages 只追加不修改，天然避开大半写冲突。
 
@@ -274,7 +249,7 @@ Cap_ID 推导口径（守护进程登记时）：节点本尊的能力为条目�
 
 ## 修订记录
 
-**v1.0 基线说明**：`a2a-hub` v1.0.0 基于 A2A 八态数据模型，统一采用 Node >= 24 零依赖 SQLite WAL + HTTP 长轮询与 `agent-gateway` 网关架构；涵盖三层寻址（`Node / Worker / Skill`）、指令与数据分离、`ed25519` 审批签名、`direct` 在途账本与跨任务 `Context_ID` 会话续接、`kind=agent` 收件箱（`inbox`）、节点本地定时调度与 `Rules` 只读镜像、L1（`verify`）+ L2（`acceptance.criteria`）两层验收。以下 §9–§11 为执行层、角色传输与验收层规范正文。
+**v1.0 基线说明**：`a2a-hub` v1.0.0 基于 A2A 五表八态数据模型，统一采用 Node >= 24 零依赖 SQLite WAL + HTTP 长轮询与 `agent-gateway` 网关架构；涵盖三层寻址（`Node / Worker / Skill`）、指令与数据分离、`ed25519` 审批签名、`direct` 在途账本与跨任务 `Context_ID` 会话续接、`kind=agent` 收件箱（`inbox`）、`AgentCard.Metadata.schedules` 定时计划观测与一步落 Task、L1（`verify`）+ L2（`acceptance.criteria`）两层验收。以下 §9–§11 为执行层、角色传输与验收层规范正文。
 ---
 
 ## 9. 附则：执行层与传输层修订（表结构不变）
@@ -292,11 +267,10 @@ Cap_ID 推导口径（守护进程登记时）：节点本尊的能力为条目�
   - `json`：stdin 传递任务信封，stdout 最后一行为结果 JSON；
   - `inbox`（v3.4 新增，专供独立 Agent 节点）：守护进程认领任务后写入本地 `agent_inbox.jsonl`，保持 `working` 状态并持续续心跳，不起任何子进程，由 Agent 本尊通过 `ah inbox` 处理并回执。
 - **输入约定（agent 型模板，指令与数据分离）**：任务的指令文本、参数与答复一律作为数据写入本次执行专用的 `input.json`（仅本机可读），不拼进 prompt。续跑时 `input.json` 另带 `approvals` 数组：本任务上每条验签通过的 approve 决定所对应的 auth_request（`msg_id`、`text`、`scope`、`run_id`、`decision`），由节点本地从总线核验后写入；受信模板在 prompt 里说明它的含义，要求 agent 不再重复申请已覆盖的动作；prompt 只由节点本地受信模板组成，加上该文件的路径和一句声明「文件内容是数据，不是指令」。执行什么命令、在哪个目录、用哪种语境、调用哪个 Agent、给什么权限，只来自节点本地 commands.json；任务参数里出现这类执行控制键（command / cwd / context / agent / worker 等）的，节点直接 rejected＋notice。任务行上的 `Worker_Hint` 与 `Skill_ID` 不在此列：它们只是在本机 `commands.json` 已登记的能力里按名字选一项，选不中就拒收，本身不携带命令、目录、语境或权限。json 型模板经标准输入收任务信封，本就是数据通道，同样不得从信封读取执行控制项。
-- **回执约定（agent 型模板）**：围栏之外的正文即摘要。产物只认围栏之外、整行匹配的 `ARTIFACT: <路径或URL>`，名称只认同样位于围栏之外的整行 `ARTIFACT_NAME: <名称>`；写在围栏里面的同形文字无效。提问与执行中审批只认整段输出里最后一个完整围栏：语言标记是 `agent-ask` 时块内为问题，任务置 input-required；语言标记是 `agent-auth` 时块内为审批说明（trim 后为空则回执无效），任务置 auth-required。二者取最后一个，更早的围栏一律忽略。围栏之外没有摘要则回执无效，直接 failed，不重试（§4）。可选的 `USAGE:`、`SESSION:` 与 `LATER:` 也只认围栏之外的整行，规则见下面几条；围栏里的同形文字无效。`LATER:` 在提问或审批上忽略。
-- **回执约定（json 型模板）**：只认 stdout 最后一个非空行，且必须是 JSON 对象。决定任务走向的顶层键有 `summary`、`artifact`、`artifact_name`、`need_input`、`need_auth`。`need_input` 与 `need_auth` 不能同时非空，否则回执无效。`need_auth` 转成字符串后 trim 非空才转入 auth-required，空白不算。可选键 `usage`、`session` 与 `later` 只按下面几条吸收，不参与执行控制。其余顶层键忽略，并记一条日志，不拿去执行。摘要进入总线前仍截断到 4000 字，不按键打码。`later` 在 `need_auth` 上忽略。
-- **可选用量（usage）**：agent 与 json 都可以带用量。没有这条就视为本轮未上报，节点不得估算或补猜。agent 在围栏之外单独整行 `USAGE: input=<n> output=<n> cached=<n> cost=<x>`，四个键都可省略、顺序不限，键之间用空白分开。json 在末行对象上加可选对象 `usage`，键同为 `input` / `output` / `cached` / `cost`，都可省略。三项 token 必须是有限非负数，写入前向零取整；`cost` 必须是有限非负数，保留至多 6 位小数。任一项大于 `1e12`、不是有限非负数，或整行 / 整对象无法按此解析，则忽略这一整条用量并记日志，回执其余部分仍然有效。用量不进 Runs（该表没有 Metadata，也不为此加列），由执行节点累加到 `Tasks.Metadata.usage`：`{input,output,cached,cost,runs,reported}`。同一任务上的重试与问答续跑都累加。`runs` 是已收口的执行轮数，`reported` 是其中带了合法用量的轮数，二者之差就是未上报轮数。写入沿用先读后合并，不覆盖 Metadata 里的其它键（如 `presented_keys`）。写在该轮任务收口的那次 Tasks 更新之后；Metadata 写失败只记日志，不得使回执提交失败。`ah task why` 的文本与 `--json` 都显示这份汇总和未上报轮数。
+- **回执约定（agent 型模板）**：围栏之外的正文即摘要。产物只认围栏之外、整行匹配的 `ARTIFACT: <路径或URL>`，名称只认同样位于围栏之外的整行 `ARTIFACT_NAME: <名称>`；写在围栏里面的同形文字无效。提问与执行中审批只认整段输出里最后一个完整围栏：语言标记是 `agent-ask` 时块内为问题，任务置 input-required；语言标记是 `agent-auth` 时块内为审批说明（trim 后为空则回执无效），任务置 auth-required。二者取最后一个，更早的围栏一律忽略。围栏之外没有摘要则回执无效，直接 failed，不重试（§4）。可选的 `USAGE:`、`SESSION:` 与 `CHECK:` 也只认围栏之外的整行，规则见下面几条；围栏里的同形文字无效。
+- **回执约定（json 型模板）**：只认 stdout 最后一个非空行，且必须是 JSON 对象。决定任务走向的顶层键有 `summary`、`artifact`、`artifact_name`、`need_input`、`need_auth`。`need_input` 与 `need_auth` 不能同时非空，否则回执无效。`need_auth` 转成字符串后 trim 非空才转入 auth-required，空白不算。可选键 `usage`、`session` 与 `checks` 只按下面几条吸收，不参与执行控制。其余顶层键忽略，并记一条日志，不拿去执行。摘要进入总线前仍截断到 4000 字，不按键打码。
+- **可选用量（usage）**：agent 与 json 都可以带用量。没有这条就视为本轮未上报，节点不得估算或补猜。agent 在围栏之外单独整行 `USAGE: input=<n> output=<n> cached=<n> cost=<x>`，四个键都可省略、顺序不限，键之间用空白分开。json 在末行对象上加可选对象 `usage`，键同为 `input` / `output` / `cached` / `cost`，都可省略。三项 token 必须是有限非负数，写入前向零取整；`cost` 必须是有限非负数，保留至多 6 位小数。任一项大于 `1e12`、不是有限非负数，或整行 / 整对象无法按此解析，则忽略这一整条用量并记日志，回执其余部分仍然有效。用量由执行节点累加到 `Tasks.Metadata.usage`：`{input,output,cached,cost,runs,reported}`。同一任务上的重试与问答续跑都累加。`runs` 是已收口的执行轮数，`reported` 是其中带了合法用量的轮数，二者之差就是未上报轮数。写入沿用先读后合并，不覆盖 Metadata 里的其它键（如 `presented_keys`）。写在该轮任务收口的那次 Tasks 更新之后；Metadata 写失败只记日志，不得使回执提交失败。`ah task why` 的文本与 `--json` 都显示这份汇总和未上报轮数。
 - **可选会话（session）与跨任务多轮续接**：只覆盖 `context=direct` 的 json / agent。inbox 不保存 session，也不读 `resume_command`。agent 在围栏之外单独整行 `SESSION: <id>`；json 末行对象可选字符串 `session`。`id` 必须匹配 `^[A-Za-z0-9._:-]{1,128}$`，否则整条忽略并记日志，不影响回执是否有效。这是执行者自报的数据，只写执行节点配置目录 `runs/<Task_ID>/session.json`（权限 0600），并按任务的 `Context_ID` 额外持久化到 `sessions/<Context_ID>.json`（权限 0600），不进总线，不写 Tasks.Metadata。任务进入终态后清理该任务 `runs/<Task_ID>/session.json`，`input.json` 仍按上面的输入约定保留；`sessions/<Context_ID>.json` 则保留，以便同 `Context_ID` 的后续任务自动续接对话记忆。`commands.json` 条目可以另写可选 `resume_command`，可信等级与 `command` 相同，只来自本机文件，不得从任务参数、消息正文或总线读取。仅当三件同时成立时，用 `resume_command` 替换 `command`：（1）本次是任务内续跑（同一任务从 `input-required` 收到 answer 或执行中审批批准后续跑），或新任务携带了非空 `Context_ID` 且命中本机 `sessions/<Context_ID>.json` 同节点/Worker 映射；（2）本机拿到了对应有效的 `session id`；（3）条目配置了 `resume_command`。执行失败后的重试、心跳回收后的重跑，不使用 `resume_command`。`{session}` 与 `{prompt}` 都只替换一轮，替换值用单引号包裹并转义其中的单引号，避免二次展开。此外，当新任务携带 `Context_ID` 且同上下文下存在已完成的历史任务时，内核向 `input.json` 写入 `context_history` 摘要数组（上限 8 条），为多轮协同提供显式上下文。agent 的 `resume_command` 使用 `{prompt}` 与 `{session}`；json 只需 `{session}`。`ah doctor` 在配置了 `resume_command` 但其中没有 `{session}` 时报问题。
-- **可选复查（later）**：终态任务不可重启。agent 在围栏之外单独整行 `LATER: <ISO8601 时刻> | <about>`；json 在末行对象上加可选对象 `later`，形如 `{at, about}`。每次回执最多一条，多条只取最后一条并记日志；围栏里的同形文字无效。`at` 必须是真实日历时间（含闰年与每月天数），并带 `Z` 或数字时区偏移（`±HH:MM` 或 `±HHMM`）；不带时区、日期不存在（如 `2027-02-29`）、早于「现在加 1 分钟」或晚于「现在加 30 天」都整条忽略。`about` 是纯文本，含控制字符或超过 200 字则整条忽略，不删字符后收下，也不截断。不合法只记日志，回执其余部分仍然有效。只有本轮收口为 completed（result）才把 `{at, about}` 读-合并-写进该任务 `Tasks.Metadata.later`，不覆盖其它键，不加列；写失败只记日志，任务仍为 completed。failed（含执行失败与回执无效）、input-required 与 auth-required 上的 later 忽略并记日志，不写入。到点建单只由 hub 的时钟做（§10.1 第 7 条）。`ah task why` 显示待触发，或已触发及新任务 ID。
 - **编排型 CLI 的默认执行主体**：编排型命令（如 Paseo、Orca）的模板必须显式带上默认执行主体。用户在 `ah setup` 交互里的选择优先；未选时写入该模板的默认值（Paseo 默认 `--provider antigravity`）。模型 slug 只钉在节点本地 `commands.json`，不进总线。详见 [能力模板库](agent-templates.md)。
 - **agent 型 CLI 的无头权限**：agent 型无头模板必须显式处理权限，不能依赖有人在终端里点确认。软拒绝型（agy / gemini / claude）、沙箱档位型（codex / droid）与全批准开关型（amp / opencode）的定版写法见 [能力模板库](agent-templates.md)。`agent-auth` 围栏是进程退出后的软约定：模板若在写出围栏前就会自己做完高风险动作，这条回执拦不住，应改走 inbox 的 `ah inbox auth`（§8.3、§10.4）。
 - **节点传输**（详见 §10.3）：守护进程型节点默认用 HTTP 长轮询（`longpoll`：`GET /api/v1/poll`，Hub 进程内直连 `LongPollBroker`）接收变更事件，被唤醒后回表拉取处理；无法长轮询或显式关闭事件时用 `poll`（默认 45 秒）；两者都保留 15 分钟对账扫表兜底（`sweepSec=900`）。hub 角色必须保持实时事件通道。
@@ -308,15 +282,13 @@ Cap_ID 推导口径（守护进程登记时）：节点本尊的能力为条目�
 - 中台只有两个逻辑角色：**node**（认领、执行、回执，可做的状态迁移见 §2、§4、§8）与 **hub**（枢纽）。本标准中凡写「枢纽」「hub」处，均指承担 hub 角色的一方；hub 是 node 角色的单进程超集，既是普通执行节点，又承担中台枢纽服务。
 - 实现是 Node 版 `ah daemon --role node|hub`。省略 `--role` 时读该进程配置目录里 `node.json` 的 `role`，缺省为 node。单进程、单配置目录（默认 `~/.a2a-hub`）即可同时承载干活与枢纽职责，无需再拆两个进程与配置目录。
 - hub 角色的职责：
-  1. 节点能力与任务执行：像普通 node 一样读取 `commands.json`、自动登记 `AgentCards`、认领并执行 `Target_Node === 本节点` 的任务（含定时任务）；
+  1. 节点能力与任务执行：像普通 node 一样读取 `commands.json`、自动登记 `AgentCards`、认领并执行 `Target_Node === 本节点` 的任务；
   2. 总线与统一 HTTP 网关：在单进程内托管 `SqliteBus`（SQLite WAL）、`startHubHttpServer`（REST API、`LongPollBroker`、`agent-gateway` 与内嵌 Web 控制台）及可选 `ExternalNotifier`；
-  3. 建单与路由：按 Rules 与 AgentCards 选目标；建单严格按「instruction 消息 → Parts → Tasks 行」顺序写，Tasks 行最后写、即触发信号（入口为 `ah task create`、Web 控制台 `POST /api/v1/tasks` 与 `agent-gateway`），可用 `--worker` 指定 Worker。建单在写任何行之前先按 AgentCards 名册校验目标存在性与 `Dispatchable=Yes` 且 `Admission=admitted`（不校验 Availability，目标离线仍可建单入队）；节点守护可按同一写序给自己建计划任务（From_Node=To_Node=本节点、Source=cron），仍不写 auth_decision 与 canceled；
+  3. 建单与路由：按 `AgentCards` 选目标；建单严格按「instruction 消息 → Parts → Tasks 行」顺序写，Tasks 行最后写、即触发信号（入口为 `ah task create`、Web 控制台 `POST /api/v1/tasks` 与 `agent-gateway`），可用 `--worker` 指定 Worker。建单在写任何行之前先按 AgentCards 名册校验目标存在性与 `Dispatchable=Yes` 且 `Admission=admitted`（不校验 Availability，目标离线仍可建单入队）；节点可通过 `PUT /api/v1/agents/:node/schedules/:id` 传 `run` 写入 `Source=cron` 定时任务记录，仍不写 `auth_decision` 与 `canceled`；
   4. 审批中继：只给已经是 auth-required 的任务受理审批，不在 submitted 阶段代写 auth_request；审批操作受 Hub Bearer Token 鉴权保护并由 `ApprovalService` 串行校验状态与 `Status_Msg` 后写入签名 `auth_decision`（From_Node=hub、Role=user、In_Reply_To=任务当前 Status_Msg）。`Claimed_By` 为空则批准后置回 submitted，非空则保持 auth-required；驳回置 canceled（§8.3）；
   5. 取消：审批驳回时写 canceled；hub 角色也可执行 `ah task cancel`（或经控制台/网关）取消任意任务。发起方只能在本机显式执行 `ah task cancel`（或 HTTP Leader 调 `/cancel`）取消自己发起的任务；
   6. 结果呈递：将本节点或主节点归属的任务结果（终态、input-required、rejected）落入本地 `present_queue.jsonl`，去重按 §8.5；
-  7. 陈旧任务告警与回收：working 且心跳超时（20 分钟）的任务先告警；告警后宽限 30 分钟，心跳恢复则撤销告警、不留痕迹；宽限届满仍无心跳，由 hub 将任务置 `failed`、清空认领、关账未结束的 Run，并写一条 notice 说明回收原因（原节点事后恢复时，其迟到回执按终态守卫处理）。这是 hub 唯一可代写的任务终态——与 `canceled`（机主/发起方意愿）严格区分，语义为「执行方失联」。`Tasks.Metadata` 可带 `queue_timeout_sec`、`lease_ttl_sec`、`lease_expires_at`、`wait_timeout_sec`（不加列）。显式租约到期且心跳未落在租约内时直接回收 working；`queue_timeout_sec` 到期回收无人认领的 submitted；`wait_timeout_sec` 到期回收 `input-required` / `auth-required`（最近一条 question、answer、auth_request 或 auth_decision 重新计时）。建单时 http-poll 的默认排队和挂起时限是 `max(65 分钟, poll_interval_min + 5 分钟)`，调用方传入的正数优先。未写这些键时，submitted 仍只告警不回收，挂起态不设超时。陈旧巡检约每 60 秒一次，不改 15 分钟对账（`sweepSec=900`）。
-  8. 账本派生职责（事项级 `later` 复查）：
-     - `ScheduleService` 每轮扫表找出 `Status=completed`、`Metadata.later` 已到点、且还没有 `later_fired` 的任务，经现行建单在同一 `Context_ID` 下新建复查任务（幂等键 `later:<前任 Task_ID>`，受 `Hop_Count > 8` 熔断）。纯 node 部署不建复查任务。
+  7. 陈旧任务告警与回收：working 且心跳超时（20 分钟）的任务先告警；告警后宽限 30 分钟，心跳恢复则撤销告警、不留痕迹；宽限届满仍无心跳，由 hub 将任务置 `failed`、清空认领，并写一条 notice 说明回收原因（原节点事后恢复时，其迟到回执按终态守卫处理）。这是 hub 唯一可代写的任务终态——与 `canceled`（机主/发起方意愿）严格区分，语义为「执行方失联」。`Tasks.Metadata` 可带 `queue_timeout_sec`、`lease_ttl_sec`、`lease_expires_at`、`wait_timeout_sec`（不加列）。显式租约到期且心跳未落在租约内时直接回收 working；`queue_timeout_sec` 到期回收无人认领的 submitted；`wait_timeout_sec` 到期回收 `input-required` / `auth-required`（最近一条 question、answer、auth_request 或 auth_decision 重新计时）。建单时 http-poll 的默认排队和挂起时限是 `max(65 分钟, poll_interval_min + 5 分钟)`，调用方传入的正数优先。未写这些键时，submitted 仍只告警不回收，挂起态不设超时。陈旧巡检约每 60 秒一次，不改 15 分钟对账（`sweepSec=900`）。
 - **角色边界**：auth_decision 消息只能由 hub 角色的代码路径写入；node 角色的守护进程与 inbox 回执从不写。canceled 同样不能由守护进程的 node 角色代码路径写入（`kernel` 认领/回执与 `inbox` 回执均不写）。唯一例外：发起方在本机显式执行 `ah task cancel`（或 HTTP Leader 调 `/api/v1/tasks/:id/cancel`），且仅能取消自己发起的任务。hub 角色可取消任意任务，审批驳回时写 canceled 仍只走 hub 路径。命令行 `--role` 不能把 node 提升成 hub。
 - From_Node=hub 是 hub 角色的逻辑名，与它跑在哪台机器无关；node 角色写出的消息，From_Node 仍是本节点名。
 - §8.3 的「有效决定」五条判定、操作鉴权与「终态不可变」等约束不因角色合并而放宽。
@@ -395,10 +367,10 @@ X-A2A-Signature: sha256=<hex>
      - 守护进程负责持续刷新 `Heartbeat_At`，避免 20 分钟租约超时；可配置 `inbox_timeout_sec`（缺省 86400 秒），超时自动置 `failed` + notice「本尊超时未处理」；
      - Agent 本尊在每轮循环或启动时调用 `ah inbox [--pop]` 读取待办；处理完成后调用 `ah inbox done`（完成并原路回执）、`ah inbox ask`（提问待答）、`ah inbox auth`（执行前请求机主批准）或 `ah inbox fail`；
      - **`ah inbox fail` 语义与失败终态**：
-       - `ah inbox fail --task <ID> --text <原因>` 表示 Agent 本尊明确宣告无法完成该任务。参数 `--text <原因>` 为必填；执行后向 Messages 追加一条 `Role=agent` 的 `notice` 消息（正文记录失败原因，`To_Node` 原路指向发起方首条 instruction 的 `From_Node`，回退 `Source` || `"hub"`），当前 Runs 以 `Outcome=failed`、`Finished_At`、`Error_Log` 关账，任务状态直接置为 `failed`；**不重试**，不回 `submitted`，不计入 `Retry_Count`；
+       - `ah inbox fail --task <ID> --text <原因>` 表示 Agent 本尊明确宣告无法完成该任务。参数 `--text <原因>` 为必填；执行后向 Messages 追加一条 `Role=agent` 的 `notice` 消息（正文记录失败原因，`To_Node` 原路指向发起方首条 instruction 的 `From_Node`，回退 `Source` || `"hub"`），任务状态直接置为 `failed`；**不重试**，不回 `submitted`，不计入 `Retry_Count`；
        - **与内核命令失败重试的区别**：内核（host 模式）拉起本地命令时，命令崩溃/进程非零退出、执行超时或无心跳被回收属于偶发临时故障，在 `MAX_RETRIES`（默认 2 次）上限内会清空 `Claimed_By` 并重置为 `submitted` 供重新认领重试；而 `ah inbox fail` 是由 Agent 本尊根据任务内容、自身能力边界或外部约束做出的业务与能力判断，属于确定性结论而非临时故障，重试无法改变结果，故直接进入终态；
        - **区分提问（ask）、批准（auth）与失败（fail）**：缺信息用 `ah inbox ask` 转入 `input-required`。对外发消息、删改数据、花钱、提交表单或改权限，在动作之前调用 `ah inbox auth --task <ID> --text <具体动作、对象与风险>`：本地条目标成 `waiting-auth`（此时 `--pop` 取不走），向 hub 写动态 auth_request，任务置 auth-required 并保留认领。机主批准后原节点把条目放回 `pending`，并带上批准上下文。`ask` 不是审批通道。一旦调用 `fail`，任务进入不可逆终态（A2A 终态不可变，禁止重开）。若发起方想在失败后调整要求重新尝试，必须在同一 `Context_ID` 下新建任务，新任务首条 instruction 的 `Ref_Task_IDs` 指回原任务；
-       - **超时未处理**：若任务进入 inbox 后超过 `inbox_timeout_sec`（缺省 86400 秒）未被 Agent 本尊处理，守护进程负责超时关账，直接将任务置为 `failed` 并写 `notice`「本尊超时未处理」，Runs 记 `failed`，同样不计入重试；
+       - **超时未处理**：若任务进入 inbox 后超过 `inbox_timeout_sec`（缺省 86400 秒）未被 Agent 本尊处理，守护进程负责超时关账，直接将任务置为 `failed` 并写 `notice`「本尊超时未处理」，同样不计入重试；
      - 发起方答复后，中台自动将任务重新放回本地 inbox（状态变回 `pending`，追加最新 answer），本尊即可续跑。
    - **双向对称**：作为发起方时，结果仍经 `present_queue.jsonl` 原路返回；独立 Agent 节点只需在交互开头跑 `ah present --pop`（收自己派出去的结果）和 `ah inbox --pop`（接派给自己的活）。需要同步等结果时用 `ah present --wait <秒> --task <Task_ID> --pop`。
 
@@ -433,7 +405,7 @@ X-A2A-Signature: sha256=<hex>
 - **怎么跑**：与主命令同一 cwd、同一进程组纪律（独立进程组，超时先 SIGTERM，宽限后 SIGKILL）。执行者上报的数据只经两条数据通道交给 verify，绝不拼进命令：标准输入是一行 JSON `{"task_id","summary","artifact","artifact_name","checks"}`；环境变量 `AH_TASK_ID`、`AH_ARTIFACT`、`AH_RUN_DIR`（本次 `runs/<Task_ID>` 目录）、`AH_MAIN_STDOUT`（主命令 stdout 文件路径）。verify 必须是只读、可重复执行的检查。
 - **在途账本**：verify 是在途账本的第二阶段（§4）。主命令收口解析成功后，账本记下解析后的回执与 `state=verifying`，再拉起 verify；verify 的 pid、启动时间、退出码与输出文件同样落盘，守护重启后续接，不重跑主命令。重启后无法确认 verify 是否结束时，重跑 verify（只读，可重复）；同一任务 verify 最多拉起 3 次，仍拿不到结果判为 `error`。verify 期间照常续心跳，占用唯一的 direct 执行槽。
 - **判定**：退出码 0 为 `pass`；非 0 为 `fail`；到 `verify_timeout_sec` 未结束为 `timeout`；拉不起来或 3 次仍无结果为 `error`。
-- **落态**：`pass` 照常 `completed` + result。`fail` / `timeout` / `error` 一律置 `failed` + notice，notice 正文第一行以「验收未通过」开头并写明判定与退出码，随后附执行方摘要与 verify 输出尾部（stdout 与 stderr 合并，至多 2000 字）。Runs 记 `Outcome=failed`，`Error_Log` 写判定与退出码。执行方给了产物的照常登记 Artifacts，但 `Is_Final=No`。验收失败**不计入 `Retry_Count`、不回 `submitted`、不自动重跑**，并清除退避水位。返工须在同一 `Context_ID` 新建任务（§2 终态不可变）。
+- **落态**：`pass` 照常 `completed` + result。`fail` / `timeout` / `error` 一律置 `failed` + notice，notice 正文第一行以「验收未通过」开头并写明判定与退出码，随后附执行方摘要与 verify 输出尾部（stdout 与 stderr 合并，至多 2000 字）。执行方给了产物的照常登记 Artifacts，但 `Is_Final=No`。验收失败**不计入 `Retry_Count`、不回 `submitted`、不自动重跑**，并清除退避水位。返工须在同一 `Context_ID` 新建任务（§2 终态不可变）。
 - **证据等级**：verify 结果由守护进程亲自捕获，等级为 `captured`，是唯一能改变任务状态的验收证据。
 
 ### 11.2 L2 声明式验收（criteria 清单）

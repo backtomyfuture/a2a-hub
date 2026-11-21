@@ -160,7 +160,6 @@ function formatTaskSummary(t) {
     retry_count: Number(f1(t, "Retry_Count")) || 0,
     context_id: f1(t, "Context_ID"),
     status_msg: f1(t, "Status_Msg"),
-    latest_run: f1(t, "Latest_Run"),
     metadata: parseJsonField(f1(t, "Metadata"), {}),
   };
 }
@@ -620,15 +619,14 @@ export async function startHubHttpServer({
         return;
       }
 
-      // 5) 单任务详情（含对话流、Runs、Artifacts、Why）
+      // 5) 单任务详情（含对话流、Artifacts、Why）
       const taskDetailMatch = pathname.match(/^\/api\/v1\/tasks\/([^/]+)$/);
       if (method === "GET" && taskDetailMatch) {
         const taskId = decodeURIComponent(taskDetailMatch[1]);
-        const [tasks, messages, parts, runs, artifacts] = await Promise.all([
+        const [tasks, messages, parts, artifacts] = await Promise.all([
           bus.listRecords(bus.tables.tasks),
           bus.listRecords(bus.tables.messages),
           bus.listRecords(bus.tables.parts),
-          bus.tables.runs ? bus.listRecords(bus.tables.runs) : Promise.resolve([]),
           bus.tables.artifacts ? bus.listRecords(bus.tables.artifacts) : Promise.resolve([]),
         ]);
         const task = tasks.find((t) => f1(t, "Task_ID") === taskId);
@@ -677,17 +675,7 @@ export async function startHubHttpServer({
               parts: msgParts,
             };
           });
-        const taskRuns = runs
-          .filter((r) => f1(r, "Task_Ref") === taskId)
-          .map((r) => ({
-            run_id: f1(r, "Run_ID"),
-            node: f1(r, "Node"),
-            worker: f1(r, "Worker"),
-            outcome: f1(r, "Outcome"),
-            error_log: f1(r, "Error_Log"),
-            started_at: f1(r, "Started_At"),
-            finished_at: f1(r, "Finished_At"),
-          }));
+        const taskRuns = [];
         const taskArts = artifacts
           .filter((a) => f1(a, "Task_ID") === taskId)
           .map((a) => {
@@ -733,7 +721,7 @@ export async function startHubHttpServer({
         const commonOpts = {
           bus,
           from: body.from || cfg?.node || "hub",
-          source: body.source || body.from || "web",
+          source: body.source || ((body.schedule_id || body.scheduleId) ? "cron" : "") || body.from || "web",
           worker: body.worker || "",
           requested_model: body.requested_model ?? null,
           cap: body.cap || "",
@@ -743,6 +731,7 @@ export async function startHubHttpServer({
           ref: body.ref || "",
           approval: body.approval || "",
           idempotencyKey: body.idempotencyKey || "",
+          scheduleId: body.schedule_id || body.scheduleId || "",
           validateTarget: body.validateTarget !== false,
           attachments,
           fileStore: activeFileStore,
@@ -1033,14 +1022,12 @@ export async function startHubHttpServer({
       }
 
       if (method === "GET" && pathname === "/api/v1/schedules") {
-        const [rules, tasks, cards] = await Promise.all([
-          bus.tables.rules ? bus.listRecords(bus.tables.rules) : Promise.resolve([]),
+        const [tasks, cards] = await Promise.all([
           bus.listRecords(bus.tables.tasks),
           bus.listRecords(bus.tables.agentCards),
         ]);
         sendJson(res, 200, {
           schedules: listSchedules({
-            rules,
             tasks,
             cards,
             connected: broker ? broker.connectedNodes() : [],

@@ -70,5 +70,5 @@
 ## 运维要点
 
 - **进程托管**：使用 `ah up --service` 或 `ah join <hub-url> --service` 注册用户级自启（macOS launchd `ah-<role>.<node>` / Linux systemd `ah-<role>-<node>.service` / Windows 任务计划 `ah-<role>-<node>`，非默认配置目录追加配置路径 SHA-256 前 8 位摘要），日志在配置目录 `daemon.log`。
-- **本地状态**：`approval_state.json`、`present_state.json`、`stale_state.json`、`schedule_state.json`、`hub.db*`、`approval_key.pem`、`app.env`、`agent_tokens.json`、`agent_webhooks.json` 保存在配置目录，不进仓库。
+- **本地状态**：`approval_state.json`、`present_state.json`、`stale_state.json`、`hub.db*`、`approval_key.pem`、`app.env`、`agent_tokens.json`、`agent_webhooks.json`、`agent_templates.json` 保存在配置目录，不进仓库。
 - **留痕与溯源**：排查具体单据时运行 `ah task why <Task_ID> [--config <dir>] [--json]` 查阅单任务全链时间线与本地在途状态，亦可通过 Web 控制台或 `ah task show <Task_ID>` 查看。

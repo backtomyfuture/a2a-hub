@@ -116,7 +116,7 @@ test("控制台包含新术语结构、接收方式、添加能力与定时任�
   // 定时任务只读页
   assert.match(html, /data-view="schedules"[^>]*>[\s\S]*?定时任务/);
   assert.match(html, /\/api\/v1\/schedules/);
-  assert.match(html, /计划在各节点本地管理，用 ah schedule 修改/);
+  assert.match(html, /各 Agent 自行管理并调度定时任务/);
 
   // 深浅色与窄屏导航适配
   assert.match(html, /prefers-color-scheme:\s*light/);
@@ -522,7 +522,7 @@ test("控制台内嵌脚本：节点分层渲染、添加能力、Webhook 与定
   // 2) 定时任务页（只读）：按节点分组、cron、上次任务、异常标记
   await vm.runInContext('state.view = "schedules"; render();', sandbox);
   const schedHtml = getEl("content").innerHTML;
-  assert.match(schedHtml, /计划在各节点本地管理，用 ah schedule 修改/);
+  assert.match(schedHtml, /各 Agent 自行管理并调度定时任务/);
   assert.match(schedHtml, /0 9 \* \* \*/);
   assert.match(schedHtml, /TASK-100/);
   assert.match(schedHtml, /漏触发 \(missed\)/);
@@ -678,7 +678,7 @@ test("控制台对尚未合入的后端接口（404）给出友好降级提示�
   await vm.runInContext("refreshState()", sandbox);
   await vm.runInContext('state.view = "schedules"; render();', sandbox);
   const schedHtml = getEl("content").innerHTML;
-  assert.match(schedHtml, /计划在各节点本地管理，用 ah schedule 修改/);
+  assert.match(schedHtml, /各 Agent 自行管理并调度定时任务/);
   assert.match(schedHtml, /后端暂未启用定时任务查询接口/);
 });
 

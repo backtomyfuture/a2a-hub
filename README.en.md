@@ -34,7 +34,7 @@ flowchart LR
     WEB["Web Console / CLI (ah)"] --> HUB
     subgraph HUB["Persistent Hub Server (e.g., Mac mini :8787)"]
         direction TB
-        SQL[("SQLite WAL Bus\ntasks · messages · parts · runs\nartifacts · agentCards · rules")]
+        SQL[("SQLite WAL Bus\ntasks · messages · parts\nartifacts · agentCards")]
         API["HTTP REST API + LongPollBroker + agent-gateway\nGET /.well-known/agent.json · ed25519 Signer"]
         SQL <--> API
     end
@@ -206,13 +206,12 @@ Configuration defaults to `~/.a2a-hub` (app installed under `~/.a2a-hub/app/`, o
 | | `ah service [--role node\|hub] [--remove]` | Install or remove user-level autostart (launchd / systemd / Windows) |
 | | `ah inventory` | Inspect this node's AgentCards and task counts |
 | | `ah reconcile` | Run a single sweep/reconciliation pass and exit |
-| **Tasks & Debug** | `ah task create --to <node> [--worker <W>] [--cap <skill>] --text …` | Validate roster and create a task |
+| **Tasks & Debug** | `ah task create --to <node> [--worker <W>] [--cap <skill>] [--schedule <id>] --text …` | Validate roster and create a task (with optional `--schedule` link) |
 | | `ah present [--wait <sec>] [--task <ID>] [--pop]` | Read or wait for receipts in `present_queue.jsonl` |
 | | `ah task reply --task <ID> --text …` | Reply to an `input-required` question and resume the task |
 | | `ah task cancel --task <ID> [--text …]` | Cancel a non-terminal task |
 | | `ah task why <ID> [--json]` | Reconstruct full timeline, acceptance summary, and local flight/outbox state |
-| **Local Scheduling & Inbox** | `ah schedule ls \| add \| rm \| enable \| disable` | Manage local `schedules.json` cron jobs |
-| | `ah inbox [--pop] [--limit <n>] [--json]` / `ah inbox done \| ask \| fail \| auth` | Consume `agent_inbox.jsonl` and report results from standalone agents |
+| **Standalone Inbox** | `ah inbox [--pop] [--limit <n>] [--json]` / `ah inbox done \| ask \| fail \| auth` | Consume `agent_inbox.jsonl` and report results from standalone agents (cron plans report via `/agents/:node/schedules/:id`) |
 
 ---
 

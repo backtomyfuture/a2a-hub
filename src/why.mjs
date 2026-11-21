@@ -4,11 +4,10 @@
 // 2. 状态与溯源：汇总 Tasks 当前状态、认领节点、重试次数、待批/提问消息与跳数；
 // 3. 消息与 Parts：按时间重排 Messages（instruction/question/answer/auth_request/auth_decision/result/notice 等），
 //    标注 From_Node→To_Node 走向；文本正文截断至 200 字符；DataPart 仅显示键名、绝不显示值（凭据与参数值不泄露）；
-// 4. 台账与产物：关联 Runs 每次执行的起止与结果，关联 Artifacts 成果指针；
+// 4. 产物与时间线：关联 Artifacts 成果指针与 Messages 完整消息流；
 // 5. 本地重试感知：只读检查配置目录下 outbox / inbox-outbox 是否存在该任务的待补交文件。
 // 6. 用量：只读 Tasks.Metadata.usage，算出未上报轮数。没有这格就不估算。
-// 7. 复查：只读 Tasks.Metadata.later / later_fired，显示待触发、已触发或跳数熔断。
-// 8. 验收：result/notice 的 DataPart 是权威；没有则退回 Tasks.Metadata.acceptance；都没有为 null。
+// 7. 验收：result/notice 的 DataPart 是权威；没有则退回 Tasks.Metadata.acceptance；都没有为 null。
 
 import path from "node:path";
 import fs from "node:fs";
@@ -126,37 +125,6 @@ function metaObject(rawMeta) {
   return meta;
 }
 
-// 没有 later 就不显示。已写 later_fired 表示这只时钟处理过，无论有没有建出新任务。
-function laterView(rawMeta) {
-  const meta = metaObject(rawMeta);
-  if (!meta) return null;
-  const later = meta.later;
-  const fired = meta.later_fired;
-  const hasLater = !!later && typeof later === "object" && !Array.isArray(later);
-  const hasFired = !!fired && typeof fired === "object" && !Array.isArray(fired);
-  if (!hasLater && !hasFired) return null;
-  const reason = hasFired && typeof fired.reason === "string" ? fired.reason : "";
-  const taskId = hasFired && typeof fired.task_id === "string" ? fired.task_id : "";
-  let status = "pending";
-  if (reason === "hop_limit") status = "skipped";
-  else if (hasFired) status = "fired";
-  return {
-    status,
-    at: hasLater && typeof later.at === "string" ? later.at : "",
-    about: hasLater && typeof later.about === "string" ? later.about : "",
-    task_id: taskId,
-    fired_at: hasFired && typeof fired.at === "string" ? fired.at : "",
-  };
-}
-
-function laterLine(later) {
-  if (!later) return "";
-  if (later.status === "fired") return `复查预约: 已触发 ${later.task_id || "(无任务号)"}`;
-  if (later.status === "skipped") return "复查预约: 已跳过（跳数超限，未建复查任务）";
-  const about = later.about ? ` ${later.about}` : "";
-  return `复查预约: 待触发 ${later.at}${about}`;
-}
-
 // 证据正文只在文本里截短展示。captured 与 self 必须分开标，避免把执行方自述看成守护进程捕获。
 function acceptanceLines(acc) {
   if (!acc) return ["验收: 未配置"];
@@ -177,19 +145,22 @@ function acceptanceLines(acc) {
   return lines;
 }
 
+function scheduleIdView(rawMeta) {
+  const meta = metaObject(rawMeta);
+  const id = meta && typeof meta.schedule_id === "string" ? meta.schedule_id.trim() : "";
+  return id;
+}
+
 // 事件类型在同一时刻下的自然逻辑顺序权重，保证时间戳相同时展示合理
 const EVENT_ORDER_WEIGHT = {
   instruction: 10,
-  "run-start": 20,
   question: 30,
   auth_request: 30,
-  "run-pause": 40,
   answer: 50,
   auth_decision: 50,
   artifact: 60,
   result: 70,
   notice: 70,
-  "run-finish": 80,
 };
 
 // 只读检查配置目录下是否有本地未落表的待补交文件
@@ -334,14 +305,13 @@ export async function getTaskWhy({ bus, configDir, taskId }) {
     context_id: f1(taskRow, "Context_ID"),
     approval_class: f1(taskRow, "Approval_Class"),
     heartbeat_at: f1(taskRow, "Heartbeat_At"),
-    latest_run: f1(taskRow, "Latest_Run"),
     idempotency_key: f1(taskRow, "Idempotency_Key"),
   };
   const rawMeta = f1(taskRow, "Metadata");
   const usage = usageView(rawMeta);
   task.usage = usage;
-  const later = laterView(rawMeta);
-  task.later = later;
+  const schedId = scheduleIdView(rawMeta);
+  if (schedId) task.schedule_id = schedId;
 
   // 2. 读取 Messages 与 Parts
   const allMessages = await bus.listRecords(bus.tables.messages);
@@ -407,26 +377,8 @@ export async function getTaskWhy({ bus, configDir, taskId }) {
     });
   }
 
-  // 3. 读取 Runs 台账
-  const allRuns = bus.tables.runs ? await bus.listRecords(bus.tables.runs) : [];
-  const rawRuns = allRuns.filter((r) => f1(r, "Task_Ref") === id);
-  rawRuns.sort((a, b) => {
-    const diff = parseTimestamp(f1(a, "Started_At")) - parseTimestamp(f1(b, "Started_At"));
-    if (diff !== 0) return diff;
-    return String(f1(a, "Run_ID") ?? "").localeCompare(String(f1(b, "Run_ID") ?? ""));
-  });
-
-  const runs = rawRuns.map((r) => ({
-    run_id: f1(r, "Run_ID"),
-    node: f1(r, "Node"),
-    worker: f1(r, "Worker"),
-    outcome: f1(r, "Outcome"),
-    started_at: f1(r, "Started_At"),
-    finished_at: f1(r, "Finished_At"),
-    error_log: f1(r, "Error_Log"),
-  }));
-
-  // 4. 读取 Artifacts 指针
+  // 3. 读取 Artifacts 指针（已移除独立 Runs 表，执行信息由 Messages + Tasks 承载）
+  const runs = [];
   const allArtifacts = bus.tables.artifacts ? await bus.listRecords(bus.tables.artifacts) : [];
   const rawArtifacts = allArtifacts.filter((a) => f1(a, "Task_ID") === id);
   rawArtifacts.sort((a, b) => {
@@ -493,45 +445,6 @@ export async function getTaskWhy({ bus, configDir, taskId }) {
     });
   }
 
-  // Runs 事件
-  for (const r of runs) {
-    if (r.started_at) {
-      timeline.push({
-        time: r.started_at,
-        timestamp: parseTimestamp(r.started_at),
-        order_weight: EVENT_ORDER_WEIGHT["run-start"],
-        type: "run",
-        action: "start",
-        ref_id: r.run_id,
-        node: r.node,
-        worker: r.worker,
-        summary: `[run-start] 节点 ${r.node || "(未知)"} 开始执行 (${r.run_id}) · worker: ${r.worker || "(默认)"}`,
-        details: [],
-      });
-    }
-
-    if (r.finished_at || r.outcome) {
-      const outcome = r.outcome || "finished";
-      const isPause = outcome === "paused";
-      const weight = isPause ? EVENT_ORDER_WEIGHT["run-pause"] : EVENT_ORDER_WEIGHT["run-finish"];
-      const outcomeDesc = outcome === "succeeded" ? "成功" : outcome === "paused" ? "暂停(待输入)" : outcome === "failed" ? "失败" : outcome;
-      const details = [];
-      if (r.error_log) details.push(`错误日志: ${summarizeText(r.error_log, 200)}`);
-
-      timeline.push({
-        time: r.finished_at || r.started_at,
-        timestamp: parseTimestamp(r.finished_at) || (parseTimestamp(r.started_at) + 1),
-        order_weight: weight,
-        type: "run",
-        action: isPause ? "pause" : "finish",
-        ref_id: r.run_id,
-        outcome,
-        summary: `[run-${outcome}] 执行${outcomeDesc} (${outcome}) · ${r.run_id}`,
-        details,
-      });
-    }
-  }
-
   // Artifacts 事件
   for (const a of artifacts) {
     timeline.push({
@@ -557,7 +470,6 @@ export async function getTaskWhy({ bus, configDir, taskId }) {
   return {
     task,
     usage,
-    later,
     acceptance,
     timeline,
     messages,
@@ -590,8 +502,6 @@ export function formatWhyText(data) {
   lines.push(`重试次数: ${task.retry_count}`);
   lines.push(usageLine(data.usage ?? task.usage));
   lines.push(...acceptanceLines(data.acceptance ?? task.acceptance));
-  const laterText = laterLine(data.later ?? task.later);
-  if (laterText) lines.push(laterText);
   lines.push(`提问/待批: ${task.status_msg || "(无)"}`);
   if (data.auth_hint) lines.push(data.auth_hint);
   if (data.inbox?.status) {
@@ -601,6 +511,7 @@ export function formatWhyText(data) {
   lines.push(`派生跳数: ${task.hop_count}`);
   lines.push(`目标节点: ${task.target_node || "(未指定)"}`);
   lines.push(`任务来源: ${task.source || "(未指定)"}`);
+  if (task.schedule_id) lines.push(`定时计划: ${task.schedule_id}`);
   lines.push(`幂等键: ${task.idempotency_key || "(无)"}`);
   const schedNote = schedKeyNote(task.idempotency_key);
   if (schedNote) lines.push(schedNote);

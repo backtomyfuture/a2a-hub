@@ -71,14 +71,14 @@ ah inbox fail --task <Task_ID> --text "<具体失败原因与卡点>"
 
 ---
 
-## 四、如果 Agent 自带本地定时器 (`schedule` + `task begin`)
+## 四、如果 Agent 自带本地定时器
 
-当本机独立 Agent 自带 cron 触发周期性工作并希望任务纳入 Hub 审计与回执追踪时：
+当本机独立 Agent 自带 cron 触发周期性工作并希望在控制台集中观测及保留 A2A `Task` 记录时：
 
 ```bash
-# 仅向中台 Rules 登记只读观察镜像（不重复写入本机 schedules.json）
-ah schedule register --id <Schedule_ID> --cron "<五段cron>" --cap agent --text "<说明>"
+# 方式 1：通过网关自报计划并在执行时一步写入 Task（推荐，见 protocol-node-runbook.md）
+# PUT /api/v1/agents/<Node>/schedules/<Schedule_ID> { cron, tz?, cap, text, run?: { status, text, title?, artifact? } }
 
-# 定时器到点时生成可幂等追踪的任务单，再走 ah inbox --pop / done
-ah task begin --schedule <Schedule_ID> [--period <期次键>] --text "<本次执行指令>"
+# 方式 2：定时器到点时创建带 --schedule 的任务入总线，再走 ah inbox --pop / done
+ah task create --to <本节点> --source cron --schedule <Schedule_ID> --cap agent --text "<本次执行指令>"
 ```
