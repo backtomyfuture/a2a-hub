@@ -741,6 +741,8 @@ test("错误归一：已知码归类，*_not_found 同类，未知码原样保�
   assert.equal(classifyErrorCode("agent_prompt_stalled"), "prompt_stalled");
   assert.equal(classifyErrorCode("agent_not_running"), "not_running");
   assert.equal(classifyErrorCode("agent_not_ready"), "not_ready");
+  assert.equal(classifyErrorCode("agent_pane_busy"), "shell_not_ready");
+  assert.equal(classifyErrorCode("agent_pane_unavailable"), "shell_not_ready");
   for (const c of ["not_found", "pane_not_found", "agent_not_found", "tab_not_found", "workspace_not_found"]) {
     assert.equal(classifyErrorCode(c), "not_found", c);
   }
@@ -1230,6 +1232,7 @@ class FakeHerdrWorld {
       return { type: "worktree_removed", workspace_id: p.workspace_id, path: "x", forced: false };
     });
     fake.on("agent.start", (p) => {
+      if (typeof this.hooks.start === "function") this.hooks.start(p);
       if (!this.panes.has(p.pane_id)) throw herr("pane_not_found");
       const a = this.addAgent(p.name, p.pane_id);
       return { type: "agent_started", agent: this.view(a) };
@@ -1456,6 +1459,31 @@ test("Runtime.launchAgent（worktree）：pane_id 来自返回值、env 经 tab.
   assert.equal(world.req("tab.close")[0].tab_id, world.lastWorktree.tab.tab_id, "worktree 自带的默认 Tab 要收掉");
   assert.equal(rt.binding(b.agentName), b);
 })));
+
+test("Runtime.launchAgent：新窗格还不是可用 shell 时等待后再启动", () => withWorld(async ({ world, rt }) => withTemp(async (dir) => {
+  let n = 0;
+  world.hooks.start = (p) => {
+    n += 1;
+    if (n < 3) throw herr("agent_pane_busy", `agent target pane ${p.pane_id} is not an available shell`);
+  };
+  const b = await rt.launchAgent({ configDir: dir, taskId: "task-shell", kind: "agy", cwd: "/x" });
+  assert.equal(n, 3);
+  assert.equal(world.req("agent.start").length, 3);
+  assert.equal(b.paneId, world.req("agent.start")[0].pane_id);
+  assert.equal(b.agentName, "ah-shell");
+})));
+
+test("Runtime.launchAgent：shell 一直不可用时在时限内放弃并关掉空壳 Tab", () => withWorld(async ({ world, rt }) => withTemp(async (dir) => {
+  world.hooks.start = (p) => { throw herr("agent_pane_busy", `agent target pane ${p.pane_id} is not an available shell`); };
+  const tabsBefore = world.tabs.size;
+  await assert.rejects(
+    rt.launchAgent({ configDir: dir, taskId: "task-busy", kind: "agy" }),
+    (e) => e.code === "agent_pane_busy",
+  );
+  assert.ok(world.req("agent.start").length >= 2);
+  assert.equal(world.tabs.size, tabsBefore);
+  assert.equal(rt.binding("ah-busy"), null);
+}), { startTimeoutMs: 3600 }));
 
 test("Runtime.launchAgent（非 worktree）：复用/创建同名 workspace，起不来时清掉空壳 Tab", () => withWorld(async ({ world, rt }) => withTemp(async (dir) => {
   const b1 = await rt.launchAgent({ configDir: dir, taskId: "task-1", kind: "claude", cwd: "/x" });
