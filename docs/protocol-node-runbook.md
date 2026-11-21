@@ -188,7 +188,7 @@ POST /api/v1/tasks/{taskId}/complete
 
 ## 四、Leader 调度闭环（Muse 等主控 Agent）
 
-1. **派发异步任务** (`POST /api/v1/tasks`)：
+1. **派发异步任务（支持单发、`to: [...]` 批量扇出与 `context_id` 多轮续接）** (`POST /api/v1/tasks`)：
    ```json
    {
      "from": "muse",
@@ -198,7 +198,9 @@ POST /api/v1/tasks/{taskId}/complete
      "criteria": [{ "id": "c1", "text": "提供架构图摘要", "verify": "agent" }]
    }
    ```
-   也支持面向任意宿主节点（如办公电脑上的 `claude` / `agy` Worker）派单：`{"from":"muse","to":"office-pc","worker":"claude","text":"..."}`。
+   - 也支持面向任意宿主节点（如办公电脑上的 `claude` / `agy` Worker）派单：`{"from":"muse","to":"office-pc","worker":"claude","text":"..."}`。
+   - **批量并行扇出**：`to` 传字符串数组（如 `"to": ["grok-bot", "office-pc"]`）可一次性派发多个并行任务并自动绑定同一个 `context_id`，响应返回 `{ ok: true, task_ids: [...], context_id, task_id }`。
+   - **多轮记忆续接**：向同一个 Worker 追问或接着前序任务继续做时，传入相同的 `"context_id": "CTX-..."`（或 `"context"`）；宿主机 CLI Worker 会自动复用上一轮 `Session_ID`（`resume_command`）并注入 `context_history`。
 2. **拉取跟进状态更新** (`GET /api/v1/agents/{node}/updates?new=1`)：
    只含「由 `{node}` 发起」且处于 `completed`、`failed`、`rejected`、`canceled`、`input-required`、`auth-required` 的任务。定时 Leader 用 `new=1`：Hub 为该节点持久化水位，终态只返回 `changed_seq` 大于水位的新变化，`input-required` 与 `auth-required` 在处理完之前每次都返回。每条带 `changed_seq`，响应带 `watermark`。`since=<seq>` 可显式指定水位，并优先于 `new=1`。带 `status` 时水位不推进，以免把这次没返回的终态跳过。定时跟单不要加 `status`。不带 `since`/`new` 时仍返回全部匹配任务。`timeout=0` 适合定时唤醒；`timeout=5..60` 留给能挂住连接的进程。
 3. **答复下级追问** (`POST /api/v1/tasks/{taskId}/reply`)：

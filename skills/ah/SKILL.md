@@ -1,6 +1,6 @@
 ---
 name: ah
-description: 操作与调度 a2a-hub (ah) 多 Agent 协作中台（控制端/调度者 CLI 版）：查询在册节点与能力名片、派发跨节点异步任务与 LoopForge 多阶段闭环、等待原路返回的结果队列、答复追问、查看任务全链与撤单。仅用于装有 ah CLI 的 Hub 或工作机主控 Agent；接单执行方请用 ah-inbox（本机独立 Agent）或 a2a-worker（纯 HTTP Agent）。
+description: 操作与调度 a2a-hub (ah) 多 Agent 协作中台（控制端/调度者 CLI 版）：查询在册节点与能力名片、派发跨节点异步任务与 Context_ID 多轮会话续接、等待原路返回的结果队列、答复追问、查看任务全链与撤单。仅用于装有 ah CLI 的 Hub 或工作机主控 Agent；接单执行方请用 ah-inbox（本机独立 Agent）或 a2a-worker（纯 HTTP Agent）。
 ---
 
 # `ah` 控制端调度 Skill（有 CLI 的中控 / 发单方）
@@ -54,28 +54,27 @@ ah task create \
 
 ---
 
-## 三、派发多阶段 SOP 闭环 (`ah loop`)
+## 三、多轮上下文续接（`--context` / `Context_ID`）与多阶段串联
 
-当任务天然分为「规划 → 编码 → 验证」等闭环阶段时，用 LoopForge 自动推进并在失败时携带诊断回跳：
+当任务已经终态、需要向同一 Worker 继续追问，或要把前一步的结果接力给下一步时，传入同一个 `--context <Context_ID>` 串联上下文（首轮新建任务会分配并输出 `Context_ID`）：
 
 ```bash
-# 查看内置模板（如 plan-code-verify）
-ah loop templates
-
-# 发起多阶段闭环（同一 Context_ID 下串联执行）
-ah loop create \
-  --title "<闭环标题>" \
-  --goal "<总目标与约束>" \
+# 第一步：启动新上下文（查看输出中的 Task_ID 与 Context_ID）
+ah task create \
   --to <Target_Node> \
   [--worker <Worker>] \
-  [--template plan-code-verify] \
-  [--max-iterations 5]
+  --text "<第一轮任务说明>"
 
-# 查看与终止
-ah loop ls [--json]
-ah loop show <Loop_ID>
-ah loop cancel <Loop_ID> [--text "<说明>"]
+# 后续轮次：传入同一 --context，本地 CLI Worker 自动复用上轮 Session_ID 并注入 context_history
+ah task create \
+  --to <Target_Node> \
+  [--worker <Worker>] \
+  --context <Context_ID> \
+  --text "<追问或下一阶段指示>"
 ```
+
+- 同一个 `Context_ID` 下，本地 CLI Worker 会自动查找上一轮持久化的 `Session_ID`（如配置了 `resume_command`）继续上下文对话，同时在 `runs/<Task_ID>/input.json` 中获得 `context_history`（历史已完成任务摘要）。
+- 如果需要更精细控制验收，可在每轮附带 `--criteria` 与前序结论指针。
 
 ---
 

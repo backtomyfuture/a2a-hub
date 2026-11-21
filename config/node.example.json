@@ -3,7 +3,6 @@
   "busType": "http",
   "capPrefix": "dev",
   "hubPublicKey": "<HUB_ED25519_PUBLIC_KEY_BASE64>",
-  "herdrSocketPath": "",
   "hubUrl": "http://127.0.0.1:8787",
   "longPollSec": 25,
   "node": "node-dev",

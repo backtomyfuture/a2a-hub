@@ -18,7 +18,8 @@
 | `agent_webhooks.json` | HTTP Agent 门铃（0600，`version: 1`，`hooks[]` 含 URL 与 HMAC `secret` 明文；列表接口不返回 secret） | 绝不 |
 | `approval_key.pem` | `role=hub` 的 ed25519 审批签名私钥，权限 600 | 绝不 |
 | `hub.db` / `hub.db-wal` / `hub.db-shm` | `role=hub` SQLite WAL 主数据库文件 | 绝不 |
-| `runs/<Task_ID>/` | 每次执行的输入、输出与在途账本（`entry.json`） | 否 |
+| `runs/<Task_ID>/` | 每次执行的输入、输出与在途账本（`entry.json`、`session.json`） | 否 |
+| `sessions/<Context_ID>.json` | 同一 `Context_ID` 跨任务自动续接的多轮 CLI `Session_ID` 持久化文件（0600） | 否 |
 | `retry_state.json` `approval_state.json` `present_state.json` `stale_state.json` `schedule_local_state.json` | 节点私有状态与水位，非协议字段 | 否 |
 | `present_queue.jsonl` `present_bell` `present_queue.jsonl.lock` | 发给本机 Agent 的回执队列、门铃，以及队列锁。锁是临时文件；没有 `ah present` 在跑且守护进程空闲时可以删 | 否 |
 | `agent_inbox.jsonl` | `kind=agent` 节点的收件箱 | 否 |
@@ -37,8 +38,6 @@
 - `longPollSec`：长轮询单次挂起秒数（默认 `25`）；`pollSec`（默认 `45`）是 `poll` 模式的定时轮询间隔；`sweepSec`（默认 `900`，即 15 分钟）是对账兜底。
 - `hubPublicKey`：hub 的审批签名公钥（base64）。`ah join` 会从 `GET /api/v1/health` 自动拉取写入；配了它，本节点只认 hub 私钥签过的 `auth_decision`。hub 自己私钥在配置目录 `approval_key.pem`（600，首次启动自动生成），公钥由私钥推出。详见 [SECURITY.md](../SECURITY.md)。
 - `tz`：IANA 时区名，缺省 `Asia/Shanghai`。决定本地定时调度的 cron 墙钟与期次键偏移，与宿主机时区及系统 `TZ` 环境变量无关。
-- `maxConcurrent`：可选正整数，默认 `4`。控制 `context: "herdr"` 宿主机节点的最大并发槽位数（`working` 与处于 `input-required` / `auth-required` 的驻留 Pane 均计入占槽）。`ah setup` 检测到本机安装 `herdr` 时自动写入 `4`。
-- `herdrSession` / `herdrWorkspace`：可选。指定 Herdr 的命名 session（缺省使用默认 session）及任务工作区标签（默认 `"a2a-hub"`）。守护进程只走 Herdr Socket API（协议 22），不再调用 `herdr` CLI。套接字按显式路径、`HERDR_SOCKET_PATH`、命名 session、默认 `~/.config/herdr/herdr.sock` 的顺序查找。
 
 ## 3. 机器类型：host 与 agent
 
@@ -109,17 +108,15 @@ Worker 条目与节点本尊的技能条目可用的字段：
 |---|---|
 | `command` | 命令模板。agent 模式含 `{prompt}` |
 | `mode` | `agent`（默认）纯文本输出＋结构化回执；`json` 脚本类，stdin 收信封、stdout 最后一行出结果；`inbox` 交给本尊收件箱 |
-| `context` | 支持 `direct`（默认，守护进程直接拉起单槽子进程）与 `herdr`（借本机 `herdr` 终端复用器为每个任务开独立 Tab/Pane，支持 `maxConcurrent` 多槽并行与多轮交互热驻留）。取值非法时任务直接 `rejected`，不静默降级 |
-| `herdr_kind` | `context=herdr` 时经 Socket `agent.start` 使用的交互式 Agent 类型（如 `claude`、`codex`、`agy`、`gemini`、`amp`、`droid`、`grok`、`hermes`、`cursor`、`opencode`）。缺省可从 Worker 名或 `command` 首词推导 |
-| `herdr_args` | 可选字符串数组。`context=herdr` 时附在 Socket `agent.start` 参数后面 |
-| `herdr_env` | 可选对象（`{ KEY: "VAL" }`）。`context=herdr` 创建 Tab 时注入的自定义环境变量。内核另外写入 `A2A_TASK_ID`、`A2A_RUN_ID`、`A2A_ATTEMPT_ID`、`A2A_NODE`、`A2A_ENVELOPE_PATH`，以及 `AH_TASK_ID` / `AH_NODE` / `AH_WORKER` / `AH_RUN_DIR` / `AH_INPUT_PATH` / `AH_RECEIPT_PATH`。用户键若以 `HERDR_` 或 `A2A_` 开头，或与上述 `AH_*` 重名，会被去掉 |
+| `context` | 仅支持 `direct`（默认，守护进程直接拉起本地命令/Agent 子进程）。取值非法（含已移除的 `herdr`/`carrier`）时任务直接 `rejected`，不静默降级 |
+| `harness` | 可选字符串。标识 CLI Agent 类型（如 `claude`、`codex`、`agy`、`gemini`、`amp`、`droid`、`grok`、`hermes`、`cursor`、`opencode`）。缺省可从 Worker 名或 `command` 首词推导 |
 | `timeout_sec` | 单次执行上限，默认 600 |
 | `verify` | 可选。一条本机 shell 命令，与 `command` 同一可信等级，原样执行，不做 `{prompt}` / `{session}` 替换。只支持 `context=direct` 的 `json` / `agent`。Skill 条目优先，Skill 未写时用其 Worker 条目的值。`mode=inbox` 写了是配置错误：认领预检 `rejected` + notice，`ah doctor` 报问题，不静默忽略。命令必须只读、可重复。执行者的数据不拼进命令，只经两条通道：stdin 一行 JSON `{"task_id","summary","artifact","artifact_name","checks"}`，以及环境变量 `AH_TASK_ID`、`AH_ARTIFACT`、`AH_RUN_DIR`、`AH_MAIN_STDOUT` |
 | `verify_timeout_sec` | 可选正数，缺省 120，夹紧到 1–1800。继承规则同 `verify` |
 | `cwd` | 工作目录，默认配置目录 |
 | `side_effect` | 副作用等级，写进名片，如 `read` / `write` |
 | `approval_class` | 本机审批下限，只收紧不放宽。设为 `approve` 的能力执行前必走机主审批 |
-| `resume_command` | 可选，含 `{session}` 与 `{prompt}`。仅 direct 问答续跑且本机已有 session 时替换 `command` |
+| `resume_command` | 可选，含 `{session}` 与 `{prompt}`。在问答/审批续跑且本机已有 `runs/<Task_ID>/session.json` 时替换 `command`；**当新任务与前任共享同一个 `Context_ID` 且本机已有 `sessions/<Context_ID>.json`（对应同一节点/Worker）时，也会自动走 `resume_command` 续接上轮 CLI 记忆** |
 | `cap_id` `name` `desc` | 登记到 AgentCards 的名片信息。`cap_id` 只对节点本尊的条目有效，可省，缺省为 `CAP-<capPrefix>-<能力名>`（`capPrefix` 缺省取 `node`）；Worker 的能力固定为 `CAP-<capPrefix>-<Worker>-<Skill_ID>`。计划里的 `cap` 按这个口径匹配。迁到 Worker 时删掉 `cap_id`，Worker 能力不接受显式 Cap_ID。 |
 | `workers` | 仅专长技能条目：能跑这项技能的 Worker 名数组。写了它就不能写 `command` / `mode` / `context` / `cwd` / `resume_command`，这些取自 Worker |
 
@@ -139,7 +136,7 @@ Worker 条目与节点本尊的技能条目可用的字段：
 
 - **agent 模式**：最后一个完整围栏若是 ```` ```agent-ask ````，表示提问（任务转 `input-required`）；若是 ```` ```agent-auth ````，表示执行中请求批准（块内写明动作、对象与风险，任务转 `auth-required`）。二者只认最后一个，空的 `agent-auth` 是无效回执。围栏外整行的 `ARTIFACT:` / `ARTIFACT_NAME:` / `USAGE:` / `SESSION:` / `LATER:` / `CHECK:` 分别表示产物、用量、会话、预约复查、清单自检。`CHECK: <id> <pass|fail|blocked>[ | <证据>]` 只在回执收口为完成时收下；提问、审批和无效回执上的自检忽略并记日志。同一 `id` 多行取最后一行。围栏内伪造的行不生效。`agent-auth` 在进程退出后才解析，拦不住已经做完的副作用；要在动作前停住，用 `ah inbox auth`。
 - **json 模式**：只认 stdout 最后一行 JSON：`summary`、`artifact`、`artifact_name`、`need_input`、`need_auth`，可选 `usage`、`session`、`later`、`checks`。`checks` 形如 `{"<id>":{"verdict":"pass|fail|blocked","evidence":"…"}}`，值也可以直接是判定字符串。`need_input` 与 `need_auth` 不能同时出现。未知顶层键忽略并记日志。提问、审批和无效回执上的 `checks` 忽略并记日志。
-- `usage` 累计到 `Tasks.Metadata.usage`；`session` 只存本机 `runs/<Task_ID>/session.json`，不进总线；`later` 在任务完成时生效，由 hub 到点在同一 `Context_ID` 新建复查任务。
+- `usage` 累计到 `Tasks.Metadata.usage`；`session` 存本机 `runs/<Task_ID>/session.json`（同时按 `Context_ID` 持久到 `sessions/<Context_ID>.json`，供后续同上下文新任务自动续接，不进总线）；`later` 在任务完成时生效，由 hub 到点在同一 `Context_ID` 新建复查任务。
 
 ### 验收
 
@@ -353,7 +350,7 @@ api backoff reason=http-429 kind=list retry=1/3 wait=2s
 
 `api backoff` 通常用于请求退避与重发定位，一般日志不写凭据、Token 与隐私字段。
 
-## 7. 独立中台（SQLite Hub）、长轮询节点与外部 HTTP Agent / LoopForge SOP
+## 7. 独立中台（SQLite Hub）、长轮询节点与外部 HTTP Agent / 多轮协同
 
 `a2a-hub` 统一采用 `sqlite`（Hub 主中枢）+ `http`（远端宿主长轮询 / 纯外部 HTTP Agent）运行。配置样例见 [`config/hub.standalone.example.json`](../config/hub.standalone.example.json) 与 [`config/node.remote.example.json`](../config/node.remote.example.json)。
 
@@ -413,32 +410,22 @@ HTTP 节点模板只有这一份文件。Hub 第一次启动时，如果配置�
 
 文件损坏或某一条不合法时，控制台顶部告警，`ah doctor` 也打印。整份损坏时不改文件，先用内存里的初始四条；某一条坏了就跳过那一条。占位示例见 [`config/agent_templates.example.json`](../config/agent_templates.example.json)。
 
-### 7.3 LoopForge SOP 多阶段闭环 CLI（`ah loop`）
+### 7.3 Leader 扇出派单与 `Context_ID` 多轮协同
 
-```bash
-# 查看内置 SOP 模板（如 plan-code-verify）
-ah loop templates
+无需在 Hub 维护静态 DAG 状态机。单 Leader（如云端 Muse 或本机 CLI）通过标准 A2A 任务接口即可完成**并行扇出**与**跨任务连续多轮记忆**：
 
-# 发起多阶段闭环（在相同 Context_ID 下串联 plan → code → verify 并基于验收自动回跳）
-ah loop create \
-  --title "修复登录竞态并补单测" \
-  --goal "定位 token 并发刷新竞态，修复代码并确保 verify 全通过" \
-  --template plan-code-verify \
-  --to edge-node-1 \
-  --worker agy \
-  --max-iterations 5 \
-  [--config <dir>]
-
-# 进阶：通过 JSON 文件或内联 JSON 自定义阶段与每阶段指定节点/能力绑定
-ah loop create --title "跨节点发布闭环" --goal "..." --stages @stages.json --bindings @bindings.json [--config <dir>]
-
-# 查看全网 Loop 列表或单条历史明细
-ah loop ls [--json] [--config <dir>]
-ah loop show <Loop_ID> [--config <dir>]
-
-# 取消闭环及当前在途子任务
-ah loop cancel <Loop_ID> [--text "说明"] [--config <dir>]
-```
+1. **批量扇出派单（`POST /api/v1/tasks`）**：当 `to` 传入节点数组时，中台一次性创建多条任务并绑定同一个 `context_id`（可显式传 `context_id` / `context`，省略时自动生成）：
+   ```json
+   {
+     "from": "muse",
+     "to": ["grok-bot", "office-pc"],
+     "text": "分别从外部资料与本地代码库排查原因并汇总给我"
+   }
+   ```
+   成功返回 `201`，包含 `task_ids` 数组与共享的 `context_id`。
+2. **`Context_ID` 多轮记忆续接（`ah task create --context <Context_ID>` 或 `POST /api/v1/tasks`）**：
+   - 已有任务进入终态（`completed` / `failed`）后，若向同一宿主机 Worker 携带同一 `Context_ID` 发下一轮新任务，宿主机内核会自动从 `sessions/<Context_ID>.json` 查出上轮落盘的 `Session_ID` 并套用 `resume_command` 继续原生对话上下文；
+   - 同时内核在写入 `runs/<Task_ID>/input.json` 时自动注入 `context_history`（同 `Context_ID` 下最近已完成任务摘要数组），即使 Worker 未配 `resume_command` 也能获得前序背景。
 
 ### 7.4 名片接纳与添加 Agent
 
@@ -500,7 +487,7 @@ ah loop cancel <Loop_ID> [--text "说明"] [--config <dir>]
 
 - 所有 Agent：`GET /api/v1/skills`、`GET /api/v1/skills/:name`、`GET /api/v1/kit/a2a_check.py`、`GET /api/v1/kit/a2a_check.sh`、`POST /api/v1/agents/register`、`GET /api/v1/agents`、自己的 `GET /api/v1/agents/:node/check`。
 - worker：自己的 `poll` / `inbox`，以及 `claim`、`heartbeat`、`complete`、`fail`、`ask`、`auth`。不能派单。
-- leader：worker 的全部，再加上自己的 `updates`；`GET`/`POST /api/v1/tasks`；自己发起或指向自己的任务详情；答复、撤销只限自己发起的任务；`loops` 的列表与取消只限自己发起的。
+- leader：worker 的全部，再加上自己的 `updates`；`GET`/`POST /api/v1/tasks`（含 `to: [...]` 批量扇出）；自己发起或指向自己的任务详情；答复、撤销只限自己发起的任务。
 - `scopes` 含 `admin` 的 leader：`POST /api/v1/admin/cards/:capId/admission`、`POST /api/v1/admin/nodes/:node/admission`、profile、`GET /api/v1/admin/onboarding`，以及 `POST /api/v1/admin/cards`（给别的节点加能力）。不能 `DELETE` 名片。
 - 任何角色：`PUT` / `DELETE /api/v1/agents/:node/schedules/:id`，且只能操作 Token 绑定的节点。这是自报计划，中台不据此触发。
 - 一律拒绝：`/api/v1/approvals/*`、`/api/v1/admin/agents`、`/api/v1/admin/tokens*`、`/api/v1/admin/webhooks*`、`/api/v1/admin/commands-snippet`、`GET /api/v1/admin/audit`、`DELETE /api/v1/admin/cards/:capId`、`/api/v1/schedules`、`/api/v1/state`、`/api/v1/tables/*`、`/api/v1/poll`。

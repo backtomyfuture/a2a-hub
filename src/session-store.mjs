@@ -43,36 +43,26 @@ export function writeSessionId(configDir, taskId, sessionId) {
   writeSessionFile(dest, { ...prev, session: sessionId });
 }
 
-// Herdr 会话的双键：稳定语义名 agent_name，加上会随 pane.moved 变化的物理位置。
-// 与 Claude session id 写在同一个文件里，两边更新都保留对方的字段。
-export function readHerdrBinding(configDir, taskId) {
-  const herdr = readSessionFile(sessionPath(configDir, taskId)).herdr;
-  if (!herdr || typeof herdr !== "object" || Array.isArray(herdr)) return null;
-  const agentName = String(herdr.agent_name ?? "").trim();
-  if (!agentName) return null;
-  return {
-    agent_name: agentName,
-    workspace_id: String(herdr.workspace_id ?? ""),
-    pane_id: String(herdr.pane_id ?? ""),
-    worktree_path: String(herdr.worktree_path ?? ""),
-  };
+// 按 A2A Context_ID 持久化会话号，让同一会话下跨任务的后续指令也能通过 resume_command 自动续接记忆。
+function contextSessionPath(configDir, contextId) {
+  const id = String(contextId ?? "").trim();
+  if (!/^[\w.:-]+$/.test(id) || id === "." || id === "..") return "";
+  return path.join(configDir, "sessions", `${id}.json`);
 }
 
-export function writeHerdrBinding(configDir, taskId, binding) {
-  const dest = sessionPath(configDir, taskId);
+export function readContextSessionId(configDir, contextId) {
+  const data = readSessionFile(contextSessionPath(configDir, contextId));
+  const id = data?.session;
+  if (typeof id === "string" && SESSION_ID.test(id)) return id;
+  return "";
+}
+
+export function writeContextSessionId(configDir, contextId, sessionId) {
+  if (typeof sessionId !== "string" || !SESSION_ID.test(sessionId)) return;
+  const dest = contextSessionPath(configDir, contextId);
   if (!dest) return;
-  const agentName = String(binding?.agent_name ?? "").trim();
-  if (!agentName) return;
   const prev = readSessionFile(dest);
-  writeSessionFile(dest, {
-    ...prev,
-    herdr: {
-      agent_name: agentName,
-      workspace_id: String(binding?.workspace_id ?? ""),
-      pane_id: String(binding?.pane_id ?? ""),
-      worktree_path: String(binding?.worktree_path ?? ""),
-    },
-  });
+  writeSessionFile(dest, { ...prev, session: sessionId, updated_at: new Date().toISOString() });
 }
 
 export function clearSessionId(configDir, taskId) {

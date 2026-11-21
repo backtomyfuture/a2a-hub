@@ -474,7 +474,7 @@ export const directMethods = {
     }
     try {
       const res = this.interpretCommandResult(flight.mode, { code, stdout, stderr });
-      this.persistSession(taskId, res.session);
+      this.persistSession(taskId, res.session, f1(current, "Context_ID"));
       const skill = this.capKeyOf(current);
       const capEntry = this.commands[skill] ?? {};
       const verifyCmd = typeof capEntry.verify === "string" && capEntry.verify.trim() ? capEntry.verify : "";
@@ -511,7 +511,7 @@ export const directMethods = {
       this.clearFlight(flight);
     } catch (e) {
       if (e instanceof InvalidReceipt) {
-        this.persistSession(taskId, e.session);
+        this.persistSession(taskId, e.session, f1(current, "Context_ID"));
         const box = this.beginOutbox(current, {
           outcome: "invalid", started: flight.started, runId: flight.runId,
           error: String(e.message).slice(0, 300),
@@ -528,7 +528,7 @@ export const directMethods = {
         return;
       }
       if (e instanceof NeedInput) {
-        this.persistSession(taskId, e.session);
+        this.persistSession(taskId, e.session, f1(current, "Context_ID"));
         const rid = await this.writeRun(current, "paused", flight.started, "input-required: " + String(e.message).slice(0, 400));
         const mid = await this.writeMessage(current, "question", String(e.message));
         const ok = await this.updateTaskState(current, {
@@ -545,7 +545,7 @@ export const directMethods = {
         return;
       }
       if (e instanceof NeedAuth) {
-        this.persistSession(taskId, e.session);
+        this.persistSession(taskId, e.session, f1(current, "Context_ID"));
         // token 用账本里的 runId。writeRun 在已 paused 时会新建下一行，拿它的返回值会发出第二张卡。
         if (!String(flight.runId ?? "").trim()) {
           await this.failExecution(current, flight, new Error("动态审批缺少稳定 runId"));

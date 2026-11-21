@@ -43,7 +43,7 @@ test("配置目录里的新模板和读取告警会进控制台页面", () => {
   assert.match(html, /agent_templates\.json 不是合法 JSON/);
 });
 
-test("控制台包含新术语结构、接收方式、添加能力、闭环分派与定时任务页，且无命令行参数残留", () => {
+test("控制台包含新术语结构、接收方式、添加能力与定时任务页，且无 SOP 闭环与命令行参数残留", () => {
   const html = renderWebConsoleHtml();
 
   // 首页「待我处理」与「一切正常」及状态中文映射 + 术语统一
@@ -109,12 +109,9 @@ test("控制台包含新术语结构、接收方式、添加能力、闭环分�
   assert.match(html, /Agent 每 30 分钟用检查脚本兜底一次，防止漏推，这不是第二种接收方式/);
   assert.match(html, /请填写对方提供的密钥/);
 
-  // 新建闭环：顶部说明、全部阶段用同一个、stageBindings 提交
-  assert.match(html, /什么是闭环/);
-  assert.match(html, /与单次任务的区别/);
-  assert.match(html, /与能力（Skill）的区别/);
-  assert.match(html, /全部阶段用同一个/);
-  assert.match(html, /stageBindings/);
+  // 已移除 SOP 闭环导航与弹窗
+  assert.equal(html.includes("SOP 闭环"), false);
+  assert.equal(html.includes("loopModal"), false);
 
   // 定时任务只读页
   assert.match(html, /data-view="schedules"[^>]*>[\s\S]*?定时任务/);
@@ -319,7 +316,7 @@ function runInlineConsole(fetchHandler, extra = {}) {
   return { sandbox, getEl };
 }
 
-test("控制台内嵌脚本：节点分层渲染、stageBindings 闭环提交、添加能力、Webhook 与定时任务页交互", async () => {
+test("控制台内嵌脚本：节点分层渲染、添加能力、Webhook 与定时任务页交互", async () => {
   const requests = [];
   const sampleState = {
     hubNode: "mac-hub",
@@ -358,15 +355,6 @@ test("控制台内嵌脚本：节点分层渲染、stageBindings 闭环提交、
       },
     ],
     tasks: [],
-    loops: [
-      {
-        loop_id: "LOOP-1", title: "测试闭环", goal: "完成改造", status: "running", iteration: 1, max_iterations: 5, stage_index: 0,
-        stages: [
-          { id: "plan", name: "规划", to: "cloud-bot", worker: "", cap: "agent" },
-          { id: "implement", name: "实现", to: "mac-worker", worker: "claude", cap: "agent" },
-        ],
-      },
-    ],
   };
 
   const { sandbox, getEl } = runInlineConsole(async (url, opts = {}) => {
@@ -417,19 +405,6 @@ test("控制台内嵌脚本：节点分层渲染、stageBindings 闭环提交、
         ],
       });
     }
-    if (url === "/api/v1/loop-templates") {
-      return jsonRes(200, {
-        templates: [{
-          id: "plan-code-verify", name: "Plan -> Code -> Verify", description: "三阶段闭环",
-          stages: [
-            { id: "plan", name: "方案规划", cap: "agent", on_fail: "retry" },
-            { id: "implement", name: "编码实现", cap: "agent", on_fail: "retry" },
-            { id: "verify", name: "验收门禁", cap: "agent", on_fail: "goto:implement" },
-          ],
-        }],
-      });
-    }
-    if (url === "/api/v1/loops" && method === "POST") return jsonRes(201, { loop_id: "LOOP-2" });
     if (url === "/api/v1/admin/cards" && method === "POST") return jsonRes(200, { ok: true, card: { cap_id: "CAP-new" } });
     if (url === "/api/v1/admin/commands-snippet" && method === "POST") {
       return jsonRes(200, { snippet: { lint: { command: "npm run lint", mode: "json" } }, text: '{"lint":{"command":"npm run lint"}}', hint: "去该节点改 commands.json，守护进程自动热重载" });
@@ -544,25 +519,7 @@ test("控制台内嵌脚本：节点分层渲染、stageBindings 闭环提交、
   assert.match(legacyCard, /需补填密钥/);
   assert.equal(legacyCard.includes('class="dot warn"'), false);
 
-  // 2) 闭环页卡片每个阶段显示派给了谁；新建闭环弹窗提交 stageBindings
-  await vm.runInContext('state.view = "loops"; render();', sandbox);
-  const loopsHtml = getEl("content").innerHTML;
-  assert.match(loopsHtml, /云端助手 \(cloud-bot\) · agent/);
-  assert.match(loopsHtml, /Claude \(mac-worker\) · claude/);
-
-  await vm.runInContext("openLoopModal()", sandbox);
-  const stageHtml = getEl("lfStageBindings").innerHTML;
-  assert.match(stageHtml, /data-stage-id="plan"/);
-  assert.match(stageHtml, /data-stage-id="implement"/);
-  assert.match(stageHtml, /data-stage-id="verify"/);
-  getEl("lfGoal").value = "验证多阶段绑定";
-  await getEl("loopForm").dispatch("submit");
-  const loopPost = requests.find((r) => r.url === "/api/v1/loops" && r.method === "POST");
-  assert.ok(loopPost, "应提交 POST /api/v1/loops");
-  assert.ok(loopPost.body.stageBindings && loopPost.body.stageBindings.plan && loopPost.body.stageBindings.verify);
-  assert.ok(loopPost.body.stageBindings.plan.to);
-
-  // 3) 定时任务页（只读）：按节点分组、cron、上次任务、异常标记
+  // 2) 定时任务页（只读）：按节点分组、cron、上次任务、异常标记
   await vm.runInContext('state.view = "schedules"; render();', sandbox);
   const schedHtml = getEl("content").innerHTML;
   assert.match(schedHtml, /计划在各节点本地管理，用 ah schedule 修改/);

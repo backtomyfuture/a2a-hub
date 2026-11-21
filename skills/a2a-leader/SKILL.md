@@ -1,6 +1,6 @@
 ---
 name: a2a-leader
-description: A2A-Hub 纯 HTTP 控制端 / Leader Agent 接入协议（无 CLI 版，适配云端 Muse Leader 等外部编排 Agent）：用机主签发的分 Agent Token 做协议自发现、注册、名录、派单、接单、SOP Loop、增量跟单、原任务答复与撤单。默认定时检查（每 5 分钟跑检查脚本，输出 WORK 才执行；跑不了脚本时也是每 5 分钟）。接单步骤与 a2a-worker 相同。也支持常驻长轮询和 Webhook 门铃。不含任何 Shell 命令。
+description: A2A-Hub 纯 HTTP 控制端 / Leader Agent 接入协议（无 CLI 版，适配云端 Muse Leader 等外部编排 Agent）：用机主签发的分 Agent Token 做协议自发现、注册、名录、单发与批量扇出派单、Context_ID 多轮协同、增量跟单、原任务答复与撤单。默认定时检查（每 5 分钟跑检查脚本，输出 WORK 才执行；跑不了脚本时也是每 5 分钟）。接单步骤与 a2a-worker 相同。也支持常驻长轮询和 Webhook 门铃。不含任何 Shell 命令。
 ---
 
 # `a2a-leader` HTTP 控制端 Skill（无 CLI 的云端 Leader）
@@ -85,7 +85,7 @@ GET /api/v1/agents
 
 ---
 
-## 二、异步派单与多阶段闭环
+## 二、异步派单、扇出与多轮续接
 
 ### 1. 派发单任务 (`POST /api/v1/tasks`)
 ```http
@@ -113,23 +113,23 @@ POST /api/v1/tasks
 - 若要派给某台固定主机上的特定本地 CLI（如 `office-pc` 上的 `claude`），填 `"to": "office-pc", "worker": "claude"`（省略 `cap` 会用其通用执行名片）。
 - 成功返回 HTTP `201`，包含 `task_id`（例如 `"TASK-20261115-xxxxxx"`）。
 
-### 2. 发起多阶段 SOP 闭环 (`POST /api/v1/loops`，可选)
-当需要中台自动驱动 `plan → code → verify` 多阶段闭环并基于验收回跳时：
+### 2. 批量扇出派单与 `Context_ID` 多轮上下文续接 (`POST /api/v1/tasks`)
+- **批量并行扇出**：当同一目标需要并行派给多个节点共同分析或分别执行时，`to` 支持传字符串数组，中台会为所有子任务自动绑定同一个 `context_id`：
 ```http
-POST /api/v1/loops
+POST /api/v1/tasks
 ```
 ```json
 {
   "from": "muse",
-  "to": "office-pc",
-  "worker": "claude",
-  "template": "plan-code-verify",
-  "title": "自动修复并验证认证竞态",
-  "goal": "定位 token 并发刷新问题、修改实现并通过单测",
-  "maxIterations": 5
+  "to": ["grok-bot", "office-pc"],
+  "text": "分别从网络检索与本地代码仓库核查该问题，汇总给我",
+  "context_id": "CTX-optional-shared"
 }
 ```
-可配合 `GET /api/v1/loops` 查看阶段历史，或 `POST /api/v1/loops/{loopId}/cancel` 终止闭环。
+  成功返回 HTTP `201`，包含 `task_ids`（数组）、`context_id` 与首条 `task_id`。
+- **多轮记忆续接**：当已有任务进入终态（如 `completed`），需要向同一个 Worker 追问或进入下一阶段时，在新的 `POST /api/v1/tasks` 请求中传入相同的 `"context_id": "CTX-..."`（或 `"context"`）：
+  - 宿主节点上的 CLI Worker（如 `claude`、`codex`）会自动从 `sessions/<Context_ID>.json` 复用上一轮的 `Session_ID`（走 `resume_command`）实现真正的多轮对话记忆，并在 `input.json` 中携带 `context_history`；
+  - 纯 HTTP Worker 可在 `GET /api/v1/tasks/{taskId}` 或历史列表按 `context_id` 关联上下文。
 
 ---
 

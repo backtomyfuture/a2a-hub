@@ -311,16 +311,6 @@ export function renderWebConsoleHtml({ presets = AGENT_TEMPLATE_PRESETS, templat
     margin-bottom: 14px;
   }
   .info-banner strong { color: var(--text); }
-  .stage-bind-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
-  .stage-bind-row {
-    display: grid; grid-template-columns: 150px 1fr 1fr; gap: 8px; align-items: center;
-    padding: 8px 10px; border-radius: 8px; background: var(--surface-2); border: 1px solid var(--border);
-  }
-  .bulk-bind-bar {
-    display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; align-items: center;
-    padding: 8px 10px; border-radius: 8px; background: var(--surface-2); border: 1px dashed var(--border-strong);
-    margin-bottom: 8px;
-  }
   .tech-details { font-size: 12px; color: var(--muted); }
   .tech-details summary { cursor: pointer; user-select: none; }
   .tech-kv {
@@ -370,15 +360,6 @@ export function renderWebConsoleHtml({ presets = AGENT_TEMPLATE_PRESETS, templat
     background: var(--amber-soft); display: flex; flex-direction: column; gap: 10px;
   }
   .action-banner.ask { border-color: rgba(168,85,247,0.35); background: var(--purple-soft); }
-
-  .loop-stages { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
-  .stage-node {
-    padding: 6px 11px; border-radius: 8px; border: 1px solid var(--border);
-    background: var(--surface-2); font-size: 12px; display: flex; align-items: center; gap: 6px;
-  }
-  .stage-node.current { border-color: var(--accent); background: var(--accent-soft); font-weight: 600; }
-  .stage-node.done { border-color: rgba(16,185,129,0.45); background: var(--green-soft); color: var(--green-text); }
-  .stage-arrow { color: var(--muted); font-size: 12px; }
 
   .input {
     width: 100%; padding: 8px 11px; border-radius: 8px;
@@ -491,7 +472,6 @@ export function renderWebConsoleHtml({ presets = AGENT_TEMPLATE_PRESETS, templat
     .tasks-split { grid-template-columns: 1fr; height: auto; }
     .task-list-col { max-height: 360px; }
     .crit-row { grid-template-columns: 1fr; }
-    .stage-bind-row, .bulk-bind-bar { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -518,10 +498,6 @@ export function renderWebConsoleHtml({ presets = AGENT_TEMPLATE_PRESETS, templat
         <span>任务</span>
         <span class="badge" id="navTaskCount">0</span>
       </button>
-      <button class="nav-btn" data-view="loops">
-        <span>SOP 闭环</span>
-        <span class="badge indigo" id="navLoopCount">0</span>
-      </button>
       <button class="nav-btn" data-view="schedules">
         <span>定时任务</span>
         <span class="badge" id="navScheduleCount">0</span>
@@ -546,7 +522,6 @@ export function renderWebConsoleHtml({ presets = AGENT_TEMPLATE_PRESETS, templat
       <div class="topbar-title" id="viewTitle">首页 · 待我处理</div>
       <div class="topbar-actions">
         <button class="btn sm" id="btnRefresh">刷新</button>
-        <button class="btn sm" id="btnNewLoop">+ 新建闭环</button>
         <button class="btn sm primary" id="btnNewTask">+ 派发任务</button>
       </div>
     </header>
@@ -554,7 +529,6 @@ export function renderWebConsoleHtml({ presets = AGENT_TEMPLATE_PRESETS, templat
       <button class="nav-btn active" data-view="overview">首页</button>
       <button class="nav-btn" data-view="agents">节点</button>
       <button class="nav-btn" data-view="tasks">任务</button>
-      <button class="nav-btn" data-view="loops">SOP 闭环</button>
       <button class="nav-btn" data-view="schedules">定时任务</button>
       <button class="nav-btn" id="mobileThemeBtn" type="button">深浅</button>
       <button class="nav-btn" id="mobileTokenBtn" type="button">密钥</button>
@@ -632,70 +606,6 @@ export function renderWebConsoleHtml({ presets = AGENT_TEMPLATE_PRESETS, templat
       <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px;">
         <button type="button" class="btn" data-close-modal="taskModal">取消</button>
         <button type="submit" class="btn primary" id="tfSubmitBtn">立即派发</button>
-      </div>
-    </form>
-  </div>
-</div>
-
-<!-- 新建 SOP 闭环弹窗 -->
-<div class="modal-backdrop" id="loopModal">
-  <div class="modal" style="max-width:680px;">
-    <div class="modal-head">
-      <span>新建 SOP 闭环</span>
-      <button class="btn sm" type="button" data-close-modal="loopModal">关闭</button>
-    </div>
-    <div class="info-banner">
-      <div><strong>什么是闭环：</strong>多阶段自动化任务链，每个阶段可派给不同节点上的不同 Agent，验收不过时自动带反馈打回修复。</div>
-      <div><strong>与单次任务的区别：</strong>单次任务发给单一目标执行一次即止；闭环会按阶段自动接力并在失败/未达标时自动重跑。</div>
-      <div><strong>与能力（Skill）的区别：</strong>能力是单个 Agent 具备的专长技能；闭环则是编排多个节点与能力的跨阶段协作流程。</div>
-    </div>
-    <form id="loopForm">
-      <div class="form-row">
-        <label>选择工作流模板</label>
-        <select class="input" id="lfTemplate"></select>
-        <div class="token-box" id="lfTemplateDesc" style="margin-top:6px;"></div>
-      </div>
-      <div class="form-row">
-        <label>阶段分派（为每个阶段选择节点与已接纳的 Agent / 能力）</label>
-        <div class="bulk-bind-bar" id="lfBulkBar">
-          <select class="input" id="lfBulkNode"></select>
-          <select class="input" id="lfBulkCap"></select>
-          <button type="button" class="btn sm" id="lfApplyAllBtn">全部阶段用同一个</button>
-        </div>
-        <div class="stage-bind-list" id="lfStageBindings"></div>
-      </div>
-      <div class="form-row">
-        <label>闭环总目标</label>
-        <textarea class="input" id="lfGoal" placeholder="描述希望多个步骤接力完成的最终目标..." required></textarea>
-      </div>
-      <details class="adv-box" id="lfAdvanced">
-        <summary>高级选项（轮次上限与手动兜底目标）</summary>
-        <div class="adv-body">
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
-            <div class="form-row">
-              <label>最多来回几轮（1-8）</label>
-              <input class="input" type="number" id="lfMaxIter" value="5" min="1" max="8" />
-            </div>
-            <div class="form-row">
-              <label>手动兜底节点（可选）</label>
-              <input class="input" id="lfTo" placeholder="仅在暂无已接纳能力时手动填写" />
-            </div>
-          </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
-            <div class="form-row">
-              <label>手动默认能力</label>
-              <input class="input" id="lfCap" value="agent" />
-            </div>
-            <div class="form-row">
-              <label>手动指定 Agent（Worker，可选）</label>
-              <input class="input" id="lfWorker" placeholder="留空由节点默认" />
-            </div>
-          </div>
-        </div>
-      </details>
-      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px;">
-        <button type="button" class="btn" data-close-modal="loopModal">取消</button>
-        <button type="submit" class="btn primary">启动闭环</button>
       </div>
     </form>
   </div>
@@ -1095,7 +1005,6 @@ const state = {
   dismissedFailed: loadDismissedAlerts(),
   cursor: 0,
   token: localStorage.getItem("a2a_hub_token") || localStorage.getItem("lobe_a2a_token") || "",
-  templates: [],
   wizardStep: 1,
   wizardAccess: "http",
   wizardReceive: "poll",
@@ -1121,13 +1030,6 @@ const TASK_STATUS_META = {
   failed: { label: "已失败", cls: "failed", tip: "failed · 执行失败或超时" },
   canceled: { label: "已取消", cls: "canceled", tip: "canceled · 已手动取消" },
   rejected: { label: "已拒收", cls: "rejected", tip: "rejected · 目标无法接收此任务" },
-};
-
-const LOOP_STATUS_META = {
-  running: { label: "进行中", cls: "running", tip: "running · 闭环正在按阶段流转" },
-  completed: { label: "已完成", cls: "completed", tip: "completed · 闭环所有阶段已通过" },
-  failed: { label: "已失败", cls: "failed", tip: "failed · 闭环执行失败或达到上限" },
-  canceled: { label: "已终止", cls: "canceled", tip: "canceled · 已手动终止" },
 };
 
 const MSG_KIND_LABELS = {
@@ -1206,10 +1108,9 @@ function isTaskStale(task) {
   return (Date.now() - ms) > 20 * 60 * 1000;
 }
 
-function statusPill(status, isLoop = false) {
+function statusPill(status) {
   const st = String(status || "unknown");
-  const dict = isLoop ? LOOP_STATUS_META : TASK_STATUS_META;
-  const info = dict[st] || { label: st, cls: st, tip: st };
+  const info = TASK_STATUS_META[st] || { label: st, cls: st, tip: st };
   return '<span class="pill st-' + esc(info.cls) + '" title="' + esc(info.tip) + '">' + esc(info.label) + '</span>';
 }
 
@@ -1619,7 +1520,6 @@ async function refreshState() {
 
     const activeTasks = (d.tasks || []).filter((t) => ["submitted", "working", "auth-required", "input-required"].includes(t.status)).length;
     document.getElementById("navTaskCount").textContent = String(activeTasks);
-    document.getElementById("navLoopCount").textContent = String((d.loops || []).filter((l) => l.status === "running").length);
 
     const navSched = document.getElementById("navScheduleCount");
     if (navSched) {
@@ -1631,7 +1531,6 @@ async function refreshState() {
     }
 
     fillDispatchCandidates();
-    fillLoopCandidates();
 
     if (state.selectedTaskId) {
       await loadTaskDetail(state.selectedTaskId, true);
@@ -2208,19 +2107,6 @@ async function cancelTaskAction(taskId) {
   }
 }
 
-async function cancelLoopAction(loopId) {
-  try {
-    await api("/api/v1/loops/" + encodeURIComponent(loopId) + "/cancel", {
-      method: "POST",
-      body: JSON.stringify({ text: "机主在控制台终止闭环" }),
-    });
-    showToast("SOP 闭环已终止");
-    await refreshState();
-  } catch (e) {
-    showToast("终止失败: " + e.message);
-  }
-}
-
 function dismissFailedAlert(taskId) {
   state.dismissedFailed.add(taskId);
   try {
@@ -2339,119 +2225,6 @@ function getDispatchableCardsForNode(node) {
     if (aIsAgent !== bIsAgent) return aIsAgent - bIsAgent;
     return String(a.cap_id || "").localeCompare(String(b.cap_id || ""));
   });
-}
-
-function populateCapSelect(selEl, node, preferredCap = "") {
-  if (!selEl) return;
-  const cards = node ? getDispatchableCardsForNode(node) : [];
-  if (!cards.length) {
-    selEl.innerHTML = '<option value="">无已接纳的可用 Agent / 能力</option>';
-    return;
-  }
-  selEl.innerHTML = cards.map((c) => '<option value="' + esc(c.cap_id) + '">' + esc(capOptionLabel(c)) + '</option>').join("");
-  const matched = (preferredCap && cards.find((c) => c.skill_id === preferredCap))
-    || cards.find((c) => c.skill_id === "agent")
-    || cards[0];
-  if (matched) selEl.value = matched.cap_id;
-}
-
-function fillLoopCandidates() {
-  const bulkNode = document.getElementById("lfBulkNode");
-  const bulkCap = document.getElementById("lfBulkCap");
-  if (!bulkNode) return;
-  const prevNode = bulkNode.value;
-  const groups = buildNodeGroups(state.data).filter((g) => g.admittedCards.some((c) => c.dispatchable === "Yes"));
-  let html = "";
-  if (!groups.length) {
-    html += '<option value="">暂无已接纳的执行节点</option>';
-  } else {
-    for (const g of groups) {
-      const label = g.displayName !== g.node ? (g.displayName + "（" + g.node + "）") : g.node;
-      html += '<option value="' + esc(g.node) + '">' + esc(label) + '</option>';
-    }
-  }
-  bulkNode.innerHTML = html;
-  if (prevNode && [...bulkNode.options].some((o) => o.value === prevNode)) {
-    bulkNode.value = prevNode;
-  } else if (groups.length) {
-    bulkNode.value = groups[0].node;
-  }
-  populateCapSelect(bulkCap, bulkNode.value);
-  renderLoopStageBindings();
-}
-
-function renderLoopStageBindings() {
-  const wrap = document.getElementById("lfStageBindings");
-  const tplSel = document.getElementById("lfTemplate");
-  if (!wrap || !tplSel) return;
-  const tpl = state.templates.find((t) => t.id === tplSel.value) || state.templates[0];
-  const stages = (tpl && Array.isArray(tpl.stages)) ? tpl.stages : [];
-  const groups = buildNodeGroups(state.data).filter((g) => g.admittedCards.some((c) => c.dispatchable === "Yes"));
-
-  if (!stages.length) {
-    wrap.innerHTML = '<div class="hint">请先选择一个闭环模板。</div>';
-    return;
-  }
-  if (!groups.length) {
-    wrap.innerHTML = '<div class="err-banner" style="margin-bottom:0;">暂无已接纳的可执行节点。请先到「节点 → 待接纳」接纳节点，或在下方高级选项手动填写。</div>';
-    return;
-  }
-
-  // 保留同一模板下用户已选中的阶段绑定，避免刷新状态时被重置
-  const prevByStage = new Map();
-  for (const row of wrap.querySelectorAll(".stage-bind-row")) {
-    prevByStage.set(row.dataset.stageId, {
-      node: row.querySelector(".stage-node-sel")?.value || "",
-      capId: row.querySelector(".stage-cap-sel")?.value || "",
-    });
-  }
-
-  let html = "";
-  for (const st of stages) {
-    const prev = prevByStage.get(st.id);
-    const chosenNode = (prev && prev.node && groups.some((g) => g.node === prev.node))
-      ? prev.node
-      : groups[0].node;
-    const nodeOpts = groups.map((g) => {
-      const label = g.displayName !== g.node ? (g.displayName + "（" + g.node + "）") : g.node;
-      return '<option value="' + esc(g.node) + '"' + (g.node === chosenNode ? " selected" : "") + '>' + esc(label) + '</option>';
-    }).join("");
-    const cards = getDispatchableCardsForNode(chosenNode);
-    const chosenCard = (prev && prev.capId && cards.find((c) => c.cap_id === prev.capId))
-      || (st.cap && cards.find((c) => c.skill_id === st.cap))
-      || cards.find((c) => c.skill_id === "agent")
-      || cards[0];
-    const capOpts = cards.map((c) => (
-      '<option value="' + esc(c.cap_id) + '"' + (chosenCard && c.cap_id === chosenCard.cap_id ? " selected" : "") + '>'
-      + esc(capOptionLabel(c)) + '</option>'
-    )).join("");
-    const failHint = st.on_fail && st.on_fail.startsWith("goto:")
-      ? ("不通过 → 回 " + st.on_fail.slice(5))
-      : (st.on_fail === "abort" ? "不通过 → 中止" : "不通过 → 重试");
-
-    html += '<div class="stage-bind-row" data-stage-id="' + esc(st.id) + '" data-default-cap="' + esc(st.cap || "agent") + '">'
-      + '<div><div style="font-weight:600;font-size:13px;">' + esc(st.name || st.id) + '</div>'
-      + '<div class="hint mono" style="font-size:11px;">' + esc(st.id) + ' · ' + esc(failHint) + '</div></div>'
-      + '<select class="input stage-node-sel" aria-label="选择阶段节点">' + nodeOpts + '</select>'
-      + '<select class="input stage-cap-sel" aria-label="选择阶段 Agent 或能力">' + capOpts + '</select>'
-      + '</div>';
-  }
-  wrap.innerHTML = html;
-}
-
-function renderTemplatePreview() {
-  const box = document.getElementById("lfTemplateDesc");
-  const sel = document.getElementById("lfTemplate");
-  if (!box || !sel) return;
-  const tpl = state.templates.find((t) => t.id === sel.value) || state.templates[0];
-  if (!tpl) {
-    box.innerHTML = '<span class="muted">选择模板后将自动按阶段接力执行。</span>';
-    return;
-  }
-  const stageNames = (tpl.stages || []).map((s) => esc(s.name || s.id)).join(" → ");
-  box.innerHTML = '<div>' + esc(tpl.description || "按预设阶段顺序执行并在不达标时自动打回。") + '</div>'
-    + (stageNames ? '<div class="muted">流程阶段：' + stageNames + '</div>' : '');
-  renderLoopStageBindings();
 }
 
 async function setCardAdmission(capId, admission) {
@@ -3031,7 +2804,6 @@ function renderOverview(d) {
   const todos = computeTodos(d);
   const groups = buildNodeGroups(d);
   const tasks = (d.tasks || []).slice(0, 8);
-  const runningLoops = (d.loops || []).filter((l) => l.status === "running");
 
   let html = '<div class="page-wrap">';
 
@@ -3205,13 +2977,6 @@ function renderOverview(d) {
     html += '</tbody></table></div>';
   }
   html += '</div>';
-
-  if (runningLoops.length) {
-    html += '<div><div class="section-head"><div class="section-title"><span>正在运行的 SOP 闭环</span></div>'
-      + '<button class="btn sm" data-action="goto-loops">查看全部</button></div>';
-    for (const l of runningLoops) html += renderLoopCard(l, d);
-    html += '</div>';
-  }
 
   html += '</div>';
   return html;
@@ -3698,61 +3463,6 @@ function renderTasks(d) {
   return '<div class="tasks-split">' + listHtml + detailHtml + '</div>';
 }
 
-function renderLoopCard(l, d) {
-  const stages = l.stages || [];
-  let stageHtml = '<div class="loop-stages">';
-  stages.forEach((s, idx) => {
-    const cls = l.status === "completed" || idx < l.stage_index ? "done" : (idx === l.stage_index && l.status === "running" ? "current" : "");
-    const nodeLabel = s.to ? nodeFriendlyName(d, s.to) : "";
-    const agentCap = s.worker
-      ? (s.cap && s.cap !== "agent" ? (s.worker + "/" + s.cap) : s.worker)
-      : (s.cap || "");
-    const assignee = [nodeLabel, agentCap].filter(Boolean).join(" · ");
-    stageHtml += '<div class="stage-node ' + cls + '"><span>' + esc(s.name || s.id) + '</span>'
-      + (assignee ? '<span class="muted">→ ' + esc(assignee) + '</span>' : '') + '</div>';
-    if (idx < stages.length - 1) stageHtml += '<span class="stage-arrow">→</span>';
-  });
-  stageHtml += '</div>';
-
-  return '<div class="card" style="margin-bottom:12px;">'
-    + '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">'
-    + '<div style="min-width:0;flex:1;">'
-    + '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">'
-    + '<span style="font-size:15px;font-weight:650;">' + esc(l.title || l.loop_id) + '</span>'
-    + statusPill(l.status, true)
-    + '<span class="badge">第 ' + esc(l.iteration) + ' / ' + esc(l.max_iterations) + ' 轮</span>'
-    + '</div>'
-    + '<div class="muted" style="margin-top:4px;">' + esc(l.goal) + '</div>'
-    + '</div>'
-    + '<div style="display:flex;gap:8px;flex-wrap:wrap;">'
-    + (l.active_task_id ? '<button class="btn sm" data-action="jump-task" data-task-id="' + esc(l.active_task_id) + '">查看当前步骤</button>' : '')
-    + (l.status === "running" ? '<button class="btn sm danger" data-action="cancel-loop" data-loop-id="' + esc(l.loop_id) + '">终止闭环</button>' : '')
-    + '</div></div>'
-    + stageHtml
-    + (l.last_error ? '<div style="margin-top:10px;color:var(--amber-text);font-size:12px;">上轮打回原因：' + esc(l.last_error.slice(0, 300)) + '</div>' : '')
-    + (l.error ? '<div style="margin-top:6px;color:var(--red-text);font-size:12px;">终止原因：' + esc(l.error) + '</div>' : '')
-    + '</div>';
-}
-
-function renderLoops(d) {
-  const loops = d.loops || [];
-  let html = '<div class="page-wrap">';
-  html += '<div class="toolbar">'
-    + '<div><div class="section-title">SOP 多阶段自动闭环</div>'
-    + '<div class="section-sub">让多个步骤按顺序自动接力（例如：规划 → 实现 → 验收），检查不通过会自动带意见退回修改。</div></div>'
-    + '<button class="btn sm primary" data-action="open-new-loop">+ 新建闭环</button>'
-    + '</div>';
-  if (!loops.length) {
-    html += '<div class="card muted">还没有运行过 SOP 闭环。点击右上角「+ 新建闭环」，选择一个预设工作流模板即可开始。</div>';
-  } else {
-    html += '<div>';
-    for (const l of loops) html += renderLoopCard(l, d);
-    html += '</div>';
-  }
-  html += '</div>';
-  return html;
-}
-
 function renderScheduleAnomalyBadge(anomaly) {
   if (anomaly === "missed") return '<span class="badge red">漏触发 (missed)</span>';
   if (anomaly === "failed") return '<span class="badge red">最近失败 (failed)</span>';
@@ -3868,8 +3578,7 @@ function render() {
     prevReplyTaskId = prevReplyEl && prevReplyEl.dataset ? prevReplyEl.dataset.taskId : "";
     prevReplyVal = prevReplyEl ? prevReplyEl.value : "";
     html = renderTasks(d);
-  } else if (state.view === "loops") html = renderLoops(d);
-  else if (state.view === "schedules") html = renderSchedules(d);
+  } else if (state.view === "schedules") html = renderSchedules(d);
   el.innerHTML = banner + html;
   if (state.view !== "tasks") return;
   const nextReplyEl = document.getElementById("replyTextBox");
@@ -3900,25 +3609,12 @@ function syncNav() {
     overview: "首页 · 待我处理",
     agents: "节点管理",
     tasks: "任务与沟通记录",
-    loops: "SOP 多阶段闭环",
     schedules: "定时任务",
   };
   document.getElementById("viewTitle").textContent = titles[state.view] || "";
   document.querySelectorAll(".nav-btn[data-view]").forEach((b) => {
     b.classList.toggle("active", b.dataset.view === state.view);
   });
-}
-
-async function openLoopModal() {
-  fillLoopCandidates();
-  try {
-    const res = await api("/api/v1/loop-templates");
-    state.templates = res.templates || [];
-    const sel = document.getElementById("lfTemplate");
-    sel.innerHTML = state.templates.map((t) => '<option value="' + esc(t.id) + '">' + esc(t.name) + '</option>').join("");
-    renderTemplatePreview();
-  } catch {}
-  openModal("loopModal");
 }
 
 function openNewTaskModal() {
@@ -3980,7 +3676,6 @@ document.addEventListener("click", (e) => {
   const act = actEl.dataset.action;
   if (act === "open-new-task") openNewTaskModal();
   else if (act === "open-add-agent") openAgentModal();
-  else if (act === "open-new-loop") openLoopModal();
   else if (act === "open-add-cap") openAddCapModal(actEl.dataset.node);
   else if (act === "delete-card") openDeleteCardConfirm(actEl.dataset.capId);
   else if (act === "do-delete-card") doDeleteCard(actEl.dataset.capId);
@@ -3992,13 +3687,11 @@ document.addEventListener("click", (e) => {
   else if (act === "goto-agents") { state.view = "agents"; syncNav(); render(); }
   else if (act === "goto-pending-agents") { state.view = "agents"; state.agentFilter = "pending"; syncNav(); render(); }
   else if (act === "goto-tasks") { state.view = "tasks"; syncNav(); render(); }
-  else if (act === "goto-loops") { state.view = "loops"; syncNav(); render(); }
   else if (act === "jump-task") jumpToTask(actEl.dataset.taskId);
   else if (act === "select-task") loadTaskDetail(actEl.dataset.taskId);
   else if (act === "decide-approval") decideApproval(actEl.dataset.taskId, actEl.dataset.decision);
   else if (act === "reply-task") replyTask(actEl.dataset.taskId);
   else if (act === "cancel-task") cancelTaskAction(actEl.dataset.taskId);
-  else if (act === "cancel-loop") cancelLoopAction(actEl.dataset.loopId);
   else if (act === "dismiss-alert") dismissFailedAlert(actEl.dataset.taskId);
   else if (act === "set-admission") setCardAdmission(actEl.dataset.capId, actEl.dataset.admission);
   else if (act === "admit-node") admitNode(actEl.dataset.node);
@@ -4058,7 +3751,6 @@ if (typeof window !== "undefined" && typeof window.addEventListener === "functio
 
 document.getElementById("btnRefresh").addEventListener("click", refreshState);
 document.getElementById("btnNewTask").addEventListener("click", openNewTaskModal);
-document.getElementById("btnNewLoop").addEventListener("click", openLoopModal);
 document.getElementById("btnTheme").addEventListener("click", toggleTheme);
 document.getElementById("mobileThemeBtn").addEventListener("click", toggleTheme);
 document.getElementById("btnToken").addEventListener("click", () => {
@@ -4077,35 +3769,6 @@ document.getElementById("saveTokenBtn").addEventListener("click", () => {
 });
 
 document.getElementById("tfTargetSelect").addEventListener("change", applyDispatchSelect);
-document.getElementById("lfTemplate").addEventListener("change", renderTemplatePreview);
-document.getElementById("lfBulkNode").addEventListener("change", (e) => {
-  populateCapSelect(document.getElementById("lfBulkCap"), e.target.value);
-});
-document.getElementById("lfApplyAllBtn").addEventListener("click", () => {
-  const nodeVal = document.getElementById("lfBulkNode").value;
-  const capId = document.getElementById("lfBulkCap").value;
-  if (!nodeVal) return showToast("请先选择一个节点");
-  const rows = document.querySelectorAll("#lfStageBindings .stage-bind-row");
-  if (!rows.length) return;
-  rows.forEach((row) => {
-    const nodeSel = row.querySelector(".stage-node-sel");
-    const capSel = row.querySelector(".stage-cap-sel");
-    if (nodeSel) nodeSel.value = nodeVal;
-    populateCapSelect(capSel, nodeVal, "");
-    if (capSel && capId && [...capSel.options].some((o) => o.value === capId)) {
-      capSel.value = capId;
-    }
-  });
-  showToast("已将全部阶段设为同一执行目标");
-});
-document.getElementById("lfStageBindings").addEventListener("change", (e) => {
-  if (e.target && e.target.classList.contains("stage-node-sel")) {
-    const row = e.target.closest(".stage-bind-row");
-    if (!row) return;
-    const capSel = row.querySelector(".stage-cap-sel");
-    populateCapSelect(capSel, e.target.value, row.dataset.defaultCap || "");
-  }
-});
 
 document.getElementById("addCritBtn").addEventListener("click", () => addCriteriaRow("", false));
 document.getElementById("criteriaRows").addEventListener("click", (e) => {
@@ -4435,77 +4098,6 @@ document.getElementById("taskForm").addEventListener("submit", async (e) => {
       submitBtn.textContent = "立即派发";
     }
     renderDraftFileList("tfFileList", state.taskDraftFiles, "task", false);
-  }
-});
-
-document.getElementById("loopForm").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  try {
-    const fallbackTo = document.getElementById("lfTo").value.trim();
-    const fallbackCap = document.getElementById("lfCap").value.trim() || "agent";
-    const fallbackWorker = document.getElementById("lfWorker").value.trim();
-    const cards = ((state.data && state.data.agentCards) || [])
-      .filter((c) => admissionOf(c) === "admitted" && c.dispatchable === "Yes");
-
-    const stageBindings = {};
-    const rows = Array.from(document.querySelectorAll("#lfStageBindings .stage-bind-row"));
-    for (const row of rows) {
-      const stageId = row.dataset.stageId;
-      if (!stageId) continue;
-      const nodeVal = (row.querySelector(".stage-node-sel")?.value || "").trim();
-      const capId = (row.querySelector(".stage-cap-sel")?.value || "").trim();
-      const matched = cards.find((c) => c.cap_id === capId);
-      if (matched) {
-        stageBindings[stageId] = {
-          to: matched.node || nodeVal,
-          worker: matched.worker || "",
-          cap: matched.skill_id || "agent",
-        };
-      } else if (nodeVal) {
-        stageBindings[stageId] = {
-          to: nodeVal,
-          worker: fallbackWorker,
-          cap: fallbackCap,
-        };
-      } else if (fallbackTo) {
-        stageBindings[stageId] = {
-          to: fallbackTo,
-          worker: fallbackWorker,
-          cap: fallbackCap,
-        };
-      } else {
-        document.getElementById("lfAdvanced").open = true;
-        return showToast("请为每个阶段选择节点与 Agent/能力，或在高级选项填写兜底节点");
-      }
-    }
-
-    const firstBind = Object.values(stageBindings)[0] || null;
-    const to = fallbackTo || (firstBind ? firstBind.to : "");
-    const cap = firstBind ? firstBind.cap : fallbackCap;
-    const worker = firstBind ? firstBind.worker : fallbackWorker;
-    if (!Object.keys(stageBindings).length && !to) {
-      document.getElementById("lfAdvanced").open = true;
-      return showToast("请为阶段选择执行节点，或在高级选项中填写");
-    }
-
-    const body = {
-      template: document.getElementById("lfTemplate").value,
-      goal: document.getElementById("lfGoal").value,
-      stageBindings,
-      to,
-      cap,
-      worker,
-      maxIterations: Number(document.getElementById("lfMaxIter").value) || 5,
-    };
-    await api("/api/v1/loops", { method: "POST", body: JSON.stringify(body) });
-    document.getElementById("loopForm").reset();
-    closeModal("loopModal");
-    showToast("SOP 闭环已启动");
-    state.view = "loops";
-    syncNav();
-    await refreshState();
-  } catch (err) {
-    showToast("创建闭环失败: " + err.message);
   }
 });
 

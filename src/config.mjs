@@ -39,11 +39,11 @@ export function modelString(value, label = "model") {
 }
 
 export function canExecuteModel(entry = {}) {
-  return modelArgsSupported(entry, String(entry.harness || inferHerdrKind(entry)).trim());
+  return modelArgsSupported(entry, String(entry.harness || inferHarness(entry)).trim());
 }
 
 export function workerModelFields(entry = {}, { remote = false } = {}) {
-  const harness = String(entry.harness || inferHerdrKind(entry)).trim();
+  const harness = String(entry.harness || inferHarness(entry)).trim();
   return {
     harness,
     default_model: modelString(entry.default_model, "default_model"),
@@ -78,13 +78,13 @@ const LAUNCH_KEYS = new Set([
   "env", "herdr_kind", "herdr_args", "herdr_env", "herdr_session", "herdr_workspace",
 ]);
 const APPROVAL_RANK = { "": 0, auto: 0, notify: 1, auto_notify: 1, approve: 2 };
-const HERDR_KNOWN_KINDS = new Set([
+const KNOWN_HARNESSES = new Set([
   "pi", "claude", "codex", "gemini", "cursor", "devin", "agy", "cline",
   "omp", "mastracode", "opencode", "copilot", "kimi", "kiro", "droid",
   "amp", "grok", "hermes", "kilo", "qodercli", "qwen", "letta", "maki", "muse",
 ]);
 
-function normalizeHerdrKindToken(raw) {
+function normalizeHarnessToken(raw) {
   const t = String(raw ?? "").trim().toLowerCase();
   if (!t) return "";
   if (t === "cursor-agent") return "cursor";
@@ -105,17 +105,19 @@ function commandExecutableName(command) {
   return tok ? path.basename(tok) : "";
 }
 
-// 推导 herdr_kind：显式配置优先，其次识别知名 Worker 名，再回退 command 首词可执行文件名（cursor-agent 映射为 cursor）。
-export function inferHerdrKind(entry, workerName = "") {
+// 推导 harness：显式配置优先，其次识别知名 Worker 名，再回退 command 首词可执行文件名（cursor-agent 映射为 cursor）。
+export function inferHarness(entry, workerName = "") {
   if (!isEntry(entry)) return "";
-  const explicitRaw = String(entry.herdr_kind ?? "").trim();
+  const explicitRaw = String(entry.harness ?? "").trim();
   if (explicitRaw) return explicitRaw.toLowerCase() === "cursor-agent" ? "cursor" : explicitRaw;
-  const workerToken = normalizeHerdrKindToken(entry.worker || workerName);
-  if (workerToken && HERDR_KNOWN_KINDS.has(workerToken)) return workerToken;
-  const binToken = normalizeHerdrKindToken(commandExecutableName(entry.command));
+  const workerToken = normalizeHarnessToken(entry.worker || workerName);
+  if (workerToken && KNOWN_HARNESSES.has(workerToken)) return workerToken;
+  const binToken = normalizeHarnessToken(commandExecutableName(entry.command));
   if (binToken) return binToken;
   return workerToken || "";
 }
+
+export const inferHerdrKind = inferHarness;
 
 function isEntry(v) {
   return !!v && typeof v === "object" && !Array.isArray(v);
@@ -167,19 +169,18 @@ export function normalizeCommands(raw, onProblem = () => {}) {
           onProblem(`Worker ${name}：名字只能含字母、数字、. _ -`);
         } else if (!isEntry(w)) {
           onProblem(`Worker ${name} 缺 command 模板`);
+        } else if (w.context === "herdr") {
+          onProblem(`Worker ${name}：herdr 执行语境已移除，请改为 direct 并提供 command 模板`);
         } else {
           const hasCmd = typeof w.command === "string" && w.command.trim();
-          const herdrKind = typeof w.herdr_kind === "string" ? w.herdr_kind.trim() : "";
-          if (!hasCmd && !(w.context === "herdr" && herdrKind)) {
+          if (!hasCmd) {
             onProblem(`Worker ${name} 缺 command 模板`);
           } else if (w.mode != null && w.mode !== "agent" && w.mode !== "json") {
             onProblem(`Worker ${name}：mode=${JSON.stringify(w.mode)} 非法（Worker 只认 agent / json）`);
           } else {
-            // herdr Worker 只配了 herdr_kind 时补等效占位 command，保证下游检查与展示兼容。
             try {
               const model = workerModelFields({ ...w, worker: name });
               workers[name] = { ...w, harness: model.harness, default_model: model.default_model, skills: model.skills };
-              if (!hasCmd) workers[name].command = `${herdrKind} {prompt}`;
             } catch (e) { onProblem(`Worker ${name}：${e.message}`); }
           }
         }
@@ -443,9 +444,6 @@ export function loadConfig(configDir, opts = {}) {
     // 只给节点本地定时调度读。缺省由 resolveScheduleTz 解释成 Asia/Shanghai，这里不套宿主机时区。
     tz: cfg.tz,
     maxConcurrent: Number.isInteger(Number(cfg.maxConcurrent)) && Number(cfg.maxConcurrent) >= 1 ? Number(cfg.maxConcurrent) : 4,
-    herdrSocketPath: String(cfg.herdrSocketPath ?? "").trim(),
-    herdrSession: String(cfg.herdrSession ?? "").trim(),
-    herdrWorkspace: String(cfg.herdrWorkspace ?? "").trim() || "a2a-hub",
     busType,
     bus,
     configDir,

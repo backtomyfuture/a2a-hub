@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { exec, execFile } from "node:child_process";
 import fs from "node:fs";
-import net from "node:net";
 import path from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
@@ -63,12 +62,12 @@ test("Worker 拥有模型及可选 skills，旧 Skill/Cap 寻址与 json/shell �
   assert.deepEqual(normalizeCommands({ echo: { command: "echo old" } }), { echo: { command: "echo old" } });
 });
 
-test("发现如实声明支持能力；Herdr/未知 harness/静态冲突参数不能假报 override", () => {
+test("发现如实声明支持能力；非 direct/未知 harness/静态冲突参数不能假报 override", () => {
   const base = { harness: "grok", command: "fake {model_args}", mode: "json" };
   assert.equal(workerModelFields(base).supports_model_override, true);
   assert.equal(workerModelFields({ ...base, supports_model_override: false }).supports_model_override, false);
   assert.equal(canExecuteModel({ ...base, supports_model_override: false }), true);
-  for (const extra of [{ context: "herdr" }, { mode: "inbox" }, { harness: "constructor" }, { command: "fake --model static {model_args}" }, { command: "fake '--model' static {model_args}" }, { command: "fake --model=static {model_args}" }, { command: "fake {model_args} {model_args}" }, { command: 'fake "{model_args}"' }, { command: "fake prefix{model_args}" }, { resume_command: "fake resume" }]) {
+  for (const extra of [{ context: "custom" }, { mode: "inbox" }, { harness: "constructor" }, { command: "fake --model static {model_args}" }, { command: "fake '--model' static {model_args}" }, { command: "fake --model=static {model_args}" }, { command: "fake {model_args} {model_args}" }, { command: 'fake "{model_args}"' }, { command: "fake prefix{model_args}" }, { resume_command: "fake resume" }]) {
     assert.equal(workerModelFields({ ...base, ...extra, supports_model_override: true }).supports_model_override, false);
   }
   const model = workerModelFields({ ...base, default_model: "base" });
@@ -144,7 +143,7 @@ test("假 CLI 实测原生参数与引号安全，覆盖不污染下一单默认
   kernel.abandonLocalFlight();
 }));
 
-test("只禁止单次覆盖的 Worker 仍执行自己的默认模型；不支持 Herdr 模型不得静默忽略", async () => withTemp(async (dir) => {
+test("只禁止单次覆盖的 Worker 仍执行自己的默认模型；不支持的模型不得静默忽略", async () => withTemp(async (dir) => {
   const bus = new MockBus({ tables: TABLES });
   const kernel = new Kernel({ node: "n", role: "node", kind: "host", capPrefix: "n", configDir: dir, bus, events: false });
   const entry = { command: "echo {model_args}", mode: "json", harness: "grok", default_model: "base", supports_model_override: false };
@@ -159,13 +158,11 @@ test("只禁止单次覆盖的 Worker 仍执行自己的默认模型；不支持
   const agentPrepared = await kernel.prepareCommand("a/agent", task, {}, null);
   assert.equal((await execAsync(agentPrepared.command)).stdout.trim(), "--model base");
   assert.match(agentPrepared.stdinText, /TASK-NATIVE/);
-  kernel.commands["a/agent"] = { ...entry, context: "herdr" };
+  kernel.commands["a/agent"] = { ...entry, context: "custom" };
   await assert.rejects(kernel.prepareCommand("a/agent", task, {}, null), /model_execution_not_supported/);
 }));
 
-test("loadConfig 保留已存在的 Herdr socket 配置入口；模板不持久化 active_model", async () => withTemp(async (dir) => {
-  fs.writeFileSync(path.join(dir, "node.json"), JSON.stringify({ node: "n", busType: "http", hubUrl: "http://127.0.0.1:1", herdrSocketPath: "/tmp/configured.sock" }));
-  assert.equal(loadConfig(dir).herdrSocketPath, "/tmp/configured.sock");
+test("模板不持久化 active_model", async () => withTemp(async (dir) => {
   fs.writeFileSync(path.join(dir, "agent_templates.json"), JSON.stringify(seedAgentTemplates()));
   assert.deepEqual(loadAgentTemplates(dir).errors, []);
   const templates = JSON.parse(fs.readFileSync(path.join(dir, "agent_templates.json")));
@@ -278,37 +275,4 @@ test("doctor 缺 default_model 仅警告，不阻断旧 Worker", async () => wit
   finally { console.log = original; }
   assert.equal(code, 0, lines.join("\n"));
   assert.match(lines.join("\n"), /Warning: Worker a 未配置 default_model/);
-}));
-
-test("doctor 从 node.json 读取 Socket 路径；仅向 Fake Server 发只读 ping/snapshot", async () => withTemp(async (dir) => {
-  const socketPath = path.join(dir, "fake.sock");
-  const requests = [];
-  const server = net.createServer((socket) => {
-    let buffer = "";
-    socket.on("error", () => {});
-    socket.on("data", (chunk) => {
-      buffer += chunk;
-      if (!buffer.includes("\n")) return;
-      const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
-      requests.push(request.method);
-      const result = request.method === "ping"
-        ? { type: "pong", version: "fixture", protocol: 22, capabilities: [] }
-        : { type: "session_snapshot", snapshot: { protocol: 22, panes: [], agents: [] } };
-      socket.end(JSON.stringify({ id: request.id, result }) + "\n");
-    });
-  });
-  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
-  fs.writeFileSync(path.join(dir, "node.json"), JSON.stringify({ node: "test-hub", role: "hub", busType: "sqlite", herdrSocketPath: socketPath }));
-  fs.writeFileSync(path.join(dir, "commands.json"), JSON.stringify({ workers: { grok: { context: "herdr", herdr_kind: "grok" } } }));
-  const lines = [];
-  const original = console.log;
-  try {
-    console.log = (...args) => lines.push(args.join(" "));
-    assert.equal(await doctor(dir, path.resolve(".")), 0, lines.join("\n"));
-  } finally {
-    console.log = original;
-    await new Promise((resolve) => server.close(resolve));
-  }
-  assert.deepEqual(requests, ["ping", "session.snapshot"]);
-  assert.match(lines.join("\n"), /Herdr socket 可达（config，protocol 22/);
 }));

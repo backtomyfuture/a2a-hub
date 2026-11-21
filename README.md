@@ -1,6 +1,6 @@
 # a2a-hub
 
-**零外部运行时依赖的独立多 Agent 编排中台**——基于 **A2A 八态数据模型**、**三层寻址（Node → Worker → Skill）**、**指令与数据分离**和 **ed25519 签名审批**，统一采用 **SQLite WAL + HTTP 网关（出站长轮询 + 外部 HTTP Agent 接入）**，内置 **可视化 Web 控制台**与 **LoopForge 多阶段 SOP 闭环编排引擎**，一台 Mac mini 或轻量服务器常驻即可调度本机 Agent、远程电脑节点以及纯 HTTP 云端 Agent（如 **Muse**、**Grok Bot**）。
+**零外部运行时依赖的独立多 Agent 编排中台**——基于 **A2A 八态数据模型**、**三层寻址（Node → Worker → Skill）**、**指令与数据分离**和 **ed25519 签名审批**，统一采用 **SQLite WAL + HTTP 网关（出站长轮询 + 外部 HTTP Agent 接入）**，内置 **可视化 Web 控制台**与 **`Context_ID` 跨任务多轮记忆 / Leader 扇出编排**，一台 Mac mini 或轻量服务器常驻即可让单个 Leader（如 **Muse**、**Grok Bot**）统筹调度本机 Agent、远程电脑节点与云端 Agent。
 
 [English](README.en.md) · [中台标准](docs/standard.md) · [配置与 CLI 手册](docs/configuration.md) · [外部 HTTP Agent 手册](docs/protocol-node-runbook.md) · [架构设计](docs/architecture.md) · [安全模型](SECURITY.md) · [变更记录](CHANGELOG.md)
 
@@ -13,16 +13,16 @@
 ## 为什么做 `a2a-hub`
 
 - **常驻中枢（Mac mini / Linux / 云主机），免外部数据库**：`hub` 角色直接启动本地 SQLite WAL（Node >= 24 内置 `node:sqlite`）+ HTTP API 与静态控制台（默认监听 `0.0.0.0:8787`），无任何第三方 npm 运行时依赖（`dependencies: {}`）。
-- **两类终端统一走 HTTP，节点零入站端口**：
-  - **宿主守护节点（`ah join`）**：远端电脑（办公 Mac、NUC、Linux 工作站、GPU 服务器等）运行轻量守护进程 `ah daemon`，通过 `GET /api/v1/poll` 维持纯出站长轮询，收到新任务、审批或追问答复时毫秒级唤醒并拉起本机 CLI/脚本。装有 **`herdr`** 的边缘宿主机自动启用 `context: "herdr"` 多 Agent 并发编排（默认 `maxConcurrent: 4`）：每个任务分配独立 Tab/Pane 与隔离环境变量，在 `input-required` / `auth-required` 期间保留活着的交互式 Agent 进程（继续占槽），答复或批准后原地热续接，终态自动回收。
+- **两类终端统一走 HTTP 与 A2A 协议，节点零入站端口**：
+  - **宿主守护节点（`ah join`）**：远端电脑（办公 Mac、NUC、Linux 工作站、GPU 服务器等）运行轻量守护进程 `ah daemon`，通过 `GET /api/v1/poll` 维持纯出站长轮询，收到新任务、审批或追问答复时毫秒级唤醒并拉起本机 CLI/脚本。同一 `Context_ID` 下的后续任务自动在宿主机复用 CLI `Session_ID`（`resume_command`）并注入 `context_history`，无需终端复用器也能连续多轮对话。
   - **纯 HTTP 外部 Agent（Muse / Grok Bot 等）**：无常驻进程。机主在控制台签发分 Agent Token（不是机主自己的 `AH_API_TOKEN`）。`GET /.well-known/agent.json` 免鉴权；`/api/v1/skills*` 与其余接口要这把 Token。添加时可自定义分钟级轮询间隔（`poll_interval_min`，默认定时检查 `5` 分钟、Webhook 兜底 `30` 分钟，也支持 `60` 分钟等长间隔），中台按 `间隔 × 1.5` 判定在线状态。定时器按设定间隔跑检查脚本：`IDLE` 结束，`WORK` 再 `poll?timeout=0` 或 `updates?new=1`。Leader 同时接单和跟单。每次唤醒都没有上一轮上下文。
 - **内置 Web 控制台**：单文件零构建内嵌于中台（打开 `http://<hub>:8787`，用机主 Token）：
   - **待我处理**：首页集中待审批、待答复和需要看一眼的任务；
   - **Agent**：按节点分组，接纳名片、改显示名、重新生成或吊销 Token；
   - **派单**：大白话表单，不必先填协议字段；
   - **添加 Agent**：三步向导（接入类型、名字与角色、密钥与接入指引）。云端 HTTP 会签发一把只显示一次的分 Agent Token；
-  - **任务与 SOP**：任务详情里在线 ed25519 审批、答复追问，以及 LoopForge 编排室。
-- **LoopForge 风格多阶段 SOP 闭环**：内置 `LoopService` 与 `ah loop` CLI，同一 `Context_ID` 下自动推进多阶段任务，借 `acceptance.mjs` 验收结果驱动 `retry` / `goto:<stage_id>` / `abort`，受 `Max_Iterations` 与 `HOP_LIMIT=8` 双重熔断保护。
+  - **任务详情**：任务时间线、产物与附件查看、在线 ed25519 审批与追问答复。
+- **Leader 轻量协同（扇出派单 + `Context_ID` 记忆续接）**：`POST /api/v1/tasks` 支持单发与 `to: ["agent-a", "agent-b"]` 批量扇出并行派单并共享 `Context_ID`；无需维护复杂静态 DAG，由单个 Leader（如 Muse）按结果动态决定追问、返工或收口。
 - **可选多通道提醒**：`node.json` 配置 `notifications` 后可向飞书群机器人 Webhook（可选通知渠道）、Bark、Telegram 或通用 Webhook 推送审批/问答/终态/陈旧告警。
 
 ---
@@ -34,8 +34,8 @@ flowchart LR
     WEB["Web 控制台 / CLI (ah)"] --> HUB
     subgraph HUB["常驻中台 Hub（如 Mac mini :8787）"]
         direction TB
-        SQL[("SQLite WAL 总线\ntasks · messages · parts · runs\nartifacts · agentCards · rules · loops")]
-        API["HTTP REST API + LongPollBroker + agent-gateway\nGET /.well-known/agent.json · ed25519 签名 · LoopService"]
+        SQL[("SQLite WAL 总线\ntasks · messages · parts · runs\nartifacts · agentCards · rules")]
+        API["HTTP REST API + LongPollBroker + agent-gateway\nGET /.well-known/agent.json · ed25519 签名"]
         SQL <--> API
     end
     HUB <-->|"出站 HTTP 长轮询（GET /api/v1/poll）"| N1["远端电脑：办公主机 (ah daemon)"]
@@ -189,7 +189,7 @@ node bin/ah.mjs daemon
 
 | 角色 \ 运行形态 | 装有 `ah` CLI（本地安装） | 无 CLI 纯 HTTP（云端 / 独立 Agent） |
 |---|---|---|
-| **控制端 / Leader**（查名册、派单、SOP 编排、收结果） | [`skills/ah/SKILL.md`](skills/ah/SKILL.md) | [`skills/a2a-leader/SKILL.md`](skills/a2a-leader/SKILL.md)（`GET /api/v1/skills/a2a-leader`，需鉴权） |
+| **控制端 / Leader**（查名册、派单与续接、收结果） | [`skills/ah/SKILL.md`](skills/ah/SKILL.md) | [`skills/a2a-leader/SKILL.md`](skills/a2a-leader/SKILL.md)（`GET /api/v1/skills/a2a-leader`，需鉴权） |
 | **执行端 / Worker**（取单、提问、审批、回执） | [`skills/ah-inbox/SKILL.md`](skills/ah-inbox/SKILL.md)（仅 `kind=agent` 自动安装） | [`skills/a2a-worker/SKILL.md`](skills/a2a-worker/SKILL.md)（`GET /api/v1/skills/a2a-worker`，需鉴权） |
 
 ---
@@ -203,7 +203,7 @@ node bin/ah.mjs daemon
 | **一键部署** | `ah up [--listen …] [--service] [--no-daemon]` | 一键初始化 SQLite Hub（自动生成 Token 与签名密钥）并启动 |
 | | `ah join <hub_url> [--node …] [--service] [--no-daemon]` | 一键抽离凭据、拉取 Hub 公钥并启动出站长轮询节点 |
 | **初始化与运维** | `ah setup [--role node\|hub] [--bus sqlite\|http]` | 向导：初始化 SQLite 中台或远端 HTTP 长轮询节点 |
-| | `ah daemon [--role node\|hub]` | 启动节点或 Hub 全功能守护进程（含 HTTP 网关、Web 控制台、Loop 引擎） |
+| | `ah daemon [--role node\|hub]` | 启动节点或 Hub 全功能守护进程（含 HTTP 网关与 Web 控制台） |
 | | `ah doctor [--role node\|hub]` | 只读自检：配置、`commands.json` 能力、总线/Hub 连通性、自启状态 |
 | | `ah service [--role node\|hub] [--remove]` | 注册或卸载用户级开机自启（launchd / systemd / Windows 任务计划） |
 | | `ah inventory` | 只读盘点本节点名片与按状态汇总的任务 |
@@ -213,10 +213,6 @@ node bin/ah.mjs daemon
 | | `ah task reply --task <ID> --text …` | 回复 `input-required` 追问并恢复原任务执行 |
 | | `ah task cancel --task <ID> [--text …]` | 撤回未终态任务 |
 | | `ah task why <ID> [--json]` | 只读排障：完整时间线、验收结论与本地在途/重投账本 |
-| **LoopForge SOP** | `ah loop templates` | 列出内置多阶段 SOP 模板（如 `plan-code-verify`） |
-| | `ah loop create --title … --goal … --to <node> [--template …]` | 启动多阶段自动闭环并追踪验收反馈回跳 |
-| | `ah loop ls [--json]` / `ah loop show <Loop_ID>` | 查看全网 SOP 闭环进度、迭代轮次与历史阶段记录 |
-| | `ah loop cancel <Loop_ID> [--text …]` | 取消闭环及其当前在途子任务 |
 | **本地调度与 Agent** | `ah schedule ls \| add \| rm \| enable \| disable` | 管理节点本地 `schedules.json` 定时任务 |
 | | `ah inbox [--pop] [--limit <n>] [--json]` / `ah inbox done \| ask \| fail \| auth` | 独立 Agent 节点读取收件箱与回报状态 |
 
@@ -237,8 +233,8 @@ node bin/ah.mjs daemon
 
 | 文档 | 内容 |
 |---|---|
-| [docs/configuration.md](docs/configuration.md) | 配置目录、`node.json` / `commands.json` / `schedules.json`、独立中台与 Loop 配置、CLI 速查 |
-| [docs/architecture.md](docs/architecture.md) | 架构分层、SQLite/HTTP 长轮询传输、Web 控制台、Loop 引擎与故障模型 |
+| [docs/configuration.md](docs/configuration.md) | 配置目录、`node.json` / `commands.json` / `schedules.json`、独立中台与多轮上下文配置、CLI 速查 |
+| [docs/architecture.md](docs/architecture.md) | 架构分层、SQLite/HTTP 长轮询传输、Web 控制台、多轮 Session 续接与故障模型 |
 | [docs/standard.md](docs/standard.md) | **中台标准规范**：表模型、A2A 八态机、审批与验收协议 |
 | [docs/hub-integration.md](docs/hub-integration.md) | Hub 职责、建单约束、结果呈递与审批流 |
 | [docs/agent-templates.md](docs/agent-templates.md) | 无头 CLI Agent 模板与权限配置注意点 |

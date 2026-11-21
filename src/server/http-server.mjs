@@ -1,4 +1,4 @@
-// Hub HTTP 服务端：承载 REST 总线接口、HTTP 长轮询唤醒端点、Web 控制台、审批签名与 LoopForge SOP API。
+// Hub HTTP 服务端：承载 REST 总线接口、HTTP 长轮询唤醒端点、Web 控制台与审批签名。
 
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
@@ -49,7 +49,6 @@ import { createTask } from "../hub/create.mjs";
 import { FileStore, findFileRefs, normalizeMime, sanitizeFileName } from "../hub/files.mjs";
 import { initiatorOf } from "../inbox.mjs";
 import { TERMINAL_STATUSES } from "../kernel-util.mjs";
-import { BUILTIN_LOOP_TEMPLATES, cancelLoop, createLoop } from "../hub/loop.mjs";
 import { getTaskWhy } from "../why.mjs";
 import { handleAgentGatewayRequest } from "./agent-gateway.mjs";
 import { rosterNodeVisible } from "./longpoll-broker.mjs";
@@ -163,30 +162,6 @@ function formatTaskSummary(t) {
     status_msg: f1(t, "Status_Msg"),
     latest_run: f1(t, "Latest_Run"),
     metadata: parseJsonField(f1(t, "Metadata"), {}),
-  };
-}
-
-function formatLoopSummary(r) {
-  return {
-    record_id: r.record_id,
-    loop_id: f1(r, "Loop_ID"),
-    title: f1(r, "Title"),
-    goal: f1(r, "Goal"),
-    context_id: f1(r, "Context_ID"),
-    status: f1(r, "Status"),
-    template: f1(r, "Template"),
-    stages: parseJsonField(f1(r, "Stages"), []),
-    stage_index: Number(f1(r, "Stage_Index")) || 0,
-    iteration: Number(f1(r, "Iteration")) || 1,
-    max_iterations: Number(f1(r, "Max_Iterations")) || 5,
-    active_task_id: f1(r, "Active_Task_ID"),
-    last_result: f1(r, "Last_Result"),
-    last_error: f1(r, "Last_Error"),
-    history: parseJsonField(f1(r, "History"), []),
-    error: f1(r, "Error"),
-    created_by: f1(r, "Created_By"),
-    created_at: f1(r, "Created_At"),
-    updated_at: f1(r, "Updated_At"),
   };
 }
 
@@ -601,10 +576,9 @@ export async function startHubHttpServer({
 
       // 4) Web 控制台总览数据
       if (method === "GET" && pathname === "/api/v1/state") {
-        const [tasks, cards, loops] = await Promise.all([
+        const [tasks, cards] = await Promise.all([
           bus.listRecords(bus.tables.tasks),
           bus.listRecords(bus.tables.agentCards),
-          bus.tables.loops ? bus.listRecords(bus.tables.loops) : Promise.resolve([]),
         ]);
         const cardNodes = new Set();
         for (const c of cards) {
@@ -641,7 +615,6 @@ export async function startHubHttpServer({
           connectedNodes,
           tasks: tasks.map(formatTaskSummary).reverse(),
           agentCards: cards.map(formatAgentCard),
-          loops: loops.map(formatLoopSummary).reverse(),
           cards: typeof bus.listCards === "function" ? bus.listCards() : [],
         });
         return;
@@ -748,7 +721,7 @@ export async function startHubHttpServer({
         return;
       }
 
-      // 6) 创建任务
+      // 6) 创建任务（支持单个 to 字符串，或 to: [...] 同 Context_ID 批量群派）
       if (method === "POST" && pathname === "/api/v1/tasks") {
         const body = await readJsonBodyBound();
         const attachments = normalizeAttachments(body.attachments, { fileStore: activeFileStore });
@@ -757,18 +730,16 @@ export async function startHubHttpServer({
           sendJson(res, 400, { error: "text 与 attachments 不能同时为空" });
           return;
         }
-        const taskId = await createTask({
+        const commonOpts = {
           bus,
           from: body.from || cfg?.node || "hub",
           source: body.source || body.from || "web",
-          to: body.to || "",
           worker: body.worker || "",
           requested_model: body.requested_model ?? null,
           cap: body.cap || "",
           text: body.text || "",
           params: body.params,
           criteria: body.criteria,
-          context: body.context || "",
           ref: body.ref || "",
           approval: body.approval || "",
           idempotencyKey: body.idempotencyKey || "",
@@ -778,6 +749,34 @@ export async function startHubHttpServer({
           queueTimeoutSec: body.queue_timeout_sec,
           leaseTtlSec: body.lease_ttl_sec,
           waitTimeoutSec: body.wait_timeout_sec,
+        };
+        if (Array.isArray(body.to)) {
+          if (!body.to.length) {
+            sendJson(res, 400, { error: "to 数组不能为空" });
+            return;
+          }
+          const targets = body.to.map((item) => validateNodeName(item));
+          const sharedContext = String(body.context ?? "").trim() || `CTX-${Date.now().toString(36)}-${randomUUID().slice(0, 6)}`;
+          const taskIds = [];
+          for (let i = 0; i < targets.length; i++) {
+            const targetNode = targets[i];
+            const perKey = commonOpts.idempotencyKey ? `${commonOpts.idempotencyKey}:${targetNode}:${i}` : "";
+            const taskId = await createTask({
+              ...commonOpts,
+              to: targetNode,
+              context: sharedContext,
+              idempotencyKey: perKey,
+            });
+            taskIds.push(taskId);
+          }
+          onWake();
+          sendJson(res, 201, { task_ids: taskIds, context_id: sharedContext });
+          return;
+        }
+        const taskId = await createTask({
+          ...commonOpts,
+          to: body.to || "",
+          context: body.context || "",
         });
         onWake();
         sendJson(res, 201, { task_id: taskId });
@@ -943,64 +942,7 @@ export async function startHubHttpServer({
         return;
       }
 
-      // 10) LoopForge SOP 闭环 API
-      if (method === "GET" && pathname === "/api/v1/loop-templates") {
-        sendJson(res, 200, { templates: Object.values(BUILTIN_LOOP_TEMPLATES) });
-        return;
-      }
-      if (method === "GET" && pathname === "/api/v1/loops") {
-        let rows = bus.tables.loops ? await bus.listRecords(bus.tables.loops) : [];
-        if (principal.kind === "agent") {
-          rows = rows.filter((r) => f1(r, "Created_By") === principal.node);
-        }
-        sendJson(res, 200, { loops: rows.map(formatLoopSummary).reverse() });
-        return;
-      }
-      if (method === "POST" && pathname === "/api/v1/loops") {
-        const body = await readJsonBodyBound();
-        const resLoop = await createLoop({
-          bus,
-          title: body.title || "",
-          goal: body.goal || "",
-          template: body.stages ? "" : (body.template || "plan-code-verify"),
-          stages: body.stages || null,
-          stageBindings: body.stageBindings || null,
-          to: body.to || "",
-          worker: body.worker || "",
-          cap: body.cap || "",
-          approval: body.approval || "",
-          maxIterations: body.maxIterations,
-          context: body.context || "",
-          from: body.from || cfg?.node || "hub",
-          validateTarget: body.validateTarget !== false,
-        });
-        onWake();
-        sendJson(res, 201, resLoop);
-        return;
-      }
-      const cancelLoopMatch = pathname.match(/^\/api\/v1\/loops\/([^/]+)\/cancel$/);
-      if (method === "POST" && cancelLoopMatch) {
-        const loopId = decodeURIComponent(cancelLoopMatch[1]);
-        const body = await readJsonBodyBound();
-        if (principal.kind === "agent") {
-          const rows = bus.tables.loops ? await bus.listRecords(bus.tables.loops) : [];
-          const row = rows.find((r) => f1(r, "Loop_ID") === loopId);
-          if (!row) {
-            sendJson(res, 404, { error: `Loop 不存在：${loopId}` });
-            return;
-          }
-          if (f1(row, "Created_By") !== principal.node) {
-            sendJson(res, 403, { error: `只能取消本节点发起的闭环（发起方 ${f1(row, "Created_By") || "未知"}）` });
-            return;
-          }
-        }
-        const resCancel = await cancelLoop({ bus, loopId, reason: body.text || "控制台终止闭环" });
-        onWake();
-        sendJson(res, 200, resCancel);
-        return;
-      }
-
-      // 11) 名片接纳与 Agent 接入管理 API（需 Bearer 鉴权）
+      // 10) 名片接纳与 Agent 接入管理 API（需 Bearer 鉴权）
       const cardAdmissionMatch = pathname.match(/^\/api\/v1\/admin\/cards\/([^/]+)\/admission$/);
       if (method === "POST" && cardAdmissionMatch) {
         const capId = decodeParam(cardAdmissionMatch[1]);

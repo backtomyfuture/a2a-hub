@@ -28,7 +28,6 @@ import {
 } from "../src/hub/admission.mjs";
 import { AgentTokenStore } from "../src/hub/agent-tokens.mjs";
 import { createTask } from "../src/hub/create.mjs";
-import { createLoop } from "../src/hub/loop.mjs";
 import { inventory } from "../src/inventory.mjs";
 import { BROWSER_USER_AGENT } from "../src/kernel-util.mjs";
 import { LocalScheduleService } from "../src/local-schedule.mjs";
@@ -446,9 +445,8 @@ test("模板：presetHttpCardFields 把模板写进 Metadata，parseCardMetadata
 });
 
 test("派单门：未接纳（pending/缺省）与 rejected 拒单且不写表，接纳后可派", async () => {
-  const tables = { ...TABLES, loops: "tbl_loops" };
-  const mock = new MockBus({ tables });
-  const rec = await mock.createRecord(tables.agentCards, {
+  const mock = new MockBus({ tables: TABLES });
+  const rec = await mock.createRecord(TABLES.agentCards, {
     Cap_ID: "CAP-node-a-echo",
     Node: "node-a",
     Skill_ID: "echo",
@@ -457,7 +455,7 @@ test("派单门：未接纳（pending/缺省）与 rejected 拒单且不写表�
   });
   mock.journal.length = 0;
 
-  // 1. 缺省（pending）拒单（含 createTask 与 createLoop）
+  // 1. 缺省（pending）拒单
   await assert.rejects(
     () => createTask({ bus: mock, to: "node-a", cap: "echo", text: "hi" }),
     /未接纳（Admission=pending），请在 Web 控制台「节点 → 待接纳」中接纳/,
@@ -470,15 +468,10 @@ test("派单门：未接纳（pending/缺省）与 rejected 拒单且不写表�
     () => createTask({ bus: mock, to: "node-a", text: "hi" }),
     /未接纳（Admission=pending）/,
   );
-  const loopStages = [{ id: "step", name: "测试", to: "node-a", cap: "echo", prompt: "{{goal}}" }];
-  await assert.rejects(
-    () => createLoop({ bus: mock, title: "t", goal: "g", stages: loopStages }),
-    /未接纳（Admission=pending）/,
-  );
   assert.equal(mock.journal.filter((j) => j.op === "create").length, 0);
 
   // 2. rejected 拒单
-  await mock.updateRecord(tables.agentCards, rec.record.record_id, { Admission: "rejected" });
+  await mock.updateRecord(TABLES.agentCards, rec.record.record_id, { Admission: "rejected" });
   mock.journal.length = 0;
   await assert.rejects(
     () => createTask({ bus: mock, to: "node-a", cap: "echo", text: "hi" }),
@@ -486,17 +479,10 @@ test("派单门：未接纳（pending/缺省）与 rejected 拒单且不写表�
   );
   assert.equal(mock.journal.filter((j) => j.op === "create").length, 0);
 
-  // 3. 接纳后可派（含 createTask 与 createLoop）
-  await mock.updateRecord(tables.agentCards, rec.record.record_id, { Admission: "admitted" });
+  // 3. 接纳后可派
+  await mock.updateRecord(TABLES.agentCards, rec.record.record_id, { Admission: "admitted" });
   const taskId = await createTask({ bus: mock, to: "node-a", cap: "echo", text: "hi" });
   assert.ok(taskId.startsWith("TASK-"));
-  const loopRes = await createLoop({
-    bus: mock,
-    title: "测试",
-    goal: "测试闭环",
-    stages: loopStages,
-  });
-  assert.ok(loopRes.loopId.startsWith("LOOP-"));
 });
 
 test("派单门：指定 --worker 时未接纳同样拒单，且 local-schedule 受门禁约束", async () => {

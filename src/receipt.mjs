@@ -39,7 +39,7 @@ function modelArgsSlot(command) {
 }
 
 export function modelArgsSupported(entry, harness) {
-  return entry.context !== "herdr" && entry.mode !== "inbox"
+  return (!entry.context || entry.context === "direct") && entry.mode !== "inbox"
     && Object.hasOwn(MODEL_FLAGS, harness) && modelArgsSlot(entry.command)
     && (!entry.resume_command || modelArgsSlot(entry.resume_command));
 }

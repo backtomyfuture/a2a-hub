@@ -1,5 +1,5 @@
 // hub 角色主循环：node 能力的超集（单进程承载能力登记与执行、SQLite + HTTP 长轮询网关、
-// Web 控制台、ed25519 审批发卡、结果呈递、陈旧告警、later 与 Loop 编排）。
+// Web 控制台、ed25519 审批发卡、结果呈递、陈旧告警与 later 复查）。
 // 唤醒通道走 src/transport/index.mjs 的 createWaker（longpoll，hub 进程内直连 Broker）。
 
 import fs from "node:fs";
@@ -12,7 +12,6 @@ import { ApprovalService } from "./approval.mjs";
 import { PresentService } from "./present.mjs";
 import { StaleService } from "./stale.mjs";
 import { ScheduleService } from "./schedule.mjs";
-import { LoopService } from "./loop.mjs";
 import { FileRetentionService, FileStore } from "./files.mjs";
 import { ExternalNotifier } from "./notifier.mjs";
 import { WebhookDispatcher } from "./webhooks.mjs";
@@ -261,12 +260,8 @@ export async function runHub(cfg, log = logLine, hooks = {}) {
     bus: cfg.bus,
     log,
   });
-  const loop = new LoopService({
-    bus: cfg.bus,
-    log,
-  });
 
-  const runtime = new HubRuntime({ cfg, approval, present, stale, schedule, loop, log });
+  const runtime = new HubRuntime({ cfg, approval, present, stale, schedule, log });
   let httpHandle = null;
   let fileStore = null;
   let fileRetention = null;
@@ -318,13 +313,12 @@ export async function runHub(cfg, log = logLine, hooks = {}) {
 }
 
 export class HubRuntime {
-  constructor({ cfg, approval, present, stale, schedule, loop = null, log, createWaker, retryMs }) {
+  constructor({ cfg, approval, present, stale, schedule, log, createWaker, retryMs }) {
     this.cfg = cfg;
     this.approval = approval;
     this.present = present;
     this.stale = stale;
     this.schedule = schedule;
-    this.loop = loop;
     this.log = log;
     this.createWaker = createWaker ?? null;
     this.kernel = new Kernel(this.cfg);
@@ -544,7 +538,6 @@ export class HubRuntime {
       ["stale", () => this.stale?.scan()],
       ["schedule", () => this.schedule?.scan()],
     ];
-    if (this.loop) jobs.push(["loop", () => this.loop.scan()]);
     for (const [name, job] of jobs) {
       const t0 = Date.now();
       let ok = false;

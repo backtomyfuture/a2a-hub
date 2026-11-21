@@ -1,6 +1,6 @@
 # a2a-hub
 
-**A self-hosted, zero-external-dependency multi-agent orchestration hub** — combining the **A2A eight-state model**, **three-layer addressing (`Node` → `Worker` → `Skill`)**, **instruction/data separation**, and **ed25519-signed approvals** over one unified **SQLite WAL + HTTP Gateway** architecture (outbound HTTP Long-Polling for host daemons + REST Agent Gateway for pure cloud/cron Agents), with a built-in **Web Console** and **LoopForge multi-stage SOP orchestration engine**.
+**A self-hosted, zero-external-dependency multi-agent orchestration hub** — combining the **A2A eight-state model**, **three-layer addressing (`Node` → `Worker` → `Skill`)**, **instruction/data separation**, and **ed25519-signed approvals** over one unified **SQLite WAL + HTTP Gateway** architecture (outbound HTTP Long-Polling for host daemons + REST Agent Gateway for pure cloud/cron Agents), with a built-in **Web Console** and **`Context_ID` multi-turn session memory / Leader fan-out orchestration**.
 
 [中文说明](README.md) · [Standard (Chinese)](docs/standard.md) · [Configuration & CLI](docs/configuration.md) · [HTTP Agent Runbook](docs/protocol-node-runbook.md) · [Architecture](docs/architecture.md) · [Security Model](SECURITY.md) · [Changelog](CHANGELOG.md)
 
@@ -14,15 +14,15 @@
 
 - **Self-Hosted Standalone Hub (`busType: "sqlite"`)**: Run `ah daemon --role hub` on a persistent server (such as a Mac mini or Linux VPS) backed by Node >= 24's built-in `node:sqlite` (WAL mode) and zero third-party npm dependencies (`dependencies: {}`).
 - **Two Connection Modes Over Pure HTTP, Zero Open Node Ports**:
-  - **Host Daemon Nodes (`ah join`)**: Workstations, NUCs, office Macs, or GPU hosts run a thin outbound daemon (`GET /api/v1/poll`) that wakes within milliseconds to execute local CLIs/scripts safely via `commands.json`. Edge hosts with **`herdr`** installed automatically enable `context: "herdr"` multi-agent concurrency (default `maxConcurrent: 4`): each task gets an isolated Tab/Pane with dedicated environment variables, stays parked with its live interactive agent during `input-required` / `auth-required` (still holding its slot) for hot resume on reply/approval, and closes automatically on terminal state.
+  - **Host Daemon Nodes (`ah join`)**: Workstations, NUCs, office Macs, or GPU hosts run a thin outbound daemon (`GET /api/v1/poll`) that wakes within milliseconds to execute local CLIs/scripts safely via `commands.json`. Follow-up tasks sharing the same A2A `Context_ID` automatically resume prior CLI sessions (`sessions/<Context_ID>.json` + `resume_command`) and receive `context_history` without needing a persistent terminal multiplexer.
   - **Pure HTTP External Agents (Muse, Grok Bot, etc.)**: No daemon. The owner issues a per-agent token in the console (not the owner `AH_API_TOKEN`). `GET /.well-known/agent.json` is public; `/api/v1/skills*` and every other API call need that token. Owners can configure a per-agent polling interval in minutes (`poll_interval_min`, default `5` min for scheduled check and `30` min for webhook fallback; supports 1–1440 min such as `60` for hourly agents), and the hub computes online status using `interval × 1.5`. A timer runs the check script at that cadence: `IDLE` stops, `WORK` then calls `poll?timeout=0` or `updates?new=1`. A leader both claims and follows up. Each run starts with no prior context.
 - **Built-in Web Console** (`http://<hub>:8787`, owner token):
   - **Needs you**: Home list of approvals, questions, and tasks worth a look.
   - **Agents**: Grouped by node, with admission, display names, and token rotate/revoke.
   - **Dispatch**: Plain-language form.
   - **Add Agent**: Three steps (access type, name and role, token plus onboarding). HTTP agents get a one-time token.
-  - **Tasks and SOP**: Task detail with ed25519 approve/reject, replies, and the LoopForge studio.
-- **LoopForge-style SOP Orchestration Engine (`LoopService`)**: Automate multi-stage pipelines (e.g. `plan → code → verify`) under a shared `Context_ID` with `Ref_Task_IDs`. Verify failures feed structured diagnostics (`retry` / `goto:<stage_id>` / `abort`) back to earlier stages, bounded by `Max_Iterations` and `HOP_LIMIT = 8`.
+  - **Task Detail**: Timeline, artifact & attachment viewer, ed25519 approve/reject, and inline replies.
+- **Lightweight Leader Orchestration (Fan-out & `Context_ID` Continuity)**: `POST /api/v1/tasks` accepts `to: ["agent-a", "agent-b"]` to fan out parallel subtasks under one shared `Context_ID`, letting a single Leader dynamically coordinate multi-agent follow-ups without brittle static DAG pipelines.
 - **Optional Webhook Notifications**: Configure `notifications` in `node.json` to push alerts via group bot webhooks, Bark, Telegram, or generic webhooks.
 
 ---
@@ -34,8 +34,8 @@ flowchart LR
     WEB["Web Console / CLI (ah)"] --> HUB
     subgraph HUB["Persistent Hub Server (e.g., Mac mini :8787)"]
         direction TB
-        SQL[("SQLite WAL Bus\ntasks · messages · parts · runs\nartifacts · agentCards · rules · loops")]
-        API["HTTP REST API + LongPollBroker + agent-gateway\nGET /.well-known/agent.json · ed25519 Signer · LoopService"]
+        SQL[("SQLite WAL Bus\ntasks · messages · parts · runs\nartifacts · agentCards · rules")]
+        API["HTTP REST API + LongPollBroker + agent-gateway\nGET /.well-known/agent.json · ed25519 Signer"]
         SQL <--> API
     end
     HUB <-->|"Outbound HTTP Long-Polling (GET /api/v1/poll)"| N1["Workstation Daemon (ah join)"]
@@ -187,7 +187,7 @@ Skills are separated along **Leader vs. Worker** and **CLI (`ah`) vs. Pure HTTP*
 
 | Role \ Runtime | Local with `ah` CLI | Pure HTTP (Cloud / Cron Agent, no CLI) |
 |---|---|---|
-| **Controller / Leader** (inspect, dispatch, loops, collect updates) | [`skills/ah/SKILL.md`](skills/ah/SKILL.md) | [`skills/a2a-leader/SKILL.md`](skills/a2a-leader/SKILL.md) (`GET /api/v1/skills/a2a-leader`, authenticated) |
+| **Controller / Leader** (inspect, dispatch & fan-out, collect updates) | [`skills/ah/SKILL.md`](skills/ah/SKILL.md) | [`skills/a2a-leader/SKILL.md`](skills/a2a-leader/SKILL.md) (`GET /api/v1/skills/a2a-leader`, authenticated) |
 | **Executor / Worker** (poll, claim, ask, auth, complete/fail) | [`skills/ah-inbox/SKILL.md`](skills/ah-inbox/SKILL.md) (auto-installed for `kind=agent`) | [`skills/a2a-worker/SKILL.md`](skills/a2a-worker/SKILL.md) (`GET /api/v1/skills/a2a-worker`, authenticated) |
 
 ---
@@ -201,7 +201,7 @@ Configuration defaults to `~/.a2a-hub` (app installed under `~/.a2a-hub/app/`, o
 | **One-Line Setup** | `ah up [--listen …] [--service] [--no-daemon]` | Initialize SQLite Hub (auto token + ed25519 key) and start |
 | | `ah join <hub_url> [--node …] [--service] [--no-daemon]` | Extract credentials, sync `hubPublicKey`, and start long-poll node |
 | **Setup & Ops** | `ah setup [--role node\|hub] [--bus sqlite\|http]` | Initialize a standalone SQLite Hub or remote HTTP node |
-| | `ah daemon [--role node\|hub]` | Start the node or full Hub runtime (HTTP server, Web UI, Loops) |
+| | `ah daemon [--role node\|hub]` | Start the node or full Hub runtime (HTTP server, Web UI) |
 | | `ah doctor [--role node\|hub]` | Read-only checks for config, `commands.json`, bus connectivity, autostart |
 | | `ah service [--role node\|hub] [--remove]` | Install or remove user-level autostart (launchd / systemd / Windows) |
 | | `ah inventory` | Inspect this node's AgentCards and task counts |
@@ -211,10 +211,6 @@ Configuration defaults to `~/.a2a-hub` (app installed under `~/.a2a-hub/app/`, o
 | | `ah task reply --task <ID> --text …` | Reply to an `input-required` question and resume the task |
 | | `ah task cancel --task <ID> [--text …]` | Cancel a non-terminal task |
 | | `ah task why <ID> [--json]` | Reconstruct full timeline, acceptance summary, and local flight/outbox state |
-| **LoopForge SOP** | `ah loop templates` | List built-in multi-stage SOP templates (e.g., `plan-code-verify`) |
-| | `ah loop create --title … --goal … --to <node> [--template …]` | Launch an automated multi-stage closed loop |
-| | `ah loop ls [--json]` / `ah loop show <Loop_ID>` | Inspect active and completed loops and stage history |
-| | `ah loop cancel <Loop_ID> [--text …]` | Cancel a loop and its active task |
 | **Local Scheduling & Inbox** | `ah schedule ls \| add \| rm \| enable \| disable` | Manage local `schedules.json` cron jobs |
 | | `ah inbox [--pop] [--limit <n>] [--json]` / `ah inbox done \| ask \| fail \| auth` | Consume `agent_inbox.jsonl` and report results from standalone agents |
 

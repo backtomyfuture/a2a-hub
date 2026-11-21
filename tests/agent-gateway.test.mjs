@@ -472,6 +472,50 @@ test("HTTP Agent 网关：发现 / 注册 / 问答闭环 / 长轮询 / ed25519 �
       assert.equal(cLeaseTakeover.status, 200);
       assert.equal(cLeaseTakeover.data.takeover, true);
       assert.equal(cLeaseTakeover.data.lease_id, "run-round-2");
+
+      // 7. 同 Context_ID 批量群派：to 为数组时自动在同一个 context_id 下并发创建多个任务
+      const regQwen = await apiJson(baseUrl, "/api/v1/agents/register", {
+        method: "POST",
+        token: apiToken,
+        body: {
+          node: "qwen-bot",
+          role: "worker",
+          kind: "agent",
+          receive_mode: "http-poll",
+          node_desc: "千问执行器",
+        },
+      });
+      assert.equal(regQwen.status, 200);
+      const admitQwen = await apiJson(baseUrl, "/api/v1/admin/nodes/qwen-bot/admission", {
+        method: "POST",
+        token: apiToken,
+        body: { admission: "admitted" },
+      });
+      assert.equal(admitQwen.status, 200);
+
+      const batchRes = await apiJson(baseUrl, "/api/v1/tasks", {
+        method: "POST",
+        token: apiToken,
+        body: {
+          from: "muse",
+          to: ["grok-bot", "qwen-bot"],
+          text: "并行调研今日 AI 行业动态",
+        },
+      });
+      assert.equal(batchRes.status, 201);
+      assert.equal(Array.isArray(batchRes.data.task_ids), true);
+      assert.equal(batchRes.data.task_ids.length, 2);
+      assert.ok(batchRes.data.context_id);
+      const batchTasks = (await bus.listRecords(DEFAULT_TABLES.tasks))
+        .filter((t) => batchRes.data.task_ids.includes(t.fields.Task_ID));
+      assert.equal(batchTasks.length, 2);
+      assert.deepEqual(
+        batchTasks.map((t) => t.fields.Target_Node).sort(),
+        ["grok-bot", "qwen-bot"],
+      );
+      for (const t of batchTasks) {
+        assert.equal(t.fields.Context_ID, batchRes.data.context_id);
+      }
     } finally {
       await httpHandle.close();
       bus.close();

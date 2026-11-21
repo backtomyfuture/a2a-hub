@@ -17,7 +17,7 @@
 flowchart TB
     OP["操作者 / Web 控制台"] --> HUB["hub 角色（逻辑角色 · Mac mini 常驻 :8787）<br/>意图理解 · 拆解 · 路由 · 审批签名 · 结果呈递"]
     HUB -->|"建单：先写 instruction 消息＋Parts<br/>最后写 Tasks 行（任务行＝触发信号）"| BUS
-    BUS["SQLite WAL 总线 + HTTP API (LongPollBroker + agent-gateway)<br/>Tasks · Messages · Parts · Runs · Artifacts · AgentCards · Rules · Loops"]
+    BUS["SQLite WAL 总线 + HTTP API (LongPollBroker + agent-gateway)<br/>Tasks · Messages · Parts · Runs · Artifacts · AgentCards · Rules"]
     BUS <-->|"GET /api/v1/poll 长轮询（毫秒级唤醒）<br/>＋低频对账扫表兜底"| N1
     BUS <-->|"同上（agent_inbox.jsonl）"| N2
     BUS <-->|"GET /api/v1/agents/{node}/poll & /updates<br/>POST /api/v1/tasks/{id}/claim|complete|..."| N3
@@ -72,7 +72,7 @@ flowchart TB
 - **hub 是逻辑角色，且为 node 的单进程超集。** 中台只有 node 与 hub 两个角色；
   hub 角色是 node 角色的单进程超集，由 `ah daemon --role node|hub`（CLI 简称 `ah`，别名 `a2a-hub` / `ahub`）承载。
   省略 `--role` 时读该配置目录 `node.json` 的 `role`，缺省 node。单进程单配置目录即可搞定，无需拆两个进程。
-  `role=hub` 既像普通节点一样读取 `commands.json` 登记能力接单干活，又负责建单（入口 `ah task create`、Web 控制台与 HTTP API）、审批签名、结果呈递、陈旧任务告警与 LoopForge 多阶段 SOP 闭环推进（`LoopService`）。
+  `role=hub` 既像普通节点一样读取 `commands.json` 登记能力接单干活，又负责建单（入口 `ah task create`、Web 控制台与 HTTP API）、审批签名、结果呈递与陈旧任务告警。
   node 角色从不写 `auth_decision` 与 `canceled`，hub 角色是唯一写方。
   Hub 单进程启动本地 HTTP 网关（`src/server/http-server.mjs`，默认 `0.0.0.0:8787`），集中托管 `SqliteBus`（`src/bus/sqlite-bus.mjs`）、`LongPollBroker`（`src/server/longpoll-broker.mjs`）、`agent-gateway`（`src/server/agent-gateway.mjs`）、内置 Web 控制台（`src/server/web-ui.mjs`）与可选外部通知器（`src/hub/notifier.mjs`）。
   hub 逻辑代码主要在 `src/hub/` 与 `src/server/`。
@@ -88,8 +88,8 @@ flowchart TB
 
 ## 一件任务的生命周期
 
-1. 调用方（CLI / Web 控制台 / Muse 等 Leader Agent / `LoopService`）建单时先写 instruction 消息与
-   Parts（参数在 DataPart），**最后写 Tasks 行**（`submitted`）。
+1. 调用方（CLI / Web 控制台 / Muse 等 Leader Agent）建单时先写 instruction 消息与
+   Parts（参数在 DataPart），**最后写 Tasks 行**（`submitted`）。如果需要同时调度多个节点并行协同，可传 `to: ["node-a", "node-b"]` 批量扇出，共享同一个 `Context_ID`。
 2. 目标节点被长轮询（或短轮询对账）唤醒，校验能力与幂等键，置 `working`、写
    `Claimed_By` 与心跳，Runs 开行。
 3. 需要补信息：写 question 消息 → 置 `input-required`，执行段以
@@ -103,7 +103,21 @@ flowchart TB
    置 `completed`，Runs 以 `succeeded` 关行。
 6. 失败：Runs 以 `failed` 关行并记 Error_Log；未达重试上限（2）回
    `submitted` 重认领，达上限置 `failed` 并写 `notice`（`verify` 未通过不回 `submitted`，直接 `failed`）。
-7. 多阶段 SOP 闭环（LoopForge）与派生：任务完成后，若属于某个 `Loops` 记录且 `Status=running`，`LoopService` 根据终态与 `acceptanceForTask` 判定自动推进下一阶段，或按阶段策略 `retry` / `goto:<stage_id>` 将验收证据注入下一棒继续在**同一 `Context_ID`**下建单（`Ref_Task_IDs` 指回前任），全链路受 `Max_Iterations` 与 `Hop_Count > 8` 熔断保护。
+7. **Leader 扇出与 `Context_ID` 多轮记忆续接**：当已有任务进入终态，Leader（或发起方）在**同一 `Context_ID`** 下向同一 Worker 发起后续任务（`Ref_Task_IDs` 指回前任）时，宿主机守护进程自动读取本地 `sessions/<Context_ID>.json` 复用上一轮 CLI `Session_ID`（走 `resume_command`）并向 `runs/<Task_ID>/input.json` 注入 `context_history`，无需复杂静态 DAG 状态机即可实现多轮连续编排。全链路受 `Hop_Count > 8` 熔断保护。
+
+```mermaid
+sequenceDiagram
+    participant L as Leader (Muse / CLI)
+    participant H as Hub (SQLite + Gateway)
+    participant W as Worker (Claude / Codex / Grok)
+    L->>H: POST /api/v1/tasks (to: ["worker-1", "worker-2"], context_id)
+    H-->>W: LongPoll / Poll 派发共享同一 Context_ID 的并行任务
+    W-->>H: claim -> complete (回传结果与 SESSION_ID)
+    Note over W: 宿主机落盘 sessions/<Context_ID>.json
+    L->>H: GET /agents/{leader}/updates?new=1 汇总结果
+    L->>H: POST /api/v1/tasks (to: "worker-1", 同一个 context_id 追问/返工)
+    H-->>W: 携带 context_history 并自动触发 resume_command 续接上一轮记忆
+```
 
 ## 一致性与故障模型
 

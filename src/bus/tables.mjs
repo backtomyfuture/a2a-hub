@@ -8,7 +8,6 @@ export const DEFAULT_TABLES = Object.freeze({
   artifacts: "artifacts",
   agentCards: "agentCards",
   rules: "rules",
-  loops: "loops",
 });
 
 export const KNOWN_TABLE_KEYS = Object.freeze(Object.keys(DEFAULT_TABLES));

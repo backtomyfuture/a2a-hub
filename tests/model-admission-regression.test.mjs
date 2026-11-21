@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import net from "node:net";
 import path from "node:path";
 import test from "node:test";
 import { doctor } from "../src/doctor.mjs";
@@ -39,37 +38,22 @@ async function withGateway(fn) {
 }
 
 for (const [label, commands, rejected] of [
-  ["named Herdr default", { workers: { a: { context: "herdr", herdr_kind: "grok", default_model: "base" } } }, true],
-  ["legacy root Herdr default", { legacy: { context: "herdr", herdr_kind: "grok", command: "echo fake", mode: "json", harness: "grok", default_model: "base" } }, true],
+  ["removed Herdr context", { workers: { a: { context: "herdr", command: "echo {model_args}", mode: "json", harness: "grok", default_model: "base" } } }, true],
   ["direct default without model slot", { workers: { a: { command: "echo fake", mode: "json", harness: "grok", default_model: "base" } } }, true],
   ["legacy direct default without model slot", { legacy: { command: "echo fake", mode: "json", harness: "grok", default_model: "base" } }, true],
   ["direct resume missing model slot", { workers: { a: { command: "echo {model_args}", resume_command: "echo {sessionId}", mode: "json", harness: "grok", default_model: "base" } } }, true],
-  ["herdr_kind alone remains direct", { workers: { a: { command: "echo {model_args}", mode: "json", herdr_kind: "grok", harness: "grok", default_model: "base" } } }, false],
+  ["extra unknown field remains direct", { workers: { a: { command: "echo {model_args}", mode: "json", harness: "grok", default_model: "base", extra_note: "ok" } } }, false],
   ["null model keeps CLI default", { workers: { a: { command: "echo fake", mode: "json", default_model: null } } }, false],
 ]) {
   test(`regression doctor: ${label}`, async () => withTemp(async (dir) => {
-    const socketPath = path.join(dir, "fake.sock");
-    const server = net.createServer((s) => {
-      let buffer = "";
-      s.on("error", () => {});
-      s.on("data", (chunk) => {
-        buffer += chunk;
-        if (!buffer.includes("\n")) return;
-        const req = JSON.parse(buffer.split("\n")[0]);
-        assert.ok(["ping", "session.snapshot"].includes(req.method));
-        const result = req.method === "ping" ? { type: "pong", protocol: 22, version: "fixture" } : { type: "session_snapshot", snapshot: { protocol: 22, panes: [], agents: [] } };
-        s.end(JSON.stringify({ id: req.id, result }) + "\n");
-      });
-    });
-    await new Promise((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
-    fs.writeFileSync(path.join(dir, "node.json"), JSON.stringify({ node: "fixture", role: "hub", busType: "sqlite", herdrSocketPath: socketPath }));
+    fs.writeFileSync(path.join(dir, "node.json"), JSON.stringify({ node: "fixture", role: "hub", busType: "sqlite" }));
     fs.writeFileSync(path.join(dir, "commands.json"), JSON.stringify(commands));
     const lines = [], original = console.log;
     let code;
     try { console.log = (...args) => lines.push(args.join(" ")); code = await doctor(dir, path.resolve(".")); }
-    finally { console.log = original; await new Promise((resolve) => server.close(resolve)); }
+    finally { console.log = original; }
     assert.equal(code !== 0, rejected, lines.join("\n"));
-    if (rejected) assert.match(lines.join("\n"), /default_model.*(?:无法|不支持|不可执行)|model_execution_not_supported/);
+    if (rejected) assert.match(lines.join("\n"), /default_model.*(?:无法|不支持|不可执行)|model_execution_not_supported|herdr 执行语境已移除/);
   }));
 }
 
@@ -163,9 +147,9 @@ test("regression legacy conflicting cards cannot freeze a different agent-card m
   assert.equal(modelAuditOf(f1(await task(made.data.task_id), "Metadata")), null);
 }));
 
-for (const [label, kind, mode] of [["Herdr host", "host", "agent"], ["local inbox", "agent", "inbox"], ["unknown backend", "unknown", "http-poll"]]) {
+for (const [label, kind, mode] of [["local host", "host", "agent"], ["local inbox", "agent", "inbox"], ["unknown backend", "unknown", "http-poll"]]) {
   test(`regression Gateway cannot consume ${label} tasks`, async () => withGateway(async ({ api, bus, task }) => {
-    const entry = normalizeCommands({ workers: { h: { context: "herdr", herdr_kind: "grok", default_model: "HERDR-NOT-EXECUTABLE" } } })["h/agent"];
+    const entry = normalizeCommands({ workers: { h: { context: "direct", command: "echo fake", harness: "grok", default_model: "LOCAL-ONLY" } } })["h/agent"];
     await bus.createRecord(DEFAULT_TABLES.agentCards, { Node: "local", Worker: "h", Skill_ID: "agent", Cap_ID: "CAP-local-h-agent", Admission: "admitted", Dispatchable: "Yes", Receive_Mode: "http-poll", Metadata: JSON.stringify({ kind, mode, worker_model: workerModelFields(entry) }) });
     const made = await api("/api/v1/tasks", { to: "local", worker: "h", text: "local Kernel owns execution" });
     assert.equal(made.status, 201);

@@ -94,8 +94,8 @@ text{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Noto Sans CJK S
 
 <rect class="chip" x="264" y="362" width="388" height="38" rx="9"/>
 <rect class="tag" x="272" y="368" width="128" height="26" rx="6"/>
-<text x="336" y="385.5" class="tn" text-anchor="middle">Rules · Loops</text>
-<text x="412" y="385.5" class="td">本机计划观察镜像与 LoopForge SOP 闭环状态</text>
+<text x="336" y="385.5" class="tn" text-anchor="middle">Rules</text>
+<text x="412" y="385.5" class="td">本机计划只读观察镜像与路由策略</text>
 
 <!-- 2 & 3: 认领与回写 -->
 <path class="conn" d="M672 190H712"/>

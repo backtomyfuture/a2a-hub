@@ -701,3 +701,58 @@ test("doctor 对缺少 {session} 的 resume_command 报问题", async () => {
     assert.match(text, /\{session\}/);
   });
 });
+
+test("同一 Context_ID 下跨任务自动续接 Session 并携行 context_history", async () => {
+  await withTemp(async (dir) => {
+    const kernels = [];
+    const phase = path.join(dir, "phase");
+    const argvFile = path.join(dir, "argv.json");
+    const input2Copy = path.join(dir, "input2.json");
+    try {
+      const command = nodeCommand(`
+        const fs = require("node:fs");
+        fs.appendFileSync(${JSON.stringify(phase)}, "command\\n");
+        process.stdout.write("第一轮分析完成\\nSESSION: ctx-sess-888\\n");
+      `);
+      const resume = nodeCommand(`
+        const fs = require("node:fs");
+        fs.appendFileSync(${JSON.stringify(phase)}, "resume\\n");
+        fs.writeFileSync(${JSON.stringify(argvFile)}, JSON.stringify(process.argv));
+        const inputFile = ${JSON.stringify(path.join(dir, "runs", "TASK-CTX-2", "input.json"))};
+        if (fs.existsSync(inputFile)) fs.copyFileSync(inputFile, ${JSON.stringify(input2Copy)});
+        process.stdout.write("第二轮已基于历史续跑完成\\n");
+      `) + " -- {session}";
+      const { mock, kernel } = await setup(dir, {
+        command,
+        resume_command: resume,
+        mode: "agent",
+        context: "direct",
+        timeout_sec: 30,
+      });
+      kernels.push(kernel);
+
+      const ctxId = "CTX-MULTI-TURN";
+      await seedTask(mock, { Task_ID: "TASK-CTX-1", Context_ID: ctxId }, { text: "第一轮需求" });
+      await untilStatus(kernel, mock, "TASK-CTX-1", "completed", { phase });
+      assert.equal(fs.readFileSync(phase, "utf8"), "command\n");
+      const ctxSessFile = path.join(dir, "sessions", `${ctxId}.json`);
+      assert.equal(fs.existsSync(ctxSessFile), true);
+      assert.equal(JSON.parse(fs.readFileSync(ctxSessFile, "utf8")).session, "ctx-sess-888");
+
+      await seedTask(mock, { Task_ID: "TASK-CTX-2", Context_ID: ctxId }, { text: "第二轮追问" });
+      await untilStatus(kernel, mock, "TASK-CTX-2", "completed", { phase });
+      assert.equal(fs.readFileSync(phase, "utf8"), "command\nresume\n");
+      const argv = JSON.parse(fs.readFileSync(argvFile, "utf8"));
+      assert.ok(argv.includes("ctx-sess-888"));
+      const input2 = JSON.parse(fs.readFileSync(input2Copy, "utf8"));
+      assert.equal(input2.context_id, ctxId);
+      assert.equal(Array.isArray(input2.context_history), true);
+      assert.equal(input2.context_history.length, 1);
+      assert.equal(input2.context_history[0].task_id, "TASK-CTX-1");
+      assert.match(input2.context_history[0].instruction, /第一轮需求/);
+      assert.match(input2.context_history[0].result, /第一轮分析完成/);
+    } finally {
+      reap(dir, kernels);
+    }
+  });
+});

@@ -338,11 +338,6 @@ const USAGE_LINES = [
   "  ah task why    <Task_ID> [--config <dir>] [--json]",
   "  ah task cancel --task <Task_ID> [--text <说明>] [--config <dir>]",
   "  ah task begin  --schedule <id> [--period <期次键>] [--cap <cap_id>] [--text <指令>]  Agent 定时触发",
-  "  ah loop templates  列出内置 SOP 闭环模板",
-  "  ah loop create --goal <目标> --to <node> [--template plan-code-verify] [--cap <cap_id>] [--stages @sop.json]  创建 LoopForge SOP 闭环",
-  "  ah loop ls [--json]  列出 SOP 闭环",
-  "  ah loop show <Loop_ID>  查看 SOP 闭环详情",
-  "  ah loop cancel <Loop_ID> [--text <说明>]  取消 SOP 闭环",
   "  ah schedule ls [--config <dir>] [--json]  列出本机定时调度计划",
   "  ah schedule add --id <id> --cron \"<五段>\" --cap <cap_id> --text <指令> [--approval auto|notify|approve] [--disabled]  添加本机定时计划",
   "  ah schedule rm <id> [--config <dir>]  删除本机计划",
@@ -973,14 +968,6 @@ if (wantsHelp) {
 } else if (cmd === "present") {
   const { handlePresentCli } = await import("../src/present-queue.mjs");
   process.exitCode = await handlePresentCli(rest, { configDir: configDirFrom(rest) });
-} else if (cmd === "loop") {
-  try {
-    const { runLoopCli } = await import("../src/loop-cli.mjs");
-    process.exitCode = await runLoopCli(rest, configDirFrom(rest));
-  } catch (e) {
-    console.error(e?.message ?? e);
-    process.exitCode = 1;
-  }
 } else if (cmd === "schedule") {
   const { handleScheduleCli } = await import("../src/schedule-cli.mjs");
   process.exitCode = await handleScheduleCli(rest, { configDir: configDirFrom(rest) });

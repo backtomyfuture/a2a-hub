@@ -12,7 +12,7 @@
  "sweepSec": 60,
  "pollSec": 45,
  "events": true,
- "nodeDesc": "Mac mini 常驻中台中枢：SQLite 总线 + 长轮询网关 + Web 控制台 + LoopForge SOP 编排",
+ "nodeDesc": "Mac mini 常驻中台中枢：SQLite 总线 + 长轮询网关 + Web 控制台 + Leader 多 Agent 编排",
  "notifications": {
   "feishuWebhookUrl": "",
   "barkUrl": "",

@@ -151,30 +151,6 @@ const TABLES = [
       field("Last_Fired", "text"),
     ],
   },
-  {
-    name: "loops",
-    role: "LoopForge 多阶段闭环：同一 Context_ID 下的阶段任务",
-    fields: [
-      field("Loop_ID", "text", { primary: true, note: "主字段" }),
-      field("Title", "text"),
-      field("Goal", "text"),
-      field("Context_ID", "text"),
-      field("Status", "text", { note: "running 等闭环状态" }),
-      field("Template", "text", { note: "内置模板 id，或 custom" }),
-      field("Stages", "text", { note: "阶段定义 JSON" }),
-      field("Stage_Index", "number"),
-      field("Iteration", "number"),
-      field("Max_Iterations", "number", { note: "与 HOP_LIMIT=8 一起限制回跳" }),
-      field("Active_Task_ID", "text"),
-      field("Last_Result", "text"),
-      field("Last_Error", "text"),
-      field("History", "text", { note: "阶段历史 JSON" }),
-      field("Error", "text"),
-      field("Created_By", "text"),
-      field("Created_At", "text"),
-      field("Updated_At", "text"),
-    ],
-  },
 ];
 
 export function buildSchema() {

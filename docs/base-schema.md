@@ -139,28 +139,3 @@ AgentCard 规范化展开：一行一项能力
 | Schedule | text |  |
 | Text | text |  |
 | Last_Fired | text |  |
-
-## loops
-
-LoopForge 多阶段闭环：同一 Context_ID 下的阶段任务
-
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| Loop_ID | text | 主字段。主字段 |
-| Title | text |  |
-| Goal | text |  |
-| Context_ID | text |  |
-| Status | text | running 等闭环状态 |
-| Template | text | 内置模板 id，或 custom |
-| Stages | text | 阶段定义 JSON |
-| Stage_Index | number |  |
-| Iteration | number |  |
-| Max_Iterations | number | 与 HOP_LIMIT=8 一起限制回跳 |
-| Active_Task_ID | text |  |
-| Last_Result | text |  |
-| Last_Error | text |  |
-| History | text | 阶段历史 JSON |
-| Error | text |  |
-| Created_By | text |  |
-| Created_At | text |  |
-| Updated_At | text |  |

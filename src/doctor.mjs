@@ -8,15 +8,13 @@ import path from "node:path";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { loadConfig, DAEMON_VERSION } from "./kernel.mjs";
-import { canExecuteModel, capIdOf, capIdsOf, inferHerdrKind, normalizeCommands, resolveListenAddr, resolveTokenFilePath } from "./config.mjs";
+import { canExecuteModel, capIdOf, capIdsOf, normalizeCommands, resolveListenAddr, resolveTokenFilePath } from "./config.mjs";
 import { isHubPublicKey, readHubPublicKey } from "./approval-sign.mjs";
 import { AGENT_TEMPLATES_FILE, loadAgentTemplates } from "./hub/agent-templates.mjs";
 import { resolveScheduleTz } from "./hub/schedule.mjs";
 import { LocalScheduleService } from "./local-schedule.mjs";
 import { f1 } from "./bus/tables.mjs";
 import { selectAutostartName } from "./service.mjs";
-import { createHerdrSocket } from "./herdr-socket.mjs";
-import { listHerdrLedgers } from "./herdr-runner.mjs";
 
 const ok = (msg) => console.log("  ✓ " + msg);
 const bad = (msg) => console.log("  ✗ " + msg);
@@ -115,7 +113,7 @@ function readAgyPermissionsAllow() {
 }
 
 const COMMAND_MODES = new Set(["agent", "json", "inbox"]);
-const COMMAND_CONTEXTS = new Set(["direct", "herdr"]);
+const COMMAND_CONTEXTS = new Set(["direct"]);
 
 function hasVerify(entry) {
   return typeof entry?.verify === "string" && entry.verify.trim().length > 0;
@@ -140,8 +138,7 @@ function auditCommandsShape(cmds, capPrefix) {
       bad(`能力 ${name}：mode=${JSON.stringify(entry.mode)} 非法（只认 agent / json / inbox；认领时内核会拒收该能力的任务）`);
       problems++;
     }
-    const isHerdr = entry.context === "herdr";
-    if (mode !== "inbox" && !(isHerdr && inferHerdrKind(entry)) && (typeof entry.command !== "string" || !entry.command.trim())) {
+    if (mode !== "inbox" && (typeof entry.command !== "string" || !entry.command.trim())) {
       bad(`能力 ${name} 缺 command 模板`);
       problems++;
     }
@@ -152,19 +149,13 @@ function auditCommandsShape(cmds, capPrefix) {
       }
     }
     if (entry.context != null && !COMMAND_CONTEXTS.has(entry.context)) {
-      const hint = entry.context === "carrier" ? "carrier 语境已在本版本移除，请把该能力改为 direct 或删除；" : "";
-      bad(`能力 ${name}：context=${JSON.stringify(entry.context)} 非法（${hint}只认 direct / herdr；认领时内核会拒收该能力的任务，不会静默直跑）`);
+      const hint = entry.context === "carrier"
+        ? "carrier 语境已在本版本移除，请把该能力改为 direct 或删除；"
+        : entry.context === "herdr"
+          ? "herdr 语境已在本版本移除，请把该能力改为 direct 并配置 command 模板；"
+          : "";
+      bad(`能力 ${name}：context=${JSON.stringify(entry.context)} 非法（${hint}只认 direct；认领时内核会拒收该能力的任务，不会静默直跑）`);
       problems++;
-    }
-    if (isHerdr) {
-      if (mode === "inbox") {
-        bad(`能力 ${name}：context="herdr" 不支持 mode="inbox"`);
-        problems++;
-      }
-      if (!inferHerdrKind(entry)) {
-        bad(`能力 ${name}：context="herdr" 缺少 herdr_kind 且无法从 worker / command 推导`);
-        problems++;
-      }
     }
     if (entry.timeout_sec != null) {
       const v = entry.timeout_sec;
@@ -485,63 +476,6 @@ function roleFrom(argv, opts, raw) {
   return "node";
 }
 
-// 有 herdr 能力时核对 Socket：ping、协议版本，以及快照里脱离账本的 ah- Agent。
-// 只报告，不关 Pane / Worktree。socket 不可达算问题，因为这种节点认领会在运行期失败。
-export async function auditHerdrSocket(configDir, flat, opts = {}) {
-  const usesHerdr = Object.values(flat || {}).some((entry) => entry?.context === "herdr");
-  if (!usesHerdr) return 0;
-  let socket = null;
-  let problems = 0;
-  try {
-    socket = createHerdrSocket({
-      socketPath: String(opts.herdrSocketPath ?? "").trim(),
-      session: String(opts.herdrSession ?? "").trim(),
-      timeoutMs: 3000,
-      autoStart: false, // doctor must not change the condition it diagnoses.
-    });
-    const pong = await socket.ensureServerRunning({ autoStart: false, timeoutMs: 3000 });
-    ok(`Herdr socket 可达（${socket.source}，protocol ${pong.protocol}，${pong.version ?? "未知版本"}）`);
-    const snapRes = await socket.call("session.snapshot", {}, { timeoutMs: 3000 });
-    const snap = snapRes?.snapshot ?? snapRes ?? {};
-    if (snap.protocol != null && Number(snap.protocol) !== Number(pong.protocol)) {
-      bad(`Herdr session.snapshot 的协议 ${snap.protocol} 与 ping 的 ${pong.protocol} 不一致`);
-      problems++;
-    }
-    const ledgers = listHerdrLedgers(configDir).filter(({ ledger }) => ledger && !ledger.broken && ledger.state !== "exited");
-    const boundAgents = new Set(ledgers.map(({ ledger }) => ledger.agent_name).filter(Boolean));
-    const agents = Array.isArray(snap.agents) ? snap.agents : [];
-    const panes = Array.isArray(snap.panes) ? snap.panes : [];
-    let orphans = 0;
-    for (const agent of agents) {
-      const name = String(agent?.name ?? agent?.agent_name ?? "");
-      if (!name.startsWith("ah-") || boundAgents.has(name)) continue;
-      info(`孤立 Agent ${name} 在 pane ${agent.pane_id ?? "?"}，本机没有对应 herdr.json`);
-      orphans++;
-    }
-    if (orphans) info(`发现 ${orphans} 个账本之外的 ah- Agent（只报告，不关闭）`);
-    else ok("没有脱离账本的 ah- Agent");
-    for (const { taskId, ledger } of ledgers) {
-      const paneOk = panes.some((pane) => pane?.pane_id === ledger.pane_id);
-      const agentOk = agents.some((agent) => String(agent?.name ?? agent?.agent_name ?? "") === ledger.agent_name);
-      if (!paneOk && !agentOk) {
-        bad(`任务 ${taskId} 的 Herdr 会话已不在快照里（agent=${ledger.agent_name || "?"} pane=${ledger.pane_id || "?"}）`);
-        problems++;
-      }
-    }
-  } catch (e) {
-    if (e?.code === "protocol_unsupported") {
-      bad(`Herdr socket 协议不够：${e.message}`);
-      problems++;
-    } else {
-      // 守护没开时不让 ah setup 失败；配了 herdr 能力的节点仍会在这里看到原因。
-      info(`Herdr socket 未接通（${e?.message ?? e}）。只读诊断，未自动启动；正常派发仅对未送达的连接失败尝试懒启动`);
-    }
-  } finally {
-    try { socket?.close(); } catch { /* 没连上 */ }
-  }
-  return problems;
-}
-
 export async function doctor(configDir, appDir, opts = {}) {
   let problems = 0;
 
@@ -695,7 +629,7 @@ export async function doctor(configDir, appDir, opts = {}) {
         const label = entry.worker ? `Worker ${entry.worker}` : `旧能力 ${key}`;
         if (entry.default_model == null) info(`Warning: ${label} 未配置 default_model：兼容沿用 CLI 默认；推荐显式设置`);
         else if (!canExecuteModel(entry)) {
-          bad(`${label} default_model 不可执行：model_execution_not_supported；Herdr 等待 M2，direct 需已验证 harness 与独立 {model_args}`);
+          bad(`${label} default_model 不可执行：model_execution_not_supported；direct 需已验证 harness 与独立 {model_args}`);
           problems++;
         }
       }
@@ -711,7 +645,6 @@ export async function doctor(configDir, appDir, opts = {}) {
       const shapeProblems = layerProblems + auditCommandsShape(flat, capPrefix);
       if (!shapeProblems && names.length) ok("commands.json 字段校验通过（Worker 引用、mode / context / timeout_sec / verify 取值合法，cap_id 无重复）");
       problems += shapeProblems;
-      problems += await auditHerdrSocket(configDir, flat, { ...opts, herdrSocketPath: opts.herdrSocketPath ?? raw?.herdrSocketPath });
       // 模板只查一遍：节点本尊的条目加上每个 Worker 自己的启动模板。
       const templates = {};
       for (const [key, entry] of Object.entries(flat)) if (!entry?.worker) templates[key] = entry;

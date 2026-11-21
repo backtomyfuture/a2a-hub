@@ -8,7 +8,7 @@
 
 ## 职责清单
 
-1. **建单与路由**：任何宿主节点、CLI、Web 控制台与已接入的 HTTP Leader Agent（如 Muse）都可以作为任务入口。按 AgentCards 校验目标节点与能力（或触发 `LoopService` 多阶段闭环），生成 Task_ID / Context_ID / Idempotency_Key 并建单（先写 `instruction` 与 Parts，最后写 `Tasks` 行）。
+1. **建单与路由**：任何宿主节点、CLI、Web 控制台与已接入的 HTTP Leader Agent（如 Muse）都可以作为任务入口。按 AgentCards 校验目标节点与能力（支持单节点与 `to: [...]` 批量扇出派单），生成 Task_ID / Context_ID / Idempotency_Key 并建单（先写 `instruction` 与 Parts，最后写 `Tasks` 行）。
 2. **唤醒与网关服务**：Hub 单进程运行本地 SQLite WAL、REST API、`LongPollBroker`（对宿主节点提供 `GET /api/v1/poll`，对纯外部 Agent 提供 `agent-gateway` `/api/v1/agents/:node/poll|updates`）、可选 `WebhookDispatcher`（向机主登记的 URL 推门铃）以及内嵌 Web 控制台。除长期对账兜底（默认 `sweepSec` 900s）外，写操作发生后通过单调递增 `seq` 毫秒级唤醒长轮询连接。
 3. **结果呈递（原路落盘，静默协作）**：
    - `role=hub` 与各宿主节点在收到唤醒事件或对账扫表时，将属于本节点发起的任务结果（`completed`、`failed`、`rejected`、`canceled`、`input-required`）写入本机 `present_queue.jsonl`，供本机 Agent / CLI (`ah present`) 消费；

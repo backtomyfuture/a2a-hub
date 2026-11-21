@@ -64,8 +64,6 @@ function routeAllowed(principal, method, pathname) {
     if (pathname === "/api/v1/tasks" && (method === "GET" || method === "POST")) return true;
     if (/^\/api\/v1\/tasks\/[^/]+$/.test(pathname) && method === "GET") return true;
     if (/^\/api\/v1\/tasks\/[^/]+\/(reply|cancel)$/.test(pathname) && method === "POST") return true;
-    if (pathname === "/api/v1/loops" && (method === "GET" || method === "POST")) return true;
-    if (/^\/api\/v1\/loops\/[^/]+\/cancel$/.test(pathname) && method === "POST") return true;
   }
   if (leaderish && hasAdmin(principal)) {
     if (method === "POST" && /^\/api\/v1\/admin\/cards\/[^/]+\/admission$/.test(pathname)) return true;

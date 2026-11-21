@@ -50,8 +50,6 @@ function eventNodesFor(table, fields, tables, lookupMessage) {
     const n = scalar(fields, "Node");
     if (n) nodes.add(n);
     nodes.add("*");
-  } else if (table === tables.loops) {
-    nodes.add("hub");
   }
   return Array.from(nodes);
 }
