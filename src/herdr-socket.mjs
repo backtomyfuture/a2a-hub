@@ -11,6 +11,9 @@ import { EventEmitter } from "node:events";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import fs from "node:fs";
+import { spawn as spawnProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 
 // 本代码依赖的最低协议版本（schema.protocol）。低于它时 doctor 与 runner 都应拒绝工作。
 export const HERDR_PROTOCOL_MIN = 22;
@@ -44,6 +47,7 @@ const CATEGORY_BY_CODE = new Map([
   // 以下是客户端本地产生的码。
   ["server_unavailable", "unavailable"],
   ["socket_path_unverified", "unavailable"],
+  ...["server_start_failed", "server_start_timeout", "server_start_locked", "server_start_limit", "server_start_cooldown", "server_start_unsupported"].map(code => [code, "unavailable"]),
   ["client_overloaded", "overloaded"],
   ["connection_closed", "closed"],
   ["protocol_error", "protocol"],
@@ -198,6 +202,140 @@ export function discoverSocketPath({
   return { path: path.join(base, "herdr.sock"), source: "default" };
 }
 
+// ---------- Lazy server readiness (transport probes never recurse) ----------
+
+const serverStarts = new Map();
+function canStartAfter(error) {
+  return error instanceof HerdrError && error.local && error.delivery === "not_sent"
+    && error.code === "server_unavailable" && ["ENOENT", "ECONNREFUSED"].includes(error.raw?.code);
+}
+
+function waitForStartup(promise, { signal, timeoutMs = 0, method = "ensureServerRunning" } = {}) {
+  return new Promise((resolve, reject) => {
+    let timer;
+    const finish = (err, result) => {
+      clearTimeout(timer); signal?.removeEventListener("abort", abort);
+      if (err) reject(err); else resolve(result);
+    };
+    const abort = () => finish(localError("aborted", "只取消本地等待；共享 Herdr 启动不受影响", method, "not_sent"));
+    promise.then(value => finish(null, value), finish);
+    if (signal?.aborted) { abort(); return; }
+    signal?.addEventListener("abort", abort, { once: true });
+    if (timeoutMs > 0) timer = setTimeout(() => finish(localError("timeout", "等待 Herdr 自愈超时；原请求未送达", method, "not_sent")), timeoutMs);
+  });
+}
+
+async function probeServer(socketPath, timeoutMs) {
+  const probe = new HerdrControl({ socketPath, timeoutMs, connectTimeoutMs: timeoutMs });
+  try {
+    const pong = await probe.call("ping");
+    if (pong.type !== "pong") throw localError("protocol_error", "Herdr readiness 必须返回 pong", "ping", "response_received");
+    return assertProtocol(pong);
+  } finally { probe.close(); }
+}
+
+// Herdr v0.9.5: session.rs:175-183 honors this environment override server-side;
+// an explicit CLI --session would override it, so never append that flag here.
+// ipc.rs:83-109 is check/remove/bind, NOT a single-instance lock. Serialize our
+// starters with wx; never steal another owner's lock or unlink its socket.
+export async function ensureServerRunning({
+  socketPath, session = "", env = process.env, platform = process.platform,
+  autoStart = true, signal, timeoutMs = 1000, startTimeoutMs = 5000,
+  pollMs = 50, cooldownMs = 30_000, executable = "herdr", spawn = spawnProcess,
+} = {}) {
+  positiveInteger(timeoutMs, "timeoutMs"); positiveInteger(startTimeoutMs, "startTimeoutMs");
+  positiveInteger(pollMs, "pollMs"); positiveInteger(cooldownMs, "cooldownMs");
+  socketPath = discoverSocketPath({ socketPath, session, env, platform }).path;
+  try { return await waitForStartup(probeServer(socketPath, timeoutMs), { signal }); }
+  catch (error) { if (!autoStart || !canStartAfter(error)) throw error; }
+  if (platform === "win32" || !path.isAbsolute(socketPath)) {
+    throw localError("server_start_unsupported", "仅对已核验的绝对 Unix Socket 启动 Herdr；不猜 Windows/相对路径", "ensureServerRunning", "not_sent");
+  }
+  // Preserve the exact endpoint: lexical normalization changes symlink/.. semantics.
+  if (signal?.aborted) throw localError("aborted", "已取消启动等待", "ensureServerRunning", "not_sent");
+  let state = serverStarts.get(socketPath);
+  if (!state) {
+    state = { done: false, error: null, promise: null };
+    serverStarts.set(socketPath, state);
+    state.promise = startServer({ socketPath, session, env, startTimeoutMs, pollMs, cooldownMs, executable, spawn })
+      .catch(error => { state.error = error; throw error; }).finally(() => { state.done = true; });
+    state.promise.catch(() => {});
+  } else if (state.done) {
+    throw state.error ?? localError("server_start_limit", "该 Socket 在本进程已尝试启动一次；不因持续重连无限 spawn", "ensureServerRunning", "not_sent");
+  }
+  return waitForStartup(state.promise, { signal });
+}
+
+async function startServer({ socketPath, session, env, startTimeoutMs, pollMs, cooldownMs, executable, spawn }) {
+  const deadline = performance.now() + startTimeoutMs;
+  const lockPath = socketPath + ".ah-start.lock", attemptPath = socketPath + ".ah-start.attempt.json";
+  let fd, identity, child, childFailure, lastError, lockBusy = false;
+  const failed = (code, message, raw) => localError(code, message, "ensureServerRunning", "not_sent", raw);
+  const childError = error => { childFailure = error; };
+  const childExit = (code, signal) => { childFailure = { code: "CHILD_EXIT", exitCode: code, signal }; };
+  try {
+    try {
+      const existing = fs.lstatSync(socketPath);
+      if (!existing.isSocket()) throw failed("server_start_unsupported", "目标已存在但不是普通 Unix Socket；不让 Herdr 清理文件或符号链接", { code: "NOT_A_SOCKET" });
+    } catch (error) { if (error.code !== "ENOENT") throw error; }
+    fs.mkdirSync(path.dirname(socketPath), { recursive: true, mode: 0o700 });
+    try {
+      fd = fs.openSync(lockPath, "wx", 0o600); identity = fs.fstatSync(fd);
+      fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, startedAt: Date.now() }));
+    } catch (error) { if (error.code !== "EEXIST") throw error; lockBusy = true; }
+    if (!lockBusy) {
+      // Recheck after the exclusive claim: another starter may have just finished.
+      try { return await probeServer(socketPath, Math.min(500, Math.max(1, deadline - performance.now()))); }
+      catch (error) { if (!canStartAfter(error)) throw error; }
+      let previous;
+      try { previous = JSON.parse(fs.readFileSync(attemptPath, "utf8")); }
+      catch (error) { if (error.code !== "ENOENT") throw error; }
+      if (previous && (!Number.isFinite(previous.at) || Date.now() - previous.at < cooldownMs)) {
+        throw failed("server_start_cooldown", "其它进程刚尝试过启动；冷却期间不再次 spawn", previous);
+      }
+      const sessionName = String(session || env?.HERDR_SESSION || "default").trim();
+      if (!SESSION_NAME.test(sessionName)) throw failed("server_start_unsupported", "无法固定合法的 Herdr session", { sessionInvalid: true });
+      const childEnv = { ...env, HERDR_SOCKET_PATH: socketPath, HERDR_SESSION: sessionName };
+      delete childEnv.HERDR_CLIENT_SOCKET_PATH; delete childEnv.HERDR_STARTUP_CWD;
+      // Persist before spawning; a failure still consumes the cooldown/budget.
+      const temporary = attemptPath + "." + randomUUID();
+      const attemptFd = fs.openSync(temporary, "wx", 0o600);
+      try {
+        fs.writeFileSync(attemptFd, JSON.stringify({ at: Date.now(), pid: process.pid }));
+        fs.fsyncSync(attemptFd);
+        fs.renameSync(temporary, attemptPath); // replace a symlink, never follow it
+      } finally { fs.closeSync(attemptFd); fs.rmSync(temporary, { force: true }); }
+      if (performance.now() >= deadline) throw failed("server_start_timeout", "Herdr 启动总时限已到", { code: "DEADLINE" });
+      child = spawn(executable, ["server"], { env: childEnv, detached: true, stdio: "ignore", shell: false });
+      child.on("error", childError); child.once("exit", childExit); child.unref();
+    }
+    let pause = pollMs;
+    while (performance.now() < deadline) {
+      try { return await probeServer(socketPath, Math.min(500, Math.max(1, deadline - performance.now()))); }
+      catch (error) {
+        lastError = error;
+        if (error.code === "timeout") throw failed("server_start_timeout", "Herdr readiness ping 未在启动时限内应答", error);
+        if (!canStartAfter(error)) throw error;
+      }
+      if (childFailure) throw failed("server_start_failed", "Herdr 子进程启动失败或就绪前退出", childFailure);
+      await new Promise(resolve => setTimeout(resolve, Math.min(pause, Math.max(1, deadline - performance.now()))));
+      pause = Math.min(pause * 2, 250);
+    }
+    throw failed(lockBusy ? "server_start_locked" : "server_start_timeout",
+      lockBusy ? "其它启动者持有锁且未就绪；可能为崩溃残留，请检查 owner 后处理，不自动抢锁" : "Herdr 未在总时限内 ping 就绪；不终止可能仍在启动的服务", lockBusy ? { lockPath, cause: lastError } : lastError);
+  } catch (error) {
+    if (error instanceof HerdrError) throw error;
+    throw failed("server_start_failed", "Herdr 启动准备/执行失败", error);
+  } finally {
+    child?.removeListener("exit", childExit);
+    // Keep the error observer: a detached child can report an asynchronous error.
+    if (fd != null) {
+      try { const current = fs.lstatSync(lockPath); if (current.dev === identity.dev && current.ino === identity.ino) fs.unlinkSync(lockPath); } catch { /* never remove an unverified owner */ }
+      fs.closeSync(fd);
+    }
+  }
+}
+
 // ---------- Control 通道 ----------
 
 export class HerdrControl {
@@ -209,10 +347,14 @@ export class HerdrControl {
   #seq = 0;
   #inflight = new Map();
   #closed = false;
+  #recover;
+  #pendingCalls = 0;
+  #lifetime = new AbortController();
 
-  constructor({ socketPath, timeoutMs = DEFAULT_CALL_TIMEOUT_MS, connectTimeoutMs = DEFAULT_CONNECT_TIMEOUT_MS, maxFrameBytes = DEFAULT_MAX_FRAME_BYTES, maxInflight = DEFAULT_MAX_INFLIGHT } = {}) {
+  constructor({ socketPath, timeoutMs = DEFAULT_CALL_TIMEOUT_MS, connectTimeoutMs = DEFAULT_CONNECT_TIMEOUT_MS, maxFrameBytes = DEFAULT_MAX_FRAME_BYTES, maxInflight = DEFAULT_MAX_INFLIGHT, recover } = {}) {
     if (!socketPath) throw new TypeError("HerdrControl 需要 socketPath");
     this.#socketPath = socketPath;
+    this.#recover = recover;
     this.#maxFrameBytes = positiveInteger(maxFrameBytes, "maxFrameBytes");
     this.#maxInflight = positiveInteger(maxInflight, "maxInflight");
     this.#timeoutMs = timeoutMs;
@@ -220,17 +362,41 @@ export class HerdrControl {
   }
 
   get inflightCount() {
-    return this.#inflight.size;
+    return this.#recover ? this.#pendingCalls : this.#inflight.size;
   }
 
   // 一次 RPC：成功返回 result 对象，失败抛 HerdrError。timeoutMs 含建连时间；0 或负数表示不设客户端超时。
-  call(method, params = {}, { timeoutMs = this.#timeoutMs, signal } = {}) {
+  async call(method, params = {}, { timeoutMs = this.#timeoutMs, signal } = {}) {
+    if (!this.#recover) return this.#callOnce(method, params, { timeoutMs, signal });
+    if (this.#pendingCalls >= this.#maxInflight) throw localError("client_overloaded", "Herdr Control 在途请求达到上限", method);
+    this.#pendingCalls++;
+    const started = performance.now();
+    signal = AbortSignal.any([this.#lifetime.signal, ...(signal ? [signal] : [])]);
+    const remaining = () => timeoutMs > 0 ? Math.max(0, timeoutMs - (performance.now() - started)) : 0;
+    try {
+      if (this.#closed) throw localError("connection_closed", "HerdrControl 已关闭", method);
+      if (signal.aborted) throw localError("aborted", "已取消", method);
+      const id = `ah-${++this.#seq}`;
+      const request = { id, frame: encodeRequest(id, method, params, this.#maxFrameBytes) };
+      try { return await this.#callOnce(method, params, { timeoutMs, signal }, request); }
+      catch (error) { if (!canStartAfter(error)) throw error; }
+      if (timeoutMs > 0 && remaining() === 0) throw localError("timeout", "原请求等待时限已到", method, "not_sent");
+      if (signal.aborted) throw localError("aborted", "已取消，不再请求自愈", method, "not_sent");
+      try { await waitForStartup(this.#recover(), { signal, timeoutMs: remaining(), method }); }
+      catch (error) { throw localError(error.code, error.message, method, "not_sent", error); }
+      if (timeoutMs > 0 && remaining() === 0) throw localError("timeout", "原请求等待时限已到", method, "not_sent");
+      // Exactly one retry, only after the first attempt was provably not sent.
+      return await this.#callOnce(method, params, { timeoutMs: remaining(), signal }, request);
+    } finally { this.#pendingCalls--; }
+  }
+
+  #callOnce(method, params = {}, { timeoutMs = this.#timeoutMs, signal } = {}, request) {
     if (this.#closed) return Promise.reject(localError("connection_closed", "HerdrControl 已关闭", method));
     if (signal?.aborted) return Promise.reject(localError("aborted", `${method} 已被取消`, method));
     if (this.#inflight.size >= this.#maxInflight) return Promise.reject(localError("client_overloaded", "Herdr Control 在途请求达到上限", method));
-    const id = `ah-${++this.#seq}`;
+    const id = request?.id ?? `ah-${++this.#seq}`;
     let frame;
-    try { frame = encodeRequest(id, method, params, this.#maxFrameBytes); }
+    try { frame = request?.frame ?? encodeRequest(id, method, params, this.#maxFrameBytes); }
     catch (err) { return Promise.reject(err); }
 
     return new Promise((resolve, reject) => {
@@ -279,6 +445,7 @@ export class HerdrControl {
 
   close() {
     this.#closed = true;
+    this.#lifetime.abort();
     for (const entry of [...this.#inflight.values()]) {
       entry.abort();
     }
@@ -328,6 +495,8 @@ export function paneStatusSubscription(paneId, agentStatus = null) {
 export class HerdrEvents extends EventEmitter {
   #socketPath;
   #provider;
+  #recover;
+  #lifetime = new AbortController();
   #backoff;
   #random;
   #connectTimeoutMs;
@@ -351,6 +520,7 @@ export class HerdrEvents extends EventEmitter {
 
   constructor({
     socketPath,
+    recover,
     subscriptions = LIFECYCLE_SUBSCRIPTIONS,
     backoff = {},
     random = Math.random,
@@ -362,6 +532,7 @@ export class HerdrEvents extends EventEmitter {
     if (!socketPath) throw new TypeError("HerdrEvents 需要 socketPath");
     this.#socketPath = socketPath;
     this.#provider = subscriptions;
+    this.#recover = recover;
     this.#backoff = backoff;
     this.#random = random;
     this.#connectTimeoutMs = connectTimeoutMs;
@@ -402,6 +573,7 @@ export class HerdrEvents extends EventEmitter {
   stop() {
     if (this.#stopped) return;
     this.#stopped = true;
+    this.#lifetime.abort();
     this.#generation++;
     this.#activeReady = false;
     this.#endSession?.("stopped");
@@ -427,6 +599,14 @@ export class HerdrEvents extends EventEmitter {
         outcome = { reason: "error", error: err };
       }
       if (this.#stopped || outcome.reason === "fatal") break;
+      if (this.#recover && canStartAfter(outcome.error)) {
+        try { await waitForStartup(this.#recover(), { signal: this.#lifetime.signal, method: "events.subscribe" }); }
+        catch (error) {
+          if (this.#stopped) break;
+          this.#stopped = true; this.#readyReject?.(error); this.emit("fatal", error); break;
+        }
+        continue;
+      }
       if (outcome.acked) this.#failures = 0;
       if (outcome.reason === "refresh") continue;
       const delay = backoffDelay(this.#failures, this.#backoff, this.#random);
@@ -477,7 +657,7 @@ export class HerdrEvents extends EventEmitter {
         socket.destroy();
         if (acked) this.#lastDownAt = Date.now();
         if (!this.#stopped) this.emit("disconnected", reason, { generation, error });
-        resolve({ reason, acked });
+        resolve({ reason, acked, error });
       };
       this.#endSession = end;
       const protocolFailure = (error) => {
@@ -574,13 +754,18 @@ export function createHerdrSocket({
   maxInflight,
   connectTimeoutMs,
   ackTimeoutMs,
+  autoStart = true,
+  serverOptions = {},
 } = {}) {
   const found = discoverSocketPath({ socketPath, session, env, platform });
-  const control = new HerdrControl({ socketPath: found.path, timeoutMs, maxFrameBytes, maxInflight, connectTimeoutMs });
-  const events = new HerdrEvents({ socketPath: found.path, subscriptions, backoff, random, maxFrameBytes, connectTimeoutMs, ackTimeoutMs });
+  const ensure = (opts = {}) => ensureServerRunning({ ...serverOptions, ...opts, socketPath: found.path, session, env, platform, autoStart: autoStart && opts.autoStart !== false });
+  const recover = autoStart ? () => ensure() : undefined;
+  const control = new HerdrControl({ socketPath: found.path, timeoutMs, maxFrameBytes, maxInflight, connectTimeoutMs, recover });
+  const events = new HerdrEvents({ socketPath: found.path, subscriptions, backoff, random, maxFrameBytes, connectTimeoutMs, ackTimeoutMs, recover });
   return {
     socketPath: found.path,
     source: found.source,
+    ensureServerRunning: ensure,
     control,
     events,
     call: (method, params, opts) => control.call(method, params, opts),
