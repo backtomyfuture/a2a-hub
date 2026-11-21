@@ -15,6 +15,8 @@ import { resolveScheduleTz } from "./hub/schedule.mjs";
 import { LocalScheduleService } from "./local-schedule.mjs";
 import { f1 } from "./bus/tables.mjs";
 import { selectAutostartName } from "./service.mjs";
+import { createHerdrSocket } from "./herdr-socket.mjs";
+import { listHerdrLedgers } from "./herdr-runner.mjs";
 
 const ok = (msg) => console.log("  ✓ " + msg);
 const bad = (msg) => console.log("  ✗ " + msg);
@@ -483,6 +485,62 @@ function roleFrom(argv, opts, raw) {
   return "node";
 }
 
+// 有 herdr 能力时核对 Socket：ping、协议版本，以及快照里脱离账本的 ah- Agent。
+// 只报告，不关 Pane / Worktree。socket 不可达算问题，因为这种节点认领会在运行期失败。
+async function auditHerdrSocket(configDir, flat, opts = {}) {
+  const usesHerdr = Object.values(flat || {}).some((entry) => entry?.context === "herdr");
+  if (!usesHerdr) return 0;
+  let socket = null;
+  let problems = 0;
+  try {
+    socket = createHerdrSocket({
+      socketPath: String(opts.herdrSocketPath ?? "").trim(),
+      session: String(opts.herdrSession ?? "").trim(),
+      timeoutMs: 3000,
+    });
+    const pong = await socket.ping({ timeoutMs: 3000 });
+    ok(`Herdr socket 可达（${socket.source}，protocol ${pong.protocol}，${pong.version ?? "未知版本"}）`);
+    const snapRes = await socket.call("session.snapshot", {}, { timeoutMs: 3000 });
+    const snap = snapRes?.snapshot ?? snapRes ?? {};
+    if (snap.protocol != null && Number(snap.protocol) !== Number(pong.protocol)) {
+      bad(`Herdr session.snapshot 的协议 ${snap.protocol} 与 ping 的 ${pong.protocol} 不一致`);
+      problems++;
+    }
+    const ledgers = listHerdrLedgers(configDir).filter(({ ledger }) => ledger && !ledger.broken && ledger.state !== "exited");
+    const boundAgents = new Set(ledgers.map(({ ledger }) => ledger.agent_name).filter(Boolean));
+    const agents = Array.isArray(snap.agents) ? snap.agents : [];
+    const panes = Array.isArray(snap.panes) ? snap.panes : [];
+    let orphans = 0;
+    for (const agent of agents) {
+      const name = String(agent?.name ?? agent?.agent_name ?? "");
+      if (!name.startsWith("ah-") || boundAgents.has(name)) continue;
+      info(`孤立 Agent ${name} 在 pane ${agent.pane_id ?? "?"}，本机没有对应 herdr.json`);
+      orphans++;
+    }
+    if (orphans) info(`发现 ${orphans} 个账本之外的 ah- Agent（只报告，不关闭）`);
+    else ok("没有脱离账本的 ah- Agent");
+    for (const { taskId, ledger } of ledgers) {
+      const paneOk = panes.some((pane) => pane?.pane_id === ledger.pane_id);
+      const agentOk = agents.some((agent) => String(agent?.name ?? agent?.agent_name ?? "") === ledger.agent_name);
+      if (!paneOk && !agentOk) {
+        bad(`任务 ${taskId} 的 Herdr 会话已不在快照里（agent=${ledger.agent_name || "?"} pane=${ledger.pane_id || "?"}）`);
+        problems++;
+      }
+    }
+  } catch (e) {
+    if (e?.code === "protocol_unsupported") {
+      bad(`Herdr socket 协议不够：${e.message}`);
+      problems++;
+    } else {
+      // 守护没开时不让 ah setup 失败；配了 herdr 能力的节点仍会在这里看到原因。
+      info(`Herdr socket 未接通（${e?.message ?? e}）。herdr 能力要等守护进程起来才能派发`);
+    }
+  } finally {
+    try { socket?.close(); } catch { /* 没连上 */ }
+  }
+  return problems;
+}
+
 export async function doctor(configDir, appDir, opts = {}) {
   let problems = 0;
 
@@ -640,6 +698,7 @@ export async function doctor(configDir, appDir, opts = {}) {
       const shapeProblems = layerProblems + auditCommandsShape(flat, capPrefix);
       if (!shapeProblems && names.length) ok("commands.json 字段校验通过（Worker 引用、mode / context / timeout_sec / verify 取值合法，cap_id 无重复）");
       problems += shapeProblems;
+      problems += await auditHerdrSocket(configDir, flat, opts);
       // 模板只查一遍：节点本尊的条目加上每个 Worker 自己的启动模板。
       const templates = {};
       for (const [key, entry] of Object.entries(flat)) if (!entry?.worker) templates[key] = entry;
