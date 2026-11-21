@@ -686,11 +686,10 @@ export class HerdrRuntime extends EventEmitter {
         name,
         kind: String(kind),
         pane_id: paneId,
-        timeout_ms: this.#opts.startTimeoutMs,
       };
       if (Array.isArray(args) && args.length) startParams.args = args.map((a) => String(a));
       try {
-        await this.#call("agent.start", startParams, { timeoutMs: this.#opts.startTimeoutMs + 5000 });
+        await this.#startAgentWhenShellReady(startParams);
       } catch (err) {
         // agent_not_ready 且 Agent 已在启动期被拦成 blocked 时，名字仍然有效：保留，交给派发守卫按 blocked 送审。
         if (err?.category !== "not_ready") throw err;
@@ -753,6 +752,39 @@ export class HerdrRuntime extends EventEmitter {
       else out.reason = out.reason || String(err?.message ?? err);
     }
     return out;
+  }
+
+  // Herdr 的 agent.start 要求窗格前台只有 shell，并且已经停在交互提示符上。
+  // tab.create 返回时 shell 往往还在跑启动脚本，立刻 start 会得到 agent_pane_busy。
+  // 这种拒绝发生在真正拉起 Agent 之前，隔一小段再试，直到启动时限用完。
+  async #startAgentWhenShellReady(startParams) {
+    const deadline = this.#now() + this.#opts.startTimeoutMs;
+    let last = null;
+    for (;;) {
+      const remaining = deadline - this.#now();
+      // 服务端要求 timeout_ms > 3000 且不超过 300000，不够再发一轮就停。
+      if (remaining <= 3000) break;
+      const timeoutMs = Math.min(300_000, Math.floor(remaining));
+      try {
+        await this.#call(
+          "agent.start",
+          { ...startParams, timeout_ms: timeoutMs },
+          { timeoutMs: timeoutMs + 5000 },
+        );
+        return;
+      } catch (err) {
+        if (err?.category !== "shell_not_ready") throw err;
+        last = err;
+        const left = deadline - this.#now();
+        if (left <= 3000) break;
+        await sleepMs(Math.min(200, left - 3000));
+      }
+    }
+    throw last ?? new HerdrError(
+      "agent_pane_busy",
+      `窗格 ${startParams.pane_id} 在启动时限内没有变成可用的 shell`,
+      { method: "agent.start", local: true },
+    );
   }
 
   // ---------- 派发 ----------

@@ -31,6 +31,9 @@ const CATEGORY_BY_CODE = new Map([
   ["agent_not_running", "not_running"],
   ["agent_not_ready", "not_ready"],
   ["agent_kind_mismatch", "not_ready"],
+  // 新窗格的 shell 还没到交互提示符，或终端进程还没起来。启动期可以等，不是永久失败。
+  ["agent_pane_busy", "shell_not_ready"],
+  ["agent_pane_unavailable", "shell_not_ready"],
   ["timeout", "timeout"],
   ["events_lost", "events_lost"],
   ["invalid_request", "invalid_request"],
