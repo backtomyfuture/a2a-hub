@@ -1,6 +1,6 @@
 // herdr 多 Agent 编排引擎单元测试：并发槽位、热驻留占槽、原地热续接、冷启动兜底与 setup/doctor 集成。
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import fs from "node:fs";
 import net from "node:net";
@@ -595,7 +595,8 @@ class FakeHerdrServer {
   }
 
   push(event, data) {
-    this.pushRaw(JSON.stringify({ event, data }) + "\n");
+    // protocol22 全局事件带 EventData.type；pane 专属点号事件没有这个字段。
+    this.pushRaw(JSON.stringify({ event, data: event.includes(".") ? data : { type: event, ...data } }) + "\n");
   }
 
   pushRaw(chunk) {
@@ -706,7 +707,7 @@ afterEach(() => {
 
 const FAST_BACKOFF = { baseMs: 5, maxMs: 20, jitter: 0 };
 
-test("socket 路径发现：显式配置 > HERDR_SOCKET_PATH > session > 默认，Windows 无默认", () => {
+test("socket 路径发现：显式路径优先，未核验 named-session/Windows 默认布局拒绝猜测", () => {
   const base = { homedir: "/home/u", platform: "linux" };
   assert.deepEqual(
     discoverSocketPath({ ...base, socketPath: "/x/a.sock", env: { HERDR_SOCKET_PATH: "/e.sock", HERDR_SESSION: "s" }, session: "t" }),
@@ -716,15 +717,9 @@ test("socket 路径发现：显式配置 > HERDR_SOCKET_PATH > session > 默认�
     discoverSocketPath({ ...base, env: { HERDR_SOCKET_PATH: "/e.sock", HERDR_SESSION: "s" }, session: "t" }),
     { path: "/e.sock", source: "env:HERDR_SOCKET_PATH" },
   );
-  assert.equal(
-    discoverSocketPath({ ...base, env: { HERDR_SESSION: "envs" }, session: "cfgs" }).path,
-    "/home/u/.config/herdr/sessions/cfgs/herdr.sock",
-    "配置里的 session 优先于 HERDR_SESSION",
-  );
-  assert.equal(
-    discoverSocketPath({ ...base, env: { HERDR_SESSION: "envs" } }).path,
-    "/home/u/.config/herdr/sessions/envs/herdr.sock",
-  );
+  // M0 未证实 named-session 布局；不能用猜测路径维持虚假的兼容性。
+  assert.throws(() => discoverSocketPath({ ...base, env: { HERDR_SESSION: "envs" }, session: "cfgs" }), (e) => e.code === "socket_path_unverified");
+  assert.throws(() => discoverSocketPath({ ...base, env: { HERDR_SESSION: "envs" } }), (e) => e.code === "socket_path_unverified");
   // 空串视为未设置，不能把空 HERDR_SOCKET_PATH 当成有效路径。
   assert.deepEqual(
     discoverSocketPath({ ...base, env: { HERDR_SOCKET_PATH: "  ", HERDR_SESSION: "" } }),
@@ -892,9 +887,9 @@ test("Events：订阅确认后收到事件，粘包与半包都能拆对，事�
   assert.deepEqual(fake.subscribeRequests, [{ subscriptions: [{ type: "pane.moved" }] }]);
 
   fake.pushRaw(
-    JSON.stringify({ event: "pane_moved", data: { n: 1 } }) + "\n" + JSON.stringify({ event: "pane_agent_status_changed", data: { n: 2 } }) + "\n",
+    JSON.stringify({ event: "pane_moved", data: { type: "pane_moved", n: 1 } }) + "\n" + JSON.stringify({ event: "pane_agent_status_changed", data: { type: "pane_agent_status_changed", n: 2 } }) + "\n",
   );
-  const third = Buffer.from(JSON.stringify({ event: "tab_created", data: { label: "任务甲" } }) + "\n");
+  const third = Buffer.from(JSON.stringify({ event: "tab_created", data: { type: "tab_created", label: "任务甲" } }) + "\n");
   const cut = third.indexOf(Buffer.from("务")) + 1;
   fake.pushRaw(third.subarray(0, cut));
   await sleep(20);
@@ -1031,15 +1026,14 @@ test("Events：stop() 之后不再重连，确认前 stop 会让 start() reject"
   await assert.rejects(p, (e) => e.code === "connection_closed");
 }));
 
-test("契约：本机 Herdr 的 schema 仍包含我们依赖的协议下限与订阅类型（无 herdr 时跳过）", (t) => {
-  let doc;
-  try {
-    doc = JSON.parse(execFileSync("herdr", ["api", "schema", "--json"], { encoding: "utf8", timeout: 15_000, maxBuffer: 16 * 1024 * 1024 }));
-  } catch {
-    t.skip("本机没有可用的 herdr 二进制");
-    return;
-  }
-  assert.ok(doc.protocol >= HERDR_PROTOCOL_MIN, `本机协议 ${doc.protocol} 低于代码要求的 ${HERDR_PROTOCOL_MIN}`);
+test("契约：固定 Herdr 0.9.5/protocol22 Schema，无真实二进制调用", () => {
+  const raw = fs.readFileSync(path.join(ROOT, "tests/fixtures/herdr-protocol22.schema.json"));
+  const provenance = JSON.parse(fs.readFileSync(path.join(ROOT, "tests/fixtures/herdr-protocol22.provenance.json"), "utf8"));
+  assert.equal(createHash("sha256").update(raw).digest("hex"), provenance.raw_stdout_sha256);
+  assert.equal(provenance.herdr_version, "0.9.5");
+  const doc = JSON.parse(raw);
+  assert.equal(doc.protocol, HERDR_PROTOCOL_MIN);
+  assert.equal(doc.schema_version, 1);
   const subTypes = new Set(
     (doc.schemas.request.$defs.Subscription.oneOf ?? []).map((v) => v.properties?.type?.const).filter(Boolean),
   );

@@ -6,7 +6,7 @@
 //   - 事件订阅：events.subscribe 的连接在 subscription_started 之后只读，再写任何一行服务端都会断开它。
 //     所以 Event 通道独占一条连接，断线靠带抖动的指数退避重连。
 //   - 无参请求必须显式带 params: {}（缺字段服务端按 invalid_request 拒绝）。
-//   - 推送事件线上名是下划线形式（pane_moved），订阅请求里是点号形式（pane.moved），此处统一成点号。
+//   - 全局推送用下划线名（pane_moved）；pane 专属订阅事件本就用点号（pane.agent_status_changed）。统一时保留已有点号。
 import { EventEmitter } from "node:events";
 import net from "node:net";
 import os from "node:os";
@@ -15,7 +15,8 @@ import path from "node:path";
 // 本代码依赖的最低协议版本（schema.protocol）。低于它时 doctor 与 runner 都应拒绝工作。
 export const HERDR_PROTOCOL_MIN = 22;
 
-const MAX_FRAME_CHARS = 32 * 1024 * 1024;
+const DEFAULT_MAX_FRAME_BYTES = 32 * 1024 * 1024;
+const DEFAULT_MAX_INFLIGHT = 128;
 const DEFAULT_CALL_TIMEOUT_MS = 30_000;
 const DEFAULT_CONNECT_TIMEOUT_MS = 5_000;
 const DEFAULT_ACK_TIMEOUT_MS = 10_000;
@@ -42,6 +43,8 @@ const CATEGORY_BY_CODE = new Map([
   ["invalid_agent_name", "invalid_request"],
   // 以下是客户端本地产生的码。
   ["server_unavailable", "unavailable"],
+  ["socket_path_unverified", "unavailable"],
+  ["client_overloaded", "overloaded"],
   ["connection_closed", "closed"],
   ["protocol_error", "protocol"],
   ["protocol_unsupported", "protocol"],
@@ -58,7 +61,7 @@ export function classifyErrorCode(code) {
 }
 
 export class HerdrError extends Error {
-  constructor(code, message, { method = "", local = false, raw = null } = {}) {
+  constructor(code, message, { method = "", local = false, raw = null, delivery = "unknown" } = {}) {
     super(String(message ?? code));
     this.name = "HerdrError";
     this.code = String(code);
@@ -67,24 +70,98 @@ export class HerdrError extends Error {
     // local=true 表示错误由本客户端产生（超时、断连、Abort），不是服务端返回的。
     this.local = local;
     this.raw = raw;
+    // response_received 不保证没有副作用；unknown 绝不能当作未发送去自动重投。
+    this.delivery = delivery;
+    this.deliveryUnknown = delivery === "unknown";
   }
 }
 
-function localError(code, message, method) {
-  return new HerdrError(code, message, { method, local: true });
+function localError(code, message, method, delivery = "not_sent", raw = null) {
+  return new HerdrError(code, message, { method, local: true, delivery, raw });
 }
 
 function errorFromBody(body, method) {
   const code = typeof body?.code === "string" && body.code ? body.code : "unknown_error";
-  return new HerdrError(code, body?.message ?? code, { method, raw: body });
+  return new HerdrError(code, body?.message ?? code, { method, raw: body, delivery: "response_received" });
 }
 
-function mapNetError(err, method) {
+function mapNetError(err, method, delivery = "not_sent") {
   const code = err?.code;
   if (code === "ENOENT" || code === "ECONNREFUSED" || code === "EACCES" || code === "ENOTSOCK") {
-    return localError("server_unavailable", `Herdr socket 不可用（${code}）：${err.message}`, method);
+    return localError("server_unavailable", `Herdr socket 不可用（${code}）：${err.message}`, method, delivery, err);
   }
-  return localError("connection_closed", `Herdr socket 读写失败（${code ?? "unknown"}）：${err?.message ?? err}`, method);
+  return localError("connection_closed", `Herdr socket 读写失败（${code ?? "unknown"}）：${err?.message ?? err}`, method, delivery, err);
+}
+
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function positiveInteger(value, name) {
+  if (!Number.isSafeInteger(value) || value < 1) throw new TypeError(`${name} 必须是正安全整数`);
+  return value;
+}
+
+// 只保留一条未完成帧；容量倍增且不超过上限，避免按字符计数及小块累加的无界碎片。
+class NdjsonReader {
+  #max;
+  #buffer;
+  #size = 0;
+  #decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+  constructor(max) {
+    this.#max = max;
+    this.#buffer = Buffer.allocUnsafe(Math.min(4096, max));
+  }
+  push(chunk, onMessage) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    let cursor = 0;
+    while (cursor < bytes.length) {
+      const nl = bytes.indexOf(10, cursor);
+      const end = nl < 0 ? bytes.length : nl;
+      const size = this.#size + end - cursor;
+      if (size > this.#max) throw new Error(`NDJSON 帧超过 ${this.#max} bytes`);
+      if (size > this.#buffer.length) {
+        const grown = Buffer.allocUnsafe(Math.min(this.#max, Math.max(size, this.#buffer.length * 2)));
+        this.#buffer.copy(grown, 0, 0, this.#size);
+        this.#buffer = grown;
+      }
+      bytes.copy(this.#buffer, this.#size, cursor, end);
+      this.#size = size;
+      if (nl < 0) return;
+      const length = size && this.#buffer[size - 1] === 13 ? size - 1 : size;
+      const text = this.#decoder.decode(this.#buffer.subarray(0, length));
+      this.#size = 0;
+      const msg = JSON.parse(text);
+      if (!isRecord(msg)) throw new Error("NDJSON 帧必须是 JSON 对象");
+      if (onMessage(msg) === false) return;
+      cursor = nl + 1;
+    }
+  }
+}
+
+function encodeRequest(id, method, params, max) {
+  try {
+    if (typeof method !== "string" || !method || !isRecord(params) || typeof params.toJSON === "function") throw new Error("method 必须是非空字符串，params 必须是对象");
+    const frame = JSON.stringify({ id, method, params });
+    if (Buffer.byteLength(frame) > max) throw new Error(`请求帧超过 ${max} bytes`);
+    return frame + "\n";
+  } catch (err) {
+    throw localError("invalid_request", `无法编码 Herdr 请求：${err.message}`, method, "not_sent", err);
+  }
+}
+
+function responseResult(msg, id, method) {
+  const error = Object.hasOwn(msg, "error");
+  const result = Object.hasOwn(msg, "result");
+  const validError = isRecord(msg.error) && typeof msg.error.code === "string" && msg.error.code.length > 0 && typeof msg.error.message === "string";
+  // 唯一实测空 id 特例：服务端无法解码请求时返回 invalid_request 错误，不能放宽成功/其它错误。
+  const invalidRequest = msg.id === "" && error && validError && msg.error.code === "invalid_request";
+  if (typeof msg.id !== "string" || (msg.id !== id && !invalidRequest) || error === result
+    || (error && !validError) || (result && (!isRecord(msg.result) || typeof msg.result.type !== "string" || !msg.result.type))) {
+    throw localError("protocol_error", `${method} 应答 id / result / error 包络不合法`, method, "unknown");
+  }
+  if (error) throw errorFromBody(msg.error, method);
+  return msg.result;
 }
 
 // ---------- 路径发现 ----------
@@ -116,8 +193,7 @@ export function discoverSocketPath({
     if (!SESSION_NAME.test(sessionName)) {
       throw localError("invalid_request", `非法的 Herdr session 名：${JSON.stringify(sessionName)}`, "");
     }
-    const from = String(session ?? "").trim() ? "config:session" : "env:HERDR_SESSION";
-    return { path: path.join(base, "sessions", sessionName, "herdr.sock"), source: from };
+    throw localError("socket_path_unverified", "named-session 的 Socket 布局尚未核验；请显式配置 socketPath 或 HERDR_SOCKET_PATH", "");
   }
   return { path: path.join(base, "herdr.sock"), source: "default" };
 }
@@ -128,13 +204,17 @@ export class HerdrControl {
   #socketPath;
   #timeoutMs;
   #connectTimeoutMs;
+  #maxFrameBytes;
+  #maxInflight;
   #seq = 0;
   #inflight = new Map();
   #closed = false;
 
-  constructor({ socketPath, timeoutMs = DEFAULT_CALL_TIMEOUT_MS, connectTimeoutMs = DEFAULT_CONNECT_TIMEOUT_MS } = {}) {
+  constructor({ socketPath, timeoutMs = DEFAULT_CALL_TIMEOUT_MS, connectTimeoutMs = DEFAULT_CONNECT_TIMEOUT_MS, maxFrameBytes = DEFAULT_MAX_FRAME_BYTES, maxInflight = DEFAULT_MAX_INFLIGHT } = {}) {
     if (!socketPath) throw new TypeError("HerdrControl 需要 socketPath");
     this.#socketPath = socketPath;
+    this.#maxFrameBytes = positiveInteger(maxFrameBytes, "maxFrameBytes");
+    this.#maxInflight = positiveInteger(maxInflight, "maxInflight");
     this.#timeoutMs = timeoutMs;
     this.#connectTimeoutMs = connectTimeoutMs;
   }
@@ -147,17 +227,20 @@ export class HerdrControl {
   call(method, params = {}, { timeoutMs = this.#timeoutMs, signal } = {}) {
     if (this.#closed) return Promise.reject(localError("connection_closed", "HerdrControl 已关闭", method));
     if (signal?.aborted) return Promise.reject(localError("aborted", `${method} 已被取消`, method));
+    if (this.#inflight.size >= this.#maxInflight) return Promise.reject(localError("client_overloaded", "Herdr Control 在途请求达到上限", method));
     const id = `ah-${++this.#seq}`;
-    const body = params && typeof params === "object" && !Array.isArray(params) ? params : {};
+    let frame;
+    try { frame = encodeRequest(id, method, params, this.#maxFrameBytes); }
+    catch (err) { return Promise.reject(err); }
 
     return new Promise((resolve, reject) => {
-      const socket = net.createConnection(this.#socketPath);
-      socket.setEncoding("utf8");
-      let buf = "";
-      let settled = false;
-      let timer = null;
-      let connectTimer = null;
-
+      let socket;
+      try { socket = net.createConnection(this.#socketPath); }
+      catch (err) { reject(mapNetError(err, method)); return; }
+      const reader = new NdjsonReader(this.#maxFrameBytes);
+      let settled = false, sent = false;
+      let timer = null, connectTimer = null;
+      const delivery = () => sent ? "unknown" : "not_sent";
       const finish = (err, value) => {
         if (settled) return;
         settled = true;
@@ -166,66 +249,38 @@ export class HerdrControl {
         signal?.removeEventListener("abort", onAbort);
         this.#inflight.delete(id);
         socket.destroy();
-        if (err) reject(err);
-        else resolve(value);
+        if (err) reject(err); else resolve(value);
       };
-      const onAbort = () => finish(localError("aborted", `${method} 已被取消`, method));
-
-      this.#inflight.set(id, { method, abort: (err) => finish(err) });
+      const onAbort = () => finish(localError("aborted", `${method} 本地等待已取消（不代表远端取消）`, method, delivery()));
+      this.#inflight.set(id, { method, abort: () => finish(localError("connection_closed", "HerdrControl 已关闭", method, delivery())) });
       signal?.addEventListener("abort", onAbort, { once: true });
-      if (timeoutMs > 0) {
-        timer = setTimeout(() => finish(localError("timeout", `${method} 客户端等待超过 ${timeoutMs}ms`, method)), timeoutMs);
-      }
-      if (this.#connectTimeoutMs > 0) {
-        connectTimer = setTimeout(
-          () => finish(localError("server_unavailable", `连接 Herdr socket 超时（${this.#connectTimeoutMs}ms）`, method)),
-          this.#connectTimeoutMs,
-        );
-      }
-
+      if (signal?.aborted) { onAbort(); return; }
+      if (timeoutMs > 0) timer = setTimeout(() => finish(localError("timeout", `${method} 客户端等待超过 ${timeoutMs}ms（远端可能仍执行）`, method, delivery())), timeoutMs);
+      if (this.#connectTimeoutMs > 0) connectTimer = setTimeout(() => finish(localError("server_unavailable", `连接 Herdr socket 超时（${this.#connectTimeoutMs}ms）`, method, delivery())), this.#connectTimeoutMs);
       socket.on("connect", () => {
+        if (settled) return;
         clearTimeout(connectTimer);
-        socket.write(JSON.stringify({ id, method, params: body }) + "\n");
+        // write 开始即不能证明未送达；不因超时/断连重试任何 Control 请求。
+        sent = true;
+        try { socket.write(frame); } catch (err) { finish(mapNetError(err, method, delivery())); }
       });
       socket.on("data", (chunk) => {
-        buf += chunk;
-        const nl = buf.indexOf("\n");
-        if (nl < 0) {
-          if (buf.length > MAX_FRAME_CHARS) finish(localError("protocol_error", `${method} 应答超过 ${MAX_FRAME_CHARS} 字符仍无换行`, method));
-          return;
-        }
-        const line = buf.slice(0, nl);
-        let msg;
+        if (settled) return;
         try {
-          msg = JSON.parse(line);
-        } catch (e) {
-          finish(localError("protocol_error", `${method} 应答不是合法 JSON：${e.message}`, method));
-          return;
+          reader.push(chunk, (msg) => { finish(null, responseResult(msg, id, method)); return false; });
+        } catch (err) {
+          finish(err instanceof HerdrError ? err : localError("protocol_error", `${method} NDJSON 应答无效：${err.message}`, method, delivery(), err));
         }
-        // 服务端对无法解码的请求会回空 id，单请求连接上它只可能是对我们这一条的应答。
-        if (typeof msg?.id === "string" && msg.id !== "" && msg.id !== id) {
-          finish(localError("protocol_error", `${method} 应答 id 不匹配：期望 ${id}，收到 ${msg.id}`, method));
-          return;
-        }
-        if (msg?.error && typeof msg.error === "object") {
-          finish(errorFromBody(msg.error, method));
-          return;
-        }
-        if (!msg || typeof msg.result !== "object" || msg.result === null) {
-          finish(localError("protocol_error", `${method} 应答缺少 result`, method));
-          return;
-        }
-        finish(null, msg.result);
       });
-      socket.on("error", (e) => finish(mapNetError(e, method)));
-      socket.on("close", () => finish(localError("connection_closed", `${method} 在收到应答前连接被关闭`, method)));
+      socket.on("error", (err) => finish(mapNetError(err, method, delivery())));
+      socket.on("close", () => finish(localError("connection_closed", `${method} 在收到完整应答前连接被关闭`, method, delivery())));
     });
   }
 
   close() {
     this.#closed = true;
     for (const entry of [...this.#inflight.values()]) {
-      entry.abort(localError("connection_closed", "HerdrControl 已关闭", entry.method));
+      entry.abort();
     }
   }
 }
@@ -240,6 +295,7 @@ export function backoffDelay(attempt, { baseMs = 250, maxMs = 8000, factor = 2, 
 // 推送事件名 pane_agent_status_changed → pane.agent_status_changed，与订阅请求里的写法一致。
 export function normalizeEventName(name) {
   const s = String(name ?? "");
+  if (s.includes(".")) return s;
   const i = s.indexOf("_");
   return i < 0 ? s : `${s.slice(0, i)}.${s.slice(i + 1)}`;
 }
@@ -261,13 +317,13 @@ export function paneStatusSubscription(paneId, agentStatus = null) {
 }
 
 // 事件：
-//   ready({attempts})        首次订阅确认
-//   reconnected({downtimeMs}) 之后每次重新订阅确认；消费方此时必须重做 session.snapshot 对账
+//   ready({generation, attempts}) 首次订阅确认
+//   reconnected({generation, downtimeMs}) 重新确认；L2 必须以代际 fence session.snapshot/定向读取
 //   lost(error)              收到 events_lost，缓存已陈旧，随后自动重连
-//   event({event, raw, data}) 推送事件（event 为点号写法）
+//   event({event, raw, data, generation}) 推送事件，仅作失效信号；不在协议层实现快照合并
 //   disconnected(reason)     连接断开
 //   subscribe_error(error)   订阅被拒（如 pane_not_found）；消费方可在退避期内剪掉失效订阅
-//   protocol_error(error)    收到无法解析的行，已跳过
+//   protocol_error(error)    非法帧后断开；消费方必须失效缓存并在重连后对账
 //   fatal(error)             订阅请求本身非法（invalid_request），不再重试
 export class HerdrEvents extends EventEmitter {
   #socketPath;
@@ -288,7 +344,10 @@ export class HerdrEvents extends EventEmitter {
   #readyReject = null;
   #lastDownAt = 0;
   #seq = 0;
-  #refreshing = false;
+  #generation = 0;
+  #activeReady = false;
+  #endSession = null;
+  #maxFrameBytes;
 
   constructor({
     socketPath,
@@ -297,6 +356,7 @@ export class HerdrEvents extends EventEmitter {
     random = Math.random,
     connectTimeoutMs = DEFAULT_CONNECT_TIMEOUT_MS,
     ackTimeoutMs = DEFAULT_ACK_TIMEOUT_MS,
+    maxFrameBytes = DEFAULT_MAX_FRAME_BYTES,
   } = {}) {
     super();
     if (!socketPath) throw new TypeError("HerdrEvents 需要 socketPath");
@@ -305,15 +365,19 @@ export class HerdrEvents extends EventEmitter {
     this.#backoff = backoff;
     this.#random = random;
     this.#connectTimeoutMs = connectTimeoutMs;
-    this.#ackTimeoutMs = ackTimeoutMs;
+    this.#ackTimeoutMs = positiveInteger(ackTimeoutMs, "ackTimeoutMs");
+    this.#maxFrameBytes = positiveInteger(maxFrameBytes, "maxFrameBytes");
   }
 
   get ready() {
-    return this.#everReady && !this.#stopped;
+    return this.#activeReady && !this.#stopped;
   }
+
+  get generation() { return this.#generation; }
 
   // 首次订阅确认后 resolve；服务端没起来时持续退避重试，stop() 会让它 reject。
   start() {
+    if (this.#stopped) return Promise.reject(localError("connection_closed", "HerdrEvents 已停止，不能重新启动", "events.subscribe"));
     if (this.#readyPromise) return this.#readyPromise;
     this.#stopped = false;
     this.#started = true;
@@ -329,17 +393,18 @@ export class HerdrEvents extends EventEmitter {
   // 订阅集合变了（新 pane 上线、pane 消失）时调用：立即断开并按最新 provider 重订，不计入失败退避。
   refresh() {
     if (!this.#started || this.#stopped) return;
-    if (this.#socket) {
-      this.#refreshing = true;
-      this.#socket.destroy();
-    }
+    this.#generation++;
+    this.#activeReady = false;
+    this.#endSession?.("refresh");
     this.#wakeSleep?.();
   }
 
   stop() {
     if (this.#stopped) return;
     this.#stopped = true;
-    this.#socket?.destroy();
+    this.#generation++;
+    this.#activeReady = false;
+    this.#endSession?.("stopped");
     this.#wakeSleep?.();
     if (!this.#everReady) this.#readyReject?.(localError("connection_closed", "HerdrEvents 在订阅确认前被停止", "events.subscribe"));
   }
@@ -350,7 +415,16 @@ export class HerdrEvents extends EventEmitter {
       try {
         outcome = await this.#session();
       } catch (e) {
-        outcome = { reason: "error", error: e };
+        if (this.#stopped) break;
+        const err = e instanceof HerdrError ? e : localError("subscription_provider_failed", `订阅 provider 失败：${e.message}`, "events.subscribe", "not_sent", e);
+        if (err.code === "invalid_request") {
+          this.#stopped = true;
+          this.#readyReject?.(err);
+          this.emit("fatal", err);
+          break;
+        }
+        this.emit("subscribe_error", err);
+        outcome = { reason: "error", error: err };
       }
       if (this.#stopped || outcome.reason === "fatal") break;
       if (outcome.acked) this.#failures = 0;
@@ -374,102 +448,113 @@ export class HerdrEvents extends EventEmitter {
   }
 
   async #session() {
-    const subscriptions = typeof this.#provider === "function" ? await this.#provider() : this.#provider;
-    if (this.#stopped) return { reason: "stopped" };
+    const generation = ++this.#generation;
+    let subscriptions;
+    try { subscriptions = typeof this.#provider === "function" ? await this.#provider() : this.#provider; }
+    catch (err) { if (this.#stopped || generation !== this.#generation) return { reason: "refresh" }; throw err; }
+    if (this.#stopped || generation !== this.#generation) return { reason: "refresh" };
+    if (!Array.isArray(subscriptions)) throw localError("invalid_request", "subscriptions 必须是数组", "events.subscribe");
     const id = `ev-${++this.#seq}`;
-
-    return new Promise((resolve) => {
-      const socket = net.createConnection(this.#socketPath);
+    const frame = encodeRequest(id, "events.subscribe", { subscriptions }, this.#maxFrameBytes);
+    return new Promise((resolve, reject) => {
+      let socket;
+      try { socket = net.createConnection(this.#socketPath); }
+      catch (err) { reject(mapNetError(err, "events.subscribe")); return; }
       this.#socket = socket;
-      socket.setEncoding("utf8");
       socket.setKeepAlive(true);
-      let buf = "";
-      let acked = false;
-      let done = false;
-      let ackTimer = null;
-      let connectTimer = null;
-
-      const end = (rawReason) => {
+      const reader = new NdjsonReader(this.#maxFrameBytes);
+      let acked = false, done = false, sent = false;
+      let ackTimer = null, connectTimer = null;
+      const current = () => !done && !this.#stopped && generation === this.#generation;
+      const delivery = () => sent ? "unknown" : "not_sent";
+      const end = (reason, error = null) => {
         if (done) return;
         done = true;
-        // refresh() 主动断开的连接要立刻重订，不能被当成故障去退避。
-        const reason = this.#refreshing && rawReason === "closed" ? "refresh" : rawReason;
-        this.#refreshing = false;
         clearTimeout(ackTimer);
         clearTimeout(connectTimer);
-        if (this.#socket === socket) this.#socket = null;
+        if (this.#socket === socket) { this.#socket = null; this.#activeReady = false; }
+        if (this.#endSession === end) this.#endSession = null;
         socket.destroy();
         if (acked) this.#lastDownAt = Date.now();
-        if (!this.#stopped) this.emit("disconnected", reason);
+        if (!this.#stopped) this.emit("disconnected", reason, { generation, error });
         resolve({ reason, acked });
       };
-
-      connectTimer = setTimeout(() => end("connect_timeout"), this.#connectTimeoutMs);
+      this.#endSession = end;
+      const protocolFailure = (error) => {
+        if (!current()) return;
+        const err = error instanceof HerdrError ? error : localError("protocol_error", `事件 NDJSON 帧无效：${error.message}`, "events.subscribe", delivery(), error);
+        // 先 fence，再通知外部；listener 同步 stop/refresh 也不能放出同包后续帧。
+        end("protocol_error", err);
+        if (!this.#stopped) this.emit("protocol_error", err);
+      };
+      if (this.#connectTimeoutMs > 0) connectTimer = setTimeout(() => {
+        if (!current()) return;
+        const err = localError("server_unavailable", "事件连接超时", "events.subscribe", delivery());
+        end("connect_timeout", err);
+        if (!this.#stopped) this.emit("subscribe_error", err);
+      }, this.#connectTimeoutMs);
       socket.on("connect", () => {
+        if (!current()) return;
         clearTimeout(connectTimer);
-        ackTimer = setTimeout(() => end("ack_timeout"), this.#ackTimeoutMs);
-        socket.write(JSON.stringify({ id, method: "events.subscribe", params: { subscriptions } }) + "\n");
+        ackTimer = setTimeout(() => {
+          if (!current()) return;
+          const err = localError("timeout", "events.subscribe ACK 超时；仅结束本地订阅等待", "events.subscribe", delivery());
+          end("ack_timeout", err);
+          if (!this.#stopped) this.emit("subscribe_error", err);
+        }, this.#ackTimeoutMs);
+        sent = true;
+        try { socket.write(frame); } catch (err) { end("closed", mapNetError(err, "events.subscribe", delivery())); }
       });
       socket.on("data", (chunk) => {
-        buf += chunk;
-        if (buf.length > MAX_FRAME_CHARS) {
-          this.emit("protocol_error", localError("protocol_error", "事件帧超过上限仍无换行", "events.subscribe"));
-          end("protocol_error");
-          return;
-        }
-        let nl;
-        while (!done && (nl = buf.indexOf("\n")) >= 0) {
-          const line = buf.slice(0, nl);
-          buf = buf.slice(nl + 1);
-          if (!line.trim()) continue;
-          let msg;
-          try {
-            msg = JSON.parse(line);
-          } catch (e) {
-            this.emit("protocol_error", localError("protocol_error", `事件帧不是合法 JSON：${e.message}`, "events.subscribe"));
-            continue;
-          }
-          if (msg?.error) {
-            const err = errorFromBody(msg.error, "events.subscribe");
-            if (err.category === "events_lost") {
-              this.emit("lost", err);
-              end("lost");
-            } else if (!acked && err.category === "invalid_request") {
-              this.emit("fatal", err);
-              if (!this.#everReady) this.#readyReject?.(err);
-              this.#stopped = true;
-              end("fatal");
-            } else {
-              this.emit("subscribe_error", err);
-              end("subscribe_error");
-            }
-            return;
-          }
-          if (!acked) {
-            if (msg?.id === id && msg?.result?.type === "subscription_started") {
+        if (!current()) return;
+        try {
+          reader.push(chunk, (msg) => {
+            if (!current()) return false;
+            if (!acked || Object.hasOwn(msg, "error")) {
+              let result;
+              try { result = responseResult(msg, id, "events.subscribe"); }
+              catch (err) {
+                if (err.local) { protocolFailure(err); return false; }
+                if (err.category === "events_lost") {
+                  end("lost", err);
+                  if (!this.#stopped && generation === this.#generation) this.emit("lost", err);
+                } else if (!acked && err.category === "invalid_request") {
+                  this.#stopped = true;
+                  end("fatal", err);
+                  this.#readyReject?.(err);
+                  this.emit("fatal", err);
+                } else {
+                  end("subscribe_error", err);
+                  if (!this.#stopped && generation === this.#generation) this.emit("subscribe_error", err);
+                }
+                return false;
+              }
+              if (acked || result.type !== "subscription_started") { protocolFailure(new Error("订阅 ACK 类型不匹配")); return false; }
               acked = true;
+              this.#activeReady = true;
               clearTimeout(ackTimer);
+              const info = { generation, attempts: this.#failures + 1 };
               if (!this.#everReady) {
                 this.#everReady = true;
-                this.#readyResolve?.({ attempts: this.#failures + 1 });
-                this.emit("ready", { attempts: this.#failures + 1 });
+                this.#readyResolve?.(info);
+                this.emit("ready", info);
               } else {
-                this.emit("reconnected", { downtimeMs: this.#lastDownAt ? Date.now() - this.#lastDownAt : 0 });
+                this.emit("reconnected", { generation, downtimeMs: this.#lastDownAt ? Date.now() - this.#lastDownAt : 0 });
               }
             } else {
-              this.emit("protocol_error", localError("protocol_error", "订阅确认帧不符合预期", "events.subscribe"));
-              end("protocol_error");
-              return;
+              if (typeof msg.event !== "string" || !msg.event || !isRecord(msg.data)
+                || (msg.event.includes("_") && !msg.event.includes(".") && msg.data.type !== msg.event)
+                || Object.hasOwn(msg, "id") || Object.hasOwn(msg, "result")) {
+                protocolFailure(new Error("事件包络／全局 EventData.type 不匹配")); return false;
+              }
+              this.emit("event", { event: normalizeEventName(msg.event), raw: msg.event, data: msg.data, generation });
             }
-            continue;
-          }
-          if (typeof msg?.event === "string") {
-            this.emit("event", { event: normalizeEventName(msg.event), raw: msg.event, data: msg.data ?? null });
-          }
-        }
+            return current();
+          });
+        } catch (err) { protocolFailure(err); }
       });
-      socket.on("error", () => end("closed"));
-      socket.on("close", () => end("closed"));
+      socket.on("error", (err) => { if (current()) end("closed", mapNetError(err, "events.subscribe", delivery())); });
+      socket.on("close", () => { if (current()) end("closed", localError("connection_closed", "事件连接在完整帧前关闭", "events.subscribe", delivery())); });
     });
   }
 }
@@ -485,10 +570,14 @@ export function createHerdrSocket({
   subscriptions,
   backoff,
   random,
+  maxFrameBytes,
+  maxInflight,
+  connectTimeoutMs,
+  ackTimeoutMs,
 } = {}) {
   const found = discoverSocketPath({ socketPath, session, env, platform });
-  const control = new HerdrControl({ socketPath: found.path, timeoutMs });
-  const events = new HerdrEvents({ socketPath: found.path, subscriptions, backoff, random });
+  const control = new HerdrControl({ socketPath: found.path, timeoutMs, maxFrameBytes, maxInflight, connectTimeoutMs });
+  const events = new HerdrEvents({ socketPath: found.path, subscriptions, backoff, random, maxFrameBytes, connectTimeoutMs, ackTimeoutMs });
   return {
     socketPath: found.path,
     source: found.source,

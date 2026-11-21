@@ -1,0 +1,16 @@
+{
+  "command": "herdr api schema --json",
+  "herdr_version": "0.9.5",
+  "protocol": 22,
+  "schema_version": 1,
+  "machines": [
+    "Jarods Mac mini",
+    "Jarod MacBook Air"
+  ],
+  "captured_during": "Milestone 0, 2026-11-21 Asia/Shanghai",
+  "fixture_encoding": "unmodified schema stdout, including final LF",
+  "raw_stdout_sha256": "9e2af207e9aa8183d4aeca5fde9cc48e7909bb40cdbd7cf21608a6d3ea78075b",
+  "fixture_sha256": "9e2af207e9aa8183d4aeca5fde9cc48e7909bb40cdbd7cf21608a6d3ea78075b",
+  "m0_archived_json_without_final_lf_sha256": "e2b2ff7ec40d9a39879bbdceb64fccad974c4a8109d592a8effdb2d17e7b6510",
+  "scope": "offline contract evidence; no runtime or model behavior is proved"
+}
