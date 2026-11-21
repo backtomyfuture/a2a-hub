@@ -14,7 +14,7 @@ const EXEC_CONTROL_KEYS = new Set([
   "command", "cmd", "cwd", "context", "agent", "worker", "mode",
   "side_effect", "approval_class", "permissions", "permission",
   "shell", "env", "executable", "argv", "bin", "max_timeout_sec",
-  "verify", "verify_timeout_sec", "model", "requested_model", "default_model", "effective_model", "model_source", "active_model", "supports_model_override", "harness", "skills",
+  "verify", "verify_timeout_sec", "model", "requested_model", "default_model", "effective_model", "model_source", "active_model", "supports_model_override", "harness", "skills", "dispatch_target",
   "herdr_kind", "herdr_args", "herdr_env", "herdr_session", "herdr_workspace",
 ]);
 

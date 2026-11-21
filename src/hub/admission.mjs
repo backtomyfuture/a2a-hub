@@ -408,13 +408,14 @@ function storedPollIntervalMin(raw) {
 
 export function parseCardMetadata(card) {
   const rawMeta = card?.fields !== undefined ? f1(card, "Metadata") : card?.Metadata;
-  const empty = { kind: "", role: "", manual: false, preset: false, poll_interval_min: null, template: "", template_id: "" };
+  const empty = { kind: "", mode: "", role: "", manual: false, preset: false, poll_interval_min: null, template: "", template_id: "" };
   if (!rawMeta) return empty;
   try {
     const meta = typeof rawMeta === "object" ? rawMeta : JSON.parse(String(rawMeta));
     if (!meta || typeof meta !== "object" || Array.isArray(meta)) return empty;
     return {
       kind: meta.kind == null ? "" : String(meta.kind),
+      mode: meta.mode == null ? "" : String(meta.mode),
       role: meta.role == null ? "" : String(meta.role),
       manual: meta.manual === true,
       preset: meta.preset === true,
@@ -431,6 +432,44 @@ export function parseCardModel(card) {
   const raw = f1(card, "Metadata");
   try { return (typeof raw === "string" ? JSON.parse(raw) : raw)?.worker_model || {}; }
   catch { return {}; }
+}
+
+// 名片派发门禁在建单与首次认领时共用；离线不等于停派。
+export function undispatchableReason(card) {
+  const reasons = [];
+  const dispatchable = String(f1(card, "Dispatchable") ?? "");
+  if (dispatchable !== "Yes") reasons.push(dispatchable === "No"
+    ? "已停派（Dispatchable=No）" : `不可派（Dispatchable=${dispatchable || "未设置"}，需要 Yes）`);
+  const admission = admissionOf(card);
+  if (admission !== "admitted") reasons.push(`未接纳（Admission=${admission}），请在 Web 控制台「节点 → 待接纳」中接纳`);
+  return reasons;
+}
+
+const HTTP_RECEIVE_MODES = new Set(["poll", "longpoll", "http-poll", "http-longpoll", "webhook"]);
+export function isGatewayExecutionCard(card) {
+  const { kind, mode } = parseCardMetadata(card);
+  const receive = String(f1(card, "Receive_Mode") || "");
+  return kind === "agent" && HTTP_RECEIVE_MODES.has(mode || receive)
+    && (!receive || HTTP_RECEIVE_MODES.has(receive));
+}
+
+export const WORKER_MODEL_KEYS = Object.freeze(["harness", "default_model", "supports_model_override"]);
+export function workerPeerCards(cards, selected) {
+  if (!selected) return [];
+  // 旧宿主根能力不是同一个 Agent Worker，不能把独立 shell/json 条目合并。
+  if (!f1(selected, "Worker") && !isGatewayExecutionCard(selected)) return [selected];
+  return cards.filter((c) => f1(c, "Node") === f1(selected, "Node") && f1(c, "Worker") === f1(selected, "Worker"));
+}
+
+export function workerModelOfCards(cards, selected) {
+  const peers = workerPeerCards(cards, selected);
+  const models = peers.map((c) => workerCardFields(parseCardModel(c), { remote: true }));
+  const model = models[0] || workerCardFields({}, { remote: true });
+  if (models.some((m) => WORKER_MODEL_KEYS.some((key) => m[key] !== model[key]))) {
+    throw httpError(400, `worker_model_conflict：${f1(selected, "Node")}/${f1(selected, "Worker") || "(本尊)"} 的名片模型策略矛盾，请一致重新注册`);
+  }
+  // skills 是非阻塞元数据，不用它判定模型策略冲突。
+  return { ...model, skills: [...new Set(models.flatMap((m) => m.skills))] };
 }
 
 export function formatAgentCard(c) {

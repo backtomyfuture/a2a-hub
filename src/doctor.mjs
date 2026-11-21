@@ -8,7 +8,7 @@ import path from "node:path";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { loadConfig, DAEMON_VERSION } from "./kernel.mjs";
-import { capIdOf, capIdsOf, inferHerdrKind, normalizeCommands, resolveListenAddr, resolveTokenFilePath } from "./config.mjs";
+import { canExecuteModel, capIdOf, capIdsOf, inferHerdrKind, normalizeCommands, resolveListenAddr, resolveTokenFilePath } from "./config.mjs";
 import { isHubPublicKey, readHubPublicKey } from "./approval-sign.mjs";
 import { AGENT_TEMPLATES_FILE, loadAgentTemplates } from "./hub/agent-templates.mjs";
 import { resolveScheduleTz } from "./hub/schedule.mjs";
@@ -686,9 +686,17 @@ export async function doctor(configDir, appDir, opts = {}) {
       const flat = normalizeCommands(cmds, (msg) => { bad(msg); layerProblems++; });
       const names = Object.keys(flat);
       const workerNames = cmds.workers && typeof cmds.workers === "object" && !Array.isArray(cmds.workers) ? Object.keys(cmds.workers) : [];
-      for (const name of workerNames) {
-        if (cmds.workers[name]?.default_model == null) info(`Warning: Worker ${name} 未配置 default_model：兼容沿用 CLI 默认；推荐显式设置`);
-        if (cmds.workers[name]?.context === "herdr" && cmds.workers[name]?.default_model != null) info(`Warning: Worker ${name}：Herdr 模型执行尚待 M2；M1 不会静默忽略 default_model`);
+      const checkedModels = new Set();
+      for (const [key, entry] of Object.entries(flat)) {
+        const identity = entry.worker ? `worker:${entry.worker}` : `cap:${key}`;
+        if (checkedModels.has(identity)) continue;
+        checkedModels.add(identity);
+        const label = entry.worker ? `Worker ${entry.worker}` : `旧能力 ${key}`;
+        if (entry.default_model == null) info(`Warning: ${label} 未配置 default_model：兼容沿用 CLI 默认；推荐显式设置`);
+        else if (!canExecuteModel(entry)) {
+          bad(`${label} default_model 不可执行：model_execution_not_supported；Herdr 等待 M2，direct 需已验证 harness 与独立 {model_args}`);
+          problems++;
+        }
       }
       const capPrefix = raw?.capPrefix ?? raw?.node ?? "";
       if (names.length) {

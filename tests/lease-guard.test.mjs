@@ -89,6 +89,7 @@ test("建单按接收方式写默认超时，显式秒数优先", async () => {
   const id = await createTask({ bus, to: "wh", text: "hi" });
   const row = (await bus.findRecords(TABLES.tasks, "Task_ID", id))[0];
   assert.deepEqual(metaOf(row), {
+    dispatch_target: { node: "wh", worker: "", skill: "agent", cap_id: "CAP-hook" },
     queue_timeout_sec: 3600, lease_ttl_sec: 1200, wait_timeout_sec: 3600,
   });
   const custom = await createTask({
@@ -96,6 +97,7 @@ test("建单按接收方式写默认超时，显式秒数优先", async () => {
   });
   const customRow = (await bus.findRecords(TABLES.tasks, "Task_ID", custom))[0];
   assert.deepEqual(metaOf(customRow), {
+    dispatch_target: { node: "wh", worker: "", skill: "agent", cap_id: "CAP-hook" },
     queue_timeout_sec: 42, lease_ttl_sec: 7, wait_timeout_sec: 9,
   });
 });
@@ -214,6 +216,10 @@ test("同一问题重复 reply 为 409，append 和新问题仍可追加；认�
       onWake: () => {},
     });
     try {
+      await bus.createRecord(DEFAULT_TABLES.agentCards, {
+        Node: "grok-bot", Skill_ID: "agent", Cap_ID: "CAP-grok-bot-agent", Admission: "admitted", Dispatchable: "Yes",
+        Receive_Mode: "http-poll", Metadata: JSON.stringify({ kind: "agent", mode: "http-poll" }),
+      });
       const task = await bus.createRecord(DEFAULT_TABLES.tasks, {
         Task_ID: "TASK-ASK",
         Title: "ask",

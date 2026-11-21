@@ -80,6 +80,22 @@ export function taskModelDecision(task, worker = {}) {
   return resolveModelDecision(parsed.meta.requested_model, worker);
 }
 
+// Worker_Hint 兼容保留旧 Skill-only 的空值；实际选中身份在 Metadata 中固定。
+export function taskDispatchBinding(task) {
+  const parsed = readTaskMeta(f1(task, "Metadata"));
+  if (!parsed.ok) throw new Error("dispatch_binding_invalid: Metadata 必须是 JSON 对象");
+  const binding = parsed.meta.dispatch_target;
+  if (binding === undefined) return null;
+  const hint = f1(task, "Worker_Hint");
+  if (!binding || typeof binding !== "object" || Array.isArray(binding)
+    || !["node", "worker", "skill", "cap_id"].every((k) => typeof binding[k] === "string")
+    || binding.node !== f1(task, "Target_Node") || binding.skill !== f1(task, "Skill_ID")
+    || (binding.worker && hint && hint !== binding.worker)) {
+    throw new Error("dispatch_binding_invalid: 目标绑定与任务身份不一致");
+  }
+  return binding;
+}
+
 export const DAEMON_VERSION = "node-1.2.0";
 const HOP_LIMIT = 8;
 
@@ -766,6 +782,13 @@ export class Kernel {
 
   // 任务行的 Worker_Hint × Skill_ID 在本机能力表里对应哪一项。空串表示没有这项能力。
   capKeyOf(task) {
+    let binding;
+    try { binding = taskDispatchBinding(task); } catch { return ""; }
+    if (binding) {
+      // 空 Worker 同样是明确本尊绑定，不可回退到别的 Worker。
+      const key = binding.worker ? `${binding.worker}/${binding.skill}` : binding.skill;
+      return this.commands[key] ? key : "";
+    }
     return resolveCapKey(this.commands, f1(task, "Skill_ID"), f1(task, "Worker_Hint"));
   }
 

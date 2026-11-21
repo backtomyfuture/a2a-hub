@@ -263,6 +263,10 @@ test("planArtifactItem：本地存在的文件记 upload_pending，相对路径�
 async function startHub(dir) {
   const broker = new LongPollBroker({ initialSeq: 0 });
   const bus = new SqliteBus({ dbPath: path.join(dir, "hub.db"), tables: DEFAULT_TABLES, broker });
+  await bus.createRecord(DEFAULT_TABLES.agentCards, {
+    Node: "worker-a", Skill_ID: "echo", Cap_ID: "CAP-worker-a-echo", Admission: "admitted", Dispatchable: "Yes",
+    Receive_Mode: "http-poll", Metadata: JSON.stringify({ kind: "agent", mode: "http-poll" }),
+  });
   const store = new FileStore({ configDir: dir });
   const handle = await startHubHttpServer({
     cfg: { node: "hub", configDir: dir, listen: "127.0.0.1:0" },
