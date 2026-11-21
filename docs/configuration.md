@@ -38,7 +38,7 @@
 - `hubPublicKey`：hub 的审批签名公钥（base64）。`ah join` 会从 `GET /api/v1/health` 自动拉取写入；配了它，本节点只认 hub 私钥签过的 `auth_decision`。hub 自己私钥在配置目录 `approval_key.pem`（600，首次启动自动生成），公钥由私钥推出。详见 [SECURITY.md](../SECURITY.md)。
 - `tz`：IANA 时区名，缺省 `Asia/Shanghai`。决定本地定时调度的 cron 墙钟与期次键偏移，与宿主机时区及系统 `TZ` 环境变量无关。
 - `maxConcurrent`：可选正整数，默认 `4`。控制 `context: "herdr"` 宿主机节点的最大并发槽位数（`working` 与处于 `input-required` / `auth-required` 的驻留 Pane 均计入占槽）。`ah setup` 检测到本机安装 `herdr` 时自动写入 `4`。
-- `herdrSession` / `herdrWorkspace`：可选。指定 `herdr` 的 `--session <name>`（缺省使用默认 session）及任务工作区标签（默认 `"a2a-hub"`）。
+- `herdrSession` / `herdrWorkspace`：可选。指定 Herdr 的命名 session（缺省使用默认 session）及任务工作区标签（默认 `"a2a-hub"`）。守护进程只走 Herdr Socket API（协议 22），不再调用 `herdr` CLI。套接字按显式路径、`HERDR_SOCKET_PATH`、命名 session、默认 `~/.config/herdr/herdr.sock` 的顺序查找。
 
 ## 3. 机器类型：host 与 agent
 
@@ -110,9 +110,9 @@ Worker 条目与节点本尊的技能条目可用的字段：
 | `command` | 命令模板。agent 模式含 `{prompt}` |
 | `mode` | `agent`（默认）纯文本输出＋结构化回执；`json` 脚本类，stdin 收信封、stdout 最后一行出结果；`inbox` 交给本尊收件箱 |
 | `context` | 支持 `direct`（默认，守护进程直接拉起单槽子进程）与 `herdr`（借本机 `herdr` 终端复用器为每个任务开独立 Tab/Pane，支持 `maxConcurrent` 多槽并行与多轮交互热驻留）。取值非法时任务直接 `rejected`，不静默降级 |
-| `herdr_kind` | `context=herdr` 时传给 `herdr agent start --kind <kind>` 的交互式 Agent 类型（如 `claude`、`codex`、`agy`、`gemini`、`amp`、`droid`、`grok`、`hermes`、`cursor`、`opencode`）。缺省可从 Worker 名或 `command` 首词推导 |
-| `herdr_args` | 可选字符串数组。`context=herdr` 时附在 `herdr agent start ... -- <args...>` 后的额外参数 |
-| `herdr_env` | 可选对象（`{ KEY: "VAL" }`）。`context=herdr` 创建 Tab 时通过 `--env` 注入的自定义环境变量（内核固定注入 `AH_TASK_ID` / `AH_NODE` / `AH_WORKER` / `AH_RUN_DIR` / `AH_INPUT_PATH` / `AH_RECEIPT_PATH`） |
+| `herdr_kind` | `context=herdr` 时经 Socket `agent.start` 使用的交互式 Agent 类型（如 `claude`、`codex`、`agy`、`gemini`、`amp`、`droid`、`grok`、`hermes`、`cursor`、`opencode`）。缺省可从 Worker 名或 `command` 首词推导 |
+| `herdr_args` | 可选字符串数组。`context=herdr` 时附在 Socket `agent.start` 参数后面 |
+| `herdr_env` | 可选对象（`{ KEY: "VAL" }`）。`context=herdr` 创建 Tab 时注入的自定义环境变量。内核另外写入 `A2A_TASK_ID`、`A2A_RUN_ID`、`A2A_ATTEMPT_ID`、`A2A_NODE`、`A2A_ENVELOPE_PATH`，以及 `AH_TASK_ID` / `AH_NODE` / `AH_WORKER` / `AH_RUN_DIR` / `AH_INPUT_PATH` / `AH_RECEIPT_PATH`。用户键若以 `HERDR_` 或 `A2A_` 开头，或与上述 `AH_*` 重名，会被去掉 |
 | `timeout_sec` | 单次执行上限，默认 600 |
 | `verify` | 可选。一条本机 shell 命令，与 `command` 同一可信等级，原样执行，不做 `{prompt}` / `{session}` 替换。只支持 `context=direct` 的 `json` / `agent`。Skill 条目优先，Skill 未写时用其 Worker 条目的值。`mode=inbox` 写了是配置错误：认领预检 `rejected` + notice，`ah doctor` 报问题，不静默忽略。命令必须只读、可重复。执行者的数据不拼进命令，只经两条通道：stdin 一行 JSON `{"task_id","summary","artifact","artifact_name","checks"}`，以及环境变量 `AH_TASK_ID`、`AH_ARTIFACT`、`AH_RUN_DIR`、`AH_MAIN_STDOUT` |
 | `verify_timeout_sec` | 可选正数，缺省 120，夹紧到 1–1800。继承规则同 `verify` |

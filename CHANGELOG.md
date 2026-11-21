@@ -4,6 +4,7 @@
 
 ## 未发布
 
+- **Herdr 改走 Socket API**：`context=herdr` 不再拉起 `herdr` CLI 做终端文本交接。守护进程通过本机 Herdr Socket（协议 22）开 Pane、启动 Agent、订阅事件。派发只带不超过 300 字节的指针，上游上下文和验收在文件信封里。交卷必须原子写入 `result.json`，且 `attempt_id` 匹配当前尝试。Agent 还停在发指针之前的 idle、没有进入 working，不算交卷，也不消耗修复次数。`session.json` 同时保存对话 id 和 Herdr 绑定。
 - **WorkBuddy 令牌留在提示词里**：云端定时任务每次都是新沙箱，没有可保留的凭据文件。接入提示词把 Bearer 令牌写在【每次运行】的请求头里，全文只出现一次；创建定时任务时这段原样成为任务指令。不再要求另存文件。401/403 才停轮并提醒机主更换令牌。
 - **附件能力（`hub://files/<file_id>`）**：新增中台文件存储（`<configDir>/files/blobs` + `files.db`，目录 `0700`、文件 `0600`；`node.json` 可配 `maxFileBytes`，默认 100MB）与 `/api/v1/files` 上传、流式下载和元数据接口，按上传者与引用任务可见性鉴权。
 - **附件写入、执行与清理**：CLI（`task create`/`reply`、`inbox ask`/`auth` 支持 `--file`，`inbox done` 支持可重复 `--artifact`）与 HTTP 网关（`attachments` / `artifacts`）支持附件；执行器自动下载 `hub://` 文件至 `runs/<Task_ID>/files/` 并写入 `input.json.files[]`；控制台支持图片缩略图与安全下载；`FileRetentionService` 自动清理 24 小时未引用或满 30 天且引用任务均已终态的文件（下载返回 410，Parts 不动）。
