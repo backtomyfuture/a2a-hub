@@ -2,7 +2,11 @@
  "workers": {
   "agy": {
    "command": "agy --dangerously-skip-permissions --print {prompt}",
-   "desc": "Antigravity：通用 Agent，终端/SSH 工具面，按指令现场发挥。权限边界：无头模板显式带 --dangerously-skip-permissions（必须位于 --print 之前）。有副作用，approval_class 保持 approve；任务参数不得改写命令或权限。",
+   "desc": "Antigravity：通用 Agent，终端/SSH 工具面，按指令现场发挥。权限边界：无头模板显式带 --dangerously-skip-permissions（必须位于 --print 之前）。有副作用，approval_class 保持 approve；任务参数不得改写命令或权限。推荐显式配置 default_model；未核实模型参数的执行器保持 null 与 supports_model_override=false。",
+   "harness": "agy",
+   "default_model": null,
+   "supports_model_override": false,
+   "skills": [],
    "mode": "agent",
    "name": "Antigravity",
    "side_effect": "write",

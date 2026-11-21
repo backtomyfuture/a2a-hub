@@ -13,13 +13,15 @@ import { pickSignedDecision, publicKeyOf } from "../approval-sign.mjs";
 import { f1 } from "../bus/tables.mjs";
 import { capIdOf } from "../config.mjs";
 import { agentCanSeeTask, assertAgentRoute } from "../hub/agent-access.mjs";
-import { admissionOf, actsAsLeader, httpError, parseCardMetadata, presetHttpCardFields, validateNodeName, validatePollIntervalMin } from "../hub/admission.mjs";
+import { assertModelOverride, parseCardModel, admissionOf, actsAsLeader, httpError, parseCardMetadata, presetHttpCardFields, validateNodeName, validatePollIntervalMin } from "../hub/admission.mjs";
 import { alignNodeReceiveMode, removeHttpAgentSchedule, saveHttpAgentSchedule } from "../hub/capabilities.mjs";
 import { isStaleWorking } from "../hub/stale.mjs";
 import { rosterNodeVisible } from "./longpoll-broker.mjs";
 import { submitAgentReceipt } from "../inbox.mjs";
 import { readTaskMeta, withRefreshedLease } from "../kernel-util.mjs";
-import { DAEMON_VERSION } from "../kernel.mjs";
+import { modelAuditOf } from "../receipt.mjs";
+import { workerCardFields } from "../hub/cards.mjs";
+import { DAEMON_VERSION, taskModelDecision } from "../kernel.mjs";
 
 const LEADER_UPDATE_STATUSES = new Set([
   "completed",
@@ -375,6 +377,8 @@ function buildTaskBrief(task, taskMsgs, partsByParent, artsByTask, view = {}) {
     from_node: fromNode,
     source: f1(task, "Source"),
     target_node: f1(task, "Target_Node"),
+    model: modelAuditOf(f1(task, "Metadata")),
+    requested_model: metadata?.requested_model ?? null,
     worker_hint: f1(task, "Worker_Hint"),
     skill_id: f1(task, "Skill_ID"),
     approval_class: f1(task, "Approval_Class") || "auto",
@@ -491,9 +495,30 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
   const target = f1(task, "Target_Node");
   if (target !== node) throw httpError(403, `任务目标节点是 ${target}，不是 ${node}`);
 
+  const st = f1(task, "Status");
+  const cards = await bus.listRecords(bus.tables.agentCards);
+  const pinnedWorker = f1(task, "Worker_Hint") || worker;
+  const mine = cards.filter((c) => f1(c, "Node") === node);
+  const hasNamedWorkers = mine.some((c) => f1(c, "Worker"));
+  const selected = mine.find((c) => f1(c, "Worker") === pinnedWorker && f1(c, "Skill_ID") === "agent")
+    || mine.find((c) => f1(c, "Worker") === pinnedWorker)
+    || ((!f1(task, "Worker_Hint") || !hasNamedWorkers) ? mine.find((c) => !f1(c, "Worker")) : null)
+    || (!pinnedWorker ? mine.find((c) => f1(c, "Skill_ID") === (f1(task, "Skill_ID") || "agent")) : null);
+  if (!selected && (f1(task, "Worker_Hint") || hasNamedWorkers)) {
+    throw httpError(400, "worker_not_found：未找到声明的 Worker，禁止套用其它 Worker 的模型配置");
+  }
+  const selectedWorker = pinnedWorker || f1(selected, "Worker");
+  const spec = parseCardModel(selected);
+  let model;
+  try { model = taskModelDecision(task, st === "working" && !modelAuditOf(f1(task, "Metadata")) ? {} : spec); }
+  catch (e) { throw httpError(400, e.message); }
+  assertModelOverride(model.requested_model, workerCardFields(spec, { remote: true }));
+  const metadata = readTaskMeta(f1(task, "Metadata"));
+  if (!metadata.ok) throw httpError(400, "任务 Metadata 无法读取");
+  const modelMetadata = JSON.stringify({ ...metadata.meta, model });
+
   const { msgByTask, partsByParent } = groupByTask(messages, parts, []);
   const taskMsgs = msgByTask.get(taskId) ?? [];
-  const st = f1(task, "Status");
   const claimedBy = f1(task, "Claimed_By");
   const reqLease = normalizeLeaseId(leaseId);
 
@@ -506,7 +531,7 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
         throw httpError(409, "任务正由同节点另一运行实例活跃执行中，请勿并发重复认领");
       }
       const takeoverFields = { Heartbeat_At: nowIso() };
-      const takeoverMeta = metadataForClaim(f1(task, "Metadata"), reqLease);
+      const takeoverMeta = metadataForClaim(modelMetadata, reqLease);
       if (takeoverMeta) takeoverFields.Metadata = takeoverMeta;
       await bus.updateRecord(bus.tables.tasks, task.record_id, takeoverFields);
       onWake();
@@ -515,6 +540,7 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
         ok: true,
         takeover: true,
         lease_id: reqLease,
+        model,
         task_id: taskId,
         status: "working",
         run_id: f1(task, "Latest_Run"),
@@ -524,11 +550,15 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
         criteria: instr.criteria,
       };
     }
+    if (!modelAuditOf(f1(task, "Metadata"))) {
+      await bus.updateRecord(bus.tables.tasks, task.record_id, { Metadata: modelMetadata });
+    }
     const instr = instructionOfTask(taskMsgs, partsByParent);
     return {
       ok: true,
       already_claimed: true,
       ...(currentLease ? { lease_id: currentLease } : {}),
+      model,
       task_id: taskId,
       status: "working",
       run_id: f1(task, "Latest_Run"),
@@ -566,8 +596,8 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
       Heartbeat_At: nowIso(),
     };
     if (runId) updateFields.Latest_Run = runId;
-    if (!f1(task, "Worker_Hint") && worker) updateFields.Worker_Hint = worker;
-    const claimMeta = metadataForClaim(f1(task, "Metadata"), reqLease);
+    if (!f1(task, "Worker_Hint") && selectedWorker) updateFields.Worker_Hint = selectedWorker;
+    const claimMeta = metadataForClaim(modelMetadata, reqLease);
     if (claimMeta) updateFields.Metadata = claimMeta;
     await bus.updateRecord(bus.tables.tasks, task.record_id, updateFields);
     onWake();
@@ -577,6 +607,7 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
       ok: true,
       action: "execute",
       ...(reqLease ? { lease_id: reqLease } : {}),
+      model,
       task_id: taskId,
       status: "working",
       run_id: runId,
@@ -605,7 +636,7 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
       Status: "working",
       Heartbeat_At: nowIso(),
     };
-    const resumeMeta = metadataForClaim(f1(task, "Metadata"), reqLease);
+    const resumeMeta = metadataForClaim(modelMetadata, reqLease);
     if (resumeMeta) updateFields.Metadata = resumeMeta;
     await bus.updateRecord(bus.tables.tasks, task.record_id, updateFields);
     onWake();
@@ -615,6 +646,7 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
       action: "resume",
       resume_reason: "answer",
       ...(reqLease ? { lease_id: reqLease } : {}),
+      model,
       task_id: taskId,
       status: "working",
       run_id: f1(task, "Latest_Run"),
@@ -636,7 +668,7 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
       Status: "working",
       Heartbeat_At: nowIso(),
     };
-    const authMeta = metadataForClaim(f1(task, "Metadata"), reqLease);
+    const authMeta = metadataForClaim(modelMetadata, reqLease);
     if (authMeta) updateFields.Metadata = authMeta;
     await bus.updateRecord(bus.tables.tasks, task.record_id, updateFields);
     onWake();
@@ -647,6 +679,7 @@ async function claimTaskForNode({ bus, node, taskId, worker = "", leaseId = "", 
       resume_reason: "auth_decision",
       decision,
       ...(reqLease ? { lease_id: reqLease } : {}),
+      model,
       task_id: taskId,
       status: "working",
       run_id: f1(task, "Latest_Run"),
@@ -1014,12 +1047,22 @@ export async function handleAgentGatewayRequest({
         : (String(spec?.cap_id ?? "").trim()
           || capIdOf(capKey, { ...(specWorker ? { worker: specWorker, skill: skillId } : {}) }, capPrefix));
 
+      const previous = existingCards.find((r) => f1(r, "Node") === node && f1(r, "Cap_ID") === capId);
+      const rawModel = { ...parseCardModel(previous) };
+      for (const key of ["harness", "default_model", "supports_model_override", "skills"]) {
+        if (Object.hasOwn(body, key)) rawModel[key] = body[key];
+        if (Object.hasOwn(spec, key)) rawModel[key] = spec[key];
+      }
+      let workerModel;
+      try { workerModel = workerCardFields(rawModel, { remote: true }); }
+      catch (e) { throw httpError(400, e.message); }
       const storedRole = identityOnly ? "leader" : role;
       // 身份名片新建时直接 admitted。更新不写 Admission / Display_Name / Admin_Note，避免盖掉机主决定。
       const preset = identityOnly
         ? presetHttpCardFields({
           node,
           role: "leader",
+          model: workerModel,
           receiveMode,
           description: String(spec?.description ?? spec?.desc ?? nodeDesc),
           availability: "online",
@@ -1055,7 +1098,7 @@ export async function handleAgentGatewayRequest({
           Node_Desc: nodeDesc,
           Zone: zone,
           Updated_At: nowMinute(),
-          Metadata: JSON.stringify(withPoll({ kind, role: storedRole, mode: receiveMode, worker: specWorker })),
+          Metadata: JSON.stringify(withPoll({ kind, role: storedRole, mode: receiveMode, worker: specWorker, worker_model: workerModel })),
         };
 
       const match = existingCards.find((r) => f1(r, "Node") === node && f1(r, "Cap_ID") === capId);
@@ -1068,6 +1111,7 @@ export async function handleAgentGatewayRequest({
         const meta = withPoll(preset
           ? { kind: "agent", role: "leader", mode: receiveMode, preset: true }
           : { kind, role: storedRole, mode: receiveMode, worker: specWorker });
+        meta.worker_model = workerModel;
         fields.Metadata = JSON.stringify(keepOwnerFlags(f1(match, "Metadata"), meta));
         const resUpd = await bus.updateRecord(bus.tables.agentCards, match.record_id, fields);
         const current = resUpd?.record ?? match;
@@ -1159,6 +1203,7 @@ export async function handleAgentGatewayRequest({
       }
       grouped.get(node).caps.push({
         cap_id: f1(c, "Cap_ID"),
+        ...workerCardFields(parseCardModel(c), { remote: true }),
         worker: f1(c, "Worker"),
         skill_id: f1(c, "Skill_ID"),
         skill_name: f1(c, "Skill_Name"),
@@ -1533,6 +1578,8 @@ export async function handleAgentGatewayRequest({
       artifacts = normalizeAttachments(body.artifacts, { fileStore });
     }
     try {
+      const receiptTask = (await bus.listRecords(bus.tables.tasks)).find((t) => f1(t, "Task_ID") === taskId);
+      const model = modelAuditOf(f1(receiptTask, "Metadata"));
       const receipt = await submitAgentReceipt({
         bus,
         node,
@@ -1546,6 +1593,7 @@ export async function handleAgentGatewayRequest({
       });
       onWake();
       sendJson(res, 200, {
+        model,
         ok: true,
         task_id: receipt.taskId,
         msg_id: receipt.msgId,

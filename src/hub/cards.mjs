@@ -6,6 +6,7 @@
 // update_multi 是 schema 2.0 后续 PATCH 换卡的开关，缺了就不能延时更新同一张卡。
 
 import { f1 } from "../bus/tables.mjs";
+export { workerModelFields as workerCardFields } from "../config.mjs";
 
 const INSTRUCTION_LIMIT = 300;
 const PARAM_LIMIT = 300;

@@ -9,7 +9,7 @@ import { parseCriteria } from "../acceptance.mjs";
 import { controlKeysIn } from "../config.mjs";
 import { f1 } from "../bus/tables.mjs";
 import { appendFileParts, normalizeAttachments } from "../attachments.mjs";
-import { admissionOf } from "./admission.mjs";
+import { admissionOf, assertModelOverride, formatAgentCard } from "./admission.mjs";
 
 const APPROVALS = new Set(["auto", "notify", "approve"]);
 // 与 src/kernel.mjs 的 HOP_LIMIT 对齐。超过 8 的单节点会直接熔断，这里不落表。
@@ -113,7 +113,7 @@ function buildInstructionData(params, criteria) {
 
 export function parseCreateArgv(argv) {
   const out = {
-    configDir: "", from: "", source: "", to: "", cap: "", worker: "", text: "", paramsRaw: undefined, criteriaRaw: undefined, context: "", ref: "", approval: "", idempotencyKey: "", files: [],
+    configDir: "", from: "", source: "", to: "", cap: "", worker: "", requested_model: null, text: "", paramsRaw: undefined, criteriaRaw: undefined, context: "", ref: "", approval: "", idempotencyKey: "", files: [],
   };
   const take = (i, flag) => {
     const value = argv[i + 1];
@@ -128,6 +128,7 @@ export function parseCreateArgv(argv) {
     else if (flag === "--to") out.to = take(i, flag);
     else if (flag === "--cap" || flag === "--skill") out.cap = take(i, flag);
     else if (flag === "--worker") out.worker = take(i, flag);
+    else if (flag === "--model") out.requested_model = take(i, flag);
     else if (flag === "--text") out.text = take(i, flag);
     else if (flag === "--params") out.paramsRaw = take(i, flag);
     else if (flag === "--criteria") out.criteriaRaw = take(i, flag);
@@ -439,7 +440,7 @@ function positiveSec(raw, fallback) {
 }
 
 export async function createTask({
-  bus, from = "", source = "", to, cap, worker = "", text = "", params, criteria, context = "", ref = "", approval = "", idempotencyKey = "", now = new Date(), validateTarget = true,
+  bus, from = "", source = "", to, cap, worker = "", requested_model = null, text = "", params, criteria, context = "", ref = "", approval = "", idempotencyKey = "", now = new Date(), validateTarget = true,
   attachments, fileStore = null, queueTimeoutSec = 0, leaseTtlSec = 0, waitTimeoutSec = 0,
 }) {
   if (!bus?.tables?.messages || !bus.tables.parts || !bus.tables.tasks) {
@@ -449,6 +450,7 @@ export async function createTask({
   // 附件校验也在第一笔写之前：hub:// 不存在或外部 URL 非法时不留半截消息。
   const files = normalizeAttachments(attachments, { fileStore });
   const { node, skill, workerHint } = await resolveDispatchTarget({ bus, to, cap, worker, validateTarget });
+  if (!bus.tables.agentCards) assertModelOverride(requested_model, null);
   let policy = pacePolicy({ cls: "host" });
   if (bus.tables.agentCards) {
     let cards = [];
@@ -457,6 +459,10 @@ export async function createTask({
     } catch (e) {
       throw new Error(`读取 AgentCards 以确定超时失败：${e?.message ?? e}`);
     }
+    const target = cards.find((c) => cardText(c, "Node") === node
+      && (!workerHint || cardText(c, "Worker") === workerHint)
+      && cardText(c, "Skill_ID") === skill);
+    assertModelOverride(requested_model, target ? formatAgentCard(target) : null);
     policy = defaultTaskPolicy(cards, node);
   }
   const sender = String(from || source || "hub").trim();
@@ -569,6 +575,7 @@ export async function createTask({
   if (workerHint) taskFields.Worker_Hint = workerHint;
   // 超时/租约只进 Metadata，不加 Tasks 列。调用方传入的正数优先，0 或缺省用目标节点接收方式的默认值。
   taskFields.Metadata = JSON.stringify({
+    ...(requested_model !== null ? { requested_model } : {}),
     queue_timeout_sec: positiveSec(queueTimeoutSec, policy.queueTimeoutSec),
     lease_ttl_sec: positiveSec(leaseTtlSec, policy.leaseTtlSec),
     wait_timeout_sec: positiveSec(waitTimeoutSec, policy.waitTimeoutSec),

@@ -3,6 +3,7 @@
 // 取单、认领、回报仍由 admission.mjs 按 template / receive 拼；intro 只换开场，prompt 才换整段。
 // 文件每次读取，改完刷新控制台即可。某条不合法就跳过；整份损坏不覆盖，先用内存里的初始四条。
 
+import { workerModelFields } from "../config.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -12,6 +13,11 @@ import {
   validateTemplate,
 } from "./admission.mjs";
 
+function templateModelFields(entry) {
+  const { active_model, ...config } = workerModelFields(entry, { remote: true });
+  return config;
+}
+
 export const AGENT_TEMPLATES_FILE = "agent_templates.json";
 
 const MAX_BYTES = 256 * 1024;
@@ -20,6 +26,7 @@ const ID_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const ENTRY_KEYS = new Set([
   "id", "label", "hint", "access", "template", "receive", "role",
   "interval", "defaults", "intro", "prompt", "preset",
+  "harness", "default_model", "supports_model_override", "skills",
 ]);
 const DEFAULT_KEYS = new Set([
   "node", "displayName", "description", "adminNote",
@@ -39,6 +46,7 @@ const DEFAULT_INTROS = {
 export function seedAgentTemplates() {
   return AGENT_TEMPLATE_PRESETS.map((preset) => {
     const entry = {
+      ...templateModelFields(preset),
       id: preset.id,
       label: preset.label,
       access: preset.access,
@@ -157,7 +165,11 @@ function parseEntry(raw, index) {
     if (read.error) return { errors: [`${where}（${id}）：${read.error}，已跳过`] };
   }
   if (intro.value && prompt.value) errors.push(`${where}（${id}）同时写了 intro 和 prompt，使用 prompt`);
+  let model;
+  try { model = templateModelFields(raw); }
+  catch (e) { return { errors: [`${where}：${e.message}，已跳过`] }; }
   const preset = {
+    ...model,
     id,
     label: label.value,
     access: "http",
@@ -177,6 +189,7 @@ function parseEntry(raw, index) {
 export function consoleTemplatePresets(presets) {
   return presets.map((preset) => {
     const view = {
+      ...templateModelFields(preset),
       id: preset.id,
       label: preset.label,
       access: preset.access,

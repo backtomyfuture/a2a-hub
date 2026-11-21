@@ -1,7 +1,8 @@
 // 名片接纳与新 Agent 接入引导纯函数：归一化 Admission、校验管理请求参数、构造 onboarding 指引。
 
 import { f1 } from "../bus/tables.mjs";
-import { capIdOf } from "../config.mjs";
+import { workerCardFields } from "./cards.mjs";
+import { modelString, capIdOf } from "../config.mjs";
 
 export const ADMISSION_VALUES = Object.freeze(["admitted", "pending", "rejected"]);
 export const ACCESS_VALUES = Object.freeze(["http", "host", "inbox"]);
@@ -189,6 +190,16 @@ function minuteStamp(date = new Date()) {
   return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())} ${p(date.getHours())}:${p(date.getMinutes())}`;
 }
 
+export function assertModelOverride(requestedModel, card) {
+  let requested;
+  try { requested = modelString(requestedModel, "requested_model"); }
+  catch (e) { throw httpError(400, e.message); }
+  if (requested !== null && card?.supports_model_override !== true) {
+    throw httpError(400, "model_override_not_supported：目标 Worker 不支持单次模型覆盖");
+  }
+  return requested;
+}
+
 // HTTP Agent 的默认可派单名片。Leader 与 Worker 同一张形状，差别只在 Metadata.role。
 export function presetHttpCardFields({
   node,
@@ -202,10 +213,11 @@ export function presetHttpCardFields({
   pollIntervalMin,
   template = "",
   templateId = "",
+  model = {},
 } = {}) {
   const storedRole = role === "hybrid" ? "leader" : role;
   const interval = pollIntervalForCard(receiveMode, pollIntervalMin);
-  const meta = { kind: "agent", role: storedRole, mode: receiveMode, preset: true };
+  const meta = { kind: "agent", role: storedRole, mode: receiveMode, preset: true, worker_model: workerCardFields(model, { remote: true }) };
   if (interval > 0) meta.poll_interval_min = interval;
   // 粗分类只在非默认时落盘。节点模板 id 单独记下，轮换 Token 时才能回到同一套 Step 3 提示词。
   // generic 与 WorkBuddy 的粗分类都是 generic，只靠 template 分不开。
@@ -415,9 +427,16 @@ export function parseCardMetadata(card) {
   }
 }
 
+export function parseCardModel(card) {
+  const raw = f1(card, "Metadata");
+  try { return (typeof raw === "string" ? JSON.parse(raw) : raw)?.worker_model || {}; }
+  catch { return {}; }
+}
+
 export function formatAgentCard(c) {
   const { kind, role, manual, preset, poll_interval_min, template, template_id } = parseCardMetadata(c);
   return {
+    ...workerCardFields(parseCardModel(c), { remote: true }),
     record_id: c.record_id,
     cap_id: f1(c, "Cap_ID"),
     node: f1(c, "Node"),
@@ -883,6 +902,7 @@ export function buildOnboarding({
     prompt = fillPromptPlaceholders(preset.prompt, promptCtx);
   }
 
+  steps.push("模型配置：推荐为 Worker 显式设置 default_model。只有确实能执行 claim.model.effective_model 时才声明 supports_model_override=true；不能执行时应拒绝，禁止静默忽略。active_model 未观测时为 null。");
   return {
     access,
     role,

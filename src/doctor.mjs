@@ -686,6 +686,10 @@ export async function doctor(configDir, appDir, opts = {}) {
       const flat = normalizeCommands(cmds, (msg) => { bad(msg); layerProblems++; });
       const names = Object.keys(flat);
       const workerNames = cmds.workers && typeof cmds.workers === "object" && !Array.isArray(cmds.workers) ? Object.keys(cmds.workers) : [];
+      for (const name of workerNames) {
+        if (cmds.workers[name]?.default_model == null) info(`Warning: Worker ${name} 未配置 default_model：兼容沿用 CLI 默认；推荐显式设置`);
+        if (cmds.workers[name]?.context === "herdr" && cmds.workers[name]?.default_model != null) info(`Warning: Worker ${name}：Herdr 模型执行尚待 M2；M1 不会静默忽略 default_model`);
+      }
       const capPrefix = raw?.capPrefix ?? raw?.node ?? "";
       if (names.length) {
         const { summary, layout, hints } = describeCommands(cmds, flat, capPrefix, kind);
@@ -698,7 +702,7 @@ export async function doctor(configDir, appDir, opts = {}) {
       const shapeProblems = layerProblems + auditCommandsShape(flat, capPrefix);
       if (!shapeProblems && names.length) ok("commands.json 字段校验通过（Worker 引用、mode / context / timeout_sec / verify 取值合法，cap_id 无重复）");
       problems += shapeProblems;
-      problems += await auditHerdrSocket(configDir, flat, opts);
+      problems += await auditHerdrSocket(configDir, flat, { ...opts, herdrSocketPath: opts.herdrSocketPath ?? raw?.herdrSocketPath });
       // 模板只查一遍：节点本尊的条目加上每个 Worker 自己的启动模板。
       const templates = {};
       for (const [key, entry] of Object.entries(flat)) if (!entry?.worker) templates[key] = entry;
