@@ -9,6 +9,8 @@ import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 import * as herdr from '../src/herdr-socket.mjs';
 import * as doctor from '../src/doctor.mjs';
+import { HerdrRuntime } from '../src/herdr-runner.mjs';
+import { herdrMethods } from '../src/kernel-herdr.mjs';
 
 const delay = ms => new Promise(r => setTimeout(r, ms));
 async function fixture(fn) {
@@ -24,7 +26,8 @@ async function fixture(fn) {
         if (drop) { s.destroy(); return; }
         if (silent) return;
         const result = r.method === 'ping' ? { type: 'pong', protocol, version: 'fake' }
-          : r.method === 'events.subscribe' ? { type: 'subscription_started' } : { type: 'ok' };
+          : r.method === 'events.subscribe' ? { type: 'subscription_started' }
+          : r.method === 'session.snapshot' ? { type: 'session_snapshot', snapshot: { protocol, workspaces: [], tabs: [], panes: [], agents: [] } } : { type: 'ok' };
         s.write(malformed ? '{}\n' : JSON.stringify({ id: r.id, result }) + '\n');
         if (r.method !== 'events.subscribe') s.end();
       });
@@ -120,10 +123,14 @@ test('connected protocol error never triggers startup', () => fixture(async f =>
   assert.equal(f.calls.length, 0);
 }));
 
-test('Event reconnect never spawns again after the socket budget was consumed', () => fixture(async f => {
-  const c = f.client({ backoff: { baseMs: 1, maxMs: 2, jitter: 0 } }); await c.events.start();
-  const fatal = once(c.events, 'fatal'); await f.closeServer();
-  const [err] = await fatal; assert.equal(err.code, 'server_start_limit'); assert.equal(f.calls.length, 1);
+test('Event exhausted startup budget stays at one spawn and can passively reconnect', () => fixture(async f => {
+  const c = f.client({ backoff: { baseMs: 5, maxMs: 10, jitter: 0.5 }, random: () => 0.5 }); await c.events.start();
+  const diagnostics = [], fatal = []; c.events.on('subscribe_error', e => diagnostics.push(e)); c.events.on('fatal', e => fatal.push(e));
+  await f.closeServer(); await until(() => diagnostics.length > 0 || fatal.length > 0);
+  assert.equal(fatal.length, 0); assert.equal(diagnostics[0].code, 'server_start_limit'); assert.equal(f.calls.length, 1);
+  await delay(25); assert.equal(f.calls.length, 1); assert.equal(c.events.ready, false);
+  const reconnected = once(c.events, 'reconnected', { signal: AbortSignal.timeout(1000) }); await f.listen(); await reconnected;
+  assert.equal(c.events.ready, true); assert.equal(f.calls.length, 1);
 }));
 
 test('stop Event waiter does not cancel Control shared startup', () => fixture(async f => {
@@ -282,3 +289,144 @@ for (const [name, executableMode, code] of [['missing', null, 'ENOENT'], ['nonex
     assert.equal(fs.existsSync(f.socketPath + '.ah-start.lock'), false);
   }));
 }
+
+
+for (const session of ['.', '..']) test(`reserved session ${session} fails closed before spawn`, () => fixture(async f => {
+  await assert.rejects(f.client({ session }).ping(), e => e.code === 'server_start_unsupported');
+  assert.equal(f.calls.length, 0);
+}));
+
+async function until(predicate, timeoutMs = 1000) {
+  const deadline = performance.now() + timeoutMs;
+  while (!predicate()) { if (performance.now() >= deadline) assert.fail('condition did not become true'); await delay(2); }
+}
+function kernelWithRuntime(client) {
+  const runtime = new HerdrRuntime({ socket: client });
+  const kernel = { ...herdrMethods, _herdrRuntime: runtime, _herdrRuntimeReady: runtime.start() };
+  // Observe early rejection so a failing-before test still cleans up deterministically.
+  kernel._herdrRuntimeReady.catch(() => {});
+  return { runtime, kernel };
+}
+
+test('initial recovery failure stays observable but Kernel initialization completes after external ACK/snapshot', () => fixture(async f => {
+  f.serverOptions.spawn = f.starter(ch => ch.emit('error', Object.assign(new Error('fake missing executable'), { code: 'ENOENT' })));
+  const c = f.client({ backoff: { baseMs: 2, maxMs: 6, jitter: 0.5 }, random: () => 0.5 });
+  const diagnostics = [], fatal = []; c.events.on('subscribe_error', e => diagnostics.push(e)); c.events.on('fatal', e => fatal.push(e));
+  const { runtime, kernel } = kernelWithRuntime(c);
+  let initialized = false; const ready = kernel.ensureHerdrRuntime().then(rt => { initialized = true; return rt; }); ready.catch(() => {});
+  try {
+    await until(() => diagnostics.some(e => e.code === 'server_start_failed') || fatal.length > 0);
+    assert.equal(fatal.length, 0, 'ordinary unavailable startup must not poison initial readiness');
+    await delay(20); assert.equal(initialized, false); assert.equal(f.calls.length, 1); assert.equal(c.events.ready, false);
+    await f.listen();
+    assert.equal(await Promise.race([ready, delay(1000).then(() => { throw new Error('Kernel never recovered'); })]), runtime);
+    assert.equal(c.events.ready, true); assert.equal(runtime.stale, false); assert.equal(f.calls.length, 1);
+    assert.ok(f.requests.findIndex(r => r.method === 'events.subscribe') < f.requests.findIndex(r => r.method === 'session.snapshot'));
+  } finally { runtime.stop(); }
+}));
+
+test('once-ready Runtime passively reconnects and resyncs generation after failed recovery, without more spawn', () => fixture(async f => {
+  await f.listen();
+  f.serverOptions.spawn = f.starter(ch => ch.emit('exit', 7, null));
+  const c = f.client({ backoff: { baseMs: 2, maxMs: 6, jitter: 0.5 }, random: () => 0.5 });
+  const diagnostics = [], fatal = []; c.events.on('subscribe_error', e => diagnostics.push(e)); c.events.on('fatal', e => fatal.push(e));
+  const { runtime, kernel } = kernelWithRuntime(c);
+  try {
+    await kernel.ensureHerdrRuntime(); const generation = c.events.generation;
+    await f.closeServer();
+    await until(() => diagnostics.some(e => e.code === 'server_start_failed') || fatal.length > 0);
+    assert.equal(fatal.length, 0); await delay(20); assert.equal(f.calls.length, 1); assert.equal(runtime.stale, true);
+    const resynced = once(runtime, 'resynced', { signal: AbortSignal.timeout(1000) }); await f.listen(); await resynced;
+    assert.equal(c.events.ready, true); assert.ok(c.events.generation > generation); assert.equal(runtime.stale, false);
+    assert.equal(await kernel.ensureHerdrRuntime(), runtime); assert.equal(f.calls.length, 1);
+  } finally { runtime.stop(); }
+}));
+
+test('close during passive recovery rejects pending Kernel readiness and never revives', () => fixture(async f => {
+  f.serverOptions.spawn = f.starter(ch => ch.emit('exit', 9, null));
+  const c = f.client({ backoff: { baseMs: 2, maxMs: 6, jitter: 0 } });
+  const diagnostics = [], fatal = []; c.events.on('subscribe_error', e => diagnostics.push(e)); c.events.on('fatal', e => fatal.push(e));
+  const { runtime, kernel } = kernelWithRuntime(c);
+  try {
+    await until(() => diagnostics.length > 0 || fatal.length > 0); assert.equal(fatal.length, 0);
+    c.close(); await assert.rejects(kernel.ensureHerdrRuntime(), e => e.code === 'connection_closed');
+    const count = f.requests.length; await f.listen(); await delay(25);
+    assert.equal(c.events.ready, false); assert.equal(f.requests.length, count); assert.equal(f.calls.length, 1);
+    await assert.rejects(c.events.start(), e => e.code === 'connection_closed');
+  } finally { runtime.stop(); }
+}));
+
+
+for (const [label, start, code] of [
+  ['permission denied executable', (f, ch) => ch.emit('error', Object.assign(new Error('denied'), { code: 'EACCES' })), 'server_start_failed'],
+  ['invalid startup filesystem', (f, ch) => ch.emit('error', Object.assign(new Error('bad path'), { code: 'ENOTDIR' })), 'server_start_failed'],
+  ['unsupported readiness protocol', f => f.listen({ protocol: 21 }), 'protocol_unsupported'],
+  ['malformed readiness protocol', f => f.listen({ malformed: true }), 'protocol_error'],
+]) test(`Event permanent ${label} fails clearly instead of entering passive retry`, () => fixture(async f => {
+  f.serverOptions.spawn = f.starter(ch => start(f, ch));
+  const c = f.client({ backoff: { baseMs: 2, maxMs: 5, jitter: 0 } }), fatal = [];
+  c.events.on('fatal', e => fatal.push(e));
+  await assert.rejects(c.events.start(), e => e.code === code);
+  assert.equal(fatal.length, 1); const requests = f.requests.length;
+  await delay(15); assert.equal(f.requests.length, requests); assert.equal(f.calls.length, 1);
+  await assert.rejects(c.events.start(), e => e.code === 'connection_closed');
+}));
+
+test('Event initial Socket permission failure is terminal and never starts a process', t => fixture(async f => {
+  t.mock.method(net, 'createConnection', () => {
+    const s = new EventEmitter(); s.destroy = () => {}; s.setKeepAlive = () => {};
+    queueMicrotask(() => s.emit('error', Object.assign(new Error('denied'), { code: 'EACCES' })));
+    return s;
+  });
+  const c = f.client(); await assert.rejects(c.events.start(), e => e.raw?.code === 'EACCES'); assert.equal(f.calls.length, 0);
+}));
+
+test('closing synchronously in recovery diagnostic creates no new backoff timer', t => fixture(async f => {
+  f.serverOptions.spawn = f.starter(ch => ch.emit('exit', 1, null));
+  const c = f.client({ backoff: { baseMs: 5000, maxMs: 5000, jitter: 0 } });
+  const original = globalThis.setTimeout, longTimers = []; let closed = false;
+  t.mock.method(globalThis, 'setTimeout', (fn, ms, ...args) => {
+    const timer = original(fn, ms, ...args); if (closed && ms >= 5000) longTimers.push(timer); return timer;
+  });
+  c.events.on('subscribe_error', () => { closed = true; c.close(); });
+  try { await assert.rejects(c.events.start(), e => e.code === 'connection_closed'); assert.equal(longTimers.length, 0); }
+  finally { longTimers.forEach(clearTimeout); }
+}));
+
+for (const mode of ['timeout', 'locked', 'cooldown']) test(`Event ${mode} startup remains passive and recovers externally without another spawn`, () => fixture(async f => {
+  f.serverOptions.startTimeoutMs = 35;
+  f.serverOptions.spawn = f.starter(() => {});
+  if (mode === 'locked') fs.writeFileSync(f.socketPath + '.ah-start.lock', JSON.stringify({ pid: 2147483647 }));
+  if (mode === 'cooldown') fs.writeFileSync(f.socketPath + '.ah-start.attempt.json', JSON.stringify({ at: Date.now() }));
+  const c = f.client({ backoff: { baseMs: 2, maxMs: 6, jitter: 0.5 }, random: () => 0.5 }), diagnostics = [], fatal = [];
+  c.events.on('subscribe_error', e => diagnostics.push(e)); c.events.on('fatal', e => fatal.push(e));
+  const ready = c.events.start(); ready.catch(() => {});
+  await until(() => diagnostics.some(e => e.code === `server_start_${mode}`) || fatal.length > 0);
+  assert.equal(fatal.length, 0); const spawns = mode === 'timeout' ? 1 : 0;
+  assert.equal(f.calls.length, spawns); await delay(15); assert.equal(f.calls.length, spawns);
+  await f.listen(); await Promise.race([ready, delay(1000).then(() => { throw new Error('passive reconnect never ACKed'); })]);
+  assert.equal(c.events.ready, true); assert.equal(f.calls.length, spawns);
+}));
+
+for (const session of ['.', '..']) test(`Event reserved session ${session} rejects initial readiness with zero spawn`, () => fixture(async f => {
+  const c = f.client({ session });
+  await assert.rejects(c.events.start(), e => e.code === 'server_start_unsupported'); assert.equal(f.calls.length, 0);
+}));
+
+test('passive retry preserves bounded exponential jittered frequency, not a busy loop', () => fixture(async f => {
+  f.serverOptions.spawn = f.starter(ch => ch.emit('exit', 2, null));
+  const attempts = [];
+  const c = f.client({ backoff: { baseMs: 40, maxMs: 80, factor: 2, jitter: 0.5 }, random: () => { attempts.push(performance.now()); return 0.5; } });
+  const ready = c.events.start(); ready.catch(() => {});
+  await until(() => attempts.length >= 3);
+  // Expected sleeps are 30ms, then 60ms; generous lower bounds tolerate timer resolution.
+  assert.ok(attempts[1] - attempts[0] >= 20); assert.ok(attempts[2] - attempts[1] >= 40);
+  assert.equal(f.calls.length, 1); c.close(); await assert.rejects(ready, e => e.code === 'connection_closed');
+}));
+
+test('Event synchronous invalid Socket configuration is terminal, not passive retry', t => fixture(async f => {
+  t.mock.method(net, 'createConnection', () => { throw Object.assign(new TypeError('invalid socket option'), { code: 'ERR_INVALID_ARG_VALUE' }); });
+  const c = f.client(); const limit = setTimeout(() => c.close(), 35);
+  try { await assert.rejects(c.events.start(), e => e.raw?.code === 'ERR_INVALID_ARG_VALUE'); assert.equal(f.calls.length, 0); }
+  finally { clearTimeout(limit); }
+}));

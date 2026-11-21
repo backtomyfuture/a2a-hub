@@ -210,6 +210,15 @@ function canStartAfter(error) {
     && error.code === "server_unavailable" && ["ENOENT", "ECONNREFUSED"].includes(error.raw?.code);
 }
 
+// A failed spawn budget must not disable passive observation of an externally
+// restored service. Only known availability failures qualify; bad configuration,
+// permissions and readiness protocol errors remain terminal and observable.
+function canPassivelyReconnect(error) {
+  if (!(error instanceof HerdrError) || !error.local) return false;
+  if (["server_start_timeout", "server_start_locked", "server_start_limit", "server_start_cooldown"].includes(error.code)) return true;
+  return error.code === "server_start_failed" && ["ENOENT", "CHILD_EXIT", "EAGAIN", "ENOMEM"].includes(error.raw?.code);
+}
+
 function waitForStartup(promise, { signal, timeoutMs = 0, method = "ensureServerRunning" } = {}) {
   return new Promise((resolve, reject) => {
     let timer;
@@ -294,7 +303,7 @@ async function startServer({ socketPath, session, env, startTimeoutMs, pollMs, c
         throw failed("server_start_cooldown", "其它进程刚尝试过启动；冷却期间不再次 spawn", previous);
       }
       const sessionName = String(session || env?.HERDR_SESSION || "default").trim();
-      if (!SESSION_NAME.test(sessionName)) throw failed("server_start_unsupported", "无法固定合法的 Herdr session", { sessionInvalid: true });
+      if (!SESSION_NAME.test(sessionName) || sessionName === "." || sessionName === "..") throw failed("server_start_unsupported", "无法固定合法的 Herdr session", { sessionInvalid: true });
       const childEnv = { ...env, HERDR_SOCKET_PATH: socketPath, HERDR_SESSION: sessionName };
       delete childEnv.HERDR_CLIENT_SOCKET_PATH; delete childEnv.HERDR_STARTUP_CWD;
       // Persist before spawning; a failure still consumes the cooldown/budget.
@@ -491,7 +500,7 @@ export function paneStatusSubscription(paneId, agentStatus = null) {
 //   disconnected(reason)     连接断开
 //   subscribe_error(error)   订阅被拒（如 pane_not_found）；消费方可在退避期内剪掉失效订阅
 //   protocol_error(error)    非法帧后断开；消费方必须失效缓存并在重连后对账
-//   fatal(error)             订阅请求本身非法（invalid_request），不再重试
+//   fatal(error)             永久配置/权限/就绪协议错误，不再重试；临时启动失败用 subscribe_error 报告
 export class HerdrEvents extends EventEmitter {
   #socketPath;
   #provider;
@@ -546,7 +555,7 @@ export class HerdrEvents extends EventEmitter {
 
   get generation() { return this.#generation; }
 
-  // 首次订阅确认后 resolve；服务端没起来时持续退避重试，stop() 会让它 reject。
+  // 首次 ACK 后 resolve；没有总体 ready 截止（每次连接/ACK 有限时）。临时启动失败保留 pending，stop() reject。
   start() {
     if (this.#stopped) return Promise.reject(localError("connection_closed", "HerdrEvents 已停止，不能重新启动", "events.subscribe"));
     if (this.#readyPromise) return this.#readyPromise;
@@ -599,14 +608,25 @@ export class HerdrEvents extends EventEmitter {
         outcome = { reason: "error", error: err };
       }
       if (this.#stopped || outcome.reason === "fatal") break;
-      if (this.#recover && canStartAfter(outcome.error)) {
-        try { await waitForStartup(this.#recover(), { signal: this.#lifetime.signal, method: "events.subscribe" }); }
-        catch (error) {
-          if (this.#stopped) break;
-          this.#stopped = true; this.#readyReject?.(error); this.emit("fatal", error); break;
-        }
-        continue;
+      if (this.#recover && outcome.error?.delivery === "not_sent"
+        && ["EACCES", "EPERM", "ENOTSOCK", "ENOTDIR", "EINVAL", "ENAMETOOLONG", "EAFNOSUPPORT", "EPROTONOSUPPORT", "ERR_INVALID_ARG_TYPE", "ERR_INVALID_ARG_VALUE"].includes(outcome.error?.raw?.code)) {
+        this.#stopped = true; this.#readyReject?.(outcome.error); this.emit("fatal", outcome.error); break;
       }
+      if (this.#recover && canStartAfter(outcome.error)) {
+        try {
+          await waitForStartup(this.#recover(), { signal: this.#lifetime.signal, method: "events.subscribe" });
+          continue;
+        } catch (error) {
+          if (this.#stopped) break;
+          if (!canPassivelyReconnect(error)) {
+            this.#stopped = true; this.#readyReject?.(error); this.emit("fatal", error); break;
+          }
+          // Keep the original ready promise pending; Kernel caches it. Fall
+          // through to bounded/jittered backoff, never refund the spawn budget.
+          this.emit("subscribe_error", error);
+        }
+      }
+      if (this.#stopped) break; // a diagnostic listener may synchronously close us
       if (outcome.acked) this.#failures = 0;
       if (outcome.reason === "refresh") continue;
       const delay = backoffDelay(this.#failures, this.#backoff, this.#random);
