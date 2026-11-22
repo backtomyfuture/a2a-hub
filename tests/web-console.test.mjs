@@ -96,6 +96,30 @@ test("Agent Card: 正面显著展示能力定位 Summary（不被机主备注掩
   assert.ok(html.includes("擅长 TypeScript 重构与疑难单测修复"));
   assert.ok(!html.includes("这条备注绝对不能覆盖能力定位"));
   assert.ok(!html.includes("<script>"), "必须转义名称中的 HTML 标签");
+
+  const compactHtml = renderAgentCard(
+    {
+      id: "mac-mini--claude",
+      worker_key: "claude",
+      name: "Claude Code",
+      role: "worker",
+      kind: "device-worker",
+      device_name: "Mac mini",
+      summary: "终端编程",
+      skills: ["coding"],
+      tools: ["bash"],
+      default_model: "claude-sonnet-4-5",
+      approval_policy: "risk",
+      enabled: true,
+      online: true,
+    },
+    [],
+    { compactInDevice: true }
+  );
+  assert.ok(compactHtml.includes("is-in-device"));
+  assert.ok(compactHtml.includes(">claude<"), "设备内紧凑卡片副标题应展示短 worker_key");
+  assert.ok(!compactHtml.includes("Mac mini · 本机 CLI"), "设备分组内卡片不应重复显示设备名");
+  assert.ok(compactHtml.includes("需审批"));
 });
 
 test("Web Console DOM Safety: 非 document 对象禁止调用 getElementById", () => {
@@ -156,4 +180,21 @@ test("Web Console UI & Templates: 主题变量切换规则、控件可读文字�
   } finally {
     fs.rmSync(tplDir, { recursive: true, force: true });
   }
+
+  const homeSrc = fs.readFileSync(path.resolve("src", "web", "views", "home.js"), "utf8");
+  assert.equal(homeSrc.includes("home-add-btn"), false, "概览页不得再包含重复的接入按钮");
+  assert.equal(homeSrc.includes("home-dispatch-btn"), false, "概览页不得再包含重复的派发按钮");
+  assert.equal(homeSrc.includes("可用 Agent 能力总览"), false, "概览页不得再重复平铺 Agent 能力卡片");
+  assert.ok(homeSrc.includes("节点负载") && homeSrc.includes("定时巡检") && homeSrc.includes("任务动态"));
+
+  const agentsSrc = fs.readFileSync(path.resolve("src", "web", "views", "agents.js"), "utf8");
+  assert.equal(agentsSrc.includes("agents-add-btn"), false, "Agent 与设备页顶部工具栏不得重复顶部栏接入按钮");
+  assert.ok(
+    agentsSrc.includes("device-node-card") &&
+      agentsSrc.includes("data-toggle-device-collapse") &&
+      agentsSrc.includes("#agent-search-input")
+  );
+
+  const dispatchSrc = fs.readFileSync(path.resolve("src", "web", "components", "dispatch-modal.js"), "utf8");
+  assert.ok(dispatchSrc.includes("dispatch-group") && dispatchSrc.includes("#dispatch-agent-search"));
 });

@@ -2,6 +2,94 @@ import { api } from "../api.js";
 import { setState, store } from "../state.js";
 import { agentSourceLabel, escapeHtml, showToast } from "../utils.js";
 
+function groupEnabledAgents(agents, devices) {
+  const devOrder = [...devices].sort((a, b) => {
+    if (Boolean(a.is_local) !== Boolean(b.is_local)) return a.is_local ? -1 : 1;
+    if (Boolean(a.online) !== Boolean(b.online)) return a.online ? -1 : 1;
+    return String(a.name || a.id).localeCompare(String(b.name || b.id), "zh-CN");
+  });
+  const devMap = new Map(devices.map((d) => [d.id, d]));
+  const groups = [];
+  const handledDeviceIds = new Set();
+
+  for (const d of devOrder) {
+    const items = agents.filter((a) => a.kind === "device-worker" && a.device_id === d.id);
+    if (!items.length) continue;
+    handledDeviceIds.add(d.id);
+    groups.push({
+      id: `dev:${d.id}`,
+      title: d.name || d.id,
+      subtitle: d.id,
+      isLocal: Boolean(d.is_local),
+      items,
+    });
+  }
+
+  for (const a of agents) {
+    if (a.kind !== "device-worker" || !a.device_id || handledDeviceIds.has(a.device_id)) continue;
+    handledDeviceIds.add(a.device_id);
+    const items = agents.filter((x) => x.kind === "device-worker" && x.device_id === a.device_id);
+    const d = devMap.get(a.device_id);
+    groups.push({
+      id: `dev:${a.device_id}`,
+      title: d?.name || a.device_name || a.device_id,
+      subtitle: a.device_id,
+      isLocal: Boolean(d?.is_local),
+      items,
+    });
+  }
+
+  const cloudItems = agents.filter((a) => a.kind !== "device-worker");
+  if (cloudItems.length) {
+    groups.push({
+      id: "cloud",
+      title: "独立 / 云端 Agent",
+      subtitle: "",
+      isLocal: false,
+      items: cloudItems,
+    });
+  }
+
+  return groups;
+}
+
+function renderDispatchOption(agent, preselect) {
+  const searchBlob = [
+    agent.name,
+    agent.id,
+    agent.worker_key,
+    agent.device_id,
+    agent.device_name,
+    agent.default_model,
+    agent.summary,
+    ...(Array.isArray(agent.skills) ? agent.skills : []),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  const dotCls = agent.online ? "dot-online" : "dot-offline";
+  const sub = agent.summary || agent.worker_key || agentSourceLabel(agent);
+
+  return `
+    <label
+      class="card dispatch-option"
+      data-dispatch-item
+      data-search-text="${escapeHtml(searchBlob)}"
+    >
+      <input type="checkbox" name="targets" value="${escapeHtml(agent.id)}" ${preselect.has(agent.id) ? "checked" : ""} style="margin-top:3px" />
+      <div style="min-width:0;flex:1">
+        <div class="row" style="gap:6px">
+          <span class="dot ${dotCls}"></span>
+          <span style="font-weight:600;font-size:13px" class="truncate">${escapeHtml(agent.name)}</span>
+          ${agent.default_model ? `<span class="chip chip-model">${escapeHtml(agent.default_model)}</span>` : ""}
+        </div>
+        <div class="muted truncate" style="font-size:11px;margin-top:2px">${escapeHtml(sub)}</div>
+      </div>
+    </label>
+  `;
+}
+
 export function renderDispatchModal(root, refreshFn) {
   if (!store.showDispatchModal) {
     root.innerHTML = "";
@@ -9,6 +97,8 @@ export function renderDispatchModal(root, refreshFn) {
   }
 
   const agents = (store.state?.agents || []).filter((a) => a.enabled);
+  const devices = store.state?.devices || [];
+  const groups = groupEnabledAgents(agents, devices);
   const preselect = new Set(store.dispatchPreselect || []);
   const contextId = store.dispatchContextId || "";
 
@@ -22,23 +112,35 @@ export function renderDispatchModal(root, refreshFn) {
 
         <form id="dispatch-form" class="stack-md">
           <div class="field">
-            <span>选择执行 Agent（可多选，自动共享同一个 Thread 上下文）*</span>
+            <div class="row-between" style="flex-wrap:wrap;gap:8px">
+              <span>选择执行 Agent（可多选，自动共享同一个 Thread 上下文）*</span>
+              ${
+                agents.length > 4
+                  ? `<input type="text" id="dispatch-agent-search" class="toolbar-search" style="max-width:240px" placeholder="快速筛选 Agent 名称、设备或能力..." />`
+                  : ""
+              }
+            </div>
             ${
               agents.length
-                ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px">
-                    ${agents
+                ? `<div class="stack-sm" style="max-height:290px;overflow-y:auto;padding-right:2px">
+                    ${groups
                       .map(
-                        (a) => `
-                      <label class="card" style="padding:9px 11px;display:flex;gap:8px;align-items:flex-start;cursor:pointer">
-                        <input type="checkbox" name="targets" value="${escapeHtml(a.id)}" ${preselect.has(a.id) ? "checked" : ""} style="margin-top:3px" />
-                        <div style="min-width:0">
-                          <div style="font-weight:600;font-size:13px" class="truncate">${escapeHtml(a.name)}</div>
-                          <div class="muted truncate" style="font-size:11px">${escapeHtml(a.summary || agentSourceLabel(a))}</div>
+                        (g) => `
+                      <div class="dispatch-group" data-dispatch-group>
+                        <div class="dispatch-group-title">
+                          <span>${escapeHtml(g.title)}</span>
+                          ${g.isLocal ? `<span class="pill pill-primary">本机</span>` : ""}
+                          ${g.subtitle ? `<span class="muted mono">${escapeHtml(g.subtitle)}</span>` : ""}
+                          <span class="muted">(${g.items.length})</span>
                         </div>
-                      </label>
+                        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px">
+                          ${g.items.map((a) => renderDispatchOption(a, preselect)).join("")}
+                        </div>
+                      </div>
                     `
                       )
                       .join("")}
+                    <div id="dispatch-search-empty" class="empty-box hidden" style="padding:16px">未找到匹配的 Agent</div>
                   </div>`
                 : `<div class="error-banner">暂无已启用的 Agent，请先接入 Agent 或恢复暂停中的 Agent。</div>`
             }
@@ -85,6 +187,27 @@ export function renderDispatchModal(root, refreshFn) {
   });
   root.querySelector("#dispatch-close")?.addEventListener("click", () => {
     setState({ showDispatchModal: false, dispatchPreselect: [], dispatchContextId: "" });
+  });
+
+  // 使用 classList.toggle 原地过滤，避免重绘 DOM 导致已勾选状态与表单草稿丢失
+  const searchEl = root.querySelector("#dispatch-agent-search");
+  searchEl?.addEventListener("input", (e) => {
+    const q = String(e.target.value || "").trim().toLowerCase();
+    let visibleCount = 0;
+    root.querySelectorAll("[data-dispatch-group]").forEach((grp) => {
+      let grpVisible = 0;
+      grp.querySelectorAll("[data-dispatch-item]").forEach((item) => {
+        const hay = item.getAttribute("data-search-text") || "";
+        const matched = !q || hay.includes(q);
+        item.classList.toggle("hidden", !matched);
+        if (matched) {
+          grpVisible++;
+          visibleCount++;
+        }
+      });
+      grp.classList.toggle("hidden", grpVisible === 0);
+    });
+    root.querySelector("#dispatch-search-empty")?.classList.toggle("hidden", visibleCount > 0);
   });
 
   root.querySelector("#dispatch-form")?.addEventListener("submit", async (e) => {
