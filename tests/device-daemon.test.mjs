@@ -5,15 +5,61 @@ import path from "node:path";
 import test from "node:test";
 import { DeviceDaemon } from "../src/client/device-daemon.mjs";
 import { GatewayClient } from "../src/client/gateway-client.mjs";
-import { saveWorkersJson } from "../src/core/config.mjs";
+import {
+  KNOWN_CLIS,
+  discoverLocalWorkers,
+  mergeDiscoveredWorkers,
+  resolveSpecBinary,
+  saveWorkersJson,
+  whichBinary,
+} from "../src/core/config.mjs";
 import { startHubRuntime } from "../src/core/hub-runtime.mjs";
-import { parseCliOutput } from "../src/core/receipt.mjs";
+import { parseCliOutput, renderWorkerCommand } from "../src/core/receipt.mjs";
 
-test("Receipt Parser: 解析 Claude JSON、Codex JSONL 与 OpenCode JSON 输出提取 sessionId", () => {
+test("Receipt Parser: 解析单对象 JSON、Amp/Claude stream-json、Cline 与 Pi 输出并提取 sessionId", () => {
   const claudeOut = JSON.stringify({ result: "修改完成", session_id: "sess_claude_99", usage: { input_tokens: 10 } });
   const c = parseCliOutput(claudeOut);
   assert.equal(c.text, "修改完成");
   assert.equal(c.sessionId, "sess_claude_99");
+
+  const agyOut = JSON.stringify({ response: "调研结论如下", conversation_id: "conv_agy_42" });
+  const agy = parseCliOutput(agyOut);
+  assert.equal(agy.text, "调研结论如下");
+  assert.equal(agy.sessionId, "conv_agy_42");
+
+  const cursorOut = JSON.stringify({ output: "补丁已应用", chat_id: "chat_cursor_7" });
+  const cur = parseCliOutput(cursorOut);
+  assert.equal(cur.text, "补丁已应用");
+  assert.equal(cur.sessionId, "chat_cursor_7");
+
+  const ampStream = [
+    JSON.stringify({ type: "system", subtype: "init", session_id: "T-amp-123" }),
+    JSON.stringify({
+      type: "assistant",
+      session_id: "T-amp-123",
+      message: { role: "assistant", content: [{ type: "text", text: "过程分片不应重复出现" }] },
+    }),
+    JSON.stringify({ type: "result", subtype: "success", session_id: "T-amp-123", result: "最终唯一结论" }),
+  ].join("\n");
+  const amp = parseCliOutput(ampStream);
+  assert.equal(amp.text, "最终唯一结论");
+  assert.equal(amp.sessionId, "T-amp-123");
+
+  const clineOut = [
+    JSON.stringify({ type: "agent_event", session_id: "cline_sess_5", text: "step 1" }),
+    JSON.stringify({ type: "run_result", session_id: "cline_sess_5", text: "Cline 终态结果" }),
+  ].join("\n");
+  const cl = parseCliOutput(clineOut);
+  assert.equal(cl.text, "Cline 终态结果");
+  assert.equal(cl.sessionId, "cline_sess_5");
+
+  const piOut = [
+    JSON.stringify({ type: "session", id: "pi_sess_88" }),
+    JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Pi 分析完成" }] } }),
+  ].join("\n");
+  const pi = parseCliOutput(piOut);
+  assert.equal(pi.text, "Pi 分析完成");
+  assert.equal(pi.sessionId, "pi_sess_88");
 
   const codexJsonl = [
     JSON.stringify({ type: "thread.started", thread_id: "thr_codex_12" }),
@@ -30,6 +76,68 @@ test("Receipt Parser: 解析 Claude JSON、Codex JSONL 与 OpenCode JSON 输出�
   const oc = parseCliOutput(ocJsonl);
   assert.equal(oc.text, "分析结果如下");
   assert.equal(oc.sessionId, "oc_sess_7");
+});
+
+test("CLI Auto-Discovery: >=26 种 CLI 唯一性、坏软链跳过、多别名探测与无损增量合并", () => {
+  assert.ok(KNOWN_CLIS.length >= 26, `预期 KNOWN_CLIS >= 26，实际 ${KNOWN_CLIS.length}`);
+  const keys = KNOWN_CLIS.map((s) => s.key);
+  assert.equal(new Set(keys).size, keys.length, "KNOWN_CLIS 中不得存在重复 key");
+  for (const required of ["claude", "codex", "opencode", "amp", "droid", "agy", "grok", "cursor", "codebuddy", "kimi", "qwen", "copilot", "cline", "kilo"]) {
+    assert.ok(keys.includes(required), `KNOWN_CLIS 缺少 ${required}`);
+  }
+  const kimiSpec = KNOWN_CLIS.find((s) => s.key === "kimi");
+  assert.equal(kimiSpec.command.includes("--yolo"), false, "Kimi -p 模式不得拼接冲突的 --yolo 参数");
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ah-test-which-"));
+  const binDir = path.join(tmpDir, "bin");
+  fs.mkdirSync(binDir, { recursive: true });
+  try {
+    const mockExe = path.join(binDir, "cbc");
+    fs.writeFileSync(mockExe, "#!/bin/sh\necho ok\n", { mode: 0o755 });
+    const danglingLink = path.join(binDir, "dangling-cli-tool");
+    fs.symlinkSync(path.join(tmpDir, "nonexistent-target"), danglingLink);
+
+    assert.equal(whichBinary("cbc", { env: { PATH: binDir }, homeDir: tmpDir }), mockExe);
+    assert.equal(whichBinary("dangling-cli-tool", { env: { PATH: binDir }, homeDir: tmpDir }), null, "悬空坏软链不得判定为已安装");
+
+    const codebuddySpec = KNOWN_CLIS.find((s) => s.key === "codebuddy");
+    assert.equal(
+      resolveSpecBinary(codebuddySpec, (name) => whichBinary(name, { env: { PATH: binDir }, homeDir: tmpDir })),
+      mockExe,
+      "应能通过别名 cbc 发现 codebuddy"
+    );
+
+    const discovered = discoverLocalWorkers({
+      whichFn: (bin) => (bin === "amp" ? "/mock/amp" : bin === "kimi" ? "/mock/kimi" : null),
+      homeDir: tmpDir,
+      defaultCwd: "/work",
+    });
+    assert.deepEqual(discovered.map((w) => w.key), ["amp", "kimi"]);
+    const ampCmd = renderWorkerCommand({ worker: discovered[0], prompt: "fix tests" });
+    assert.ok(ampCmd.includes("--dangerously-allow-all") && ampCmd.includes("--stream-json"));
+    const kimiCmd = renderWorkerCommand({ worker: discovered[1], prompt: "review" });
+    assert.equal(kimiCmd.includes("--yolo"), false);
+
+    // 增量合并默认保留用户既有配置与自定义 key，仅追加新发现项
+    const existing = [
+      { key: "amp", name: "My Custom Amp", command: "amp -x {prompt}", cwd: "/custom" },
+      { key: "my-script", name: "Script", command: "echo {prompt}", cwd: "/scripts" },
+    ];
+    const m1 = mergeDiscoveredWorkers(existing, discovered, { force: false });
+    assert.deepEqual(m1.added.map((w) => w.key), ["kimi"]);
+    assert.equal(m1.updated.length, 0);
+    assert.equal(m1.workers.find((w) => w.key === "amp").cwd, "/custom");
+    assert.ok(m1.workers.some((w) => w.key === "my-script"));
+
+    // force: true 覆盖同名内置 CLI 但依然保留用户自定义 key
+    const m2 = mergeDiscoveredWorkers(existing, discovered, { force: true });
+    assert.deepEqual(m2.updated.map((w) => w.key), ["amp"]);
+    assert.deepEqual(m2.added.map((w) => w.key), ["kimi"]);
+    assert.equal(m2.workers.find((w) => w.key === "amp").cwd, "/work");
+    assert.ok(m2.workers.some((w) => w.key === "my-script"));
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });
 
 test("DeviceDaemon: 真并发多 Worker 执行、同上下文 Session 续接与 Ed25519 审批验签", async () => {

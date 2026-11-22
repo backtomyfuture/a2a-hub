@@ -9,11 +9,13 @@ import {
   DAEMON_VERSION,
   KNOWN_CLIS,
   detectDefaultModel,
+  discoverLocalWorkers,
   loadAppEnv,
   loadWorkersJson,
+  mergeDiscoveredWorkers,
+  resolveSpecBinary,
   sanitizeSlug,
   saveWorkersJson,
-  whichBinary,
   writeLockedAppEnvVars,
 } from "../core/config.mjs";
 import { shellQuote } from "../core/receipt.mjs";
@@ -560,7 +562,7 @@ export function startHubHttpServer({
     if (method === "GET" && pathname === "/api/v1/worker-presets") {
       if (!requireOwner()) return;
       const presets = KNOWN_CLIS.map((spec) => {
-        const binPath = whichBinary(spec.bin) || "";
+        const binPath = resolveSpecBinary(spec) || "";
         const detected = detectDefaultModel(spec.key);
         const binExpr = binPath || spec.bin;
         return {
@@ -579,8 +581,42 @@ export function startHubHttpServer({
           approval_policy: spec.approvalPolicy,
           installed: Boolean(binPath),
         };
-      });
+      }).sort((a, b) => Number(b.installed) - Number(a.installed));
       return sendJson(res, 200, { ok: true, presets });
+    }
+
+    m = /^\/api\/v1\/devices\/([A-Za-z0-9._-]+)\/workers\/scan$/.exec(pathname);
+    if (method === "POST" && m) {
+      if (!requireOwner()) return;
+      const devId = m[1];
+      const dev = store.getDevice(devId);
+      if (!dev) return sendError(res, 404, "设备不存在", "not_found");
+
+      const body = await readJsonBody(req);
+      if (hubDeviceId && devId === hubDeviceId) {
+        const discovered = discoverLocalWorkers();
+        const existing = loadWorkersJson(configDir);
+        const merged = mergeDiscoveredWorkers(existing, discovered, { force: Boolean(body.force) });
+        if (merged.added.length || merged.updated.length || !fs.existsSync(path.join(configDir, "workers.json"))) {
+          saveWorkersJson(configDir, merged.workers);
+        }
+        const synced = store.syncDeviceWorkers(devId, merged.workers, {});
+        return sendJson(res, 200, {
+          ok: true,
+          local: true,
+          discovered_count: discovered.length,
+          added: merged.added.map((w) => w.key),
+          updated: merged.updated.map((w) => w.key),
+          total: merged.workers.length,
+          ...synced,
+        });
+      }
+
+      return sendJson(res, 200, {
+        ok: true,
+        local: false,
+        cli_command: "ah workers scan",
+      });
     }
 
     m = /^\/api\/v1\/devices\/([A-Za-z0-9._-]+)\/workers$/.exec(pathname);

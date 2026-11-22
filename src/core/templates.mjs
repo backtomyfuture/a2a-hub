@@ -77,6 +77,102 @@ export const DEFAULT_AGENT_TEMPLATES = [
     summary_hint: "擅长结构化数据分析、文档翻译与代码辅助的云端 Agent",
     intro: "你是一个连接在 a2a-hub 上的云端 Worker Agent（千问）。",
   },
+  {
+    id: "openclaw",
+    name: "OpenClaw（个人常驻 Agent）",
+    default_name: "OpenClaw",
+    default_id: "openclaw",
+    role: "leader",
+    transport: "longpoll",
+    poll_interval_min: 2,
+    badge: "Leader · 长连接",
+    summary_hint: "24/7 常驻个人多通道 Agent，负责统一调度任务与对接即时通讯入口",
+    intro: "你是连接在 a2a-hub 上的常驻主调度 Agent（OpenClaw / Leader）。",
+  },
+  {
+    id: "hermes",
+    name: "Hermes Agent（常驻执行助手）",
+    default_name: "Hermes",
+    default_id: "hermes",
+    role: "worker",
+    transport: "poll",
+    poll_interval_min: 5,
+    badge: "Worker · 定时轮询",
+    summary_hint: "具备持久化记忆与技能学习的自主执行 Agent",
+    intro: "你是一个连接在 a2a-hub 上的常驻执行 Worker Agent（Hermes）。",
+  },
+  {
+    id: "manus",
+    name: "Manus（通用自主 Agent）",
+    default_name: "Manus",
+    default_id: "manus",
+    role: "worker",
+    transport: "poll",
+    poll_interval_min: 5,
+    badge: "Worker · 定时轮询",
+    summary_hint: "擅长深度调研、网页操作、报告交付与复杂多步任务",
+    intro: "你是一个连接在 a2a-hub 上的云端自主 Worker Agent（Manus）。",
+  },
+  {
+    id: "kimi-agent",
+    name: "Kimi（月之暗面 Agent）",
+    default_name: "Kimi",
+    default_id: "kimi-agent",
+    role: "worker",
+    transport: "poll",
+    poll_interval_min: 5,
+    badge: "Worker · 定时轮询",
+    summary_hint: "擅长超长文档精读、深度检索与研究资料汇总",
+    intro: "你是一个连接在 a2a-hub 上的云端研究 Worker Agent（Kimi）。",
+  },
+  {
+    id: "coze",
+    name: "Coze / 扣子 Bot",
+    default_name: "Coze Bot",
+    default_id: "coze",
+    role: "worker",
+    transport: "webhook",
+    poll_interval_min: 30,
+    badge: "Worker · Webhook",
+    summary_hint: "通过扣子工作流与插件生态完成垂直业务自动化任务",
+    intro: "你是一个连接在 a2a-hub 上的 Coze Bot Worker Agent。",
+  },
+  {
+    id: "dify",
+    name: "Dify Workflow Agent",
+    default_name: "Dify",
+    default_id: "dify",
+    role: "worker",
+    transport: "webhook",
+    poll_interval_min: 30,
+    badge: "Worker · Webhook",
+    summary_hint: "基于 Dify 编排流程与知识库检索（RAG）的业务 Agent",
+    intro: "你是一个连接在 a2a-hub 上的 Dify 工作流 Worker Agent。",
+  },
+  {
+    id: "n8n",
+    name: "n8n 自动化工作流",
+    default_name: "n8n Flow",
+    default_id: "n8n",
+    role: "worker",
+    transport: "webhook",
+    poll_interval_min: 30,
+    badge: "Worker · Webhook",
+    summary_hint: "通过 n8n Webhook 触发多系统集成、数据同步与自动化通知",
+    intro: "你是一个连接在 a2a-hub 上的 n8n 自动化工作流 Worker。",
+  },
+  {
+    id: "feishu-bot",
+    name: "飞书机器人 / 多维表格 Agent",
+    default_name: "飞书助手",
+    default_id: "feishu-bot",
+    role: "worker",
+    transport: "webhook",
+    poll_interval_min: 30,
+    badge: "Worker · Webhook",
+    summary_hint: "对接飞书群消息、文档、审批与多维表格协作的办公 Agent",
+    intro: "你是一个连接在 a2a-hub 上的飞书协作 Worker Agent。",
+  },
 ];
 
 export function loadAgentTemplates(configDir) {
@@ -91,7 +187,12 @@ export function loadAgentTemplates(configDir) {
   }
   try {
     const raw = JSON.parse(fs.readFileSync(filePath, "utf8"));
-    if (Array.isArray(raw) && raw.length) return raw;
+    if (Array.isArray(raw) && raw.length) {
+      // 保留老环境已自定义的模板，同时增量补充版本升级带来的新内置模板
+      const seen = new Set(raw.map((t) => t?.id).filter(Boolean));
+      const extras = DEFAULT_AGENT_TEMPLATES.filter((t) => !seen.has(t.id));
+      return extras.length ? [...raw, ...extras] : raw;
+    }
   } catch {}
   return DEFAULT_AGENT_TEMPLATES;
 }

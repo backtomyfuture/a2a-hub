@@ -4,7 +4,6 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
 
 export const DAEMON_VERSION = "2.0.0";
 export const STALE_MIN = 20;
@@ -311,36 +310,431 @@ export const KNOWN_CLIS = [
     approvalPolicy: "never",
     defaultModels: [],
   },
+  {
+    key: "amp",
+    bin: "amp",
+    name: "Amp CLI",
+    platform: "amp",
+    summary: "本机 Sourcegraph Amp 自主编程与多步工程 CLI",
+    skills: ["coding", "refactor", "debug", "review", "git"],
+    tools: ["bash", "files", "git", "web"],
+    modelFlag: "--model",
+    command: "{bin} --dangerously-allow-all --stream-json {model_args} -x {prompt}",
+    resumeCommand: "{bin} threads continue {session} --dangerously-allow-all --stream-json -x {prompt}",
+    timeoutSec: 900,
+    approvalPolicy: "never",
+    defaultModels: [],
+  },
+  {
+    key: "droid",
+    bin: "droid",
+    name: "Factory Droid",
+    platform: "droid",
+    summary: "本机 Factory Droid 工程代理与多步代码执行 CLI",
+    skills: ["coding", "refactor", "test", "debug", "git"],
+    tools: ["bash", "files", "git", "web"],
+    modelFlag: "-m",
+    command: "{bin} exec --output-format json --auto high {model_args} {prompt}",
+    resumeCommand: "{bin} exec --output-format json --auto high -s {session} {model_args} {prompt}",
+    timeoutSec: 900,
+    approvalPolicy: "never",
+    defaultModels: [],
+  },
+  {
+    key: "agy",
+    bin: "agy",
+    name: "Antigravity CLI",
+    platform: "antigravity",
+    summary: "本机 Google Antigravity 终端工程与多模态代理 CLI",
+    skills: ["coding", "research", "debug", "review", "git"],
+    tools: ["bash", "files", "git", "web"],
+    modelFlag: "--model",
+    command: "{bin} -p --output-format json --dangerously-skip-permissions {model_args} {prompt}",
+    resumeCommand: "{bin} --conversation {session} -p --output-format json --dangerously-skip-permissions {model_args} {prompt}",
+    timeoutSec: 900,
+    approvalPolicy: "never",
+    defaultModels: [],
+  },
+  {
+    key: "grok",
+    bin: "grok",
+    name: "Grok CLI",
+    platform: "grok",
+    summary: "本机 xAI Grok Build 编程与实时搜索 CLI",
+    skills: ["coding", "research", "debug", "web"],
+    tools: ["bash", "files", "git", "web"],
+    modelFlag: "-m",
+    command: "{bin} --output-format json --always-approve {model_args} -p {prompt}",
+    resumeCommand: "{bin} --output-format json --always-approve -r {session} {model_args} -p {prompt}",
+    timeoutSec: 900,
+    approvalPolicy: "never",
+    defaultModels: [],
+  },
+  {
+    key: "cursor",
+    bin: "cursor-agent",
+    name: "Cursor Agent",
+    platform: "cursor",
+    summary: "本机 Cursor Agent CLI 代码编辑与终端执行代理",
+    skills: ["coding", "refactor", "debug", "review"],
+    tools: ["bash", "files", "git"],
+    modelFlag: "--model",
+    command: "{bin} -p --output-format json --force --trust {model_args} {prompt}",
+    resumeCommand: "{bin} -p --output-format json --force --trust --resume {session} {model_args} {prompt}",
+    timeoutSec: 900,
+    approvalPolicy: "never",
+    defaultModels: [],
+  },
+  {
+    key: "codebuddy",
+    bin: "codebuddy",
+    bins: ["codebuddy", "cbc"],
+    name: "CodeBuddy Code",
+    platform: "codebuddy",
+    summary: "本机腾讯 CodeBuddy Code 编程与多模型开发 CLI",
+    skills: ["coding", "refactor", "debug", "review"],
+    tools: ["bash", "files", "git"],
+    modelFlag: "--model",
+    command: "{bin} -p --output-format json -y {model_args} {prompt}",
+    resumeCommand: "{bin} -p --output-format json -y -r {session} {model_args} {prompt}",
+    timeoutSec: 900,
+    approvalPolicy: "never",
+    defaultModels: [],
+  },
+  {
+    key: "copilot",
+    bin: "copilot",
+    name: "GitHub Copilot CLI",
+    platform: "copilot",
+    summary: "本机 GitHub Copilot 终端编程与仓库助手 CLI",
+    skills: ["coding", "review", "debug", "git"],
+    tools: ["bash", "files", "git"],
+    modelFlag: "--model",
+    command: "{bin} -p {prompt} --allow-all --silent {model_args}",
+    resumeCommand: "",
+    timeoutSec: 900,
+    approvalPolicy: "never",
+    defaultModels: [],
+  },
+  {
+    key: "qwen",
+    bin: "qwen",
+    name: "Qwen Code",
+    platform: "qwen-code",
+    summary: "本机阿里通义千问 Qwen Code 终端编程代理 CLI",
+    skills: ["coding", "refactor", "debug", "analysis"],
+    tools: ["bash", "files", "git"],
+    modelFlag: "-m",
+    command: "{bin} -p {prompt} --yolo --output-format json {model_args}",
+    resumeCommand: "{bin} --resume {session} -p {prompt} --yolo --output-format json {model_args}",
+    timeoutSec: 900,
+    approvalPolicy: "never",
+    defaultModels: [],
+  },
+  {
+    key: "kimi",
+    bin: "kimi",
+    name: "Kimi Code CLI",
+    platform: "kimi",
+    summary: "本机月之暗面 Kimi Code 终端代理 CLI",
+    skills: ["coding", "analysis", "refactor"],
+    tools: ["bash", "files", "git"],
+    modelFlag: "-m",
+    // kimi -p 与 --yolo/-y 互斥，非交互模式无需也不得附带 --yolo
+    command: "{bin} -p {prompt} --output-format stream-json {model_args}",
+    resumeCommand: "{bin} -S {session} -p {prompt} --output-format stream-json {model_args}",
+    timeoutSec: 900,
+    approvalPolicy: "never",
+    defaultModels: [],
+  },
+  {
+    key: "kiro",
+    bin: "kiro-cli",
+    name: "AWS Kiro CLI",
+    platform: "kiro",
+    summary: "本机 AWS Kiro 规范驱动开发与云资源自动化 CLI",
+    skills: ["coding", "cloud", "devops", "spec"],
+    tools: ["bash", "files", "git"],
+    modelFlag: "--model",
+    command: "{bin} chat --no-interactive --trust-all-tools {model_args} {prompt}",
+    resumeCommand: "",
+    timeoutSec: 900,
+    approvalPolicy: "never",
+    defaultModels: [],
+  },
+  {
+    key: "cline",
+    bin: "cline",
+    name: "Cline CLI",
+    platform: "cline",
+    summary: "本机 Cline 自主编程与多模型任务执行 CLI",
+    skills: ["coding", "refactor", "debug", "automation"],
+    tools: ["bash", "files", "git"],
+    modelFlag: "-m",
+    command: "{bin} -y --json {model_args} {prompt}",
+    resumeCommand: "",
+    timeoutSec: 900,
+    approvalPolicy: "never",
+    defaultModels: [],
+  },
+  {
+    key: "kilo",
+    bin: "kilo",
+    bins: ["kilo", "kilocode"],
+    name: "Kilo Code CLI",
+    platform: "kilo",
+    summary: "本机 Kilo Code 开源多模型自主开发 CLI",
+    skills: ["coding", "refactor", "debug"],
+    tools: ["bash", "files", "git"],
+    modelFlag: "-m",
+    command: "{bin} run --auto --format json {model_args} {prompt}",
+    resumeCommand: "",
+    timeoutSec: 900,
+    approvalPolicy: "never",
+    defaultModels: [],
+  },
+  {
+    key: "auggie",
+    bin: "auggie",
+    name: "Augment Auggie",
+    platform: "auggie",
+    summary: "本机 Augment Code 上下文引擎与代码库分析 CLI",
+    skills: ["coding", "review", "research", "refactor"],
+    tools: ["bash", "files", "git"],
+    modelFlag: "--model",
+    command: "{bin} --print {model_args} {prompt}",
+    resumeCommand: "{bin} --print --resume {session} {model_args} {prompt}",
+    timeoutSec: 900,
+    approvalPolicy: "never",
+    defaultModels: [],
+  },
+  {
+    key: "vibe",
+    bin: "vibe",
+    name: "Mistral Vibe",
+    platform: "vibe",
+    summary: "本机 Mistral Vibe Devstral 轻量终端编程 CLI",
+    skills: ["coding", "refactor", "debug"],
+    tools: ["bash", "files", "git"],
+    modelFlag: "",
+    command: "{bin} -p {prompt} --auto-approve --output json",
+    resumeCommand: "{bin} --resume {session} -p {prompt} --auto-approve --output json",
+    timeoutSec: 900,
+    approvalPolicy: "never",
+    defaultModels: [],
+  },
+  {
+    key: "crush",
+    bin: "crush",
+    name: "Charm Crush",
+    platform: "crush",
+    summary: "本机 Charmbracelet Crush 终端多模型编程 CLI",
+    skills: ["coding", "debug", "analysis"],
+    tools: ["bash", "files", "git"],
+    modelFlag: "",
+    // crush run 默认无交互且不接受 --yolo/--model 参数
+    command: "{bin} run {prompt}",
+    resumeCommand: "",
+    timeoutSec: 900,
+    approvalPolicy: "never",
+    defaultModels: [],
+  },
+  {
+    key: "pi",
+    bin: "pi",
+    name: "Pi Coding Agent",
+    platform: "pi",
+    summary: "本机 Pi 极简可扩展终端编程 Agent CLI",
+    skills: ["coding", "automation", "refactor"],
+    tools: ["bash", "files", "git"],
+    modelFlag: "--model",
+    command: "{bin} -p --mode json {model_args} {prompt}",
+    resumeCommand: "",
+    timeoutSec: 900,
+    approvalPolicy: "never",
+    defaultModels: [],
+  },
+  {
+    key: "devin",
+    bin: "devin",
+    name: "Devin CLI",
+    platform: "devin",
+    summary: "本机 Cognition Devin 自主软件工程代理 CLI",
+    skills: ["coding", "debug", "test", "git"],
+    tools: ["bash", "files", "git", "web"],
+    modelFlag: "--model",
+    // devin -p 在未信任工作区需 --respect-workspace-trust false 才能无交互运行
+    command: "{bin} -p --permission-mode dangerous --respect-workspace-trust false {model_args} {prompt}",
+    resumeCommand: "",
+    timeoutSec: 900,
+    approvalPolicy: "never",
+    defaultModels: [],
+  },
+  {
+    key: "openhands",
+    bin: "openhands",
+    name: "OpenHands CLI",
+    platform: "openhands",
+    summary: "本机 OpenHands 开源端到端软件工程代理 CLI",
+    skills: ["coding", "automation", "debug", "test"],
+    tools: ["bash", "files", "git"],
+    modelFlag: "",
+    command: "{bin} --headless --json -t {prompt}",
+    resumeCommand: "",
+    timeoutSec: 900,
+    approvalPolicy: "never",
+    defaultModels: [],
+  },
+  {
+    key: "iflow",
+    bin: "iflow",
+    name: "iFlow CLI",
+    platform: "iflow",
+    summary: "本机阿里心流 iFlow 终端工程与自动化代理 CLI",
+    skills: ["coding", "automation", "analysis"],
+    tools: ["bash", "files", "git"],
+    modelFlag: "-m",
+    command: "{bin} -p {prompt} --yolo {model_args}",
+    resumeCommand: "",
+    timeoutSec: 900,
+    approvalPolicy: "never",
+    defaultModels: [],
+  },
+  {
+    key: "qoder",
+    bin: "qodercli",
+    bins: ["qodercli", "qoder"],
+    name: "Qoder CLI",
+    platform: "qoder",
+    summary: "本机阿里 Qoder 终端自主编程与仓库审查 CLI",
+    skills: ["coding", "review", "refactor", "git"],
+    tools: ["bash", "files", "git"],
+    modelFlag: "",
+    command: "{bin} -p {prompt} --output-format json --yolo",
+    resumeCommand: "",
+    timeoutSec: 900,
+    approvalPolicy: "never",
+    defaultModels: [],
+  },
 ];
 
-export function whichBinary(name) {
-  const cmd = process.platform === "win32" ? "where" : "which";
+function isExecutableFile(filePath) {
   try {
-    const out = execFileSync(cmd, [name], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-    const first = out.split(/\r?\n/).find((l) => l.trim());
-    return first ? first.trim() : null;
+    // statSync 会解引用软链，自动排除指向已删除目标的坏链与目录
+    const st = fs.statSync(filePath);
+    if (!st.isFile()) return false;
+    if (process.platform !== "win32") {
+      fs.accessSync(filePath, fs.constants.X_OK);
+    }
+    return true;
   } catch {
-    return null;
+    return false;
   }
 }
 
+export function whichBinary(name, { env = process.env, homeDir = os.homedir() } = {}) {
+  const target = String(name || "").trim();
+  if (!target) return null;
+
+  const isWin = process.platform === "win32";
+  const pathExts = isWin
+    ? (env.PATHEXT || ".COM;.EXE;.BAT;.CMD")
+        .split(";")
+        .map((e) => e.trim())
+        .filter(Boolean)
+    : [""];
+
+  const probe = (basePath) => {
+    const candidates = isWin && !path.extname(basePath) ? [basePath, ...pathExts.map((ext) => `${basePath}${ext}`)] : [basePath];
+    for (const c of candidates) {
+      if (isExecutableFile(c)) return c;
+    }
+    return null;
+  };
+
+  if (target.includes("/") || (isWin && target.includes("\\"))) {
+    return probe(target);
+  }
+
+  const rawPath = env.PATH || (isWin ? env.Path : "") || "";
+  const pathDirs = rawPath.split(path.delimiter).map((d) => d.trim()).filter(Boolean);
+  const searchDirs = [...pathDirs];
+  if (!isWin) {
+    const fallbacks = [
+      path.join(homeDir, ".local", "bin"),
+      path.join(homeDir, ".amp", "bin"),
+      path.join(homeDir, ".grok", "bin"),
+      path.join(homeDir, ".bun", "bin"),
+      path.join(homeDir, ".cargo", "bin"),
+      "/opt/homebrew/bin",
+      "/usr/local/bin",
+    ];
+    for (const dir of fallbacks) {
+      searchDirs.push(dir);
+    }
+  }
+
+  const seen = new Set();
+  for (const dir of searchDirs) {
+    if (!dir || seen.has(dir)) continue;
+    seen.add(dir);
+    const hit = probe(path.join(dir, target));
+    if (hit) return hit;
+  }
+  return null;
+}
+
+export function resolveSpecBinary(spec, whichFn = whichBinary) {
+  const candidates = Array.isArray(spec?.bins) && spec.bins.length ? spec.bins : [spec?.bin];
+  for (const bin of candidates) {
+    if (!bin) continue;
+    const hit = whichFn(bin);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+const JSON_MODEL_PATHS = {
+  claude: [".claude", "settings.json"],
+  opencode: [".config", "opencode", "opencode.json"],
+  gemini: [".gemini", "settings.json"],
+  qwen: [".qwen", "settings.json"],
+  codebuddy: [".codebuddy", "settings.json"],
+  agy: [".agy", "settings.json"],
+  iflow: [".iflow", "settings.json"],
+};
+
+const TOML_MODEL_SPECS = {
+  codex: { parts: [".codex", "config.toml"], key: "model" },
+  grok: { parts: [".grok", "config.toml"], key: "model" },
+  kimi: { parts: [".kimi", "config.toml"], key: "default_model" },
+};
+
 export function detectDefaultModel(key, homeDir = os.homedir()) {
   try {
-    if (key === "claude") {
-      const s = readJsonIfExists(path.join(homeDir, ".claude", "settings.json"), null);
-      if (s?.model) return String(s.model);
-    } else if (key === "codex") {
-      const tomlPath = path.join(homeDir, ".codex", "config.toml");
+    if (JSON_MODEL_PATHS[key]) {
+      const s = readJsonIfExists(path.join(homeDir, ...JSON_MODEL_PATHS[key]), null);
+      if (typeof s?.model === "string" && s.model.trim()) return s.model.trim();
+    } else if (TOML_MODEL_SPECS[key]) {
+      const { parts, key: tomlKey } = TOML_MODEL_SPECS[key];
+      const tomlPath = path.join(homeDir, ...parts);
       if (fs.existsSync(tomlPath)) {
-        const m = /^\s*model\s*=\s*["']([^"']+)["']/m.exec(fs.readFileSync(tomlPath, "utf8"));
-        if (m) return m[1];
+        const re = new RegExp(`^\\s*${tomlKey}\\s*=\\s*["']([^"']+)["']`, "m");
+        const m = re.exec(fs.readFileSync(tomlPath, "utf8"));
+        if (m) return m[1].trim();
       }
-    } else if (key === "opencode") {
-      const oc = readJsonIfExists(path.join(homeDir, ".config", "opencode", "opencode.json"), null);
-      if (oc?.model) return String(oc.model);
-    } else if (key === "gemini") {
-      const gm = readJsonIfExists(path.join(homeDir, ".gemini", "settings.json"), null);
-      if (gm?.model) return String(gm.model);
+    } else if (key === "droid") {
+      // 仅读取纯字符串模型字段，避免接触任何自定义 API 配置或密钥
+      const f = readJsonIfExists(path.join(homeDir, ".factory", "settings.json"), null);
+      if (typeof f?.model === "string" && f.model.trim()) return f.model.trim();
+      if (typeof f?.defaultModel === "string" && f.defaultModel.trim()) return f.defaultModel.trim();
+    } else if (key === "cursor") {
+      const c = readJsonIfExists(path.join(homeDir, ".cursor", "cli-config.json"), null);
+      const mid = typeof c?.model === "string" ? c.model : c?.model?.modelId;
+      if (typeof mid === "string") {
+        const trimmed = mid.trim();
+        if (trimmed && trimmed !== "default" && trimmed !== "auto") return trimmed;
+      }
     }
   } catch {}
   return "";
@@ -349,7 +743,7 @@ export function detectDefaultModel(key, homeDir = os.homedir()) {
 export function discoverLocalWorkers({ whichFn = whichBinary, homeDir = os.homedir(), defaultCwd = os.homedir() } = {}) {
   const found = [];
   for (const spec of KNOWN_CLIS) {
-    const binPath = whichFn(spec.bin);
+    const binPath = resolveSpecBinary(spec, whichFn);
     if (!binPath) continue;
     const detectedModel = detectDefaultModel(spec.key, homeDir);
     const models = [...spec.defaultModels];
@@ -376,4 +770,36 @@ export function discoverLocalWorkers({ whichFn = whichBinary, homeDir = os.homed
     });
   }
   return found;
+}
+
+export function mergeDiscoveredWorkers(existingWorkers = [], discoveredWorkers = [], { force = false } = {}) {
+  const existing = Array.isArray(existingWorkers) ? existingWorkers.filter((w) => w && w.key) : [];
+  const discovered = Array.isArray(discoveredWorkers) ? discoveredWorkers.filter((w) => w && w.key) : [];
+  const discoveredByKey = new Map(discovered.map((w) => [w.key, w]));
+
+  const workers = [];
+  const added = [];
+  const updated = [];
+  const seenKeys = new Set();
+
+  for (const w of existing) {
+    seenKeys.add(w.key);
+    if (force && discoveredByKey.has(w.key)) {
+      const next = { ...discoveredByKey.get(w.key) };
+      workers.push(next);
+      updated.push(next);
+    } else {
+      workers.push({ ...w });
+    }
+  }
+
+  for (const w of discovered) {
+    if (seenKeys.has(w.key)) continue;
+    seenKeys.add(w.key);
+    const next = { ...w };
+    workers.push(next);
+    added.push(next);
+  }
+
+  return { workers, added, updated };
 }

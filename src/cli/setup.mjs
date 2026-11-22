@@ -127,7 +127,8 @@ export async function runHubSetup({
 
   io.log(`✓ Hub 初始化完成（配置目录: ${configDir}）`);
   io.log(`  监听地址: ${addr.listen}  （控制台: ${addr.url}/?token=${encodeURIComponent(finalToken || "")}）`);
-  io.log(`  本机设备 ID: ${resolvedDeviceId}（已发现 ${workers.length} 个本地 CLI Agent）`);
+  const discoveredSummary = workers.length ? `: ${workers.map((w) => w.key).join(", ")}` : "";
+  io.log(`  本机设备 ID: ${resolvedDeviceId}（已发现 ${workers.length} 个本地 CLI Agent${discoveredSummary}）`);
   if (finalToken) io.log(`  机主 Token（已写入 0600 app.env）: ${finalToken}`);
   if (skills.length) io.log(`  已安装控制端 Skill: ${skills.join(", ")}`);
 
@@ -177,7 +178,8 @@ export async function runDeviceJoin({
   const skills = installLocalSkills(resolveSkillsForHost({ mode: "device" }), { skip: skipSkill });
 
   io.log(`✓ 已配置接入 Hub: ${parsed.baseUrl}`);
-  io.log(`  本机设备 ID: ${resolvedDeviceId}（已发现 ${workers.length} 个本地 CLI Agent）`);
+  const discoveredSummary = workers.length ? `: ${workers.map((w) => w.key).join(", ")}` : "";
+  io.log(`  本机设备 ID: ${resolvedDeviceId}（已发现 ${workers.length} 个本地 CLI Agent${discoveredSummary}）`);
   if (hubPublicKey) io.log(`  ✓ 已自动拉取 Hub 审批验签公钥`);
   if (skills.length) io.log(`  已安装控制端 Skill: ${skills.join(", ")}`);
 

@@ -52,6 +52,12 @@ test("CLI Wrapper & Flags: bin/ah.mjs --version、ah workers add/remove 与布�
     });
     workers = loadWorkersJson(dir);
     assert.equal(workers.length, 0);
+
+    const scanOut = execFileSync(process.execPath, [path.resolve("bin/ah.mjs"), "workers", "scan", "--config", dir], {
+      encoding: "utf8",
+    });
+    assert.equal(fs.existsSync(path.join(dir, "workers.json")), true);
+    assert.ok(scanOut.includes("探测到") || scanOut.includes("未在本机"));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

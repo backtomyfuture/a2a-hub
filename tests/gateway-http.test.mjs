@@ -133,7 +133,25 @@ test("Device Workers Management: worker-presets、本机 Worker 热增改删落�
     assert.ok(localDev, "本机 Device 应标记 is_local=true");
 
     const presetsRes = await owner.get("/api/v1/worker-presets");
-    assert.ok(Array.isArray(presetsRes.presets) && presetsRes.presets.length >= 4);
+    assert.ok(Array.isArray(presetsRes.presets) && presetsRes.presets.length >= 26);
+    for (const k of ["amp", "droid", "agy", "grok", "cursor", "codebuddy", "copilot", "qwen", "kimi", "kiro", "cline", "kilo"]) {
+      assert.ok(presetsRes.presets.some((p) => p.key === k), `presets 应包含 ${k}`);
+    }
+    const firstUninstalledIdx = presetsRes.presets.findIndex((p) => !p.installed);
+    if (firstUninstalledIdx >= 0) {
+      assert.equal(
+        presetsRes.presets.slice(firstUninstalledIdx).some((p) => p.installed),
+        false,
+        "已安装的 preset 应排在未安装 preset 之前"
+      );
+    }
+
+    // 扫描本机与远端设备 Worker
+    const scanLocal = await owner.post(`/api/v1/devices/${encodeURIComponent(localDev.id)}/workers/scan`, {});
+    assert.equal(scanLocal.ok, true);
+    assert.equal(scanLocal.local, true);
+    assert.ok(Array.isArray(scanLocal.added));
+    assert.ok(Number(scanLocal.total) >= 0);
 
     // 1) 为本机新增自定义 Worker：立即写入 workers.json 并同步上线
     const addLocal = await owner.post(`/api/v1/devices/${encodeURIComponent(localDev.id)}/workers`, {
@@ -177,6 +195,10 @@ test("Device Workers Management: worker-presets、本机 Worker 热增改删落�
     assert.equal(addRemote.local, false);
     assert.ok(addRemote.cli_command.startsWith("ah workers add "));
     assert.ok(addRemote.cli_command.includes("--key 'remote-bash'"));
+
+    const scanRemote = await owner.post("/api/v1/devices/remote-box/workers/scan", {});
+    assert.equal(scanRemote.local, false);
+    assert.equal(scanRemote.cli_command, "ah workers scan");
   } finally {
     await rt.stop();
     fs.rmSync(dir, { recursive: true, force: true });

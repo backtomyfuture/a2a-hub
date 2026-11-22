@@ -54,6 +54,44 @@ function tryParseJson(line) {
   }
 }
 
+function extractContentText(content) {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === "string") return part;
+        if (part && typeof part === "object") {
+          if (typeof part.text === "string") return part.text;
+          if (part.content !== undefined) return extractContentText(part.content);
+        }
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+  if (content && typeof content === "object") {
+    if (typeof content.text === "string") return content.text;
+    if (content.content !== undefined) return extractContentText(content.content);
+  }
+  return "";
+}
+
+function pickSessionId(obj) {
+  if (!obj || typeof obj !== "object") return "";
+  return String(
+    obj.session_id ||
+      obj.sessionID ||
+      obj.sessionId ||
+      obj.thread_id ||
+      obj.threadId ||
+      obj.conversation_id ||
+      obj.conversationId ||
+      obj.chat_id ||
+      obj.chatId ||
+      ""
+  );
+}
+
 export function parseCliOutput(stdout, stderr = "") {
   const raw = String(stdout || "").trim();
   if (!raw) {
@@ -65,29 +103,33 @@ export function parseCliOutput(stdout, stderr = "") {
     };
   }
 
-  // 1) 单对象 JSON（如 Claude Code -p --output-format json）
+  // 1) 单对象 JSON（如 Claude Code / Droid / Agy / Cursor / Grok / Qwen -p --output-format json）
   const single = tryParseJson(raw);
   if (single && typeof single === "object" && !Array.isArray(single)) {
-    const text =
+    const candidate =
       single.result ??
+      single.response ??
+      single.output ??
       single.text ??
       single.message ??
       single.content ??
-      single.summary ??
-      raw;
-    const sessionId = single.session_id || single.sessionId || single.thread_id || "";
+      single.summary;
+    const extracted = candidate !== undefined ? extractContentText(candidate) : "";
+    const text = extracted || (typeof candidate === "string" ? candidate : candidate !== undefined ? JSON.stringify(candidate) : raw);
+    const sessionId = pickSessionId(single);
     const usage = single.usage || (single.total_cost_usd !== undefined ? { total_cost_usd: single.total_cost_usd } : null);
     return {
       text: typeof text === "string" ? text : JSON.stringify(text),
-      sessionId: String(sessionId || ""),
+      sessionId,
       usage,
       structured: single,
     };
   }
 
-  // 2) JSONL 事件流（如 Codex exec --json / OpenCode --format json）
+  // 2) JSONL 事件流（如 Amp / Claude / Codex / OpenCode / Kimi / Cline / Pi / Kilo）
   const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   let sessionId = "";
+  let finalResultText = "";
   const messageChunks = [];
   let lastUsage = null;
   let parsedJsonl = false;
@@ -96,26 +138,38 @@ export function parseCliOutput(stdout, stderr = "") {
     const ev = tryParseJson(line);
     if (!ev || typeof ev !== "object") continue;
     parsedJsonl = true;
-    if (ev.session_id || ev.sessionID || ev.thread_id || ev.sessionId) {
-      sessionId = String(ev.session_id || ev.sessionID || ev.thread_id || ev.sessionId);
+    const evSession = pickSessionId(ev);
+    if (evSession) {
+      sessionId = evSession;
+    } else if (ev.type === "session" && ev.id) {
+      sessionId = String(ev.id);
     }
-    if (ev.type === "thread.started" && ev.thread_id) {
-      sessionId = String(ev.thread_id);
-    }
-    if (ev.type === "item.completed" && ev.item?.type === "agent_message" && ev.item?.text) {
+
+    if (ev.type === "result" && typeof ev.result === "string") {
+      // 终态 result 字段已汇总最终答复，避免与前序 assistant 分片重复拼接
+      finalResultText = ev.result;
+    } else if (ev.type === "run_result" && typeof ev.text === "string") {
+      finalResultText = ev.text;
+    } else if (ev.type === "item.completed" && ev.item?.type === "agent_message" && ev.item?.text) {
       messageChunks.push(String(ev.item.text));
     } else if (ev.type === "text" && ev.part?.text) {
       messageChunks.push(String(ev.part.text));
+    } else if (ev.type === "assistant" && ev.message?.content !== undefined) {
+      const chunk = extractContentText(ev.message.content);
+      if (chunk) messageChunks.push(chunk);
+    } else if (ev.type === "message_end" && ev.message?.role === "assistant" && ev.message?.content !== undefined) {
+      const chunk = extractContentText(ev.message.content);
+      if (chunk) messageChunks.push(chunk);
     } else if (typeof ev.result === "string") {
       messageChunks.push(ev.result);
-    } else if (typeof ev.text === "string" && ev.type !== "step_start") {
+    } else if (typeof ev.text === "string" && !["step_start", "system", "thinking"].includes(ev.type)) {
       messageChunks.push(ev.text);
     }
     if (ev.usage) lastUsage = ev.usage;
   }
 
   if (parsedJsonl) {
-    const finalText = messageChunks.join("\n").trim() || raw;
+    const finalText = finalResultText.trim() || messageChunks.join("\n").trim() || raw;
     return {
       text: finalText,
       sessionId,

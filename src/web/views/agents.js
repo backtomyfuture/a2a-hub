@@ -76,6 +76,7 @@ export function renderAgentsView(container, refreshFn) {
                 </div>
                 <div class="row">
                   <button class="btn btn-sm btn-primary" data-dev-add-worker="${escapeHtml(d.id)}">+ 添加 Worker</button>
+                  <button class="btn btn-sm btn-secondary" data-dev-scan-workers="${escapeHtml(d.id)}">扫描 CLI</button>
                   <button class="btn btn-sm btn-secondary" data-dev-toggle="${escapeHtml(d.id)}" data-dev-enabled="${d.enabled ? "1" : "0"}">
                     ${d.enabled ? "暂停整机" : "恢复整机"}
                   </button>
@@ -104,6 +105,28 @@ export function renderAgentsView(container, refreshFn) {
     btn.addEventListener("click", () => {
       resetAddWorkerModalState();
       setState({ showAddWorkerDeviceId: btn.getAttribute("data-dev-add-worker") });
+    });
+  });
+
+  container.querySelectorAll("[data-dev-scan-workers]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = btn.getAttribute("data-dev-scan-workers");
+      try {
+        const res = await api.scanDeviceWorkers(id, {});
+        if (res.local) {
+          const added = Array.isArray(res.added) ? res.added : [];
+          showToast(
+            added.length
+              ? `扫描到 ${res.discovered_count} 个 CLI，已新增上线: ${added.join(", ")}`
+              : `共检测到 ${res.discovered_count || 0} 个本机 CLI，均已在列表中`
+          );
+          await refreshFn();
+        } else {
+          await copyText(res.cli_command || "ah workers scan", "远端电脑请在终端执行扫描命令（已复制：ah workers scan）");
+        }
+      } catch (err) {
+        showToast(err.message, true);
+      }
     });
   });
 

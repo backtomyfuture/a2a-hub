@@ -34,6 +34,8 @@ export const api = {
   workerPresets: () => apiFetch("/api/v1/worker-presets"),
   addDeviceWorker: (deviceId, payload) =>
     apiFetch(`/api/v1/devices/${encodeURIComponent(deviceId)}/workers`, { method: "POST", body: payload }),
+  scanDeviceWorkers: (deviceId, payload = {}) =>
+    apiFetch(`/api/v1/devices/${encodeURIComponent(deviceId)}/workers/scan`, { method: "POST", body: payload }),
 
   createAgent: (payload) => apiFetch("/api/v1/agents", { method: "POST", body: payload }),
   updateAgent: (id, patch) => apiFetch(`/api/v1/agents/${encodeURIComponent(id)}`, { method: "PATCH", body: patch }),

@@ -59,7 +59,7 @@ export function renderAddModal(root, refreshFn) {
             接入独立 Agent（云端 / Bot / 脚本）
           </button>
           <button class="filter-chip ${modalTab === "device" ? "active" : ""}" data-add-tab="device">
-            挂载一台电脑（自动发现本机 Claude / Codex 等）
+            挂载一台电脑（自动发现本机 26 种常见 CLI Agent）
           </button>
         </div>
 

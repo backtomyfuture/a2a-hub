@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { startHubRuntime } from "../src/core/hub-runtime.mjs";
-import { DEFAULT_AGENT_TEMPLATES } from "../src/core/templates.mjs";
+import { DEFAULT_AGENT_TEMPLATES, loadAgentTemplates } from "../src/core/templates.mjs";
 import { renderAgentCard } from "../src/web/components/agent-card.js";
 import { escapeHtml } from "../src/web/utils.js";
 
@@ -138,4 +138,22 @@ test("Web Console UI & Templates: 主题变量切换规则、控件可读文字�
   );
   assert.ok(DEFAULT_AGENT_TEMPLATES.some((t) => t.id === "muse" && t.role === "leader"));
   assert.ok(DEFAULT_AGENT_TEMPLATES.some((t) => t.id === "grok-bot" && t.transport === "webhook"));
+  for (const id of ["openclaw", "hermes", "manus", "kimi-agent", "coze", "dify", "n8n", "feishu-bot"]) {
+    assert.ok(DEFAULT_AGENT_TEMPLATES.some((t) => t.id === id), `DEFAULT_AGENT_TEMPLATES 缺少 ${id}`);
+  }
+
+  // 验证已有旧版 agent_templates.json 时会无损增量追加新增内置模板
+  const tplDir = fs.mkdtempSync(path.join(os.tmpdir(), "ah-test-tpl-"));
+  try {
+    fs.writeFileSync(
+      path.join(tplDir, "agent_templates.json"),
+      JSON.stringify([{ id: "custom-org", name: "Custom Org", role: "worker", transport: "poll", poll_interval_min: 5 }])
+    );
+    const mergedTpls = loadAgentTemplates(tplDir);
+    assert.equal(mergedTpls[0].id, "custom-org");
+    assert.ok(mergedTpls.some((t) => t.id === "openclaw"));
+    assert.ok(mergedTpls.some((t) => t.id === "dify"));
+  } finally {
+    fs.rmSync(tplDir, { recursive: true, force: true });
+  }
 });

@@ -10,9 +10,11 @@ import { fileURLToPath } from "node:url";
 import {
   DAEMON_VERSION,
   defaultConfigDir,
+  discoverLocalWorkers,
   loadConfigJson,
   loadOwnerToken,
   loadWorkersJson,
+  mergeDiscoveredWorkers,
   readLiveHubUrl,
   sanitizeSlug,
   saveWorkersJson,
@@ -98,8 +100,8 @@ function helpText() {
   ah doctor [--config <dir>]
       只读自检配置、权限、本地 CLI 与 Hub 连通性
   ah agents [list | pause <id> | resume <id>]
-  ah workers <list | add | remove> [...]
-      管理本机 workers.json 可执行 Worker 列表（新增、查看、移除）
+  ah workers <list | scan | add | remove> [...]
+      管理本机 workers.json 可执行 Worker 列表（查看、增量扫描新 CLI、新增、移除）
   ah task <create | list | show | reply | cancel> [...]
   ah present [list | approve <id> | deny <id> | reply <id> <text>]
   ah inbox <check | list | show | claim | complete | fail | ask | auth | updates> [...]
@@ -314,6 +316,29 @@ async function main() {
       }
       for (const w of workers) {
         console.log(`${String(w.key || "").padEnd(18)} ${(w.name || "").padEnd(18)} ${w.command || ""}`);
+      }
+      return 0;
+    }
+    if (sub === "scan") {
+      const discovered = discoverLocalWorkers();
+      const force = Boolean(flags.force);
+      const merged = mergeDiscoveredWorkers(workers, discovered, { force });
+      if (merged.added.length || merged.updated.length || !fs.existsSync(path.join(configDir, "workers.json"))) {
+        saveWorkersJson(configDir, merged.workers);
+      }
+      if (!discovered.length) {
+        console.log("未在本机 PATH 或常见安装目录中检测到已受支持的 CLI Agent。");
+        return 0;
+      }
+      const addedKeys = merged.added.map((w) => w.key).join(", ");
+      const updatedKeys = merged.updated.map((w) => w.key).join(", ");
+      console.log(`✓ 本机共探测到 ${discovered.length} 个 CLI Agent: ${discovered.map((w) => w.key).join(", ")}`);
+      if (merged.added.length) console.log(`  新增写入 (${merged.added.length}): ${addedKeys}`);
+      if (merged.updated.length) console.log(`  强制覆盖 (${merged.updated.length}): ${updatedKeys}`);
+      if (!merged.added.length && !merged.updated.length) {
+        console.log("  全部均已在 workers.json 中配置，未重复写入。");
+      } else {
+        console.log("  守护进程将在下次轮询自动同步到 Hub。");
       }
       return 0;
     }
