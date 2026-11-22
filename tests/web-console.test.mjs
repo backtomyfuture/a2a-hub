@@ -30,10 +30,11 @@ test("Web Console: 静态资源托管完整性、登录鉴权与 /api/v1/state �
       "/components/add-modal.js",
       "/components/add-worker-modal.js",
       "/components/dispatch-modal.js",
+      "/components/settings-drawer.js",
       "/views/home.js",
       "/views/agents.js",
       "/views/threads.js",
-      "/views/settings.js",
+      "/views/schedules.js",
     ]) {
       const resp = await fetch(`${rt.url}${asset}`);
       assert.equal(resp.status, 200, `${asset} 应返回 200`);
@@ -125,6 +126,8 @@ test("Web Console UI & Templates: 主题变量切换规则、控件可读文字�
 
   const html = fs.readFileSync(path.resolve("src", "web", "index.html"), "utf8");
   assert.ok(html.includes('id="btn-theme-toggle"'));
+  assert.ok(html.includes('id="btn-open-settings"'));
+  assert.ok(html.includes('data-tab="schedules"'));
   assert.ok(html.includes('localStorage.getItem("ah_theme")'));
 
   assert.equal(DEFAULT_AGENT_TEMPLATES[0].id, "generic");

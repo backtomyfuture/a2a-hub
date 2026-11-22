@@ -1,5 +1,11 @@
-// 定时自报任务观测服务（只读聚合 +missed 检测 + 可选登记即触发记录）。
+// 定时自报任务观测服务（聚合挂载 Worker、最近 10 次执行轨迹、成功率、超时未报与一键触发）。
 // 中台不替代本地 cron 触发器，只汇总各 Agent 报上来的定时任务并检测超时未报（> interval_min * 1.5）。
+
+import { serializeTask } from "../store/db.mjs";
+
+const TERMINAL_OK_STATES = new Set(["completed"]);
+const TERMINAL_FAIL_STATES = new Set(["failed", "rejected", "canceled"]);
+const TERMINAL_ALL_STATES = new Set(["completed", "failed", "rejected", "canceled"]);
 
 export class ScheduleService {
   constructor(store, taskService) {
@@ -9,21 +15,107 @@ export class ScheduleService {
 
   listWithStatus(agentId = null, now = Date.now()) {
     const schedules = this.store.listSchedules(agentId);
+    const devices = new Map(this.store.listDevices().map((d) => [d.id, d]));
     const agents = new Map(this.store.listAgents().map((a) => [a.id, a]));
+
+    // 单次批量查出最近带 schedule_id 的定时执行记录，避免 N+1 SQLite 查询。
+    const rows = this.store.db.prepare(`
+      SELECT * FROM tasks
+      WHERE schedule_id IS NOT NULL
+      ORDER BY created_at DESC
+      LIMIT 500
+    `).all();
+    const runsByKey = new Map();
+    for (const row of rows) {
+      const t = serializeTask(row);
+      const key = `${t.to_agent_id}::${t.schedule_id}`;
+      let arr = runsByKey.get(key);
+      if (!arr) {
+        arr = [];
+        runsByKey.set(key, arr);
+      }
+      if (arr.length < 10) {
+        const endAt = t.completed_at || (t.state === "working" ? now : null);
+        const durationMs = endAt && t.created_at ? Math.max(0, Number(endAt) - Number(t.created_at)) : null;
+        arr.push({
+          id: t.id,
+          context_id: t.context_id,
+          state: t.state,
+          title: t.title,
+          summary: t.receipt?.summary || t.receipt?.text || "",
+          error_message: t.error_message || "",
+          created_at: t.created_at,
+          completed_at: t.completed_at,
+          duration_ms: durationMs,
+        });
+      }
+    }
+
     return schedules.map((sch) => {
       const ag = agents.get(sch.agent_id);
-      const lastTask = sch.last_task_id ? this.store.getTask(sch.last_task_id) : null;
-      const lastRunAt = sch.last_run_at || lastTask?.created_at || null;
+      const dev = ag?.device_id ? devices.get(ag.device_id) : null;
+      const key = `${sch.agent_id}::${sch.id}`;
+      const runsNewestFirst = runsByKey.get(key) || [];
+      const recentRuns = [...runsNewestFirst].reverse(); // 旧 → 新顺序，适合 sparkline 从左向右展示
+
+      let lastRun = runsNewestFirst[0] || null;
+      if (!lastRun && sch.last_task_id) {
+        const explicitTask = this.store.getTask(sch.last_task_id);
+        if (explicitTask) {
+          const endAt = explicitTask.completed_at || null;
+          lastRun = {
+            id: explicitTask.id,
+            context_id: explicitTask.context_id,
+            state: explicitTask.state,
+            title: explicitTask.title,
+            summary: explicitTask.receipt?.summary || explicitTask.receipt?.text || "",
+            error_message: explicitTask.error_message || "",
+            created_at: explicitTask.created_at,
+            completed_at: explicitTask.completed_at,
+            duration_ms: endAt ? Math.max(0, Number(endAt) - Number(explicitTask.created_at)) : null,
+          };
+          recentRuns.push(lastRun);
+        }
+      }
+
+      const lastRunAt = sch.last_run_at || lastRun?.created_at || null;
       const intervalMs = Math.max(Number(sch.interval_min || 60), 1) * 60_000;
       const missed = Boolean(sch.enabled && lastRunAt && now - Number(lastRunAt) > intervalMs * 1.5);
+      const nextExpectedAt = sch.enabled && lastRunAt ? Number(lastRunAt) + intervalMs : null;
+      const overdueMs = missed && lastRunAt ? Math.max(0, now - (Number(lastRunAt) + intervalMs)) : 0;
+
+      const terminalRuns = recentRuns.filter((r) => TERMINAL_ALL_STATES.has(r.state));
+      const okRuns = terminalRuns.filter((r) => TERMINAL_OK_STATES.has(r.state));
+      const successRate = terminalRuns.length > 0 ? Math.round((okRuns.length / terminalRuns.length) * 100) : null;
+
+      const lastState = lastRun?.state || null;
+      let health = "idle";
+      if (!sch.enabled) health = "paused";
+      else if (lastState === "working" || lastState === "submitted") health = "running";
+      else if (lastState === "input-required" || lastState === "auth-required") health = "attention";
+      else if (missed) health = "missed";
+      else if (TERMINAL_FAIL_STATES.has(lastState)) health = "failing";
+      else if (lastRunAt) health = "healthy";
+
       return {
         ...sch,
         agent_name: ag?.name || sch.agent_id,
+        agent_kind: ag?.kind || "",
+        agent_device_id: ag?.device_id || null,
+        agent_device_name: dev?.name || "",
         agent_platform: ag?.platform || "",
+        agent_enabled: ag ? Boolean(ag.enabled) : true,
         last_run_at: lastRunAt,
-        last_task_state: lastTask?.state || null,
-        last_task_title: lastTask?.title || "",
+        last_run: lastRun,
+        last_task_state: lastState,
+        last_task_title: lastRun?.title || "",
+        last_context_id: lastRun?.context_id || null,
+        recent_runs: recentRuns,
+        next_expected_at: nextExpectedAt,
+        overdue_ms: overdueMs,
+        success_rate: successRate,
         missed,
+        health,
       };
     });
   }

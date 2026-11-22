@@ -36,6 +36,29 @@ export function formatDateTime(ms) {
   }
 }
 
+export function formatInterval(min) {
+  const m = Number(min || 0);
+  if (!Number.isFinite(m) || m <= 0) return "未设间隔";
+  if (m < 60) return `每 ${m} 分钟`;
+  if (m % 1440 === 0) return m === 1440 ? "每天" : `每 ${m / 1440} 天`;
+  if (m % 60 === 0) return `每 ${m / 60} 小时`;
+  const h = Math.floor(m / 60);
+  const rem = m % 60;
+  return `每 ${h} 小时 ${rem} 分`;
+}
+
+export function formatDuration(ms) {
+  if (ms === null || ms === undefined) return "-";
+  const num = Number(ms);
+  if (!Number.isFinite(num) || num < 0) return "-";
+  if (num < 1000) return `${Math.round(num)}ms`;
+  const sec = Math.round(num / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  const remSec = sec % 60;
+  return remSec ? `${min}m ${remSec}s` : `${min}m`;
+}
+
 export function stateLabel(state) {
   const map = {
     submitted: "排队中",

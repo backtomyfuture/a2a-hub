@@ -3,11 +3,12 @@ import { renderAddModal, resetAddModalState } from "./components/add-modal.js";
 import { renderAddWorkerModal } from "./components/add-worker-modal.js";
 import { renderAgentDrawer } from "./components/agent-drawer.js";
 import { renderDispatchModal } from "./components/dispatch-modal.js";
+import { renderSettingsDrawer } from "./components/settings-drawer.js";
 import { setState, store, subscribe } from "./state.js";
 import { showToast } from "./utils.js";
 import { renderAgentsView } from "./views/agents.js";
 import { renderHomeView } from "./views/home.js";
-import { renderSettingsView } from "./views/settings.js";
+import { renderSchedulesView } from "./views/schedules.js";
 import { renderThreadsView } from "./views/threads.js";
 
 const mainEl = document.getElementById("main-view");
@@ -49,7 +50,7 @@ window.matchMedia?.("(prefers-color-scheme: dark)")?.addEventListener?.("change"
 let pollSeq = 0;
 let pollingStarted = false;
 let lastRenderedModalKey = "";
-let lastRenderedDrawerAgent = null;
+let lastRenderedDrawerKey = "";
 
 async function refreshState() {
   const data = await api.state();
@@ -88,12 +89,21 @@ function renderAll() {
     if (store.activeTab === "home") renderHomeView(mainEl, refreshState);
     else if (store.activeTab === "agents") renderAgentsView(mainEl, refreshState);
     else if (store.activeTab === "threads") renderThreadsView(mainEl, refreshState);
-    else if (store.activeTab === "settings") void renderSettingsView(mainEl);
+    else if (store.activeTab === "schedules") renderSchedulesView(mainEl, refreshState);
   }
 
-  if (store.selectedAgentId !== lastRenderedDrawerAgent || !drawerRoot.contains(document.activeElement)) {
-    lastRenderedDrawerAgent = store.selectedAgentId;
-    renderAgentDrawer(drawerRoot, refreshState);
+  const nextDrawerKey = store.showSettingsDrawer
+    ? "settings"
+    : store.selectedAgentId
+      ? `agent:${store.selectedAgentId}`
+      : "";
+  if (!nextDrawerKey) {
+    lastRenderedDrawerKey = "";
+    drawerRoot.innerHTML = "";
+  } else if (nextDrawerKey !== lastRenderedDrawerKey || !drawerRoot.contains(document.activeElement)) {
+    lastRenderedDrawerKey = nextDrawerKey;
+    if (store.showSettingsDrawer) renderSettingsDrawer(drawerRoot);
+    else renderAgentDrawer(drawerRoot, refreshState);
   }
 
   const nextModalKey = store.showAddModal
@@ -175,9 +185,13 @@ document.querySelectorAll(".nav-tab").forEach((btn) => {
   });
 });
 
+document.getElementById("btn-open-settings")?.addEventListener("click", () => {
+  setState({ showSettingsDrawer: true, selectedAgentId: null });
+});
+
 document.getElementById("btn-open-add")?.addEventListener("click", () => {
   resetAddModalState("agent");
-  setState({ showAddModal: "agent", showDispatchModal: false });
+  setState({ showAddModal: "agent", showDispatchModal: false, showSettingsDrawer: false });
 });
 
 document.getElementById("btn-open-dispatch")?.addEventListener("click", () => {

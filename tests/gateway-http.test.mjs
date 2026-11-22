@@ -72,14 +72,41 @@ test("Gateway HTTP: 完整闭环 (Hub 启动 -> 设备同步 -> 独立 Agent 注
     });
     assert.equal(done.task.state, "completed");
 
-    // 定时自报 missed 检测
+    // 定时自报 missed 检测与丰富执行轨迹聚合
     await leaderClient.put("/api/v1/agents/muse-cloud/schedules/morning", {
       name: "早报巡检",
+      cron_expr: "0 9 * * *",
       interval_min: 1,
       last_run_at: Date.now() - 180_000,
     });
     const schRes = await owner.get("/api/v1/schedules");
     assert.equal(schRes.schedules[0].missed, true);
+    assert.equal(schRes.schedules[0].health, "missed");
+
+    // 触发运行一条定时任务并验证 recent_runs / success_rate / duration_ms
+    const trig = await leaderClient.put("/api/v1/agents/muse-cloud/schedules/check-live", {
+      name: "实时巡检",
+      cron_expr: "*/15 * * * *",
+      interval_min: 15,
+      summary: "检查节点状态",
+      run: true,
+    });
+    assert.ok(trig.task.id);
+    await leaderClient.claimTask(trig.task.id);
+    await leaderClient.complete(trig.task.id, { summary: "全部在线" });
+
+    const schRes2 = await owner.get("/api/v1/schedules");
+    const liveSch = schRes2.schedules.find((x) => x.id === "check-live");
+    assert.equal(liveSch.health, "healthy");
+    assert.equal(liveSch.success_rate, 100);
+    assert.equal(liveSch.recent_runs.length, 1);
+    assert.equal(liveSch.recent_runs[0].state, "completed");
+    assert.ok(liveSch.last_context_id);
+    assert.ok(liveSch.last_run.duration_ms >= 0);
+
+    await leaderClient.del("/api/v1/agents/muse-cloud/schedules/check-live");
+    const schRes3 = await owner.get("/api/v1/schedules");
+    assert.equal(schRes3.schedules.some((x) => x.id === "check-live"), false);
 
     // 静态目录穿越防护
     const traversal = await fetch(`${rt.url}/../package.json`);

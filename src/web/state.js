@@ -7,7 +7,10 @@ export const store = {
   workerPresets: [],
   activeTab: "home",
   agentFilter: "all",
+  scheduleFilter: "all",
+  scheduleSearch: "",
   selectedAgentId: null,
+  showSettingsDrawer: false,
   selectedThreadId: null,
   selectedThreadDetail: null,
   showAddModal: null, // null | 'agent' | 'device'

@@ -51,6 +51,16 @@ export const api = {
 
   getThread: (contextId) => apiFetch(`/api/v1/threads/${encodeURIComponent(contextId)}`),
 
+  upsertSchedule: (agentId, scheduleId, payload) =>
+    apiFetch(`/api/v1/agents/${encodeURIComponent(agentId)}/schedules/${encodeURIComponent(scheduleId)}`, {
+      method: "PUT",
+      body: payload,
+    }),
+  deleteSchedule: (agentId, scheduleId) =>
+    apiFetch(`/api/v1/agents/${encodeURIComponent(agentId)}/schedules/${encodeURIComponent(scheduleId)}`, {
+      method: "DELETE",
+    }),
+
   getSettings: () => apiFetch("/api/v1/admin/settings"),
   saveSettings: (payload) => apiFetch("/api/v1/admin/settings", { method: "POST", body: payload }),
   testNotifier: () => apiFetch("/api/v1/admin/notifier-test", { method: "POST", body: {} }),
