@@ -1036,3 +1036,13 @@ test("控制台内嵌脚本：建单与答复多选文件上传（超 100MB 拦�
   assert.equal(replyPost.body.text, "");
   assert.deepEqual(replyPost.body.attachments, [{ file_id: "F-3" }]);
 });
+
+test("控制台 Model UI：节点卡片展示默认模型与覆盖能力，派单表单透传 requested_model", () => {
+  const html = renderWebConsoleHtml();
+  assert.match(html, /id="tfModel"/);
+  assert.match(html, /id="tfModelHint"/);
+  assert.match(html, /function syncTaskModelField/);
+  assert.match(html, /requested_model/);
+  assert.match(html, /支持切模型/);
+  assert.match(html, /Default_Model:/);
+});

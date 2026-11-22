@@ -548,7 +548,12 @@ export function renderWebConsoleHtml({ presets = AGENT_TEMPLATE_PRESETS, templat
       <div class="form-row">
         <label>交给谁</label>
         <select class="input" id="tfTargetSelect"></select>
-        <div class="hint" id="tfTargetHint">只列出您已接纳且可接收任务的节点与能力。</div>
+        <div class="hint" id="tfTargetHint">只列出您已接纳且可接收任务的节点与 Agent。</div>
+      </div>
+      <div class="form-row" id="tfModelRow">
+        <label>指定模型（可选）</label>
+        <input class="input mono" id="tfModel" placeholder="留空使用 Agent 默认模型" />
+        <div class="hint" id="tfModelHint">选定 Agent 后将显示其默认模型及是否支持临时切换。</div>
       </div>
       <div class="form-row">
         <label>要做什么</label>
@@ -2141,7 +2146,8 @@ function fillDispatchCandidates() {
       html += '<option value="">请选择一个 Agent 能力...</option>';
       for (const c of dispatchableCards) {
         const capName = (c.display_name && String(c.display_name).trim()) || c.skill_name || c.skill_id || "通用能力";
-        const sub = (c.worker ? c.worker + " · " : "") + (c.node || "");
+        const modelTag = c.default_model ? (" · " + c.default_model) : "";
+        const sub = (c.worker ? c.worker + " · " : "") + (c.node || "") + modelTag;
         html += '<option value="' + esc(c.cap_id) + '">' + esc(capName + "（" + sub + "）") + '</option>';
       }
       html += '<option value="__manual__">手动填写节点（高级）</option>';
@@ -2159,18 +2165,49 @@ function fillDispatchCandidates() {
   }
 }
 
+function syncTaskModelField(card) {
+  const input = document.getElementById("tfModel");
+  const hint = document.getElementById("tfModelHint");
+  if (!input || !hint) return;
+  if (!card) {
+    input.disabled = false;
+    input.placeholder = "留空使用 Agent 默认模型";
+    hint.textContent = "选定 Agent 后将显示其默认模型及是否支持临时切换。";
+    return;
+  }
+  const defModel = card.default_model ? String(card.default_model) : "CLI 默认";
+  if (card.supports_model_override === true) {
+    input.disabled = false;
+    input.placeholder = card.default_model ? ("留空使用默认模型（" + card.default_model + "）") : "留空使用 CLI 默认模型";
+    hint.textContent = "当前默认模型：" + defModel + " · 支持填写模型名临时覆盖";
+  } else {
+    input.value = "";
+    input.disabled = true;
+    input.placeholder = "不支持临时覆盖（使用 " + defModel + "）";
+    hint.textContent = "当前默认模型：" + defModel + " · 该 Agent 暂不支持临时切换模型";
+  }
+}
+
 function applyDispatchSelect() {
   const val = document.getElementById("tfTargetSelect").value;
   if (val === "__manual__") {
     document.getElementById("tfAdvanced").open = true;
+    syncTaskModelField(null);
     return;
   }
-  if (!val) return;
+  if (!val) {
+    syncTaskModelField(null);
+    return;
+  }
   const c = ((state.data && state.data.agentCards) || []).find((x) => x.cap_id === val && admissionOf(x) === "admitted");
-  if (!c) return;
+  if (!c) {
+    syncTaskModelField(null);
+    return;
+  }
   document.getElementById("tfTo").value = c.node || "";
   document.getElementById("tfCap").value = c.skill_id || "";
   document.getElementById("tfWorker").value = c.worker || "";
+  syncTaskModelField(c);
 }
 
 function openDispatchFor(node, worker, skill, capId) {
@@ -2179,6 +2216,7 @@ function openDispatchFor(node, worker, skill, capId) {
   document.getElementById("tfWorker").value = worker || "";
   document.getElementById("tfCap").value = skill || "agent";
   const sel = document.getElementById("tfTargetSelect");
+  let matchedCard = null;
   if (sel) {
     const cards = ((state.data && state.data.agentCards) || []).filter((c) => admissionOf(c) === "admitted" && c.dispatchable === "Yes");
     let matchedId = capId || "";
@@ -2189,11 +2227,13 @@ function openDispatchFor(node, worker, skill, capId) {
     }
     if (matchedId && [...sel.options].some((o) => o.value === matchedId)) {
       sel.value = matchedId;
+      matchedCard = cards.find((c) => c.cap_id === matchedId) || null;
     } else {
       sel.value = "__manual__";
       document.getElementById("tfAdvanced").open = true;
     }
   }
+  syncTaskModelField(matchedCard);
   openModal("taskModal");
 }
 
@@ -3011,6 +3051,9 @@ function renderCapTechnicalDetails(c) {
     + '<div>Availability: ' + esc(c.availability || "-") + '</div>'
     + '<div>Side_Effect: ' + esc(c.side_effect || "-") + '</div>'
     + '<div>Approval_Class: ' + esc(c.approval_class || "-") + '</div>'
+    + '<div>Harness: ' + esc(c.harness || "-") + '</div>'
+    + '<div>Default_Model: ' + esc(c.default_model || "(CLI 默认)") + '</div>'
+    + '<div>Model_Override: ' + (c.supports_model_override === true ? "Yes" : "No") + '</div>'
     + '</div></details>';
 }
 
@@ -3110,6 +3153,10 @@ function renderCapabilityItem(c, mode, isHttp = false) {
     + (note ? '<div class="hint" style="margin-top:2px;color:var(--text-2);">备注：' + esc(note) + '</div>' : '')
     + '</div>'
     + '<div style="display:flex;gap:5px;flex-wrap:wrap;">'
+    + (c.default_model
+      ? '<span class="badge indigo">模型: ' + esc(c.default_model) + '</span>'
+      : (c.harness ? '<span class="badge">模型: CLI 默认</span>' : ''))
+    + (c.supports_model_override === true ? '<span class="badge green">支持切模型</span>' : '')
     + '<span class="badge">' + esc(effectText) + '</span>'
     + '<span class="badge">' + esc(approvalText) + '</span>'
     + '</div></div>'
@@ -4041,11 +4088,15 @@ document.getElementById("taskForm").addEventListener("submit", async (e) => {
     if (!text.trim() && !state.taskDraftFiles.length) {
       return showToast("请填写任务描述，或至少附上一个文件");
     }
+    const requestedModel = (document.getElementById("tfModel") && !document.getElementById("tfModel").disabled)
+      ? document.getElementById("tfModel").value.trim()
+      : "";
     const body = {
       to,
       cap,
       worker,
       text,
+      ...(requestedModel ? { requested_model: requestedModel } : {}),
       approval: document.getElementById("tfRequireApproval").checked ? "approve" : "",
       context: document.getElementById("tfContext").value.trim(),
     };
@@ -4077,6 +4128,7 @@ document.getElementById("taskForm").addEventListener("submit", async (e) => {
 
     const res = await api("/api/v1/tasks", { method: "POST", body: JSON.stringify(body) });
     state.taskDraftFiles = [];
+    if (document.getElementById("tfModel")) document.getElementById("tfModel").value = "";
     setFormFileError("tfFileErr", "");
     document.getElementById("taskForm").reset();
     document.getElementById("criteriaRows").innerHTML = "";
