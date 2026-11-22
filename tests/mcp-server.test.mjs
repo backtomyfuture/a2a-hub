@@ -50,12 +50,34 @@ test("MCP Server (Streamable HTTP & Token Identity Binding): 按 Token 角色动
     );
     assert.ok(
       workerCreated.mcp_onboarding.http_json.includes(workerCreated.token),
-      "MCP HTTP JSON 配置文件应在传输层 headers 中携带 Token"
+      "MCP HTTP JSON 配置文件应在传输层携带 Token"
     );
     assert.ok(
-      workerCreated.mcp_onboarding.cli_commands.gemini.includes("gemini mcp add a2a-hub"),
-      "应生成 Gemini CLI 一行挂载命令"
+      workerCreated.mcp_onboarding.http_json.includes("serverUrl"),
+      "Gemini 模板的 Streamable HTTP 配置应使用 serverUrl 字段"
     );
+    assert.ok(
+      workerCreated.mcp_onboarding.cli_commands.gemini.includes("gemini mcp add --transport http a2a-hub"),
+      "应生成 Gemini CLI HTTP 一行挂载命令"
+    );
+
+    // 验证支持 URL ?token= 鉴权（适配不支持自定义 headers 的 Streamable HTTP 客户端）
+    const qAuthResp = await fetch(`${rt.url}/api/v1/mcp?token=${encodeURIComponent(workerCreated.token)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 99, method: "initialize" }),
+    });
+    assert.equal(qAuthResp.status, 200);
+    const qAuthJson = await qAuthResp.json();
+    assert.equal(qAuthJson.result.serverInfo.name, "a2a-hub");
+    assert.ok(qAuthJson.result.instructions.includes("gemini"));
+
+    const badQAuthResp = await fetch(`${rt.url}/api/v1/mcp?token=invalid_tok`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 100, method: "initialize" }),
+    });
+    assert.equal(badQAuthResp.status, 401);
 
     const leaderMcp = new GatewayClient(rt.url, { token: leaderCreated.token });
     const workerMcp = new GatewayClient(rt.url, { token: workerCreated.token });
@@ -337,5 +359,16 @@ test("Templates Preferred Connect: 客户端模板默认首选 MCP，云端定�
   assert.equal(bundle.preferred_connect, "mcp");
   assert.ok(!bundle.mcp_prompt.includes("ag_secret_123456"));
   assert.ok(bundle.stdio_json.includes("ag_secret_123456"));
-  assert.ok(bundle.http_json.includes("Bearer ag_secret_123456"));
+  assert.ok(bundle.stdio_json.includes("/opt/homebrew/bin"));
+  assert.ok(bundle.npx_json.includes("github:backtomyfuture/a2a-hub"));
+  assert.ok(bundle.http_json.includes("serverUrl"));
+  assert.ok(bundle.http_json.includes("?token=ag_secret_123456"));
+
+  const claudeBundle = buildAgentMcpOnboarding({
+    hubUrl: "http://127.0.0.1:8787",
+    agent: { id: "claude", name: "Claude", role: "worker", platform: "claude-client" },
+    token: "ag_secret_654321",
+  });
+  assert.ok(claudeBundle.http_json.includes("Bearer ag_secret_654321"));
+  assert.ok(claudeBundle.http_json.includes("?token=ag_secret_654321"));
 });

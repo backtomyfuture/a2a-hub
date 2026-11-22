@@ -60,14 +60,22 @@ export function parseCookies(req) {
   return out;
 }
 
-export function extractBearerToken(req) {
+export function extractBearerToken(req, { allowQueryToken = false } = {}) {
   const auth = String(req.headers.authorization || "");
   const m = /^Bearer\s+(.+)$/i.exec(auth.trim());
-  return m ? m[1].trim() : "";
+  if (m) return m[1].trim();
+  if (allowQueryToken && req.url) {
+    try {
+      const u = new URL(req.url, "http://127.0.0.1");
+      const q = String(u.searchParams.get("token") || "").trim();
+      if (q) return q;
+    } catch {}
+  }
+  return "";
 }
 
-export function resolveRequestActor(req, { ownerToken = "", store, approvalPrivateKey = null } = {}) {
-  const bearer = extractBearerToken(req);
+export function resolveRequestActor(req, { ownerToken = "", store, approvalPrivateKey = null, allowQueryToken = false } = {}) {
+  const bearer = extractBearerToken(req, { allowQueryToken });
   if (bearer) {
     if (ownerToken && timingSafeEqualStr(bearer, ownerToken)) {
       return { kind: "owner", id: "owner", authenticated: true };

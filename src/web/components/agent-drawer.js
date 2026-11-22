@@ -260,6 +260,7 @@ export function renderAgentDrawer(root, refreshFn) {
 
   const getMcpSnippet = (mcp, tab) => {
     if (!mcp) return "";
+    if (tab === "npx_json") return mcp.npx_json || "";
     if (tab === "stdio_json") return mcp.stdio_json || "";
     if (tab === "gemini_cli") return mcp.cli_commands?.gemini || "";
     if (tab === "claude_cli") return mcp.cli_commands?.claude || "";
@@ -292,8 +293,9 @@ export function renderAgentDrawer(root, refreshFn) {
                 <button type="button" class="btn btn-secondary btn-sm" id="drawer-copy-mcp-cfg">复制 MCP 配置</button>
               </div>
               <div class="filter-bar">
-                <button type="button" class="filter-chip ${drawerMcpTab === "http_json" ? "active" : ""}" data-drawer-mcp-tab="http_json">HTTP JSON</button>
-                <button type="button" class="filter-chip ${drawerMcpTab === "stdio_json" ? "active" : ""}" data-drawer-mcp-tab="stdio_json">Stdio (ah mcp)</button>
+                <button type="button" class="filter-chip ${drawerMcpTab === "http_json" ? "active" : ""}" data-drawer-mcp-tab="http_json">HTTP 直连</button>
+                <button type="button" class="filter-chip ${drawerMcpTab === "npx_json" ? "active" : ""}" data-drawer-mcp-tab="npx_json">npx 免安装</button>
+                <button type="button" class="filter-chip ${drawerMcpTab === "stdio_json" ? "active" : ""}" data-drawer-mcp-tab="stdio_json">本机 ah mcp</button>
                 <button type="button" class="filter-chip ${drawerMcpTab === "gemini_cli" ? "active" : ""}" data-drawer-mcp-tab="gemini_cli">Gemini CLI</button>
                 <button type="button" class="filter-chip ${drawerMcpTab === "claude_cli" ? "active" : ""}" data-drawer-mcp-tab="claude_cli">Claude CLI</button>
               </div>

@@ -334,28 +334,46 @@ export function buildAgentMcpPrompt({ agent, template }) {
   return lines.join("\n");
 }
 
-// 生成 MCP 挂载配置包（Streamable HTTP JSON / 本机 Stdio JSON / Gemini & Claude CLI 一行挂载命令 + 脱敏提示词）。
+// 生成 MCP 挂载配置包（默认 Streamable HTTP 直连，同时提供 npx 免安装 / 本机 ah mcp / CLI 一行命令 + 脱敏提示词）。
 export function buildAgentMcpOnboarding({ hubUrl, agent, token, template }) {
   const baseUrl = String(hubUrl || "http://127.0.0.1:8787").replace(/\/+$/, "");
   const tpl = template || findTemplate(".", agent.platform);
   const mcpUrl = `${baseUrl}/api/v1/mcp`;
+  const hasRealOrPlaceholderToken = Boolean(token);
+  const isPlaceholder = String(token || "").startsWith("<");
+  const mcpUrlWithToken = hasRealOrPlaceholderToken
+    ? `${mcpUrl}?token=${isPlaceholder ? token : encodeURIComponent(token)}`
+    : mcpUrl;
   const preferredConnect =
     tpl?.preferred_connect || (agent.transport === "webhook" ? "http" : "mcp");
+  const isGemini = (tpl?.id || agent.platform) === "gemini";
 
-  const httpServerEntry = {
-    url: mcpUrl,
-    ...(token
-      ? {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        }
-      : {}),
-  };
+  // Streamable HTTP 直连：同时携带 ?token= 与 Authorization（Gemini 桌面端采用简洁 serverUrl，免去本机 Node/PATH 依赖）
+  const httpServerEntry = isGemini
+    ? {
+        serverUrl: mcpUrlWithToken,
+      }
+    : {
+        url: mcpUrlWithToken,
+        ...(hasRealOrPlaceholderToken
+          ? {
+              headers: {
+                Authorization: `Bearer ${token}`,
+              },
+            }
+          : {}),
+      };
 
   const stdioEnv = {
+    PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
     AH_URL: baseUrl,
-    ...(token ? { AH_TOKEN: token } : { AH_AGENT: agent.id }),
+    ...(hasRealOrPlaceholderToken ? { AH_TOKEN: token } : { AH_AGENT: agent.id }),
+  };
+
+  const npxServerEntry = {
+    command: "npx",
+    args: ["-y", "github:backtomyfuture/a2a-hub", "mcp"],
+    env: stdioEnv,
   };
 
   const stdioServerEntry = {
@@ -365,18 +383,21 @@ export function buildAgentMcpOnboarding({ hubUrl, agent, token, template }) {
   };
 
   const envFlags = [`-e AH_URL="${baseUrl}"`];
-  if (token) envFlags.push(`-e AH_TOKEN="${token}"`);
+  if (hasRealOrPlaceholderToken) envFlags.push(`-e AH_TOKEN="${token}"`);
   else if (agent.id) envFlags.push(`-e AH_AGENT="${agent.id}"`);
 
   return {
     preferred_connect: preferredConnect,
     mcp_url: mcpUrl,
+    mcp_url_with_token: mcpUrlWithToken,
     mcp_prompt: buildAgentMcpPrompt({ agent, template: tpl }),
     http_json: JSON.stringify({ mcpServers: { "a2a-hub": httpServerEntry } }, null, 2),
+    npx_json: JSON.stringify({ mcpServers: { "a2a-hub": npxServerEntry } }, null, 2),
     stdio_json: JSON.stringify({ mcpServers: { "a2a-hub": stdioServerEntry } }, null, 2),
     cli_commands: {
-      gemini: `gemini mcp add a2a-hub ah mcp ${envFlags.join(" ")}`,
-      claude: `claude mcp add a2a-hub ${envFlags.join(" ")} -- ah mcp`,
+      gemini: `gemini mcp add --transport http a2a-hub "${mcpUrlWithToken}"`,
+      claude: `claude mcp add --transport http a2a-hub "${mcpUrlWithToken}"`,
+      stdio_gemini: `gemini mcp add a2a-hub ah mcp ${envFlags.join(" ")}`,
     },
   };
 }

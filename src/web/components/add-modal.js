@@ -205,11 +205,7 @@ export function renderAddModal(root, refreshFn) {
         });
         const preferred = res.mcp_onboarding?.preferred_connect || activeTpl.preferred_connect || "mcp";
         selectedAgentConnectMode = preferred;
-        selectedMcpConfigTab = selectedTemplateId === "gemini"
-          ? "gemini_cli"
-          : selectedTemplateId === "claude-client"
-            ? "claude_cli"
-            : "http_json";
+        selectedMcpConfigTab = "http_json";
         createdResult = {
           kind: "agent",
           title: `Agent「${res.agent.name}」已创建并立即激活`,
@@ -382,6 +378,7 @@ function renderDeviceForm() {
 
 function getMcpConfigSnippet(mcp, tab) {
   if (!mcp) return "";
+  if (tab === "npx_json") return mcp.npx_json || "";
   if (tab === "stdio_json") return mcp.stdio_json || "";
   if (tab === "gemini_cli") return mcp.cli_commands?.gemini || "";
   if (tab === "claude_cli") return mcp.cli_commands?.claude || "";
@@ -403,10 +400,11 @@ function renderResultStep(res) {
     { id: "cli", label: "已装 ah 快捷接入" },
   ];
   const mcpTabs = [
-    { id: "http_json", label: "Streamable HTTP (JSON)" },
-    { id: "stdio_json", label: "本机 Stdio (ah mcp)" },
-    { id: "gemini_cli", label: "Gemini CLI 一行命令" },
-    { id: "claude_cli", label: "Claude Code 一行命令" },
+    { id: "http_json", label: "Streamable HTTP 直连（推荐 · 免 Node）" },
+    { id: "npx_json", label: "npx 免安装 (Stdio)" },
+    { id: "stdio_json", label: "本机 ah mcp (Stdio)" },
+    { id: "gemini_cli", label: "Gemini CLI" },
+    { id: "claude_cli", label: "Claude Code" },
   ];
 
   return `

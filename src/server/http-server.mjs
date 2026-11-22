@@ -348,6 +348,7 @@ export function startHubHttpServer({
       ownerToken: curOwnerToken,
       store,
       approvalPrivateKey,
+      allowQueryToken: pathname === "/api/v1/mcp",
     });
     if (!actor.authenticated) {
       return sendError(res, 401, actor.invalidToken ? "无效的访问令牌" : "未登录或缺少 Bearer Token", "unauthorized");
