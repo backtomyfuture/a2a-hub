@@ -7,7 +7,8 @@ import os from "node:os";
 import path from "node:path";
 import { Kernel } from "../kernel.mjs";
 import { formatStats } from "../kernel-util.mjs";
-import { readEnvFile, resolveListenAddr } from "../config.mjs";
+import { readEnvFile, readLiveHubUrl, resolveListenAddr, inferCloudPublicUrl } from "../config.mjs";
+import { probePublicEndpoint } from "../expose.mjs";
 import { ApprovalService } from "./approval.mjs";
 import { PresentService } from "./present.mjs";
 import { StaleService } from "./stale.mjs";
@@ -68,7 +69,7 @@ async function importWakerModule() {
   }
 }
 
-export async function hubDoctor(configDir) {
+export async function hubDoctor(configDir, opts = {}) {
   let problems = 0;
   const ok = (msg) => console.log("  ✓ " + msg);
   const bad = (msg) => console.log("  ✗ " + msg);
@@ -106,10 +107,35 @@ export async function hubDoctor(configDir) {
     || kv.AH_API_TOKEN
     || process.env.AH_API_TOKEN,
   );
+  const publicUrl = String(raw?.publicUrl ?? kv.AH_PUBLIC_URL ?? inferCloudPublicUrl(process.env) ?? "").trim().replace(/\/+$/, "");
   if (!hasApiToken) {
-    info("未配置 apiToken：若要暴露到公网或不可信局域网，建议在 node.json 或 app.env 设置 apiToken");
+    if (publicUrl) {
+      bad(`已配置公网地址 ${publicUrl} 但未配置机主 apiToken（禁止公网无口令暴露，请设置 AH_API_TOKEN 或运行 ah expose --auto-token）`);
+      problems++;
+    } else {
+      info("未配置 apiToken：若要暴露到公网或不可信局域网，建议在 node.json 或 app.env 设置 apiToken");
+    }
   } else {
     ok("apiToken 已配置（不显示明文）");
+  }
+  if (publicUrl) {
+    ok(`公网对外基地址：${publicUrl}`);
+    const webOff = raw?.webConsole === false || ["1", "true", "yes"].includes(
+      String(kv.AH_DISABLE_WEB_UI ?? process.env.AH_DISABLE_WEB_UI ?? "").trim().toLowerCase(),
+    );
+    if (webOff) info("Web 控制台已关闭（webConsole=false / AH_DISABLE_WEB_UI=1，仅保留协议网关接口）");
+    if (opts.probePublic === true || (opts.probePublic !== false && readLiveHubUrl(configDir))) {
+      const probe = await probePublicEndpoint(publicUrl, opts);
+      if (probe.ok) {
+        ok(`公网 Bot 探针通过（${probe.url}/api/v1/health HTTP ${probe.status}，未触发 WAF/Bot 拦截）`);
+      } else if (probe.cfBlocked) {
+        bad(probe.error);
+        for (const line of probe.remediation.split("\n")) info(line);
+        problems++;
+      } else {
+        info(`公网探针未就绪：${probe.error}`);
+      }
+    }
   }
   if (!owner) {
     info("使用内置 Web 控制台执行 ed25519 签名审批");

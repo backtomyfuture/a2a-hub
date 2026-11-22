@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.zeabur.app/template.json",
+  "name": "a2a-hub",
+  "description": "Zero-dependency multi-agent A2A orchestration hub (SQLite WAL + HTTP Long-Poll + Web Console)",
+  "build": {
+    "type": "dockerfile",
+    "dockerfile": "Dockerfile"
+  },
+  "ports": [
+    {
+      "id": "web",
+      "port": 8787,
+      "type": "HTTP"
+    }
+  ],
+  "volumes": [
+    {
+      "id": "data",
+      "dir": "/data"
+    }
+  ],
+  "env": {
+    "AH_HOME": "/data",
+    "PORT": "8787",
+    "AH_API_TOKEN": {
+      "description": "Owner master API token for Web Console and CLI management",
+      "required": true
+    }
+  }
+}

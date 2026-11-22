@@ -51,7 +51,7 @@ import { initiatorOf } from "../inbox.mjs";
 import { TERMINAL_STATUSES } from "../kernel-util.mjs";
 import { getTaskWhy } from "../why.mjs";
 import { handleAgentGatewayRequest } from "./agent-gateway.mjs";
-import { rosterNodeVisible } from "./longpoll-broker.mjs";
+import { MAX_LONGPOLL_SEC, rosterNodeVisible } from "./longpoll-broker.mjs";
 import { renderWebConsoleHtml } from "./web-ui.mjs";
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -263,11 +263,13 @@ export async function startHubHttpServer({
   const connectHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
   let activePort = port;
   const publicUrl = String(cfg?.publicUrl ?? "").trim().replace(/\/+$/, "");
-  // 接入提示词要发给其他机器：优先用配置的对外地址，避免机主在 Hub 本机用 127.0.0.1 打开控制台时生成远端不可达的地址。
+  // 接入提示词要发给其他机器：优先用配置的对外地址；无配置时识别反向代理 X-Forwarded-Proto/Host，避免在 443 代理后生成 http://。
   const requestHubUrl = (req) => {
     if (publicUrl) return publicUrl;
-    const hostHdr = String(req.headers.host ?? "").trim();
-    return hostHdr ? `http://${hostHdr}` : `http://${connectHost}:${activePort}`;
+    const hostHdr = String(req.headers["x-forwarded-host"] ?? req.headers.host ?? "").split(",")[0].trim();
+    const protoHdr = String(req.headers["x-forwarded-proto"] ?? "").split(",")[0].trim().toLowerCase();
+    const proto = protoHdr === "https" ? "https" : "http";
+    return hostHdr ? `${proto}://${hostHdr}` : `http://${connectHost}:${activePort}`;
   };
   // 节点模板以配置目录的文件为准。没有文件时写入初始四条；之后每次请求重读，改文件不用重启。
   const agentTemplates = () => loadAgentTemplates(cfg?.configDir || "", { writeIfMissing: Boolean(cfg?.configDir) });
@@ -307,6 +309,10 @@ export async function startHubHttpServer({
 
     try {
       if (method === "GET" && (pathname === "/" || pathname === "/index.html")) {
+        if (cfg?.webConsole === false) {
+          sendJson(res, 404, { error: "Web 控制台已关闭（webConsole=false）" });
+          return;
+        }
         const loaded = agentTemplates();
         sendHtml(res, 200, renderWebConsoleHtml({
           presets: consoleTemplatePresets(loaded.presets),
@@ -489,7 +495,7 @@ export async function startHubHttpServer({
         const node = principal.kind === "agent" ? principal.node : rawNode;
         const cursor = Number(reqUrl.searchParams.get("cursor") ?? 0) || 0;
         const timeoutSec = Number(reqUrl.searchParams.get("timeout") ?? 25);
-        const timeoutMs = Number.isFinite(timeoutSec) ? Math.max(0, Math.min(60, timeoutSec)) * 1000 : 25_000;
+        const timeoutMs = Number.isFinite(timeoutSec) ? Math.max(0, Math.min(MAX_LONGPOLL_SEC, timeoutSec)) * 1000 : 25_000;
         const ac = new AbortController();
         const onClose = () => ac.abort();
         req.on("close", onClose);

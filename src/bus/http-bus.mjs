@@ -145,7 +145,7 @@ export class HttpBus {
   async waitForChanges({ node, cursor = 0, timeoutSec = 25, signal } = {}) {
     const target = encodeURIComponent(String(node ?? this.node ?? "*"));
     const cur = encodeURIComponent(String(Number(cursor) || 0));
-    const sec = encodeURIComponent(String(Math.max(0, Math.min(60, Number(timeoutSec) || 25))));
+    const sec = encodeURIComponent(String(Math.max(0, Math.min(40, Number(timeoutSec) || 25))));
     const r = await fetch(`${this.hubUrl}/api/v1/poll?node=${target}&cursor=${cur}&timeout=${sec}`, {
       method: "GET",
       headers: this._headers(false),

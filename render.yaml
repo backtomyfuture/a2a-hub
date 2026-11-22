@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: a2a-hub
+    runtime: docker
+    plan: starter
+    healthCheckPath: /api/v1/health
+    disk:
+      name: a2a-hub-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: AH_HOME
+        value: /data
+      - key: AH_API_TOKEN
+        generateValue: true
+      - key: PORT
+        value: "8787"

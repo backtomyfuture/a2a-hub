@@ -272,6 +272,24 @@ export function readEnvFile(p) {
   return kv;
 }
 
+export function writeLockedAppEnvVars(configDir, vars) {
+  const appEnvPath = path.join(configDir, "app.env");
+  const merged = {};
+  try {
+    for (const line of fs.readFileSync(appEnvPath, "utf8").split("\n")) {
+      const idx = line.indexOf("=");
+      if (idx > 0) merged[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+    }
+  } catch { /* 文件不存在 */ }
+  for (const [k, v] of Object.entries(vars)) {
+    if (v !== undefined && v !== null && String(v) !== "") merged[k] = String(v);
+  }
+  const content = Object.entries(merged).map(([k, v]) => `${k}=${v}`).join("\n") + "\n";
+  fs.writeFileSync(appEnvPath, content, { mode: 0o600 });
+  fs.chmodSync(appEnvPath, 0o600);
+  return appEnvPath;
+}
+
 function expandHome(raw) {
   const s = String(raw ?? "").trim();
   if (s === "~") return os.homedir();
@@ -334,6 +352,18 @@ export function resolveListenAddr(raw = "0.0.0.0:8787") {
     }
   }
   throw new Error(`非法 listen 地址：${s}（期望 host:port 或 port）`);
+}
+
+export function inferCloudPublicUrl(env = process.env) {
+  const direct = String(env.AH_PUBLIC_URL ?? env.RENDER_EXTERNAL_URL ?? env.ZEABUR_WEB_URL ?? "").trim();
+  if (direct) return direct.replace(/\/+$/, "");
+  const railway = String(env.RAILWAY_PUBLIC_DOMAIN ?? "").trim();
+  if (railway) {
+    return (railway.startsWith("http://") || railway.startsWith("https://") ? railway : `https://${railway}`).replace(/\/+$/, "");
+  }
+  const flyApp = String(env.FLY_APP_NAME ?? "").trim();
+  if (flyApp) return `https://${flyApp}.fly.dev`;
+  return "";
 }
 
 export function readLiveHubUrl(configDir) {
@@ -465,10 +495,18 @@ export function loadConfig(configDir, opts = {}) {
   }
   if (busType === "sqlite") {
     out.dbPath = resolvedDbPath;
-    out.listen = cfg.listen ?? "0.0.0.0:8787";
+    const envPort = String(process.env.PORT ?? "").trim();
+    const validPort = /^\d+$/.test(envPort) && Number(envPort) >= 1 && Number(envPort) <= 65535 ? envPort : "";
+    const envListen = String(kv.AH_LISTEN ?? process.env.AH_LISTEN ?? "").trim();
+    out.listen = envListen || (validPort ? `0.0.0.0:${validPort}` : (cfg.listen ?? "0.0.0.0:8787"));
   }
   if (apiToken) out.apiToken = apiToken;
-  if (cfg.publicUrl) out.publicUrl = String(cfg.publicUrl).trim();
+  const effectivePublicUrl = String(cfg.publicUrl || kv.AH_PUBLIC_URL || inferCloudPublicUrl(process.env) || "").trim().replace(/\/+$/, "");
+  if (effectivePublicUrl) out.publicUrl = effectivePublicUrl;
+  const disableUi = ["1", "true", "yes"].includes(
+    String(kv.AH_DISABLE_WEB_UI ?? process.env.AH_DISABLE_WEB_UI ?? "").trim().toLowerCase(),
+  );
+  if (cfg.webConsole === false || disableUi) out.webConsole = false;
   if (cfg.notifications && typeof cfg.notifications === "object") {
     out.notifications = cfg.notifications;
   }

@@ -139,6 +139,47 @@ curl -X POST "http://<HUB_IP>:8787/api/v1/tasks/<TASK_ID>/complete" \
 
 更多接口说明见 [外部 HTTP Agent 手册](docs/protocol-node-runbook.md)。
 
+### 方式 D：零门槛公网暴露（免买域名 / 云端 7×24 一键部署）
+
+让本地 Hub 拥有浏览器与云端 Agent 都信任的 `443 HTTPS` 公网入口，有两种零门槛方式：
+
+#### 1) 本地主机一键开启 Tailscale Funnel（0 域名 · 0 备案 · 永久固定 HTTPS）
+
+如果中台跑在家里的 Mac mini 或 Linux 主机上，只要本机登录了 Tailscale，一条命令即可映射到 `https://<主机名>.<tailnet>.ts.net` 并自动回填 `node.json.publicUrl`：
+
+```bash
+# 先确保已设置机主口令（没有可加 --auto-token 自动生成写入 0600 app.env）
+node bin/ah.mjs expose tailscale --auto-token
+```
+
+也支持查看与关闭，或对已有 Cloudflare Tunnel 公网域名做 **Bot Fight Mode / WAF 质询拦截探测**：
+
+```bash
+node bin/ah.mjs expose status                 # 查看当前公网地址与端到端健康探针
+node bin/ah.mjs expose cf https://hub.你的域名  # 绑定公网地址并探测是否被 Cloudflare 拦截
+node bin/ah.mjs expose off                    # 关闭 Funnel 并移除 publicUrl
+```
+
+> 若通过 Cloudflare 代理被 WAF / Bot Fight Mode 返回 403 或 HTML 质询页，请关闭 **Bot Fight Mode** 或在 **Security → WAF → Custom rules** 中对 `/api/v1/*` 与 `/.well-known/*` 配置 `Skip`。
+
+#### 2) 云平台一键部署（无本地常驻机器，60 秒拥有 7×24 公网 HTTPS 中台）
+
+仓库根目录已内置标准 [`Dockerfile`](Dockerfile)（Node 24 零依赖，自动识别 `$PORT`、`AH_API_TOKEN`、`AH_PUBLIC_URL` 及反向代理 `X-Forwarded-Proto: https`）及各大云平台模板：
+
+- **Railway**（[`railway.json`](railway.json)）：[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/template?referralCode=&repo=https://github.com/backtomyfuture/a2a-hub) — 挂载持久化卷到 `/data`，环境变量设置 `AH_API_TOKEN`。
+- **Render**（[`render.yaml`](render.yaml)）：[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/backtomyfuture/a2a-hub) — 自动创建 1GB 持久化磁盘 `/data` 与随机 `AH_API_TOKEN`。
+- **Fly.io**（[`fly.toml`](fly.toml)）：`fly launch --copy-config` 一键起服并挂载 `a2a_hub_data -> /data`。
+- **Zeabur**（[`zeabur.json`](zeabur.json)）：导入仓库后自动挂载 `/data` 持久化卷。
+- **任意 Docker 主机**：
+  ```bash
+  docker build -t a2a-hub .
+  docker run -d --name a2a-hub -p 8787:8787 \
+    -v a2a_hub_data:/data \
+    -e AH_API_TOKEN="你的强口令" \
+    -e AH_PUBLIC_URL="https://你的公网域名" \
+    a2a-hub
+  ```
+
 <details>
 <summary>高级用法：手动分步 setup / 自定义参数 / 仅本地调试</summary>
 
@@ -201,6 +242,7 @@ node bin/ah.mjs daemon
 | 分类 | 命令 | 用途 |
 |---|---|---|
 | **一键部署** | `ah up [--listen …] [--service] [--no-daemon]` | 一键初始化 SQLite Hub（自动生成 Token 与签名密钥）并启动 |
+| | `ah expose [tailscale\|cf <url>\|status\|off] [--auto-token]` | 一键开启 Tailscale Funnel 443 HTTPS 暴露与 Cloudflare Bot 自检 |
 | | `ah join <hub_url> [--node …] [--service] [--no-daemon]` | 一键抽离凭据、拉取 Hub 公钥并启动出站长轮询节点 |
 | **初始化与运维** | `ah setup [--role node\|hub] [--bus sqlite\|http]` | 向导：初始化 SQLite 中台或远端 HTTP 长轮询节点 |
 | | `ah daemon [--role node\|hub]` | 启动节点或 Hub 全功能守护进程（含 HTTP 网关与 Web 控制台） |

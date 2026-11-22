@@ -9,7 +9,7 @@ import { AgentGatewayClient } from "./bus/agent-client.mjs";
 import { HttpBus } from "./bus/http-bus.mjs";
 import { SqliteBus } from "./bus/sqlite-bus.mjs";
 import { normalizeTables } from "./bus/tables.mjs";
-import { normalizeCommands, readEnvFile, readTokenFile, resolveListenAddr } from "./config.mjs";
+import { inferCloudPublicUrl, normalizeCommands, readEnvFile, readTokenFile, resolveListenAddr, writeLockedAppEnvVars } from "./config.mjs";
 import { isHubPublicKey, loadOrCreateHubKey } from "./approval-sign.mjs";
 import { doctor } from "./doctor.mjs";
 import { service } from "./service.mjs";
@@ -425,24 +425,6 @@ export function setupHelpText() {
   --help        打印本帮助并退出`;
 }
 
-function writeLockedAppEnvVars(configDir, vars) {
-  const appEnvPath = path.join(configDir, "app.env");
-  const merged = {};
-  try {
-    for (const line of fs.readFileSync(appEnvPath, "utf8").split("\n")) {
-      const idx = line.indexOf("=");
-      if (idx > 0) merged[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
-    }
-  } catch { /* 文件不存在 */ }
-  for (const [k, v] of Object.entries(vars)) {
-    if (v !== undefined && v !== null && String(v) !== "") merged[k] = String(v);
-  }
-  const content = Object.entries(merged).map(([k, v]) => `${k}=${v}`).join("\n") + "\n";
-  fs.writeFileSync(appEnvPath, content, { mode: 0o600 });
-  fs.chmodSync(appEnvPath, 0o600);
-  return appEnvPath;
-}
-
 async function confirmOverwriteNodeJson(configDir, flags, interactive, ask) {
   fs.mkdirSync(configDir, { recursive: true });
   const nodeJsonPath = path.join(configDir, "node.json");
@@ -800,11 +782,15 @@ export async function runSetup(configDir, argv, appDir) {
     let listenAddr = null;
     let publicUrl = "";
     if (setupBus === "sqlite") {
-      const listenRaw = flags.listen || existingRaw?.listen || (interactive ? await ask("HTTP 监听地址", "0.0.0.0:8787") : "0.0.0.0:8787");
+      const envPort = String(process.env.PORT ?? "").trim();
+      const validEnvPort = /^\d+$/.test(envPort) && Number(envPort) >= 1 && Number(envPort) <= 65535 ? `0.0.0.0:${envPort}` : "";
+      const envListen = String(process.env.AH_LISTEN ?? "").trim() || validEnvPort;
+      const defaultListen = envListen || existingRaw?.listen || "0.0.0.0:8787";
+      const listenRaw = flags.listen || (interactive ? await ask("HTTP 监听地址", defaultListen) : defaultListen);
       listenAddr = resolveListenAddr(listenRaw);
       const listen = `${listenAddr.host}:${listenAddr.port}`;
       const dbPath = flags.dbPath || existingRaw?.dbPath || path.join(configDir, "hub.db");
-      publicUrl = String(flags.publicUrl ?? existingRaw?.publicUrl ?? "").trim();
+      publicUrl = String(flags.publicUrl ?? existingRaw?.publicUrl ?? inferCloudPublicUrl(process.env) ?? "").trim();
       nodeJson.listen = listen;
       nodeJson.dbPath = dbPath;
       if (publicUrl) nodeJson.publicUrl = publicUrl;

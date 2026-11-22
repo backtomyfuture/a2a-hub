@@ -290,18 +290,23 @@ api backoff reason=http-429 kind=list retry=1/3 wait=2s
 | `busType` | 全部 | 总线类型：`sqlite`（`role=hub` 默认）、`http`（填写了 `hubUrl` 的远端节点，机主 Token）或 `agent`（官方 Agent Gateway 客户端，分 Agent Token） |
 | `dbPath` | Hub (`sqlite`) | SQLite WAL 数据库文件路径，支持相对配置目录路径，默认 `hub.db` |
 | `listen` | Hub (`sqlite`) | HTTP API 与 Web 控制台绑定地址，格式 `<host>:<port>`，默认 `0.0.0.0:8787` |
-| `publicUrl` | Hub (`sqlite`) | 可选外部访问地址（如 `http://192.168.1.10:8787` 或 Tailscale 地址），用于生成外部通知跳转链接，以及控制台「添加 Agent」接入提示词里的 Hub 地址 |
-| `apiToken` | Hub / 远端 `http` 节点 | 机主（owner）Bearer Token，权限覆盖全部接口。建议放在 0600 权限的 `app.env` 环境变量 `AH_API_TOKEN` 中。外部 HTTP Agent 不要用这把钥匙，用 §7.5 的分 Agent Token |
+| `publicUrl` | Hub (`sqlite`) | 可选外部访问地址（如 `https://mac-mini.tail99.ts.net` 或反向代理域名；也可通过 `AH_PUBLIC_URL` / 云平台域名变量自动推导），用于生成外部通知跳转链接及控制台「添加 Agent」提示词；未配置时若收到代理头 `X-Forwarded-Proto: https` 也会自动按 `https://` 生成 |
+| `webConsole` | Hub (`sqlite`) | 设为 `false`（或设环境变量 `AH_DISABLE_WEB_UI=1`）可在公网纯网关模式下关闭 `/` 网页控制台（返回 404） |
+| `apiToken` | Hub / 远端节点 | 机主（owner）Bearer Token，权限覆盖全部接口，配置了 `publicUrl` 时强制要求。建议放在 0600 权限的 `app.env` 环境变量 `AH_API_TOKEN` 中。外部接入节点请使用 §7.5 的分节点 Token |
 | `hubUrl` | 远端节点 (`http` / `agent`) | 中台 HTTP 根地址，如 `http://192.168.1.10:8787` |
 | `tokenFile` | `busType=agent` | `0600` 凭据文件路径。一行 Token，或 `AH_API_TOKEN=` / `A2A_HUB_TOKEN=`。优先于环境变量。明文不进 `node.json` |
 | `agentRole` | `busType=agent` | `worker` 或 `leader`。`role` 字段仍是 `node` |
 | `receiveMode` | `busType=agent` | 缺省 `http-longpoll` |
-| `longPollSec` | 全部模式 | 长轮询单次挂起秒数，默认 `25`（服务端安全夹紧在 5–60 秒） |
+| `longPollSec` | 全部模式 | 长轮询单次挂起秒数，默认 `25`（服务端安全夹紧在 0–40 秒，避免反向代理 60~100 秒超时 524/504 断流） |
 | `notifications` | Hub (`sqlite`) | 可选外部提醒配置对象：`feishuWebhookUrl`（飞书群机器人 Webhook，可选通知渠道）、`barkUrl`、`telegramBotToken`、`telegramChatId`、`webhookUrl`、`events`（默认 `auth-required`、`input-required`、`completed`、`failed`、`rejected`，另可加 `stale`） |
 
 ### 7.2 快速启动与接入方式
 
 - 一键启动主中台 Hub：`ah up [--listen 0.0.0.0:8787] [--service]`（自动生成 SQLite 库、`app.env` 随机口令与 `approval_key.pem` ed25519 密钥对）
+- 一键公网 443 HTTPS 暴露（Tailscale Funnel / Cloudflare 检测）：
+  - `ah expose tailscale [--auto-token] [--port <port>]`：检查 Tailscale 登录状态与 MagicDNS，开启 443 HTTPS Funnel 并自动回填 `node.json.publicUrl`（未配 `AH_API_TOKEN` 时拒绝暴露，需加 `--auto-token`）
+  - `ah expose cf <https://你的域名> [--auto-token]`：写入 `publicUrl` 并发送模拟无 Cookie Agent 探针检测 Cloudflare WAF / Bot Fight Mode 拦截，命中质询时给出精确排障指引
+  - `ah expose status` / `ah expose off`：查看当前公网地址与探针状态，或一键关闭 Funnel 并清除 `publicUrl`
 - 一键接入远端电脑：`ah join http://<TOKEN>@<HUB>:8787 [--service]`（自动抽离口令至 `app.env`、拉取 `hubPublicKey` 并启动只出站长轮询守护）
 - 官方 Agent Gateway 客户端（云端 VM，只用分 Agent Token）：
   ```bash

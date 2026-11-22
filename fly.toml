@@ -1,0 +1,26 @@
+app = "a2a-hub"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  AH_HOME = "/data"
+  PORT = "8787"
+
+[mounts]
+  source = "a2a_hub_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8787
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/api/v1/health"

@@ -13,6 +13,7 @@ import { isHubPublicKey, readHubPublicKey } from "./approval-sign.mjs";
 import { AGENT_TEMPLATES_FILE, loadAgentTemplates } from "./hub/agent-templates.mjs";
 import { f1 } from "./bus/tables.mjs";
 import { selectAutostartName } from "./service.mjs";
+import { probePublicEndpoint } from "./expose.mjs";
 
 const ok = (msg) => console.log("  ✓ " + msg);
 const bad = (msg) => console.log("  ✗ " + msg);
@@ -647,6 +648,11 @@ export async function doctor(configDir, appDir, opts = {}) {
       ok(`Tasks 可读：共 ${tasks.length} 条`);
     } catch (e) {
       bad(`连接远程 Hub 失败：${e.message}`);
+      const probe = await probePublicEndpoint(cfg.hubUrl).catch(() => null);
+      if (probe?.cfBlocked) {
+        bad(probe.error);
+        for (const line of probe.remediation.split("\n")) info(line);
+      }
       problems++;
     }
     info(`唤醒方式：HTTP 长轮询（longpoll，超时 ${cfg.longPollSec}s）＋ ${cfg.sweepSec}s 对账扫表`);
@@ -658,6 +664,11 @@ export async function doctor(configDir, appDir, opts = {}) {
       ok(`Agent Gateway /check 可达（work=${check?.work ? "yes" : "no"}）`);
     } catch (e) {
       bad(`连接 Agent Gateway 失败：${e.message}`);
+      const probe = await probePublicEndpoint(cfg.hubUrl).catch(() => null);
+      if (probe?.cfBlocked) {
+        bad(probe.error);
+        for (const line of probe.remediation.split("\n")) info(line);
+      }
       problems++;
     }
     info(`唤醒方式：Agent Gateway 长轮询（${cfg.receiveMode}，超时 ${cfg.longPollSec}s），不开监听端口`);

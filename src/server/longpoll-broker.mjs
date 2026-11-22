@@ -16,6 +16,9 @@ const RUN_BURST_MS = 30_000;
 export const AGENT_WINDOW_FACTOR = 1.5;
 export const DEFAULT_POLL_INTERVAL_MIN = 5;
 export const DEFAULT_WEBHOOK_INTERVAL_MIN = 30;
+// 反向代理（Cloudflare / Railway / Render / Zeabur 等）单次请求通常 60~100 秒超时，hold 窗口严格控制在 40 秒内。
+export const MAX_LONGPOLL_SEC = 40;
+export const MAX_LONGPOLL_MS = MAX_LONGPOLL_SEC * 1000;
 const MIN_AGENT_WINDOW_MS = 3 * 60 * 1000;
 
 function configuredWindowMs(pollIntervalMin) {
@@ -329,7 +332,7 @@ export class LongPollBroker {
 
   async wait({ node = "*", cursor = 0, timeoutMs = 25_000, signal = null, remoteAddr = "" } = {}) {
     const cur = Number.isFinite(Number(cursor)) ? Number(cursor) : 0;
-    const waitMs = Math.max(0, Math.min(60_000, Number(timeoutMs) || 0));
+    const waitMs = Math.max(0, Math.min(MAX_LONGPOLL_MS, Number(timeoutMs) || 0));
 
     if (this._closed) {
       return { wake: false, cursor: this.latestSeq, events: [], closed: true };

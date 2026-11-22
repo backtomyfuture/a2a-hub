@@ -16,7 +16,7 @@ import { agentCanSeeTask, assertAgentRoute } from "../hub/agent-access.mjs";
 import { assertModelOverride, parseCardModel, workerModelOfCards, workerPeerCards, WORKER_MODEL_KEYS, undispatchableReason, isGatewayExecutionCard, admissionOf, actsAsLeader, httpError, parseCardMetadata, presetHttpCardFields, validateNodeName, validatePollIntervalMin } from "../hub/admission.mjs";
 import { alignNodeReceiveMode, normalizeScheduleSpecs, removeHttpAgentSchedule, saveHttpAgentSchedule } from "../hub/capabilities.mjs";
 import { isStaleWorking } from "../hub/stale.mjs";
-import { rosterNodeVisible } from "./longpoll-broker.mjs";
+import { MAX_LONGPOLL_SEC, rosterNodeVisible } from "./longpoll-broker.mjs";
 import { submitAgentReceipt } from "../inbox.mjs";
 import { readTaskMeta, withRefreshedLease } from "../kernel-util.mjs";
 import { modelAuditOf } from "../receipt.mjs";
@@ -1363,7 +1363,7 @@ export async function handleAgentGatewayRequest({
     const qTimeout = reqUrl.searchParams.get("timeout");
     const rawTimeout = body.timeout ?? (qTimeout != null ? Number(qTimeout) : 0);
     const timeoutMs = Number.isFinite(Number(rawTimeout))
-      ? Math.max(0, Math.min(60, Number(rawTimeout))) * 1000
+      ? Math.max(0, Math.min(MAX_LONGPOLL_SEC, Number(rawTimeout))) * 1000
       : 0;
     const preCheckSeq = broker?.latestSeq ?? 0;
     const rawCursor = body.cursor ?? reqUrl.searchParams.get("cursor");
@@ -1464,7 +1464,7 @@ export async function handleAgentGatewayRequest({
   if (method === "GET" && updatesMatch) {
     const node = validateNodeName(decodeURIComponent(updatesMatch[1]));
     const rawTimeout = Number(reqUrl.searchParams.get("timeout") ?? 0);
-    const timeoutMs = Number.isFinite(rawTimeout) ? Math.max(0, Math.min(60, rawTimeout)) * 1000 : 0;
+    const timeoutMs = Number.isFinite(rawTimeout) ? Math.max(0, Math.min(MAX_LONGPOLL_SEC, rawTimeout)) * 1000 : 0;
     const preCheckSeq = broker?.latestSeq ?? 0;
     const rawCursor = reqUrl.searchParams.get("cursor");
     const cursor = rawCursor != null && String(rawCursor).trim() !== "" && Number.isFinite(Number(rawCursor))

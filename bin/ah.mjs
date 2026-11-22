@@ -319,6 +319,7 @@ function serviceOptions(rest, role) {
 // 总用法表。printUsage 按子命令筛行，所以每行都以「  ah <子命令> 」开头。
 const USAGE_LINES = [
   "  ah up      [--listen 0.0.0.0:8787] [--node mac-mini] [--service]  一行初始化并启动独立中台 Hub",
+  "  ah expose  [tailscale|cf <url>|status|off] [--auto-token] [--port <port>]  一键公网 443 HTTPS 暴露（Tailscale Funnel）与 Cloudflare Bot 拦截自检",
   "  ah join    http://[<token>@]<hub-ip>:8787 [--node worker-1] [--agent] [--agent-role worker|leader] [--token-file <path>] [--service]  一行接入远端 Hub；--agent 走 Agent Gateway",
   "  ah setup   [--config <dir>] [--role node|hub] [--bus sqlite|http|agent] [--kind host|agent] [--agent] [--agent-role worker|leader] [--token-file <path>] [--hub] [--join <url>] [--skip-skill]  一键配置向导",
   "  ah daemon  [--config <dir>] [--role node|hub]  常驻守护进程（省略 --role 时读 node.json，缺省 node）",
@@ -398,6 +399,9 @@ if (wantsHelp) {
       await runDaemonLoop(configDir, "node");
     }
   }
+} else if (cmd === "expose") {
+  const { runExpose } = await import("../src/expose.mjs");
+  process.exitCode = await runExpose(path.resolve(configDirFrom(rest)), rest);
 } else if (cmd === "setup") {
   const { runSetup } = await import("../src/setup.mjs");
   process.exitCode = await runSetup(configDirFrom(rest), rest, APP_DIR);
