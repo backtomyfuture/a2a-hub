@@ -5,8 +5,13 @@ node_modules/
 __pycache__/
 
 # 运行时与凭据（只存本机，绝不进仓库）
+.a2a-hub/
 .hub-node/
 app.env
+config.json
+workers.json
+sessions/
+daemon.lock
 hub.db
 hub.db-wal
 hub.db-shm

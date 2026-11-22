@@ -1,84 +1,40 @@
 ---
 name: ah-inbox
-description: 本机独立 Agent 收件箱执行 Skill（有 ah CLI 的执行端，`kind=agent`）：从本机守护进程投递的 agent_inbox.jsonl 取单、汇报交付与产物、提交自检清单、发起澄清提问、在高危动作前申请机主签名授权及登记本地定时触发。仅给运行在本机且配置了 kind=agent 的独立执行 Agent 使用；普通 host 子进程勿装、云端无 CLI Agent 请用 a2a-worker。
+description: "通过 ah inbox CLI 接入个人 a2a-hub 中台的轻量收件箱交互指令，适合命令行代理按需检查、认领和回报任务。"
 ---
 
-# `ah-inbox` 执行端 Skill（有 CLI 的本机独立 Agent）
+# `ah inbox` 协议说明（v2.0）
 
-你运行在一台配置了 `ah`（`a2a-hub`，`kind: "agent"`, `mode: "inbox"`）的主机上。本机 `ah daemon` 已在后台替你维持 HTTP 长轮询、认领锁单、续租心跳与超时兜底，并把指派给你的任务写入本地收件箱 `agent_inbox.jsonl`。你需要通过 `ah inbox` 与中台完成闭环交付。
-
-> **边界守则**：
-> - **高危动作必须走 `auth`，绝不用 `ask` 代替审批**：涉及对外发消息、删改重要数据、花钱/支付、提交外部表单、变更权限前，先调 `ah inbox auth` 停下等机主确认。
-> - **禁止篡改终态或替人审批**：交付/失败后任务进入终态不可再写；如需把任务再拆分外包，请另走控制端派单流程。
-> - **先接纳再收单**：新登记的名片需机主在控制台接纳后，本收件箱才会收到派单。HTTP 注册时看响应的 `admission`（各名片状态）与 `pending`（是否仍有未接纳名片）。
-
----
-
-## 一、提取待办任务 (`ah inbox`)
-
-每轮唤醒、对话入口或定时 ticker 中检查并取出待处理的任务（含 `input-required` 答复恢复、`auth-required` 获批恢复）：
-
-```bash
-ah inbox --pop [--json]
+## 常用工作流
+1. 查看自己名下是否有待办或变更：
+```sh
+ah inbox check --agent <你的agent_id>
 ```
-
-- 无输出表示当前没有待办任务；
-- `--pop` 会同时把本地条目状态标为 `acked`（避免重复消费），并返回：
-  - `task_id`、`from_node`（任务发起方）、`title`、`text`（主指令）、`params`（结构化参数与 `acceptance.criteria`）、`turns`（历史多轮问答与审批记录）、`files`（附件数组 `{ uri, name, mime, from_kind, local_path?, error? }`；`hub://` 文件已由守护进程下载至 `runs/<Task_ID>/files/` 并填 `local_path`，失败时 `error` 取 `expired`、`not_found` 或 `download_failed`；`direct` 执行器的 `runs/<Task_ID>/input.json` 同此结构）。
-
----
-
-## 二、执行中沟通与中断挂起
-
-### 1. 缺少业务信息时提问 (`ah inbox ask`)
-任务挂起为 `input-required`，停止继续执行等待发起方回复；发起方回复后任务会自动回到收件箱并带上新答复：
-
-```bash
-ah inbox ask --task <Task_ID> --text "<需要发起方补充的具体问题或选项>" [--file <本地文件路径>]...
+2. 列出收件箱全部任务：
+```sh
+ah inbox list --agent <你的agent_id>
 ```
-
-### 2. 高危动作前请求机主批准 (`ah inbox auth`)
-在真正执行外部发送、删改、扣费、提权等敏感副作用**之前**暂停申请批准：
-
-```bash
-ah inbox auth --task <Task_ID> --text "<具体动作、目标对象与潜在风险>" [--file <本地文件路径>]...
+3. 查看任务完整上下文与附件描述：
+```sh
+ah inbox show <task_id>
 ```
-- `ask` 与 `auth` 的 `--file` 均可重复（最多 20 个附件），提交前自动上传为 `hub://`。
-
-- 本地条目立即变为 `waiting-auth`，不会被 `ah inbox --pop` 再次取出；
-- 机主在 Hub Web 控制台完成 ed25519 签名批准后，任务自动回到收件箱恢复；若被驳回则任务终止。
-
----
-
-## 三、交付结果或报告失败 (`done` / `fail`)
-
-### 1. 成功交付 (`ah inbox done`)
-```bash
-ah inbox done \
-  --task <Task_ID> \
-  --text "<清晰结果总结>" \
-  [--artifact <本地文件路径或URL>]... \
-  [--check <criterion_id>=<pass|fail|blocked>[:<简要证据>]]
+4. 认领锁定并开始执行（进入 `working`）：
+```sh
+ah inbox claim <task_id>
 ```
-
-- `--artifact` 可重复；本地路径会在提交时自动上传为 `hub://files/<file_id>`，`http`/`https` 链接原样登记。
-- 如果来单的 `params.acceptance.criteria` 包含验收清单，用可重复的 `--check` 逐条回报每项 `id` 的自检结果与证据。
-
-### 2. 无法完成时明确失败 (`ah inbox fail`)
-```bash
-ah inbox fail --task <Task_ID> --text "<具体失败原因与卡点>"
+5. 执行过程中阻塞请求人类或 Leader：
+```sh
+# 需要补充条件（转为 input-required）：
+ah inbox ask <task_id> --prompt "请确认部署目标分支是 main 还是 staging？"
+# 涉及高危操作需要机主在线 Ed25519 签名放行（转为 auth-required）：
+ah inbox auth <task_id> --reason "需要删除旧数据库表并重建索引"
 ```
-
----
-
-## 四、如果 Agent 自带本地定时器
-
-当本机独立 Agent 自带 cron 触发周期性工作并希望在控制台集中观测及保留 A2A `Task` 记录时：
-
-```bash
-# 方式 1：通过网关自报计划并在执行时一步写入 Task（推荐，见 protocol-node-runbook.md）
-# PUT /api/v1/agents/<Node>/schedules/<Schedule_ID> { cron, tz?, cap, text, run?: { status, text, title?, artifact? } }
-
-# 方式 2：定时器到点时创建带 --schedule 的任务入总线，再走 ah inbox --pop / done
-ah task create --to <本节点> --source cron --schedule <Schedule_ID> --cap agent --text "<本次执行指令>"
+6. 回报完成或失败：
+```sh
+ah inbox complete <task_id> --summary "简明结果" --text "详细执行结论"
+ah inbox fail <task_id> --error "错误原因" [--retryable]
+```
+7. Leader 角色按增量水位拉取子任务回执：
+```sh
+ah inbox updates --agent <你的leader_id> --new
 ```

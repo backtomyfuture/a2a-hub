@@ -1,0 +1,10 @@
+{
+  "mode": "hub",
+  "version": "2.0.0",
+  "deviceId": "mac-mini-hub",
+  "deviceName": "Mac mini Hub",
+  "listen": "0.0.0.0:8787",
+  "publicUrl": "http://127.0.0.1:8787",
+  "maxConcurrent": 4,
+  "hubPublicKey": "<HUB_ED25519_PUBLIC_KEY_BASE64>"
+}

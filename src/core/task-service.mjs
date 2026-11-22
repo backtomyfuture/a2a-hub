@@ -1,0 +1,921 @@
+// 唯一权威的任务状态机引擎（A2A 八态模型）。
+// 统一处理单/多节点派单、幂等去重、认领租约、上下文历史汇总、Chase 提问回复、
+// Ed25519 审批签名放行与 Leader 增量水位消费；全部状态变更都在单事务中完成。
+
+import { randomId } from "../store/db.mjs";
+import { controlKeysIn, clampTimeoutSec, MAX_RETRIES, STALE_MIN } from "./config.mjs";
+import { signDecision } from "./approval-sign.mjs";
+
+export const A2A_STATES = new Set([
+  "submitted",
+  "working",
+  "input-required",
+  "auth-required",
+  "completed",
+  "failed",
+  "canceled",
+  "rejected",
+]);
+
+export const TERMINAL_STATES = new Set(["completed", "failed", "canceled", "rejected"]);
+
+const ALLOWED_TRANSITIONS = {
+  submitted: new Set(["working", "auth-required", "canceled", "rejected"]),
+  working: new Set(["completed", "failed", "submitted", "input-required", "auth-required", "canceled"]),
+  "input-required": new Set(["submitted", "canceled"]),
+  "auth-required": new Set(["submitted", "rejected", "canceled"]),
+  completed: new Set([]),
+  failed: new Set([]),
+  canceled: new Set([]),
+  rejected: new Set([]),
+};
+
+export function canTransition(from, to) {
+  return Boolean(ALLOWED_TRANSITIONS[from]?.has(to));
+}
+
+function makeError(message, statusCode = 400, code = "bad_request") {
+  const err = new Error(message);
+  err.statusCode = statusCode;
+  err.code = code;
+  return err;
+}
+
+export class TaskService {
+  constructor(store, { approvalPrivateKey = null, defaultLeaseSec = 300 } = {}) {
+    this.store = store;
+    this.approvalPrivateKey = approvalPrivateKey;
+    this.defaultLeaseSec = defaultLeaseSec;
+  }
+
+  setApprovalPrivateKey(privateKey) {
+    this.approvalPrivateKey = privateKey;
+  }
+
+  // 构建同 Thread（context_id）的跨任务前序摘要，便于新接入的 Worker 或续接任务拿到完整前情。
+  buildContextHistory(contextId, excludeTaskId = null, limit = 10) {
+    const tasks = this.store.listTasks({ context_id: contextId, order: "asc", limit: 50 });
+    const history = [];
+    for (const t of tasks) {
+      if (excludeTaskId && t.id === excludeTaskId) continue;
+      if (!["completed", "failed", "input-required", "auth-required", "working"].includes(t.state)) continue;
+      const summary = t.receipt?.summary || t.receipt?.text || t.error_message || "";
+      history.push({
+        task_id: t.id,
+        to_agent_id: t.to_agent_id,
+        from_node: t.from_node,
+        title: t.title,
+        input_text: t.input_text,
+        state: t.state,
+        summary: String(summary).slice(0, 1200),
+        created_at: t.created_at,
+        completed_at: t.completed_at,
+      });
+    }
+    return history.slice(-limit);
+  }
+
+  getTaskDetail(taskId, { includeContextHistory = true } = {}) {
+    const task = this.store.getTask(taskId);
+    if (!task) return null;
+    const messages = this.store.listMessages(taskId);
+    const context_history = includeContextHistory ? this.buildContextHistory(task.context_id, task.id) : [];
+    return { ...task, messages, context_history };
+  }
+
+  // 派单（支持单目标 to: "id" 与多目标扇出 to: ["a", "b"]，共享同一个 context_id）
+  dispatchTasks({
+    fromNode = "owner",
+    to,
+    title = "",
+    inputText = "",
+    params = {},
+    attachments = [],
+    model = "",
+    priority = 5,
+    contextId = "",
+    parentTaskId = null,
+    source = "direct",
+    scheduleId = null,
+    idempotencyKey = "",
+    timeoutSec,
+    maxRetries = MAX_RETRIES,
+  } = {}) {
+    const targetsRaw = Array.isArray(to) ? to : to ? [to] : [];
+    const targets = [...new Set(targetsRaw.map((x) => String(x || "").trim()).filter(Boolean))];
+    if (!targets.length) {
+      throw makeError("必须至少指定一个目标 Agent (to)", 400, "missing_target");
+    }
+
+    const forbidden = controlKeysIn(params);
+    if (forbidden.length) {
+      throw makeError(`任务参数严禁包含执行控制字段: ${forbidden.join(", ")}`, 400, "exec_control_key_forbidden");
+    }
+
+    const scope = `dispatch:${fromNode}`;
+    if (idempotencyKey) {
+      const cached = this.store.getIdempotency(scope, idempotencyKey);
+      if (cached) return { ...cached, idempotent: true };
+    }
+
+    const finalContextId = String(contextId || "").trim() || randomId("ctx");
+    const safePriority = Math.min(Math.max(Number(priority || 5), 1), 10);
+    const safeTimeout = clampTimeoutSec(timeoutSec);
+    const safeMaxRetries = Math.min(Math.max(Number(maxRetries ?? MAX_RETRIES), 0), 5);
+    const now = Date.now();
+
+    return this.store.transaction(() => {
+      const created = [];
+      for (const targetId of targets) {
+        const agent = this.store.getAgent(targetId);
+        if (!agent) {
+          throw makeError(`目标 Agent 不存在: ${targetId}`, 404, "agent_not_found");
+        }
+        if (!agent.enabled) {
+          throw makeError(`目标 Agent 已暂停: ${agent.name || targetId}`, 409, "agent_paused");
+        }
+        if (agent.device_id) {
+          const dev = this.store.getDevice(agent.device_id);
+          if (dev && !dev.enabled) {
+            throw makeError(`目标设备已暂停: ${dev.name || dev.id}`, 409, "device_paused");
+          }
+        }
+
+        const taskId = randomId("tsk");
+        const requirePreflight = agent.approval_policy === "always" || Boolean(params?.require_approval);
+        const initialState = requirePreflight ? "auth-required" : "submitted";
+        const seq = this.store.nextSeq();
+        const taskTitle = String(title || "").trim() || String(inputText || "").trim().slice(0, 80) || `Task -> ${agent.name}`;
+        const chosenModel = String(model || agent.default_model || "").trim();
+
+        this.store.db.prepare(`
+          INSERT INTO tasks (
+            id, context_id, parent_task_id, from_node, to_agent_id, title, input_text,
+            params_json, attachments_json, model, state, priority, source, schedule_id,
+            progress_json, receipt_json, error_message, retry_count, max_retries, timeout_sec,
+            claimed_by, claimed_at, lease_until, leader_notified,
+            created_at, updated_at, completed_at, changed_seq
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', NULL, NULL, 0, ?, ?, NULL, NULL, NULL, 0, ?, ?, NULL, ?)
+        `).run(
+          taskId,
+          finalContextId,
+          parentTaskId ? String(parentTaskId) : null,
+          String(fromNode),
+          agent.id,
+          taskTitle,
+          String(inputText || ""),
+          JSON.stringify(params && typeof params === "object" ? params : {}),
+          JSON.stringify(Array.isArray(attachments) ? attachments : []),
+          chosenModel,
+          initialState,
+          safePriority,
+          String(source || "direct"),
+          scheduleId ? String(scheduleId) : null,
+          safeMaxRetries,
+          safeTimeout,
+          now,
+          now,
+          seq
+        );
+
+        const dispatchMsg = this.store.appendMessage({
+          task_id: taskId,
+          context_id: finalContextId,
+          from_node: String(fromNode),
+          kind: "dispatch",
+          body: String(inputText || taskTitle),
+          data: {
+            title: taskTitle,
+            model: chosenModel,
+            params: params && typeof params === "object" ? params : {},
+            to_agent_id: agent.id,
+          },
+          attachments: Array.isArray(attachments) ? attachments : [],
+          created_at: now,
+        });
+
+        let authRequestId = null;
+        if (requirePreflight) {
+          authRequestId = randomId("req");
+          this.store.appendMessage({
+            task_id: taskId,
+            context_id: finalContextId,
+            from_node: "hub",
+            kind: "auth_request",
+            body: `Agent「${agent.name}」配置为执行前需机主签名审批`,
+            data: {
+              request_id: authRequestId,
+              reason: "预检审批策略（approval_policy=always）",
+              risk_level: "preflight",
+              title: taskTitle,
+            },
+            created_at: now,
+          });
+        }
+
+        if (scheduleId) {
+          this.store.db.prepare(
+            "UPDATE schedules SET last_run_at = ?, last_task_id = ? WHERE agent_id = ? AND id = ?"
+          ).run(now, taskId, agent.id, String(scheduleId));
+        }
+
+        const task = this.store.getTask(taskId);
+        created.push(task);
+
+        this.store.emitChange({
+          type: requirePreflight ? "task.auth_required" : "task.created",
+          seq,
+          taskId,
+          contextId: finalContextId,
+          fromNode: String(fromNode),
+          agentId: agent.id,
+          deviceId: agent.device_id,
+          state: initialState,
+          title: taskTitle,
+          reason: requirePreflight ? "执行前需机主签名确认" : undefined,
+          messageId: dispatchMsg.id,
+        });
+      }
+
+      const result = { context_id: finalContextId, tasks: created };
+      if (idempotencyKey) {
+        this.store.saveIdempotency(scope, idempotencyKey, result);
+      }
+      return result;
+    });
+  }
+
+  claimNext({ agentIds, claimant, leaseSec = this.defaultLeaseSec } = {}) {
+    const ids = [...new Set((Array.isArray(agentIds) ? agentIds : [agentIds]).map((x) => String(x || "").trim()).filter(Boolean))];
+    if (!ids.length) return null;
+
+    return this.store.transaction(() => {
+      const placeholders = ids.map(() => "?").join(",");
+      const candidate = this.store.db.prepare(`
+        SELECT t.* FROM tasks t
+        JOIN agents a ON a.id = t.to_agent_id
+        LEFT JOIN devices d ON d.id = a.device_id
+        WHERE t.to_agent_id IN (${placeholders})
+          AND t.state = 'submitted'
+          AND a.enabled = 1
+          AND (a.device_id IS NULL OR d.enabled = 1)
+        ORDER BY t.priority DESC, t.created_at ASC
+        LIMIT 1
+      `).get(...ids);
+      if (!candidate) return null;
+      return this._claimRow(candidate, { claimant: claimant || candidate.to_agent_id, leaseSec });
+    });
+  }
+
+  claimTaskById(taskId, { claimant, allowedAgentIds = null, leaseSec = this.defaultLeaseSec } = {}) {
+    return this.store.transaction(() => {
+      const row = this.store.db.prepare("SELECT * FROM tasks WHERE id = ?").get(String(taskId));
+      if (!row) throw makeError("任务不存在", 404, "task_not_found");
+      if (Array.isArray(allowedAgentIds) && !allowedAgentIds.includes(row.to_agent_id)) {
+        throw makeError("无权认领其他 Agent 的任务", 403, "forbidden");
+      }
+      const agent = this.store.getAgent(row.to_agent_id);
+      if (agent && !agent.enabled) {
+        throw makeError(`Agent 已暂停: ${agent.name}`, 409, "agent_paused");
+      }
+      if (row.state !== "submitted") {
+        throw makeError(`任务当前状态为 ${row.state}，不可认领`, 409, "invalid_state");
+      }
+      return this._claimRow(row, { claimant: claimant || row.to_agent_id, leaseSec });
+    });
+  }
+
+  _claimRow(row, { claimant, leaseSec }) {
+    const now = Date.now();
+    const safeLease = Math.min(Math.max(Number(leaseSec || this.defaultLeaseSec), 30), 3600);
+    const leaseUntil = now + safeLease * 1000;
+    const seq = this.store.nextSeq();
+
+    const upd = this.store.db.prepare(`
+      UPDATE tasks
+      SET state = 'working', claimed_by = ?, claimed_at = ?, lease_until = ?, updated_at = ?, changed_seq = ?
+      WHERE id = ? AND state = 'submitted'
+    `).run(String(claimant), now, leaseUntil, now, seq, row.id);
+    if (upd.changes === 0) {
+      throw makeError("任务已被其他执行者认领", 409, "claim_conflict");
+    }
+
+    const ag = this.store.getAgent(row.to_agent_id);
+    this.store.db.prepare("UPDATE agents SET active_task_id = ?, last_seen_at = ? WHERE id = ?")
+      .run(row.id, now, row.to_agent_id);
+
+    this.store.appendMessage({
+      task_id: row.id,
+      context_id: row.context_id,
+      from_node: String(claimant),
+      kind: "status",
+      body: "claimed",
+      data: { state: "working", lease_until: leaseUntil },
+      created_at: now,
+    });
+
+    this.store.emitChange({
+      type: "task.working",
+      seq,
+      taskId: row.id,
+      contextId: row.context_id,
+      fromNode: row.from_node,
+      agentId: row.to_agent_id,
+      deviceId: ag?.device_id ?? null,
+      state: "working",
+      title: row.title,
+    });
+
+    return this.getTaskDetail(row.id, { includeContextHistory: true });
+  }
+
+  heartbeat(taskId, { actorId, progress = {}, leaseSec = this.defaultLeaseSec } = {}) {
+    return this.store.transaction(() => {
+      const task = this.store.getTask(taskId);
+      if (!task) throw makeError("任务不存在", 404, "task_not_found");
+      if (task.state !== "working") {
+        throw makeError(`任务状态为 ${task.state}，仅 working 支持心跳续约`, 409, "invalid_state");
+      }
+      const now = Date.now();
+      const safeLease = Math.min(Math.max(Number(leaseSec || this.defaultLeaseSec), 30), 3600);
+      const leaseUntil = now + safeLease * 1000;
+      const mergedProgress = { ...(task.progress || {}), ...(progress && typeof progress === "object" ? progress : {}), updated_at: now };
+
+      this.store.db.prepare(`
+        UPDATE tasks SET lease_until = ?, progress_json = ?, updated_at = ? WHERE id = ?
+      `).run(leaseUntil, JSON.stringify(mergedProgress), now, task.id);
+
+      this.store.touchAgentSeen(actorId || task.to_agent_id, now);
+      return this.store.getTask(task.id);
+    });
+  }
+
+  ask(taskId, { actorId, prompt, choices = [], data = {} } = {}) {
+    if (!String(prompt || "").trim()) {
+      throw makeError("追问内容 prompt 不能为空", 400, "missing_prompt");
+    }
+    return this.store.transaction(() => {
+      const task = this.store.getTask(taskId);
+      if (!task) throw makeError("任务不存在", 404, "task_not_found");
+      if (!canTransition(task.state, "input-required")) {
+        throw makeError(`状态 ${task.state} 不允许转为 input-required`, 409, "invalid_state");
+      }
+      const now = Date.now();
+      const seq = this.store.nextSeq();
+      this.store.db.prepare(`
+        UPDATE tasks SET state = 'input-required', lease_until = NULL, updated_at = ?, changed_seq = ? WHERE id = ?
+      `).run(now, seq, task.id);
+      this.store.db.prepare("UPDATE agents SET active_task_id = NULL WHERE id = ? AND active_task_id = ?")
+        .run(task.to_agent_id, task.id);
+
+      const ag = this.store.getAgent(task.to_agent_id);
+      const msg = this.store.appendMessage({
+        task_id: task.id,
+        context_id: task.context_id,
+        from_node: String(actorId || task.to_agent_id),
+        kind: "question",
+        body: String(prompt),
+        data: { choices: Array.isArray(choices) ? choices : [], ...(data && typeof data === "object" ? data : {}) },
+        created_at: now,
+      });
+
+      this.store.emitChange({
+        type: "task.input_required",
+        seq,
+        taskId: task.id,
+        contextId: task.context_id,
+        fromNode: task.from_node,
+        agentId: task.to_agent_id,
+        deviceId: ag?.device_id ?? null,
+        state: "input-required",
+        title: task.title,
+        prompt: String(prompt),
+        messageId: msg.id,
+      });
+      return this.getTaskDetail(task.id, { includeContextHistory: false });
+    });
+  }
+
+  requestAuth(taskId, { actorId, reason, commandPreview = "", riskLevel = "high", data = {} } = {}) {
+    if (!String(reason || "").trim()) {
+      throw makeError("审批原因 reason 不能为空", 400, "missing_reason");
+    }
+    return this.store.transaction(() => {
+      const task = this.store.getTask(taskId);
+      if (!task) throw makeError("任务不存在", 404, "task_not_found");
+      if (!canTransition(task.state, "auth-required")) {
+        throw makeError(`状态 ${task.state} 不允许转为 auth-required`, 409, "invalid_state");
+      }
+      const now = Date.now();
+      const seq = this.store.nextSeq();
+      const requestId = randomId("req");
+      this.store.db.prepare(`
+        UPDATE tasks SET state = 'auth-required', lease_until = NULL, updated_at = ?, changed_seq = ? WHERE id = ?
+      `).run(now, seq, task.id);
+      this.store.db.prepare("UPDATE agents SET active_task_id = NULL WHERE id = ? AND active_task_id = ?")
+        .run(task.to_agent_id, task.id);
+
+      const ag = this.store.getAgent(task.to_agent_id);
+      const msg = this.store.appendMessage({
+        task_id: task.id,
+        context_id: task.context_id,
+        from_node: String(actorId || task.to_agent_id),
+        kind: "auth_request",
+        body: String(reason),
+        data: {
+          request_id: requestId,
+          reason: String(reason),
+          command_preview: String(commandPreview || ""),
+          risk_level: String(riskLevel || "high"),
+          ...(data && typeof data === "object" ? data : {}),
+        },
+        created_at: now,
+      });
+
+      this.store.emitChange({
+        type: "task.auth_required",
+        seq,
+        taskId: task.id,
+        contextId: task.context_id,
+        fromNode: task.from_node,
+        agentId: task.to_agent_id,
+        deviceId: ag?.device_id ?? null,
+        state: "auth-required",
+        title: task.title,
+        reason: String(reason),
+        messageId: msg.id,
+      });
+      return this.getTaskDetail(task.id, { includeContextHistory: false });
+    });
+  }
+
+  complete(taskId, { actorId, summary = "", text = "", artifacts = [], data = {}, usage = null, attachments = [] } = {}) {
+    return this.store.transaction(() => {
+      const task = this.store.getTask(taskId);
+      if (!task) throw makeError("任务不存在", 404, "task_not_found");
+      if (!canTransition(task.state, "completed")) {
+        throw makeError(`状态 ${task.state} 不允许转为 completed`, 409, "invalid_state");
+      }
+      const now = Date.now();
+      const seq = this.store.nextSeq();
+      const receipt = {
+        summary: String(summary || text || "").slice(0, 600),
+        text: String(text || summary || ""),
+        artifacts: Array.isArray(artifacts) ? artifacts : [],
+        data: data && typeof data === "object" ? data : {},
+        usage: usage || null,
+        completed_by: String(actorId || task.to_agent_id),
+      };
+
+      this.store.db.prepare(`
+        UPDATE tasks
+        SET state = 'completed', receipt_json = ?, error_message = NULL, lease_until = NULL,
+            completed_at = ?, updated_at = ?, changed_seq = ?
+        WHERE id = ?
+      `).run(JSON.stringify(receipt), now, now, seq, task.id);
+
+      this.store.db.prepare("UPDATE agents SET active_task_id = NULL WHERE id = ? AND active_task_id = ?")
+        .run(task.to_agent_id, task.id);
+
+      const ag = this.store.getAgent(task.to_agent_id);
+      const msg = this.store.appendMessage({
+        task_id: task.id,
+        context_id: task.context_id,
+        from_node: String(actorId || task.to_agent_id),
+        kind: "receipt",
+        body: receipt.text || receipt.summary,
+        data: receipt,
+        attachments: Array.isArray(attachments) ? attachments : [],
+        created_at: now,
+      });
+
+      this.store.emitChange({
+        type: "task.completed",
+        seq,
+        taskId: task.id,
+        contextId: task.context_id,
+        fromNode: task.from_node,
+        agentId: task.to_agent_id,
+        deviceId: ag?.device_id ?? null,
+        state: "completed",
+        title: task.title,
+        summary: receipt.summary,
+        messageId: msg.id,
+      });
+      return this.getTaskDetail(task.id, { includeContextHistory: false });
+    });
+  }
+
+  fail(taskId, { actorId, error = "execution_failed", retryable = false, data = {} } = {}) {
+    return this.store.transaction(() => {
+      const task = this.store.getTask(taskId);
+      if (!task) throw makeError("任务不存在", 404, "task_not_found");
+      if (!canTransition(task.state, "failed")) {
+        throw makeError(`状态 ${task.state} 不允许标记失败`, 409, "invalid_state");
+      }
+      const now = Date.now();
+      const seq = this.store.nextSeq();
+      const errText = String(error || "execution_failed");
+      const canRetry = Boolean(retryable) && Number(task.retry_count) < Number(task.max_retries);
+      const ag = this.store.getAgent(task.to_agent_id);
+
+      this.store.db.prepare("UPDATE agents SET active_task_id = NULL WHERE id = ? AND active_task_id = ?")
+        .run(task.to_agent_id, task.id);
+
+      if (canRetry) {
+        const nextRetry = Number(task.retry_count) + 1;
+        this.store.db.prepare(`
+          UPDATE tasks
+          SET state = 'submitted', retry_count = ?, error_message = ?, claimed_by = NULL,
+              claimed_at = NULL, lease_until = NULL, updated_at = ?, changed_seq = ?
+          WHERE id = ?
+        `).run(nextRetry, errText, now, seq, task.id);
+
+        const msg = this.store.appendMessage({
+          task_id: task.id,
+          context_id: task.context_id,
+          from_node: String(actorId || task.to_agent_id),
+          kind: "retry",
+          body: errText,
+          data: { retry_count: nextRetry, ...(data && typeof data === "object" ? data : {}) },
+          created_at: now,
+        });
+
+        this.store.emitChange({
+          type: "task.requeued",
+          seq,
+          taskId: task.id,
+          contextId: task.context_id,
+          fromNode: task.from_node,
+          agentId: task.to_agent_id,
+          deviceId: ag?.device_id ?? null,
+          state: "submitted",
+          title: task.title,
+          messageId: msg.id,
+        });
+        return this.getTaskDetail(task.id, { includeContextHistory: false });
+      }
+
+      this.store.db.prepare(`
+        UPDATE tasks
+        SET state = 'failed', error_message = ?, lease_until = NULL, completed_at = ?, updated_at = ?, changed_seq = ?
+        WHERE id = ?
+      `).run(errText, now, now, seq, task.id);
+
+      const msg = this.store.appendMessage({
+        task_id: task.id,
+        context_id: task.context_id,
+        from_node: String(actorId || task.to_agent_id),
+        kind: "error",
+        body: errText,
+        data: data && typeof data === "object" ? data : {},
+        created_at: now,
+      });
+
+      this.store.emitChange({
+        type: "task.failed",
+        seq,
+        taskId: task.id,
+        contextId: task.context_id,
+        fromNode: task.from_node,
+        agentId: task.to_agent_id,
+        deviceId: ag?.device_id ?? null,
+        state: "failed",
+        title: task.title,
+        error: errText,
+        messageId: msg.id,
+      });
+      return this.getTaskDetail(task.id, { includeContextHistory: false });
+    });
+  }
+
+  reply(taskId, { fromNode = "owner", body = "", data = {}, attachments = [] } = {}) {
+    if (!String(body || "").trim() && !attachments?.length) {
+      throw makeError("回复内容不能为空", 400, "missing_body");
+    }
+    return this.store.transaction(() => {
+      const task = this.store.getTask(taskId);
+      if (!task) throw makeError("任务不存在", 404, "task_not_found");
+      if (task.state !== "input-required") {
+        throw makeError(`当前状态 ${task.state} 不可回复（仅 input-required 可补充回复）`, 409, "invalid_state");
+      }
+      const now = Date.now();
+      const seq = this.store.nextSeq();
+      this.store.db.prepare(`
+        UPDATE tasks
+        SET state = 'submitted', claimed_by = NULL, claimed_at = NULL, lease_until = NULL, updated_at = ?, changed_seq = ?
+        WHERE id = ?
+      `).run(now, seq, task.id);
+
+      const ag = this.store.getAgent(task.to_agent_id);
+      const msg = this.store.appendMessage({
+        task_id: task.id,
+        context_id: task.context_id,
+        from_node: String(fromNode),
+        kind: "answer",
+        body: String(body || ""),
+        data: data && typeof data === "object" ? data : {},
+        attachments: Array.isArray(attachments) ? attachments : [],
+        created_at: now,
+      });
+
+      this.store.emitChange({
+        type: "task.resumed",
+        seq,
+        taskId: task.id,
+        contextId: task.context_id,
+        fromNode: task.from_node,
+        agentId: task.to_agent_id,
+        deviceId: ag?.device_id ?? null,
+        state: "submitted",
+        title: task.title,
+        messageId: msg.id,
+      });
+      return this.getTaskDetail(task.id, { includeContextHistory: false });
+    });
+  }
+
+  decideApproval(taskId, { fromNode = "owner", decision, note = "", requestId = "" } = {}) {
+    const raw = String(decision || "").trim().toLowerCase();
+    const normalized = ["approve", "approved", "allow", "yes"].includes(raw)
+      ? "approved"
+      : ["deny", "denied", "reject", "rejected", "no"].includes(raw)
+        ? "rejected"
+        : "";
+    if (!normalized) {
+      throw makeError("decision 必须是 approve 或 deny", 400, "invalid_decision");
+    }
+    if (!this.approvalPrivateKey) {
+      throw makeError("Hub 审批签名私钥未就绪", 500, "missing_approval_key");
+    }
+
+    return this.store.transaction(() => {
+      const task = this.store.getTask(taskId);
+      if (!task) throw makeError("任务不存在", 404, "task_not_found");
+      if (task.state !== "auth-required") {
+        throw makeError(`当前状态 ${task.state} 无需审批`, 409, "invalid_state");
+      }
+
+      const msgs = this.store.listMessages(task.id);
+      const lastAuthReq = [...msgs].reverse().find((m) => m.kind === "auth_request");
+      const finalReqId = String(requestId || lastAuthReq?.data?.request_id || "default");
+      const signature = signDecision(this.approvalPrivateKey, {
+        taskId: task.id,
+        requestId: finalReqId,
+        decision: normalized,
+      });
+
+      const now = Date.now();
+      const seq = this.store.nextSeq();
+      const nextState = normalized === "approved" ? "submitted" : "rejected";
+      const ag = this.store.getAgent(task.to_agent_id);
+
+      if (normalized === "approved") {
+        this.store.db.prepare(`
+          UPDATE tasks
+          SET state = 'submitted', claimed_by = NULL, claimed_at = NULL, lease_until = NULL, updated_at = ?, changed_seq = ?
+          WHERE id = ?
+        `).run(now, seq, task.id);
+      } else {
+        this.store.db.prepare(`
+          UPDATE tasks
+          SET state = 'rejected', error_message = ?, lease_until = NULL, completed_at = ?, updated_at = ?, changed_seq = ?
+          WHERE id = ?
+        `).run(String(note || "机主拒绝审批"), now, now, seq, task.id);
+        this.store.db.prepare("UPDATE agents SET active_task_id = NULL WHERE id = ? AND active_task_id = ?")
+          .run(task.to_agent_id, task.id);
+      }
+
+      const msg = this.store.appendMessage({
+        task_id: task.id,
+        context_id: task.context_id,
+        from_node: String(fromNode),
+        kind: "auth_decision",
+        body: note ? String(note) : normalized,
+        data: {
+          request_id: finalReqId,
+          decision: normalized,
+          note: String(note || ""),
+          signature,
+        },
+        signature,
+        created_at: now,
+      });
+
+      this.store.emitChange({
+        type: normalized === "approved" ? "task.resumed" : "task.rejected",
+        seq,
+        taskId: task.id,
+        contextId: task.context_id,
+        fromNode: task.from_node,
+        agentId: task.to_agent_id,
+        deviceId: ag?.device_id ?? null,
+        state: nextState,
+        title: task.title,
+        messageId: msg.id,
+      });
+
+      return this.getTaskDetail(task.id, { includeContextHistory: false });
+    });
+  }
+
+  cancel(taskId, { fromNode = "owner", reason = "" } = {}) {
+    return this.store.transaction(() => {
+      const task = this.store.getTask(taskId);
+      if (!task) throw makeError("任务不存在", 404, "task_not_found");
+      if (TERMINAL_STATES.has(task.state)) {
+        throw makeError(`终态任务 (${task.state}) 不可取消`, 409, "terminal_task");
+      }
+      const now = Date.now();
+      const seq = this.store.nextSeq();
+      const ag = this.store.getAgent(task.to_agent_id);
+
+      this.store.db.prepare(`
+        UPDATE tasks
+        SET state = 'canceled', error_message = ?, lease_until = NULL, completed_at = ?, updated_at = ?, changed_seq = ?
+        WHERE id = ?
+      `).run(String(reason || "canceled"), now, now, seq, task.id);
+
+      this.store.db.prepare("UPDATE agents SET active_task_id = NULL WHERE id = ? AND active_task_id = ?")
+        .run(task.to_agent_id, task.id);
+
+      const msg = this.store.appendMessage({
+        task_id: task.id,
+        context_id: task.context_id,
+        from_node: String(fromNode),
+        kind: "cancel",
+        body: String(reason || "已取消"),
+        created_at: now,
+      });
+
+      this.store.emitChange({
+        type: "task.canceled",
+        seq,
+        taskId: task.id,
+        contextId: task.context_id,
+        fromNode: task.from_node,
+        agentId: task.to_agent_id,
+        deviceId: ag?.device_id ?? null,
+        state: "canceled",
+        title: task.title,
+        messageId: msg.id,
+      });
+      return this.getTaskDetail(task.id, { includeContextHistory: false });
+    });
+  }
+
+  reclaimStale(now = Date.now()) {
+    const staleCutoff = now - STALE_MIN * 60_000;
+    const staleRows = this.store.db.prepare(`
+      SELECT * FROM tasks
+      WHERE state = 'working' AND ((lease_until IS NOT NULL AND lease_until < ?) OR updated_at < ?)
+    `).all(now, staleCutoff);
+
+    const reclaimed = [];
+    for (const row of staleRows) {
+      const canRetry = Number(row.retry_count) < Number(row.max_retries);
+      const updated = this.fail(row.id, {
+        actorId: "hub-stale-reaper",
+        error: "task_lease_expired",
+        retryable: canRetry,
+      });
+      reclaimed.push(updated);
+    }
+    return reclaimed;
+  }
+
+  // ---- Leader 增量拉取与 Agent 只读 Check ----
+
+  getLeaderUpdates(actorId, { sinceSeq = null, advance = false } = {}) {
+    const storedWatermark = this.store.getWatermark(actorId);
+    const effectiveSince = sinceSeq !== null && sinceSeq !== undefined && sinceSeq !== ""
+      ? Number(sinceSeq)
+      : storedWatermark;
+
+    const rows = this.store.db.prepare(`
+      SELECT * FROM tasks
+      WHERE from_node = ? AND changed_seq > ?
+      ORDER BY changed_seq ASC
+      LIMIT 200
+    `).all(String(actorId), effectiveSince);
+
+    let maxSeq = effectiveSince;
+    const updates = rows.map((r) => {
+      const task = this.store.getTask(r.id);
+      if (task.changed_seq > maxSeq) maxSeq = task.changed_seq;
+      const msgs = this.store.listMessages(task.id);
+      const latestMsg = msgs[msgs.length - 1] || null;
+      return {
+        ...task,
+        latest_message: latestMsg,
+      };
+    });
+
+    if (advance && maxSeq > storedWatermark) {
+      this.store.setWatermark(actorId, maxSeq);
+    }
+
+    return {
+      actor_id: String(actorId),
+      since_seq: effectiveSince,
+      watermark: advance ? Math.max(storedWatermark, maxSeq) : storedWatermark,
+      next_seq: maxSeq,
+      updates,
+    };
+  }
+
+  checkAgentInbox(agentId) {
+    const agent = this.store.getAgent(agentId);
+    if (!agent) return null;
+    const pendingTasks = this.store.listTasks({ to_agent_id: agent.id, state: "submitted", limit: 20 });
+    const watermark = this.store.getWatermark(agent.id);
+    const leaderUpdatesRow = this.store.db.prepare(
+      "SELECT COUNT(*) AS cnt FROM tasks WHERE from_node = ? AND changed_seq > ? AND state != 'submitted'"
+    ).get(agent.id, watermark);
+    const leaderUpdatesCount = Number(leaderUpdatesRow?.cnt || 0);
+
+    return {
+      ok: true,
+      agent_id: agent.id,
+      paused: !agent.enabled,
+      work: Boolean(agent.enabled && (pendingTasks.length > 0 || leaderUpdatesCount > 0)),
+      pending_count: pendingTasks.length,
+      leader_updates_count: leaderUpdatesCount,
+      watermark,
+      tasks: agent.enabled
+        ? pendingTasks.map((t) => ({
+            id: t.id,
+            context_id: t.context_id,
+            title: t.title,
+            from_node: t.from_node,
+            priority: t.priority,
+            created_at: t.created_at,
+          }))
+        : [],
+    };
+  }
+
+  // ---- Thread 视角聚合 ----
+
+  listThreads({ limit = 60, agentId = null, visibleTo = null } = {}) {
+    const tasks = this.store.listTasks({
+      ...(agentId ? { to_agent_id: agentId } : {}),
+      ...(visibleTo ? { visible_to: visibleTo } : {}),
+      limit: 500,
+    });
+
+    const groups = new Map();
+    for (const t of tasks) {
+      let g = groups.get(t.context_id);
+      if (!g) {
+        g = {
+          context_id: t.context_id,
+          title: t.title,
+          from_node: t.from_node,
+          created_at: t.created_at,
+          updated_at: t.updated_at,
+          agents: [],
+          states: {},
+          task_count: 0,
+          pending_action_count: 0,
+          tasks: [],
+        };
+        groups.set(t.context_id, g);
+      }
+      g.task_count += 1;
+      g.created_at = Math.min(g.created_at, t.created_at);
+      if (t.updated_at >= g.updated_at) {
+        g.updated_at = t.updated_at;
+        if (!g.title) g.title = t.title;
+      }
+      if (!g.agents.includes(t.to_agent_id)) g.agents.push(t.to_agent_id);
+      g.states[t.state] = (g.states[t.state] || 0) + 1;
+      if (t.state === "input-required" || t.state === "auth-required") {
+        g.pending_action_count += 1;
+      }
+      g.tasks.push(t);
+    }
+
+    const list = [...groups.values()].sort((a, b) => b.updated_at - a.updated_at);
+    return list.slice(0, Math.min(Math.max(Number(limit || 60), 1), 300));
+  }
+
+  getThread(contextId) {
+    const tasks = this.store.listTasks({ context_id: contextId, order: "asc", limit: 200 });
+    if (!tasks.length) return null;
+    const enriched = tasks.map((t) => ({
+      ...t,
+      messages: this.store.listMessages(t.id),
+    }));
+    const agents = [...new Set(enriched.map((t) => t.to_agent_id))];
+    const updatedAt = enriched.reduce((m, t) => Math.max(m, t.updated_at), 0);
+    return {
+      context_id: String(contextId),
+      title: enriched[0].title || enriched[0].input_text.slice(0, 80),
+      from_node: enriched[0].from_node,
+      agents,
+      updated_at: updatedAt,
+      tasks: enriched,
+    };
+  }
+}

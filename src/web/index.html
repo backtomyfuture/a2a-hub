@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>a2a-hub · 个人多 Agent 编排中台</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div id="app" class="app-shell">
+      <header class="topbar">
+        <div class="topbar-inner">
+          <div class="brand">
+            <span class="brand-mark">A2A</span>
+            <div>
+              <div class="brand-title">a2a-hub</div>
+              <div class="brand-sub">个人多 Agent 编排中台</div>
+            </div>
+          </div>
+
+          <nav class="nav-tabs" id="nav-tabs">
+            <button class="nav-tab active" data-tab="home">
+              待办概览 <span class="badge-count hidden" id="nav-action-badge">0</span>
+            </button>
+            <button class="nav-tab" data-tab="agents">Agent 与设备</button>
+            <button class="nav-tab" data-tab="threads">对话线程</button>
+            <button class="nav-tab" data-tab="settings">设置与定时</button>
+          </nav>
+
+          <div class="topbar-actions">
+            <span class="live-pill" id="live-pill" title="实时长轮询连接状态">
+              <span class="dot dot-online"></span> 实时同步
+            </span>
+            <button class="btn btn-secondary" id="btn-open-add">+ 接入 Agent / 电脑</button>
+            <button class="btn btn-primary" id="btn-open-dispatch">+ 派发任务</button>
+            <button class="btn btn-ghost hidden" id="btn-logout" title="退出登录">退出</button>
+          </div>
+        </div>
+      </header>
+
+      <main class="main-container" id="main-view">
+        <div class="loading-box">正在连接 a2a-hub...</div>
+      </main>
+    </div>
+
+    <div id="login-overlay" class="modal-backdrop hidden">
+      <div class="modal-card modal-sm">
+        <h2>登录 a2a-hub 控制台</h2>
+        <p class="muted">请输入机主访问令牌（配置目录 app.env 中的 AH_API_TOKEN）。</p>
+        <form id="login-form" class="stack-md">
+          <label class="field">
+            <span>机主令牌</span>
+            <input type="password" id="login-token-input" placeholder="ah_owner_..." autocomplete="current-password" required />
+          </label>
+          <div id="login-error" class="error-banner hidden"></div>
+          <button type="submit" class="btn btn-primary btn-block">验证并进入控制台</button>
+        </form>
+      </div>
+    </div>
+
+    <div id="drawer-root"></div>
+    <div id="modal-root"></div>
+    <div id="toast-root" class="toast-root"></div>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

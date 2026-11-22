@@ -7,7 +7,6 @@ COPY package.json ./
 COPY bin ./bin
 COPY src ./src
 COPY skills ./skills
-COPY schema ./schema
 COPY config ./config
 
 ENV AH_HOME=/data \

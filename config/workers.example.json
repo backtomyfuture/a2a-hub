@@ -1,0 +1,20 @@
+[
+  {
+    "key": "claude",
+    "name": "Claude Code",
+    "role": "worker",
+    "platform": "claude-code",
+    "summary": "本机 Anthropic Claude Code 编程与仓库操作 CLI",
+    "skills": ["coding", "refactor", "debug", "review", "git"],
+    "tools": ["bash", "files", "git"],
+    "models": ["claude-sonnet-4-5", "claude-opus-4-5"],
+    "default_model": "claude-sonnet-4-5",
+    "model_flag": "--model",
+    "command": "claude -p --output-format json --dangerously-skip-permissions {model_args} {prompt}",
+    "resume_command": "claude --resume {session} -p --output-format json --dangerously-skip-permissions {model_args} {prompt}",
+    "cwd": "~",
+    "timeout_sec": 900,
+    "approval_policy": "never",
+    "enabled": true
+  }
+]

@@ -1,1495 +1,1184 @@
-// Hub HTTP 服务端：承载 REST 总线接口、HTTP 长轮询唤醒端点、Web 控制台与审批签名。
+// Hub 统一 HTTP 网关（REST + Longpoll + Web 控制台静态资源）。
+// 所有业务状态写入都经由 TaskService / HubStore 单事务落库，并在提交后唤醒挂起的长轮询连接。
 
-import { randomUUID, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
-import { f1 } from "../bus/tables.mjs";
-import { resolveTableName } from "../bus/tables.mjs";
-import { resolveListenAddr } from "../config.mjs";
-import { agentCanSeeTask, assertAgentRoute, assertAgentTableWrite, bindAgentBody } from "../hub/agent-access.mjs";
-import { AgentTokenStore } from "../hub/agent-tokens.mjs";
+import { fileURLToPath } from "node:url";
 import {
-  buildOnboarding,
-  admissionOf,
-  ensureLeaderIdentityCards,
-  formatAgentCard,
-  httpError,
-  issuedRole,
-  parseCardMetadata,
-  presetHttpCardFields,
-  receiveForTemplate,
-  receiveModeFor,
-  resolveHttpOnboardingChoice,
-  templatePresetById,
-  knownTemplateId,
-  inferTemplateId,
-  validateAccess,
-  validateAdmission,
-  validateNodeName,
-  validatePollIntervalMin,
-  validateProfileFields,
-  validateReceive,
-  validateRole,
-  validateTemplate,
-} from "../hub/admission.mjs";
-import { consoleTemplatePresets, loadAgentTemplates } from "../hub/agent-templates.mjs";
-import { publicWebhook, validateWebhookHeader, validateWebhookKey, validateWebhookUrl, WebhookDispatcher } from "../hub/webhooks.mjs";
+  DAEMON_VERSION,
+  sanitizeSlug,
+  writeLockedAppEnvVars,
+  loadAppEnv,
+} from "../core/config.mjs";
 import {
-  alignNodeReceiveMode,
-  buildCommandsSnippet,
-  createManualCard,
-  deleteManualCard,
-  listSchedules,
-  nodeStoredReceiveMode,
-} from "../hub/capabilities.mjs";
-import { cancelTask } from "../hub/cancel.mjs";
-import { appendFileParts, attachmentsView, normalizeAttachments } from "../attachments.mjs";
-import { createTask } from "../hub/create.mjs";
-import { FileStore, findFileRefs, normalizeMime, sanitizeFileName } from "../hub/files.mjs";
-import { initiatorOf } from "../inbox.mjs";
-import { TERMINAL_STATUSES } from "../kernel-util.mjs";
-import { getTaskWhy } from "../why.mjs";
-import { handleAgentGatewayRequest } from "./agent-gateway.mjs";
-import { MAX_LONGPOLL_SEC, rosterNodeVisible } from "./longpoll-broker.mjs";
-import { renderWebConsoleHtml } from "./web-ui.mjs";
+  buildAgentOnboardingPrompt,
+  buildDeviceJoinCommand,
+  findTemplate,
+  loadAgentTemplates,
+} from "../core/templates.mjs";
+import { validateWebhookUrl } from "../core/webhooks.mjs";
+import {
+  actorCanControlTaskAsSender,
+  actorCanOperateTaskAsWorker,
+  actorCanSeeTask,
+  buildSetSessionCookieHeader,
+  checkSpoofedHeader,
+  createSessionCookieValue,
+  deviceOwnsAgent,
+  resolveRequestActor,
+  timingSafeEqualStr,
+} from "./auth.mjs";
 
-const MAX_BODY_BYTES = 2 * 1024 * 1024;
-const INLINE_IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(__dirname, "..", "..");
+const WEB_ROOT = path.resolve(REPO_ROOT, "src", "web");
+const SKILLS_ROOT = path.resolve(REPO_ROOT, "skills");
 
-function encodeRFC5987(str) {
-  return encodeURIComponent(String(str ?? "file")).replace(
-    /['()*!]/g,
-    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
-  );
-}
+const MAX_JSON_BODY_BYTES = 2 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 
-function sendJson(res, status, data) {
+const MIME_BY_EXT = {
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".mjs": "application/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".ico": "image/x-icon",
+};
+
+function sendJson(res, status, data, extraHeaders = {}) {
   const body = JSON.stringify(data);
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type, X-A2A-Node, X-Api-Token, X-File-Name",
-    "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+    "X-Content-Type-Options": "nosniff",
+    ...extraHeaders,
   });
   res.end(body);
 }
 
-function sendHtml(res, status, html) {
-  res.writeHead(status, {
-    "Content-Type": "text/html; charset=utf-8",
-    "Cache-Control": "no-store",
+function sendError(res, status, message, code = "error") {
+  sendJson(res, status, { ok: false, error: code, message });
+}
+
+function readRawBody(req, maxBytes = MAX_JSON_BODY_BYTES) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+    req.on("data", (chunk) => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        const err = new Error("请求体过大");
+        err.statusCode = 413;
+        reject(err);
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
   });
-  res.end(html);
-}
-
-function safeTokenEqual(provided, expected) {
-  const a = Buffer.from(String(provided ?? ""), "utf8");
-  const b = Buffer.from(String(expected ?? ""), "utf8");
-  if (!a.length || a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
-}
-
-function extractToken(req, url) {
-  const auth = String(req.headers.authorization ?? "").trim();
-  if (/^Bearer\s+/i.test(auth)) return auth.replace(/^Bearer\s+/i, "").trim();
-  const hdr = String(req.headers["x-api-token"] ?? "").trim();
-  if (hdr) return hdr;
-  return String(url.searchParams.get("token") ?? "").trim();
 }
 
 async function readJsonBody(req) {
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of req) {
-    size += chunk.length;
-    if (size > MAX_BODY_BYTES) {
-      const err = new Error("请求体超过 2MB 上限");
-      err.status = 413;
-      throw err;
-    }
-    chunks.push(chunk);
-  }
-  const raw = Buffer.concat(chunks).toString("utf8").trim();
+  const buf = await readRawBody(req, MAX_JSON_BODY_BYTES);
+  const raw = buf.toString("utf8").trim();
   if (!raw) return {};
   try {
-    return JSON.parse(raw);
-  } catch {
-    const err = new Error("请求体不是合法 JSON");
-    err.status = 400;
-    throw err;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") {
+      const err = new Error("请求体必须是 JSON 对象");
+      err.statusCode = 400;
+      throw err;
+    }
+    return parsed;
+  } catch (err) {
+    if (err.statusCode) throw err;
+    const parseErr = new Error("JSON 解析失败");
+    parseErr.statusCode = 400;
+    throw parseErr;
   }
 }
 
-function parseJsonField(raw, fallback) {
-  if (raw && typeof raw === "object") return raw;
-  const s = String(raw ?? "").trim();
-  if (!s) return fallback;
-  try { return JSON.parse(s); } catch { return fallback; }
-}
-
-function nowMinute() {
-  const d = new Date();
-  const p = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-}
-
-function decodeParam(raw) {
+function serveStaticFile(res, rootDir, relPath) {
+  const safeRel = String(relPath || "").replace(/^\/+/, "");
+  const fullPath = path.resolve(rootDir, safeRel);
+  if (!fullPath.startsWith(rootDir + path.sep) && fullPath !== rootDir) {
+    sendError(res, 403, "Forbidden", "forbidden");
+    return;
+  }
+  let stat;
   try {
-    return decodeURIComponent(raw).trim();
+    stat = fs.statSync(fullPath);
   } catch {
-    throw httpError(400, "路径参数编码不合法");
+    res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end("Not Found");
+    return;
   }
+  if (!stat.isFile()) {
+    res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end("Not Found");
+    return;
+  }
+  const ext = path.extname(fullPath).toLowerCase();
+  const contentType = MIME_BY_EXT[ext] || "application/octet-stream";
+  res.writeHead(200, {
+    "Content-Type": contentType,
+    "Cache-Control": "no-cache",
+    "X-Content-Type-Options": "nosniff",
+  });
+  fs.createReadStream(fullPath).pipe(res);
 }
 
-function formatTaskSummary(t) {
-  return {
-    record_id: t.record_id,
-    task_id: f1(t, "Task_ID"),
-    title: f1(t, "Title"),
-    status: f1(t, "Status"),
-    target_node: f1(t, "Target_Node"),
-    worker_hint: f1(t, "Worker_Hint"),
-    skill_id: f1(t, "Skill_ID"),
-    source: f1(t, "Source"),
-    approval_class: f1(t, "Approval_Class"),
-    hop_count: Number(f1(t, "Hop_Count")) || 0,
-    claimed_by: f1(t, "Claimed_By"),
-    heartbeat_at: f1(t, "Heartbeat_At"),
-    retry_count: Number(f1(t, "Retry_Count")) || 0,
-    context_id: f1(t, "Context_ID"),
-    status_msg: f1(t, "Status_Msg"),
-    metadata: parseJsonField(f1(t, "Metadata"), {}),
-  };
-}
-
-async function canPrincipalSeeFile({ principal, meta, bus, fileId }) {
-  if (principal?.kind !== "agent") {
-    return { visible: true, refs: null };
-  }
-  if (meta.uploaded_by === principal.node) {
-    return { visible: true, refs: null };
-  }
-  const rawRefs = await findFileRefs(bus, fileId);
-  const taskIds = [...new Set(rawRefs.map((r) => r.task_id).filter(Boolean))];
-  if (!taskIds.length || !bus?.tables?.tasks) {
-    return { visible: false, refs: taskIds };
-  }
-  const [tasks, messages] = await Promise.all([
-    bus.listRecords(bus.tables.tasks),
-    bus.tables.messages ? bus.listRecords(bus.tables.messages) : Promise.resolve([]),
-  ]);
-  for (const tid of taskIds) {
-    const task = tasks.find((t) => f1(t, "Task_ID") === tid);
-    if (!task) continue;
-    const taskMsgs = messages.filter((m) => f1(m, "Task_ID") === tid);
-    if (agentCanSeeTask(principal, initiatorOf(task, taskMsgs), f1(task, "Source"), f1(task, "Target_Node"))) {
-      return { visible: true, refs: taskIds };
-    }
-  }
-  return { visible: false, refs: taskIds };
-}
-
-export async function startHubHttpServer({
-  cfg,
-  bus,
+export function startHubHttpServer({
+  configDir,
+  store,
+  taskService,
   broker,
-  approval,
-  fileStore = null,
-  log = () => {},
-  onWake = () => {},
-  webhookDispatcher = null,
+  fileStore,
+  webhooks,
+  notifier,
+  schedules,
+  approvalPublicKey = "",
+  approvalPrivateKey = null,
+  ownerToken = "",
+  listen = "0.0.0.0:8787",
+  hubUrlResolver = null,
 } = {}) {
-  const { host, port } = resolveListenAddr(cfg?.listen ?? "0.0.0.0:8787");
-  const apiToken = String(cfg?.apiToken ?? "").trim();
-  const tokenStore = cfg?.configDir ? new AgentTokenStore(cfg.configDir) : null;
-  const ownFileStore = !fileStore && cfg?.configDir
-    ? new FileStore({
-      configDir: cfg.configDir,
-      ...(Number.isFinite(Number(cfg?.maxFileBytes)) && Number(cfg.maxFileBytes) > 0
-        ? { maxBytes: Number(cfg.maxFileBytes) }
-        : {}),
-    })
-    : null;
-  const activeFileStore = fileStore ?? ownFileStore;
-  const webhooks = webhookDispatcher
-    ?? (cfg?.configDir
-      ? new WebhookDispatcher({
-        configDir: cfg.configDir,
-        hubNode: cfg?.node || "hub",
-        taskTable: bus?.tables?.tasks || "tasks",
-        messageTable: bus?.tables?.messages || "messages",
-        bus,
-        broker,
-        log,
-      })
-      : null);
-  // 调用方先建好的 dispatcher 也要能在投递成功时刷新在线，不能只靠自己 new 的那条路径。
-  if (webhooks && broker && !webhooks.broker) webhooks.broker = broker;
-  // 答复门铃要靠 bus 反查 Target_Node。hub 启动路径已经 addListener，这里只给自己 new 出来的那份注册，避免双推。
-  if (webhooks && bus) {
-    if (!webhooks.bus) webhooks.bus = bus;
-    if (bus.tables?.messages) webhooks.messageTable = bus.tables.messages;
+  const getOwnerToken = () => (typeof ownerToken === "function" ? ownerToken() : String(ownerToken || ""));
+  const getHubUrl = () => {
+    if (typeof hubUrlResolver === "function") return String(hubUrlResolver() || "");
+    const addr = server.address();
+    const port = typeof addr === "object" && addr ? addr.port : 8787;
+    return `http://127.0.0.1:${port}`;
+  };
+
+  function enrichStateSnapshot(now = Date.now()) {
+    const devicesRaw = store.listDevices();
+    const agentsRaw = store.listAgents();
+    const devMap = new Map(devicesRaw.map((d) => [d.id, d]));
+
+    const devices = devicesRaw.map((d) => {
+      const devAgents = agentsRaw.filter((a) => a.device_id === d.id);
+      return {
+        ...d,
+        online: broker.isDeviceOnline(d, now),
+        connected: broker.isDeviceConnected(d.id),
+        worker_count: devAgents.length,
+        active_count: devAgents.filter((a) => Boolean(a.active_task_id)).length,
+      };
+    });
+
+    const agents = agentsRaw.map((a) => {
+      const dev = a.device_id ? devMap.get(a.device_id) : null;
+      return {
+        ...a,
+        device_name: dev?.name || "",
+        online: broker.isAgentOnline(a, devMap, now),
+        connected: a.kind === "device-worker" && a.device_id ? broker.isDeviceConnected(a.device_id) : broker.isAgentConnected(a.id),
+      };
+    });
+
+    const tasks = store.listTasks({ limit: 300 });
+    const threads = taskService.listThreads({ limit: 80 });
+    const pendingActions = tasks.filter((t) => t.state === "auth-required" || t.state === "input-required").map((t) => ({
+      ...t,
+      messages: store.listMessages(t.id),
+    }));
+    const scheduleList = schedules ? schedules.listWithStatus(null, now) : [];
+
+    return {
+      seq: broker.currentSeq(),
+      version: DAEMON_VERSION,
+      hub_url: getHubUrl(),
+      public_key: approvalPublicKey,
+      auth_required: Boolean(getOwnerToken()),
+      notifier: notifier ? notifier.configuredChannels() : {},
+      devices,
+      agents,
+      tasks,
+      threads,
+      pending_actions: pendingActions,
+      schedules: scheduleList,
+    };
   }
-  if (!webhookDispatcher && webhooks && typeof bus?.addListener === "function") bus.addListener(webhooks);
-  if (tokenStore && bus) {
-    try {
-      const created = await ensureLeaderIdentityCards({
-        bus,
-        tokenStore,
-        webhookStore: webhooks?.store ?? null,
-      });
-      if (created) log(`已为 ${created} 个 leader 补建身份名片`);
-    } catch (err) {
-      // 补建失败不能挡住 Hub 起来；下一轮启动会再试，已有名片不会被覆盖。
-      log(`补建 leader 身份名片失败：${err?.message ?? err}`);
-    }
-  }
-  // 启动时将名片已保存的 poll_interval_min 预同步到 Broker，避免重启后首次 Webhook 投递回落到默认窗口。
-  if (broker?.setNodePollInterval && bus?.tables?.agentCards && typeof bus.listRecords === "function") {
-    try {
-      const bootCards = await bus.listRecords(bus.tables.agentCards);
-      for (const card of bootCards) {
-        const nodeName = f1(card, "Node");
-        const intervalMin = parseCardMetadata(card).poll_interval_min;
-        if (nodeName && intervalMin > 0) broker.setNodePollInterval(nodeName, intervalMin);
+
+  function formatAgentsPublicList(actor, now = Date.now()) {
+    const devicesRaw = store.listDevices();
+    const devMap = new Map(devicesRaw.map((d) => [d.id, d]));
+    return store.listAgents().map((a) => {
+      const dev = a.device_id ? devMap.get(a.device_id) : null;
+      const base = {
+        id: a.id,
+        kind: a.kind,
+        device_id: a.device_id,
+        device_name: dev?.name || "",
+        worker_key: a.worker_key,
+        name: a.name,
+        role: a.role,
+        platform: a.platform,
+        summary: a.summary,
+        skills: a.skills,
+        tools: a.tools,
+        models: a.models,
+        default_model: a.default_model,
+        transport: a.transport,
+        enabled: a.enabled,
+        online: broker.isAgentOnline(a, devMap, now),
+        active_task_id: a.active_task_id,
+        last_seen_at: a.last_seen_at,
+      };
+      if (actor.kind === "owner") {
+        return {
+          ...a,
+          device_name: dev?.name || "",
+          online: base.online,
+        };
       }
-    } catch (err) {
-      log(`同步名片轮询间隔失败：${err?.message ?? err}`);
-    }
+      return base;
+    });
   }
-  const runtimePath = cfg?.configDir ? path.join(cfg.configDir, "hub_runtime.json") : "";
-  const connectHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
-  let activePort = port;
-  const publicUrl = String(cfg?.publicUrl ?? "").trim().replace(/\/+$/, "");
-  // 接入提示词要发给其他机器：优先用配置的对外地址；无配置时识别反向代理 X-Forwarded-Proto/Host，避免在 443 代理后生成 http://。
-  const requestHubUrl = (req) => {
-    if (publicUrl) return publicUrl;
-    const hostHdr = String(req.headers["x-forwarded-host"] ?? req.headers.host ?? "").split(",")[0].trim();
-    const protoHdr = String(req.headers["x-forwarded-proto"] ?? "").split(",")[0].trim().toLowerCase();
-    const proto = protoHdr === "https" ? "https" : "http";
-    return hostHdr ? `${proto}://${hostHdr}` : `http://${connectHost}:${activePort}`;
-  };
-  // 节点模板以配置目录的文件为准。没有文件时写入初始四条；之后每次请求重读，改文件不用重启。
-  const agentTemplates = () => loadAgentTemplates(cfg?.configDir || "", { writeIfMissing: Boolean(cfg?.configDir) });
 
-  // 无机主 Token 且尚未签发任何 Agent Token 时保持免鉴权；一旦有任一种钥匙就关闭。
-  const resolvePrincipal = (presented) => {
-    const ownerOn = Boolean(apiToken);
-    const agentsOn = Boolean(tokenStore?.hasAny());
-    if (!ownerOn && !agentsOn) return { kind: "open" };
-    if (ownerOn && safeTokenEqual(presented, apiToken)) return { kind: "owner" };
-    const agent = tokenStore?.authenticate(presented);
-    if (agent) return { kind: "agent", ...agent };
-    return null;
-  };
+  async function handleApi(req, res, url) {
+    const method = req.method || "GET";
+    const pathname = url.pathname;
+    const curOwnerToken = getOwnerToken();
 
-  const server = http.createServer(async (req, res) => {
-    const reqUrl = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
-    const pathname = reqUrl.pathname;
-    const method = (req.method || "GET").toUpperCase();
-    let principal = { kind: "open" };
-    // 身份绑定要在读完 body 后做：省略的 node/from 补成绑定节点，冒充则 403。
-    const readJsonBodyBound = async () => {
+    // ---- 1. 免鉴权探针与会话状态检查 ----
+    if (method === "GET" && pathname === "/api/v1/health") {
+      return sendJson(res, 200, {
+        ok: true,
+        version: DAEMON_VERSION,
+        seq: broker.currentSeq(),
+        auth_required: Boolean(curOwnerToken),
+      });
+    }
+
+    if (method === "GET" && pathname === "/.well-known/agent.json") {
+      return sendJson(res, 200, {
+        name: "a2a-hub",
+        version: DAEMON_VERSION,
+        protocol: "a2a-hub-v2",
+        approval_public_key: approvalPublicKey,
+        auth_required: Boolean(curOwnerToken),
+      });
+    }
+
+    if (method === "GET" && pathname === "/api/v1/auth/session") {
+      const actor = resolveRequestActor(req, {
+        ownerToken: curOwnerToken,
+        store,
+        approvalPrivateKey,
+      });
+      return sendJson(res, 200, {
+        ok: true,
+        authenticated: actor.authenticated && actor.kind === "owner",
+        auth_required: Boolean(curOwnerToken),
+        actor_kind: actor.kind,
+      });
+    }
+
+    if (method === "POST" && pathname === "/api/v1/auth/login") {
+      if (!curOwnerToken) {
+        return sendJson(res, 200, { ok: true, authenticated: true, open: true });
+      }
       const body = await readJsonBody(req);
-      if (principal.kind === "agent") bindAgentBody(principal, body);
-      return body;
+      const token = String(body.token || "").trim();
+      if (!token || !timingSafeEqualStr(token, curOwnerToken)) {
+        return sendError(res, 401, "机主密钥不正确", "invalid_credentials");
+      }
+      const cookieVal = createSessionCookieValue(curOwnerToken, approvalPrivateKey);
+      return sendJson(
+        res,
+        200,
+        { ok: true, authenticated: true },
+        { "Set-Cookie": buildSetSessionCookieHeader(req, cookieVal) }
+      );
+    }
+
+    if (method === "POST" && pathname === "/api/v1/auth/logout") {
+      return sendJson(
+        res,
+        200,
+        { ok: true },
+        { "Set-Cookie": buildSetSessionCookieHeader(req, "", { clear: true }) }
+      );
+    }
+
+    // ---- 2. 全局鉴权与防冒充校验 ----
+    const actor = resolveRequestActor(req, {
+      ownerToken: curOwnerToken,
+      store,
+      approvalPrivateKey,
+    });
+    if (!actor.authenticated) {
+      return sendError(res, 401, actor.invalidToken ? "无效的访问令牌" : "未登录或缺少 Bearer Token", "unauthorized");
+    }
+    const spoofErr = checkSpoofedHeader(req, actor);
+    if (spoofErr) {
+      return sendError(res, 403, spoofErr, "impersonation_forbidden");
+    }
+
+    const requireOwner = () => {
+      if (actor.kind !== "owner") {
+        sendError(res, 403, "仅机主可访问此接口", "owner_required");
+        return false;
+      }
+      return true;
     };
 
-    if (method === "OPTIONS") {
-      res.writeHead(204, {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "Authorization, Content-Type, X-A2A-Node, X-Api-Token, X-File-Name",
-        "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+    // ---- 3. Web 控制台状态与长轮询 ----
+    if (method === "GET" && pathname === "/api/v1/state") {
+      if (!requireOwner()) return;
+      return sendJson(res, 200, { ok: true, ...enrichStateSnapshot() });
+    }
+
+    if (method === "GET" && pathname === "/api/v1/poll") {
+      if (!requireOwner()) return;
+      const since = Number(url.searchParams.get("since") || 0);
+      const timeout = Number(url.searchParams.get("timeout") || 30);
+      const ac = new AbortController();
+      req.on("close", () => ac.abort());
+      const resWait = await broker.waitForChange({
+        scope: "web",
+        sinceSeq: since,
+        timeoutSec: timeout,
+        signal: ac.signal,
       });
-      res.end();
+      return sendJson(res, 200, { ok: true, ...resWait });
+    }
+
+    // ---- 4. Skills 与脚本套件 ----
+    if (method === "GET" && pathname === "/api/v1/skills") {
+      const names = ["ah", "ah-inbox", "a2a-leader", "a2a-worker"].filter((n) =>
+        fs.existsSync(path.join(SKILLS_ROOT, n, "SKILL.md"))
+      );
+      return sendJson(res, 200, { ok: true, skills: names });
+    }
+
+    let m = /^\/api\/v1\/skills\/([A-Za-z0-9._-]+)$/.exec(pathname);
+    if (method === "GET" && m) {
+      const skillFile = path.resolve(SKILLS_ROOT, m[1], "SKILL.md");
+      if (!skillFile.startsWith(SKILLS_ROOT + path.sep) || !fs.existsSync(skillFile)) {
+        return sendError(res, 404, "Skill 不存在", "not_found");
+      }
+      const md = fs.readFileSync(skillFile, "utf8");
+      res.writeHead(200, {
+        "Content-Type": "text/markdown; charset=utf-8",
+        "Cache-Control": "no-cache",
+      });
+      res.end(md);
       return;
     }
 
-    try {
-      if (method === "GET" && (pathname === "/" || pathname === "/index.html")) {
-        if (cfg?.webConsole === false) {
-          sendJson(res, 404, { error: "Web 控制台已关闭（webConsole=false）" });
-          return;
-        }
-        const loaded = agentTemplates();
-        sendHtml(res, 200, renderWebConsoleHtml({
-          presets: consoleTemplatePresets(loaded.presets),
-          templateError: loaded.errors.join("；"),
-        }));
-        return;
+    m = /^\/api\/v1\/kit\/(a2a_check\.(?:py|sh))$/.exec(pathname);
+    if (method === "GET" && m) {
+      const kitPath = path.resolve(SKILLS_ROOT, "a2a-check", m[1]);
+      if (!kitPath.startsWith(SKILLS_ROOT + path.sep) || !fs.existsSync(kitPath)) {
+        return sendError(res, 404, "脚本不存在", "not_found");
       }
-
-      if (method === "GET" && pathname === "/api/v1/health") {
-        sendJson(res, 200, {
-          ok: true,
-          node: cfg?.node || "hub",
-          role: cfg?.role || "hub",
-          busType: cfg?.busType || "sqlite",
-          seq: broker?.latestSeq ?? 0,
-          authRequired: Boolean(apiToken) || Boolean(tokenStore?.hasAny()),
-          hubPublicKey: cfg?.hubPublicKey || "",
-        });
-        return;
-      }
-
-      // A2A 协议探索名片免鉴权，便于外部 Agent 先发现接入端点
-      if (await handleAgentGatewayRequest({
-        req, res, reqUrl, pathname, method, bus, broker, approval, cfg, onWake, readJsonBody, sendJson, discoverOnly: true,
-      })) {
-        return;
-      }
-
-      if (pathname.startsWith("/api/")) {
-        const next = resolvePrincipal(extractToken(req, reqUrl));
-        if (!next) {
-          sendJson(res, 401, { error: "Unauthorized: invalid or missing API token" });
-          return;
-        }
-        principal = next;
-        if (principal.kind === "agent") {
-          assertAgentRoute(principal, {
-            method,
-            pathname,
-            searchParams: reqUrl.searchParams,
-            headers: req.headers,
-          });
-        }
-      }
-
-      // 外部 HTTP Agent（Muse / Grok Bot 等）统一网关，优先于通用 /api/v1/tasks/:id 详情路由匹配
-      if (await handleAgentGatewayRequest({
-        req, res, reqUrl, pathname, method, bus, broker, approval, cfg, onWake,
-        readJsonBody: readJsonBodyBound,
-        sendJson,
-        principal,
-        webhookStore: webhooks?.store ?? null,
-        hubUrl: requestHubUrl(req),
-        fileStore: activeFileStore,
-      })) {
-        return;
-      }
-
-      // 0) 附件上传与下载（§3：流式上传不走 readJsonBody，agent 无权或不存在统一 404）
-      if (method === "POST" && pathname === "/api/v1/files") {
-        if (!activeFileStore) {
-          sendJson(res, 503, { error: "文件存储未配置" });
-          return;
-        }
-        const clRaw = req.headers["content-length"];
-        if (clRaw !== undefined) {
-          const cl = Number(clRaw);
-          if (Number.isFinite(cl) && cl > activeFileStore.maxBytes) {
-            if (!req.readableEnded) res.setHeader("Connection", "close");
-            sendJson(res, 413, { error: `文件大小超过上限（${activeFileStore.maxBytes} 字节）` });
-            return;
-          }
-        }
-        let fileName = "file";
-        const rawName = req.headers["x-file-name"];
-        if (rawName !== undefined && String(rawName).trim() !== "") {
-          let decoded;
-          try {
-            decoded = decodeURIComponent(String(rawName));
-          } catch {
-            throw httpError(400, "X-File-Name 编码不合法");
-          }
-          fileName = sanitizeFileName(decoded, "file");
-        }
-        const mime = normalizeMime(req.headers["content-type"]);
-        const uploadedBy = principal.kind === "agent"
-          ? principal.node
-          : (principal.kind === "owner" ? "owner" : "open");
-        const meta = await activeFileStore.putStream(req, { name: fileName, mime, uploadedBy });
-        sendJson(res, 201, {
-          file_id: meta.file_id,
-          uri: meta.uri,
-          name: meta.name,
-          mime: meta.mime,
-          size: meta.size,
-          sha256: meta.sha256,
-        });
-        return;
-      }
-
-      const fileMetaMatch = pathname.match(/^\/api\/v1\/files\/([^/]+)\/meta$/);
-      if (method === "GET" && fileMetaMatch) {
-        if (!activeFileStore) {
-          sendJson(res, 503, { error: "文件存储未配置" });
-          return;
-        }
-        const fileId = decodeParam(fileMetaMatch[1]);
-        const meta = activeFileStore.get(fileId);
-        if (!meta) {
-          sendJson(res, 404, { error: "文件不存在" });
-          return;
-        }
-        const { visible, refs: checkedRefs } = await canPrincipalSeeFile({ principal, meta, bus, fileId });
-        if (!visible) {
-          sendJson(res, 404, { error: "文件不存在" });
-          return;
-        }
-        if (meta.deleted_at) {
-          sendJson(res, 410, {
-            error: "文件已过期清理",
-            deleted_at: meta.deleted_at,
-            reason: activeFileStore.getReason(fileId) || "expired",
-          });
-          return;
-        }
-        const refs = checkedRefs ?? [...new Set((await findFileRefs(bus, fileId)).map((r) => r.task_id).filter(Boolean))];
-        sendJson(res, 200, { meta, refs });
-        return;
-      }
-
-      const fileDownloadMatch = pathname.match(/^\/api\/v1\/files\/([^/]+)$/);
-      if (method === "GET" && fileDownloadMatch) {
-        if (!activeFileStore) {
-          sendJson(res, 503, { error: "文件存储未配置" });
-          return;
-        }
-        const fileId = decodeParam(fileDownloadMatch[1]);
-        const meta = activeFileStore.get(fileId);
-        if (!meta) {
-          sendJson(res, 404, { error: "文件不存在" });
-          return;
-        }
-        const { visible } = await canPrincipalSeeFile({ principal, meta, bus, fileId });
-        if (!visible) {
-          sendJson(res, 404, { error: "文件不存在" });
-          return;
-        }
-        if (meta.deleted_at) {
-          sendJson(res, 410, {
-            error: "文件已过期清理",
-            deleted_at: meta.deleted_at,
-            reason: activeFileStore.getReason(fileId) || "expired",
-          });
-          return;
-        }
-        const stream = activeFileStore.openReadStream(fileId);
-        const baseMime = normalizeMime(meta.mime);
-        const wantsInline = reqUrl.searchParams.get("inline") === "1" && INLINE_IMAGE_MIMES.has(baseMime);
-        const disposition = wantsInline ? "inline" : "attachment";
-        res.writeHead(200, {
-          "Content-Type": meta.mime || "application/octet-stream",
-          "Content-Length": String(meta.size),
-          "X-Content-Type-Options": "nosniff",
-          "Cache-Control": "private, max-age=0",
-          "Content-Disposition": `${disposition}; filename*=UTF-8''${encodeRFC5987(meta.name)}`,
-          "Access-Control-Allow-Origin": "*",
-        });
-        const cleanup = () => { if (!stream.destroyed) stream.destroy(); };
-        res.on("close", cleanup);
-        stream.on("error", () => {
-          if (!res.writableEnded) res.destroy();
-        });
-        stream.pipe(res);
-        return;
-      }
-
-      // 1) HTTP 长轮询唤醒端点
-      if (method === "GET" && pathname === "/api/v1/poll") {
-        const rawNode = String(reqUrl.searchParams.get("node") ?? req.headers["x-a2a-node"] ?? "*").trim() || "*";
-        const node = principal.kind === "agent" ? principal.node : rawNode;
-        const cursor = Number(reqUrl.searchParams.get("cursor") ?? 0) || 0;
-        const timeoutSec = Number(reqUrl.searchParams.get("timeout") ?? 25);
-        const timeoutMs = Number.isFinite(timeoutSec) ? Math.max(0, Math.min(MAX_LONGPOLL_SEC, timeoutSec)) * 1000 : 25_000;
-        const ac = new AbortController();
-        const onClose = () => ac.abort();
-        req.on("close", onClose);
-        try {
-          const remoteAddr = req.socket?.remoteAddress || "";
-          const result = await broker.wait({ node, cursor, timeoutMs, signal: ac.signal, remoteAddr });
-          if (!res.writableEnded) sendJson(res, 200, result);
-        } finally {
-          req.off("close", onClose);
-        }
-        return;
-      }
-
-      // 2) 通用总线表读写（供远程 HttpBus 节点调用）
-      const tableMatch = pathname.match(/^\/api\/v1\/tables\/([^/]+)\/records(?:\/([^/]+))?$/);
-      if (tableMatch) {
-        const rawTable = decodeURIComponent(tableMatch[1]);
-        const recordId = tableMatch[2] ? decodeURIComponent(tableMatch[2]) : "";
-        const table = resolveTableName(bus.tables, rawTable);
-        if (!table) {
-          sendJson(res, 404, { error: `未知表：${rawTable}` });
-          return;
-        }
-
-        if (method === "GET" && !recordId) {
-          const items = await bus.listRecords(table);
-          sendJson(res, 200, { data: { items } });
-          return;
-        }
-        if (method === "GET" && recordId) {
-          const record = await bus.getRecord(table, recordId);
-          if (!record) {
-            sendJson(res, 404, { error: `record not found: ${table}/${recordId}` });
-            return;
-          }
-          sendJson(res, 200, { data: { record } });
-          return;
-        }
-        if (method === "POST" && !recordId) {
-          const body = await readJsonBodyBound();
-          const clientToken = reqUrl.searchParams.get("client_token") || body.client_token || undefined;
-          const safeFields = await assertAgentTableWrite({
-            principal,
-            bus,
-            realTable: table,
-            method,
-            fields: body.fields ?? {},
-          });
-          const result = await bus.createRecord(table, safeFields, clientToken);
-          onWake();
-          sendJson(res, 200, { data: result });
-          return;
-        }
-        if (method === "PUT" && recordId) {
-          const body = await readJsonBodyBound();
-          const safeFields = await assertAgentTableWrite({
-            principal,
-            bus,
-            realTable: table,
-            method,
-            recordId,
-            fields: body.fields ?? {},
-          });
-          try {
-            const result = await bus.updateRecord(table, recordId, safeFields);
-            onWake();
-            sendJson(res, 200, { data: result });
-          } catch (e) {
-            if (String(e?.message ?? "").includes("not found")) {
-              sendJson(res, 404, { error: e.message });
-            } else {
-              throw e;
-            }
-          }
-          return;
-        }
-      }
-
-      // 3) IM 卡片接口（HttpBus 兼容）
-      if (method === "POST" && pathname === "/api/v1/im/messages") {
-        const body = await readJsonBodyBound();
-        const result = await bus.sendMessage(
-          body.receive_id,
-          body.msg_type || "interactive",
-          body.content,
-          body.receive_id_type || "owner",
-        );
-        sendJson(res, 200, { data: result });
-        return;
-      }
-      const patchCardMatch = pathname.match(/^\/api\/v1\/im\/messages\/([^/]+)$/);
-      if (method === "PATCH" && patchCardMatch) {
-        const msgId = decodeURIComponent(patchCardMatch[1]);
-        const body = await readJsonBodyBound();
-        const result = await bus.patchInteractiveCard(msgId, body.content);
-        sendJson(res, 200, { data: result });
-        return;
-      }
-
-      // 4) Web 控制台总览数据
-      if (method === "GET" && pathname === "/api/v1/state") {
-        const [tasks, cards] = await Promise.all([
-          bus.listRecords(bus.tables.tasks),
-          bus.listRecords(bus.tables.agentCards),
-        ]);
-        const cardNodes = new Set();
-        for (const c of cards) {
-          const node = f1(c, "Node");
-          if (node) cardNodes.add(node);
-        }
-        // 无名片且 30 分钟内没活动的在线记录不进总览。有名片的离线节点仍留在 agentCards 里。
-        const connectedNodes = (broker ? broker.connectedNodes() : [])
-          .filter((n) => rosterNodeVisible(n, cardNodes.has(n.node)));
-        // Hub 自己的工作内核在进程内直连 Broker，从不经 HTTP 轮询，Broker 里没有它的连接记录。
-        // 能响应本请求就说明它在线，不补的话控制台「最近活动」永远是「暂无记录」。
-        const selfNode = cfg?.node || "";
-        if (selfNode && !connectedNodes.some((n) => n.node === selfNode)) {
-          connectedNodes.push({
-            node: selfNode,
-            online: true,
-            polling: true,
-            activeWaiters: 0,
-            cursor: broker?.latestSeq ?? 0,
-            remoteAddr: "",
-            lastSeenAt: Date.now(),
-            firstSeenAt: Date.now(),
-            kind: "host",
-            mode: "longpoll",
-            role: "",
-            intervalSec: null,
-            lastDeliveredAt: null,
-          });
-        }
-        sendJson(res, 200, {
-          hubNode: cfg?.node || "hub",
-          hubPublicKey: cfg?.hubPublicKey || "",
-          seq: broker?.latestSeq ?? 0,
-          connectedNodes,
-          tasks: tasks.map(formatTaskSummary).reverse(),
-          agentCards: cards.map(formatAgentCard),
-          cards: typeof bus.listCards === "function" ? bus.listCards() : [],
-        });
-        return;
-      }
-
-      // 5) 单任务详情（含对话流、Artifacts、Why）
-      const taskDetailMatch = pathname.match(/^\/api\/v1\/tasks\/([^/]+)$/);
-      if (method === "GET" && taskDetailMatch) {
-        const taskId = decodeURIComponent(taskDetailMatch[1]);
-        const [tasks, messages, parts, artifacts] = await Promise.all([
-          bus.listRecords(bus.tables.tasks),
-          bus.listRecords(bus.tables.messages),
-          bus.listRecords(bus.tables.parts),
-          bus.tables.artifacts ? bus.listRecords(bus.tables.artifacts) : Promise.resolve([]),
-        ]);
-        const task = tasks.find((t) => f1(t, "Task_ID") === taskId);
-        if (!task) {
-          sendJson(res, 404, { error: `任务不存在：${taskId}` });
-          return;
-        }
-        const rawTaskMsgs = messages.filter((m) => f1(m, "Task_ID") === taskId);
-        if (!agentCanSeeTask(principal, initiatorOf(task, rawTaskMsgs), f1(task, "Source"), f1(task, "Target_Node"))) {
-          sendJson(res, 403, { error: "只能查看本节点发起或指向本节点的任务" });
-          return;
-        }
-        const taskMsgs = messages
-          .filter((m) => f1(m, "Task_ID") === taskId)
-          .map((m) => {
-            const msgId = f1(m, "Msg_ID");
-            const msgParts = parts
-              .filter((p) => f1(p, "Parent_Type") === "message" && f1(p, "Parent_ID") === msgId)
-              .sort((a, b) => (Number(f1(a, "Seq")) || 0) - (Number(f1(b, "Seq")) || 0))
-              .map((p) => {
-                const base = {
-                  part_id: f1(p, "Part_ID"),
-                  seq: Number(f1(p, "Seq")) || 0,
-                  kind: f1(p, "Kind"),
-                  text: f1(p, "Text"),
-                  file_uri: f1(p, "File_URI"),
-                  file_name: f1(p, "File_Name"),
-                  mime_type: f1(p, "Mime_Type"),
-                  data: f1(p, "Data"),
-                };
-                // 文件块补下载地址、大小与过期标记（docs/attachments.md §7）。
-                if (base.kind === "file") {
-                  const [view] = attachmentsView([p], requestHubUrl(req), activeFileStore);
-                  Object.assign(base, { download_url: view.download_url, size: view.size, deleted: view.deleted });
-                }
-                return base;
-              });
-            return {
-              msg_id: msgId,
-              kind: f1(m, "Kind"),
-              role: f1(m, "Role"),
-              from_node: f1(m, "From_Node"),
-              to_node: f1(m, "To_Node"),
-              in_reply_to: f1(m, "In_Reply_To"),
-              created_at: f1(m, "Created_At"),
-              parts: msgParts,
-            };
-          });
-        const taskRuns = [];
-        const taskArts = artifacts
-          .filter((a) => f1(a, "Task_ID") === taskId)
-          .map((a) => {
-            const artId = f1(a, "Artifact_ID");
-            const files = attachmentsView(
-              parts.filter((p) => f1(p, "Parent_Type") === "artifact" && f1(p, "Parent_ID") === artId),
-              requestHubUrl(req),
-              activeFileStore,
-            );
-            return {
-              artifact_id: artId,
-              name: f1(a, "Name"),
-              description: f1(a, "Description"),
-              is_final: f1(a, "Is_Final"),
-              created_by: f1(a, "Created_By"),
-              created_at: f1(a, "Created_At"),
-              files,
-            };
-          });
-        let why = null;
-        try {
-          why = await getTaskWhy({ bus, configDir: cfg?.configDir, taskId });
-        } catch { /* ignore */ }
-        sendJson(res, 200, {
-          task: formatTaskSummary(task),
-          messages: taskMsgs,
-          runs: taskRuns,
-          artifacts: taskArts,
-          why,
-        });
-        return;
-      }
-
-      // 6) 创建任务（支持单个 to 字符串，或 to: [...] 同 Context_ID 批量群派）
-      if (method === "POST" && pathname === "/api/v1/tasks") {
-        const body = await readJsonBodyBound();
-        const attachments = normalizeAttachments(body.attachments, { fileStore: activeFileStore });
-        // 有附件时 text 可以为空，但两者不能同时为空。
-        if (!String(body.text ?? "").trim() && !attachments.length) {
-          sendJson(res, 400, { error: "text 与 attachments 不能同时为空" });
-          return;
-        }
-        const commonOpts = {
-          bus,
-          from: body.from || cfg?.node || "hub",
-          source: body.source || ((body.schedule_id || body.scheduleId) ? "cron" : "") || body.from || "web",
-          worker: body.worker || "",
-          requested_model: body.requested_model ?? null,
-          cap: body.cap || "",
-          text: body.text || "",
-          params: body.params,
-          criteria: body.criteria,
-          ref: body.ref || "",
-          approval: body.approval || "",
-          idempotencyKey: body.idempotencyKey || "",
-          scheduleId: body.schedule_id || body.scheduleId || "",
-          validateTarget: body.validateTarget !== false,
-          attachments,
-          fileStore: activeFileStore,
-          queueTimeoutSec: body.queue_timeout_sec,
-          leaseTtlSec: body.lease_ttl_sec,
-          waitTimeoutSec: body.wait_timeout_sec,
-        };
-        if (Array.isArray(body.to)) {
-          if (!body.to.length) {
-            sendJson(res, 400, { error: "to 数组不能为空" });
-            return;
-          }
-          const targets = body.to.map((item) => validateNodeName(item));
-          const sharedContext = String(body.context ?? "").trim() || `CTX-${Date.now().toString(36)}-${randomUUID().slice(0, 6)}`;
-          const taskIds = [];
-          for (let i = 0; i < targets.length; i++) {
-            const targetNode = targets[i];
-            const perKey = commonOpts.idempotencyKey ? `${commonOpts.idempotencyKey}:${targetNode}:${i}` : "";
-            const taskId = await createTask({
-              ...commonOpts,
-              to: targetNode,
-              context: sharedContext,
-              idempotencyKey: perKey,
-            });
-            taskIds.push(taskId);
-          }
-          onWake();
-          sendJson(res, 201, { task_ids: taskIds, context_id: sharedContext });
-          return;
-        }
-        const taskId = await createTask({
-          ...commonOpts,
-          to: body.to || "",
-          context: body.context || "",
-        });
-        onWake();
-        sendJson(res, 201, { task_id: taskId });
-        return;
-      }
-
-      // 7) 网页端答复 input-required
-      const replyMatch = pathname.match(/^\/api\/v1\/tasks\/([^/]+)\/reply$/);
-      if (method === "POST" && replyMatch) {
-        const taskId = decodeURIComponent(replyMatch[1]);
-        const body = await readJsonBodyBound();
-        const text = String(body.text ?? "").trim();
-        const attachments = normalizeAttachments(body.attachments, { fileStore: activeFileStore });
-        if (!text && !attachments.length) {
-          sendJson(res, 400, { error: "答复内容 text 与 attachments 不能同时为空" });
-          return;
-        }
-        const tasks = await bus.listRecords(bus.tables.tasks);
-        const task = tasks.find((t) => f1(t, "Task_ID") === taskId);
-        if (!task) {
-          sendJson(res, 404, { error: `任务不存在：${taskId}` });
-          return;
-        }
-        const messages = (await bus.listRecords(bus.tables.messages)).filter((m) => f1(m, "Task_ID") === taskId);
-        if (principal.kind === "agent") {
-          const initiator = initiatorOf(task, messages);
-          if (initiator !== principal.node) {
-            sendJson(res, 403, { error: `只能答复本节点发起的任务（发起方 ${initiator}）` });
-            return;
-          }
-        }
-        if (f1(task, "Status") !== "input-required") {
-          sendJson(res, 409, { error: `任务当前状态为 ${f1(task, "Status")}，不是 input-required` });
-          return;
-        }
-        // 同一 Status_Msg 已有 answer 就停在写表之前。新问题会换 Status_Msg，多轮追问不受影响。
-        const statusMsg = String(f1(task, "Status_Msg") ?? "").trim();
-        if (body.append !== true && statusMsg && messages.some((m) =>
-          f1(m, "Kind") === "answer" && String(f1(m, "In_Reply_To") ?? "").trim() === statusMsg)) {
-          sendJson(res, 409, { error: "该问题已有答复；如需再补一条请传 append:true" });
-          return;
-        }
-        let max = 0;
-        for (const m of messages) {
-          const matched = String(f1(m, "Msg_ID") ?? "").match(/-(\d+)$/);
-          if (matched && Number(matched[1]) > max) max = Number(matched[1]);
-        }
-        const msgId = `MSG-${taskId.replace("TASK-", "")}-${String(max + 1).padStart(2, "0")}`;
-        const d = new Date();
-        const p = (n) => String(n).padStart(2, "0");
-        const nowMinute = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-
-        // 没有文字就不写 text 块，文件块从 Seq 1 开始。
-        let nextSeq = 1;
-        if (text) {
-          await bus.createRecord(bus.tables.parts, {
-            Part_ID: `${msgId}-P1`,
-            Parent_ID: msgId,
-            Parent_Type: "message",
-            Seq: 1,
-            Kind: "text",
-            Text: text.slice(0, 4000),
-          });
-          nextSeq = 2;
-        }
-        await appendFileParts(bus, msgId, nextSeq, attachments);
-        await bus.createRecord(bus.tables.messages, {
-          Msg_ID: msgId,
-          Task_ID: taskId,
-          Context_ID: f1(task, "Context_ID"),
-          From_Node: String(body.from ?? body.node ?? "").trim() || cfg?.node || "hub",
-          To_Node: f1(task, "Target_Node"),
-          Role: String(body.role ?? "").trim() || "user",
-          Kind: "answer",
-          In_Reply_To: String(f1(task, "Status_Msg") ?? "").trim(),
-          Created_At: nowMinute,
-        });
-        onWake();
-        sendJson(res, 200, { msg_id: msgId });
-        return;
-      }
-
-      // 8) 取消任务
-      const cancelMatch = pathname.match(/^\/api\/v1\/tasks\/([^/]+)\/cancel$/);
-      if (method === "POST" && cancelMatch) {
-        const taskId = decodeURIComponent(cancelMatch[1]);
-        const body = await readJsonBodyBound();
-        if (principal.kind === "agent") {
-          const tasks = await bus.listRecords(bus.tables.tasks);
-          const task = tasks.find((t) => f1(t, "Task_ID") === taskId);
-          if (!task) {
-            sendJson(res, 404, { error: `任务不存在：${taskId}` });
-            return;
-          }
-          const messages = (await bus.listRecords(bus.tables.messages)).filter((m) => f1(m, "Task_ID") === taskId);
-          const initiator = initiatorOf(task, messages);
-          if (initiator !== principal.node) {
-            sendJson(res, 403, { error: `只能撤销本节点发起的任务（发起方 ${initiator}）` });
-            return;
-          }
-        }
-        const actor = String(body.from ?? body.node ?? "").trim();
-        const hubNode = cfg?.node || "hub";
-        const result = await cancelTask({
-          bus,
-          node: actor || hubNode,
-          role: actor && actor !== hubNode ? "node" : "hub",
-          taskId,
-          text: body.text || "",
-        });
-        onWake();
-        sendJson(res, 200, result);
-        return;
-      }
-
-      // 9) Web 端审批（走标准 ApprovalService + ed25519 签名）
-      const decideMatch = pathname.match(/^\/api\/v1\/approvals\/([^/]+)\/decide$/);
-      if (method === "POST" && decideMatch) {
-        if (!approval) {
-          sendJson(res, 503, { error: "ApprovalService 未就绪" });
-          return;
-        }
-        const taskId = decodeURIComponent(decideMatch[1]);
-        const body = await readJsonBodyBound();
-        const decision = String(body.decision ?? "").trim();
-        if (decision !== "approve" && decision !== "reject") {
-          sendJson(res, 400, { error: "decision 只能是 approve 或 reject" });
-          return;
-        }
-        const tasks = await bus.listRecords(bus.tables.tasks);
-        const task = tasks.find((t) => f1(t, "Task_ID") === taskId);
-        if (!task) {
-          sendJson(res, 404, { error: `任务不存在：${taskId}` });
-          return;
-        }
-        if (f1(task, "Status") !== "auth-required") {
-          sendJson(res, 409, { error: `任务当前状态为 ${f1(task, "Status")}，不是 auth-required` });
-          return;
-        }
-        const statusMsg = String(f1(task, "Status_Msg") ?? "").trim();
-        const opId = String(approval.ownerId ?? "").trim() || "web-owner";
-        const resp = await approval.handleCardAction({
-          _source: "web",
-          event_id: `web_${randomUUID()}`,
-          operator: { id: opId },
-          action: {
-            value: {
-              record_id: task.record_id,
-              task_id: taskId,
-              status_msg: statusMsg,
-              decision,
-            },
-          },
-        });
-        await approval.whenIdle();
-        onWake();
-        const toast = resp?.toast ?? {};
-        if (toast.type === "error") {
-          sendJson(res, 400, { error: toast.content || "审批处理失败" });
-          return;
-        }
-        sendJson(res, 200, { ok: true, message: toast.content || (decision === "approve" ? "已批准" : "已驳回") });
-        return;
-      }
-
-      // 10) 名片接纳与 Agent 接入管理 API（需 Bearer 鉴权）
-      const cardAdmissionMatch = pathname.match(/^\/api\/v1\/admin\/cards\/([^/]+)\/admission$/);
-      if (method === "POST" && cardAdmissionMatch) {
-        const capId = decodeParam(cardAdmissionMatch[1]);
-        const body = await readJsonBodyBound();
-        const admission = validateAdmission(body?.admission);
-        const cards = await bus.listRecords(bus.tables.agentCards);
-        const card = cards.find((c) => f1(c, "Cap_ID") === capId);
-        if (!card) {
-          sendJson(res, 404, { error: `名片不存在：${capId}` });
-          return;
-        }
-        const upd = await bus.updateRecord(bus.tables.agentCards, card.record_id, { Admission: admission });
-        onWake();
-        sendJson(res, 200, { ok: true, card: formatAgentCard(upd?.record ?? card) });
-        return;
-      }
-
-      const nodeAdmissionMatch = pathname.match(/^\/api\/v1\/admin\/nodes\/([^/]+)\/admission$/);
-      if (method === "POST" && nodeAdmissionMatch) {
-        const node = decodeParam(nodeAdmissionMatch[1]);
-        const body = await readJsonBodyBound();
-        const admission = validateAdmission(body?.admission);
-        const cards = await bus.listRecords(bus.tables.agentCards);
-        const nodeCards = cards.filter((c) => f1(c, "Node") === node);
-        if (!nodeCards.length) {
-          sendJson(res, 404, { error: `节点没有名片：${node}` });
-          return;
-        }
-        for (const c of nodeCards) {
-          await bus.updateRecord(bus.tables.agentCards, c.record_id, { Admission: admission });
-        }
-        onWake();
-        sendJson(res, 200, { ok: true, node, updated: nodeCards.length });
-        return;
-      }
-
-      const cardProfileMatch = pathname.match(/^\/api\/v1\/admin\/cards\/([^/]+)\/profile$/);
-      if ((method === "PATCH" || method === "POST") && cardProfileMatch) {
-        const capId = decodeParam(cardProfileMatch[1]);
-        const body = await readJsonBodyBound();
-        const patch = validateProfileFields(body);
-        const cards = await bus.listRecords(bus.tables.agentCards);
-        const card = cards.find((c) => f1(c, "Cap_ID") === capId);
-        if (!card) {
-          sendJson(res, 404, { error: `名片不存在：${capId}` });
-          return;
-        }
-        let latest = card;
-        if (Object.keys(patch).length > 0) {
-          const upd = await bus.updateRecord(bus.tables.agentCards, card.record_id, patch);
-          latest = upd?.record ?? card;
-          onWake();
-        }
-        sendJson(res, 200, { ok: true, card: formatAgentCard(latest) });
-        return;
-      }
-
-      if (method === "POST" && pathname === "/api/v1/admin/cards") {
-        // body.node 是要添加能力的目标节点，不是调用者身份。带 admin 的 Leader 会给别的节点建名片。
-        const body = await readJsonBody(req);
-        try {
-          const record = await createManualCard({ bus, tokenStore, body });
-          onWake();
-          sendJson(res, 201, { ok: true, card: formatAgentCard(record) });
-        } catch (e) {
-          if (Number(e?.status) === 409 && e.snippet) {
-            sendJson(res, 409, { error: e.message, snippet: e.snippet, text: e.text, hint: e.hint });
-            return;
-          }
-          throw e;
-        }
-        return;
-      }
-
-      const deleteCardMatch = pathname.match(/^\/api\/v1\/admin\/cards\/([^/]+)$/);
-      if (method === "DELETE" && deleteCardMatch) {
-        const capId = decodeParam(deleteCardMatch[1]);
-        const result = await deleteManualCard({ bus, tokenStore, capId });
-        onWake();
-        sendJson(res, 200, result);
-        return;
-      }
-
-      if (method === "POST" && pathname === "/api/v1/admin/commands-snippet") {
-        const body = await readJsonBodyBound();
-        sendJson(res, 200, buildCommandsSnippet(body));
-        return;
-      }
-
-      if (method === "GET" && pathname === "/api/v1/schedules") {
-        const [tasks, cards] = await Promise.all([
-          bus.listRecords(bus.tables.tasks),
-          bus.listRecords(bus.tables.agentCards),
-        ]);
-        sendJson(res, 200, {
-          schedules: listSchedules({
-            tasks,
-            cards,
-            connected: broker ? broker.connectedNodes() : [],
-            hubNode: cfg?.node || "",
-            hubTz: cfg?.tz || "",
-          }),
-        });
-        return;
-      }
-
-      if (method === "POST" && pathname === "/api/v1/admin/agents") {
-        const body = await readJsonBodyBound();
-        const node = validateNodeName(body?.node);
-        const access = validateAccess(body?.access);
-        const role = issuedRole(validateRole(body?.role));
-        const profile = validateProfileFields(body);
-        const displayName = profile.Display_Name ?? "";
-        const adminNote = profile.Admin_Note ?? "";
-        const description = body?.description == null ? "" : String(body.description).trim();
-        // receive 只对 HTTP Agent 有意义；host / inbox 的唤醒方式由本机 ah daemon 决定。
-        let receive = "poll";
-        let webhookUrl = "";
-        let webhookKey = "";
-        let webhookHeader = "Authorization";
-        let pollIntervalMin = null;
-        let template = "generic";
-        let templateId = "";
-        const { presets } = agentTemplates();
-        if (access === "http") {
-          const choice = resolveHttpOnboardingChoice({
-            template: Object.hasOwn(body ?? {}, "template") ? body.template : undefined,
-            receive: Object.hasOwn(body ?? {}, "receive") ? body.receive : undefined,
-            templateId: body?.template_id,
-            presets,
-          });
-          template = choice.template;
-          receive = choice.receive;
-          templateId = choice.templateId;
-          pollIntervalMin = validatePollIntervalMin(body?.poll_interval_min, receive);
-          if (receive === "webhook") {
-            webhookUrl = validateWebhookUrl(body?.webhook_url);
-            webhookKey = validateWebhookKey(body?.webhook_key ?? body?.key, { required: true });
-            webhookHeader = validateWebhookHeader(body?.webhook_header ?? body?.header);
-          }
-        }
-
-        if (!tokenStore) {
-          sendJson(res, 500, { error: "未配置 configDir，无法签发 Agent Token" });
-          return;
-        }
-        // 没有机主 Token 时一旦签发 Agent Token，鉴权就会生效，机主自己将被挡在管理接口之外。
-        if (!apiToken) {
-          sendJson(res, 400, { error: "请先在 node.json 配置机主 apiToken，再签发 Agent Token" });
-          return;
-        }
-        if (tokenStore.get(node)) {
-          sendJson(res, 409, { error: `节点 ${node} 已存在（已有 Token）。如需重新接入，请在「节点」页重新生成 Token（即轮换：POST /api/v1/admin/tokens/${node}/rotate），或先删除该节点再添加` });
-          return;
-        }
-
-        let card = null;
-        if (access === "http") {
-          const fields = presetHttpCardFields({
-            node,
-            role,
-            receiveMode: receiveModeFor(receive),
-            displayName,
-            description,
-            adminNote,
-            availability: "offline",
-            updatedAt: nowMinute(),
-            pollIntervalMin,
-            template,
-            templateId,
-            model: templateId ? templatePresetById(templateId, presets) : {},
-          });
-          const existing = await bus.listRecords(bus.tables.agentCards);
-          if (existing.some((r) => f1(r, "Cap_ID") === fields.Cap_ID)) {
-            const prev = existing.find((r) => f1(r, "Cap_ID") === fields.Cap_ID);
-            const adm = admissionOf(prev);
-            // 被拒绝的名片仍占着 Cap_ID，直接报「已存在」会让人以为节点凭空消失了。
-            const where = adm === "rejected" ? "它在「节点 → 已拒绝」里，可以恢复为待接纳" : (adm === "pending" ? "它在「节点 → 待接纳」里" : "它已经接入");
-            sendJson(res, 409, { error: `节点 ${node} 已存在：${where}；也可先删除该节点再添加` });
-            return;
-          }
-          const created = await bus.createRecord(bus.tables.agentCards, fields);
-          onWake();
-          card = formatAgentCard(created?.record);
-        }
-
-        // 所有远端节点（http / host / inbox）均签发独立的分节点 Token，隔离主控 AH_API_TOKEN。
-        const issued = tokenStore.issue({ node, role, scopes: [], access });
-        let webhookPayload = null;
-        if (access === "http" && receive === "webhook") {
-          if (!webhooks) throw httpError(500, "未配置 configDir，无法保存 Webhook");
-          const saved = webhooks.store.put({
-            node,
-            url: webhookUrl,
-            key: webhookKey,
-            header: webhookHeader,
-          });
-          webhookPayload = publicWebhook(saved.hook);
-        }
-        const onboarding = buildOnboarding({
-          hubUrl: requestHubUrl(req),
-          node,
-          access,
-          role,
-          authRequired: Boolean(apiToken) || Boolean(issued),
-          token: issued?.token || "",
-          receive,
-          pollIntervalMin,
-          template,
-          templateId,
-          presets,
-        });
-        if (access === "http") broker?.setNodePollInterval?.(node, pollIntervalMin);
-        const payload = { ok: true, node, card, onboarding };
-        if (issued) payload.token = issued.token;
-        if (webhookPayload) payload.webhook = webhookPayload;
-        sendJson(res, 200, payload);
-        return;
-      }
-
-      const deleteAgentMatch = pathname.match(/^\/api\/v1\/admin\/agents\/([^/]+)$/);
-      if (method === "DELETE" && deleteAgentMatch) {
-        const node = validateNodeName(decodeParam(deleteAgentMatch[1]));
-        if (node === (cfg?.node || "hub")) {
-          sendJson(res, 400, { error: "不能删除 Hub 本机节点" });
-          return;
-        }
-        if (typeof bus.deleteRecord !== "function") {
-          sendJson(res, 501, { error: "当前总线不支持删除名片" });
-          return;
-        }
-        const cards = (await bus.listRecords(bus.tables.agentCards)).filter((c) => f1(c, "Node") === node);
-        // 先吊销再删名片：顺序反过来时，对方恰好在这之间注册会把名片写回来。
-        const tokenRevoked = tokenStore ? tokenStore.revoke(node) : false;
-        const webhookRemoved = webhooks ? webhooks.store.remove(node) : false;
-        for (const c of cards) await bus.deleteRecord(bus.tables.agentCards, c.record_id);
-        const forgotten = broker?.forgetNode ? broker.forgetNode(node) : false;
-        if (!cards.length && !tokenRevoked && !forgotten && !webhookRemoved) {
-          sendJson(res, 404, { error: `节点不存在：${node}` });
-          return;
-        }
-        // 未结束的任务不动：它们仍可在任务页撤销，删 Agent 不应顺带改任务状态。
-        const tasks = await bus.listRecords(bus.tables.tasks);
-        const openTasks = tasks.filter((t) => f1(t, "Target_Node") === node && !TERMINAL_STATUSES.has(f1(t, "Status"))).length;
-        if (cards.length) onWake();
-        sendJson(res, 200, { ok: true, node, cardsRemoved: cards.length, tokenRevoked, webhookRemoved, openTasks });
-        return;
-      }
-
-      if (method === "GET" && pathname === "/api/v1/admin/onboarding") {
-        const rawNode = reqUrl.searchParams.get("node");
-        const node = validateNodeName(
-          principal.kind === "agent" && !String(rawNode ?? "").trim() ? principal.node : rawNode,
-        );
-        const access = validateAccess(reqUrl.searchParams.get("access"));
-        const role = validateRole(reqUrl.searchParams.get("role"));
-        const { presets } = agentTemplates();
-        const choice = access === "http"
-          ? resolveHttpOnboardingChoice({
-            template: reqUrl.searchParams.get("template"),
-            receive: reqUrl.searchParams.get("receive"),
-            templateId: reqUrl.searchParams.get("template_id"),
-            presets,
-          })
-          : { template: "generic", receive: "poll", templateId: "" };
-        const pollIntervalMin = reqUrl.searchParams.has("poll_interval_min")
-          ? validatePollIntervalMin(reqUrl.searchParams.get("poll_interval_min"), choice.receive)
-          : undefined;
-        const onboarding = buildOnboarding({
-          hubUrl: requestHubUrl(req),
-          node,
-          access,
-          role,
-          authRequired: Boolean(apiToken) || Boolean(tokenStore?.hasAny()),
-          receive: choice.receive,
-          pollIntervalMin,
-          template: choice.template,
-          templateId: choice.templateId,
-          presets,
-        });
-        sendJson(res, 200, { onboarding });
-        return;
-      }
-
-      if (method === "GET" && pathname === "/api/v1/admin/tokens") {
-        sendJson(res, 200, { tokens: tokenStore ? tokenStore.listPublic() : [] });
-        return;
-      }
-
-      // 名录变更只追加。Agent 身份在 assertAgentRoute 已被拒绝，这里只对机主和 open 开放。
-      if (method === "GET" && pathname === "/api/v1/admin/audit") {
-        const logs = typeof bus.listAuditLogs === "function"
-          ? bus.listAuditLogs({
-            table: String(reqUrl.searchParams.get("table") ?? "").trim(),
-            node: String(reqUrl.searchParams.get("node") ?? "").trim(),
-            limit: reqUrl.searchParams.get("limit"),
-          })
-          : [];
-        sendJson(res, 200, { logs });
-        return;
-      }
-
-      const rotateTokenMatch = pathname.match(/^\/api\/v1\/admin\/tokens\/([^/]+)\/rotate$/);
-      if (method === "POST" && rotateTokenMatch) {
-        if (!tokenStore) throw httpError(500, "未配置 configDir，无法管理 Agent Token");
-        if (!apiToken) throw httpError(400, "请先在 node.json 配置机主 apiToken，再签发 Agent Token");
-        const node = validateNodeName(decodeParam(rotateTokenMatch[1]));
-        const body = await readJsonBodyBound();
-        const existing = tokenStore.get(node);
-        const cards = bus?.tables?.agentCards ? await bus.listRecords(bus.tables.agentCards) : [];
-        let role = Object.hasOwn(body, "role") ? body.role : existing?.role;
-        // 吊销后再点「生成密钥」或历史节点首次签发时，若调用方未显式传 role，则从该节点已有名片的 Metadata.role 推导。
-        if (!role) {
-          let inferred = "";
-          for (const card of cards) {
-            if (f1(card, "Node") !== node) continue;
-            const cardRole = parseCardMetadata(card).role;
-            if (cardRole === "leader" || cardRole === "hybrid") {
-              inferred = "leader";
-              break;
-            }
-            if (cardRole === "worker") inferred = "worker";
-          }
-          if (inferred) role = inferred;
-        }
-        const scopes = Object.hasOwn(body, "scopes") ? body.scopes : undefined;
-        let access = existing?.access || "";
-        if (Object.hasOwn(body, "access") && String(body.access ?? "").trim()) {
-          access = validateAccess(body.access);
-        }
-        const mineCards = cards.filter((card) => f1(card, "Node") === node);
-        if (!access) {
-          const hasHttpCard = mineCards.some((card) => {
-            const meta = parseCardMetadata(card);
-            const rm = String(f1(card, "Receive_Mode") ?? "");
-            return f1(card, "Daemon_Version") === "http-agent"
-              || (meta.kind === "agent" && ["http-poll", "http-longpoll", "webhook"].includes(rm));
-          });
-          if (hasHttpCard) {
-            access = "http";
-          } else if (mineCards.length) {
-            const isInbox = mineCards.every((card) => parseCardMetadata(card).mode === "inbox" || parseCardMetadata(card).kind === "agent");
-            access = isInbox ? "inbox" : "host";
-          } else {
-            access = "http";
-          }
-        }
-        const issued = tokenStore.rotate({ node, role, scopes, access });
-        const { presets } = agentTemplates();
-        // 节点模板 id 优先于粗 template：WorkBuddy 和通用的粗分类都是 generic，只靠后者会生成同一段提示词。
-        let templateId = "";
-        let template = "generic";
-        let receive = "poll";
-        let pollIntervalMin = null;
-        if (access === "http") {
-          if (Object.hasOwn(body, "template_id") && String(body.template_id ?? "").trim()) {
-            templateId = templatePresetById(body.template_id, presets).id;
-          } else {
-            for (const card of mineCards) {
-              const id = knownTemplateId(parseCardMetadata(card).template_id, presets);
-              if (id) { templateId = id; break; }
-            }
-          }
-          let templateFromCard = "";
-          for (const card of mineCards) {
-            const t = parseCardMetadata(card).template;
-            if (t) { templateFromCard = t; break; }
-          }
-          if (Object.hasOwn(body, "template")) template = validateTemplate(body.template);
-          else if (templateFromCard) template = validateTemplate(templateFromCard);
-          const storedReceive = nodeStoredReceiveMode(cards, node);
-          receive = storedReceive === "http-longpoll" ? "longpoll" : (storedReceive === "webhook" ? "webhook" : "poll");
-          if (templateId && !Object.hasOwn(body, "template")) {
-            const preset = templatePresetById(templateId, presets);
-            // 名片接收方式已经和建单时的模板不一致时，不再套用那套提示词。
-            if (!storedReceive || preset.receive === receive) {
-              template = preset.template;
-              receive = preset.receive;
-            } else {
-              templateId = "";
-            }
-          }
-          if (!templateId) templateId = inferTemplateId(template, receive, presets);
-          receive = receiveForTemplate(template, receive);
-          for (const card of mineCards) {
-            const stored = parseCardMetadata(card).poll_interval_min;
-            if (!stored) continue;
-            pollIntervalMin = stored;
-            if (f1(card, "Receive_Mode") === storedReceive) break;
-          }
-        }
-        const onboarding = buildOnboarding({
-          hubUrl: requestHubUrl(req),
-          node,
-          access,
-          role: issued.role,
-          authRequired: true,
-          token: issued.token,
-          receive,
-          pollIntervalMin,
-          template,
-          templateId,
-          presets,
-        });
-        sendJson(res, 200, { token: issued.token, onboarding });
-        return;
-      }
-
-      const revokeTokenMatch = pathname.match(/^\/api\/v1\/admin\/tokens\/([^/]+)$/);
-      if (method === "DELETE" && revokeTokenMatch) {
-        if (!tokenStore) throw httpError(500, "未配置 configDir，无法管理 Agent Token");
-        const node = validateNodeName(decodeParam(revokeTokenMatch[1]));
-        if (!tokenStore.revoke(node)) {
-          sendJson(res, 404, { error: `节点 ${node} 没有 Token` });
-          return;
-        }
-        sendJson(res, 200, { ok: true });
-        return;
-      }
-
-      if (pathname === "/api/v1/admin/webhooks" || pathname.startsWith("/api/v1/admin/webhooks/")) {
-        if (!webhooks) throw httpError(500, "未配置 configDir，无法管理 Webhook");
-        if (method === "GET" && pathname === "/api/v1/admin/webhooks") {
-          sendJson(res, 200, { webhooks: webhooks.store.listPublic() });
-          return;
-        }
-        const webhookTestMatch = pathname.match(/^\/api\/v1\/admin\/webhooks\/([^/]+)\/test$/);
-        if (method === "POST" && webhookTestMatch) {
-          const node = validateNodeName(decodeParam(webhookTestMatch[1]));
-          const result = await webhooks.ping(node);
-          if (result.missing) {
-            sendJson(res, 404, { error: `节点 ${node} 没有 Webhook` });
-            return;
-          }
-          sendJson(res, 200, { ok: result.ok, status: result.status, error: result.error });
-          return;
-        }
-        const webhookNodeMatch = pathname.match(/^\/api\/v1\/admin\/webhooks\/([^/]+)$/);
-        if (webhookNodeMatch && method === "DELETE") {
-          const node = validateNodeName(decodeParam(webhookNodeMatch[1]));
-          if (!webhooks.store.remove(node)) {
-            sendJson(res, 404, { error: `节点 ${node} 没有 Webhook` });
-            return;
-          }
-          // 配置没了就不能再声称是 webhook，否则控制台和投递会各说各话。回到默认定时检查。
-          const cardsUpdated = await alignNodeReceiveMode(bus, node, "http-poll");
-          if (cardsUpdated) onWake();
-          sendJson(res, 200, { ok: true });
-          return;
-        }
-        if (webhookNodeMatch && method === "PUT") {
-          const node = validateNodeName(decodeParam(webhookNodeMatch[1]));
-          const cards = await bus.listRecords(bus.tables.agentCards);
-          if (nodeStoredReceiveMode(cards, node) !== "webhook") {
-            throw httpError(409, "该节点的接收方式不是 Webhook，不能登记推送");
-          }
-          const body = await readJsonBodyBound();
-          if (!body || typeof body !== "object" || Array.isArray(body)) {
-            throw httpError(400, "请求体必须是 JSON 对象");
-          }
-          const url = validateWebhookUrl(body.url);
-          const saved = webhooks.store.put({
-            node,
-            url,
-            key: body.key ?? body.webhook_key,
-            header: body.header ?? body.webhook_header,
-          });
-          sendJson(res, 200, { ok: true, webhook: publicWebhook(saved.hook) });
-          return;
-        }
-      }
-
-      sendJson(res, 404, { error: "Not Found" });
-    } catch (e) {
-      const status = Number(e?.status) || 400;
-      if (!res.writableEnded) {
-        if (status === 413 && !req.readableEnded) res.setHeader("Connection", "close");
-        sendJson(res, status, { error: e?.message ?? String(e) });
-      }
-    }
-  });
-
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(port, host, () => {
-      server.off("error", reject);
-      resolve();
-    });
-  });
-
-  const addr = server.address();
-  const boundPort = typeof addr === "object" && addr ? addr.port : port;
-  activePort = boundPort;
-  const localUrl = `http://${connectHost}:${boundPort}`;
-
-  if (runtimePath) {
-    try {
-      fs.mkdirSync(path.dirname(runtimePath), { recursive: true });
-      fs.writeFileSync(runtimePath, JSON.stringify({
-        pid: process.pid,
-        url: localUrl,
-        listen: `${host}:${boundPort}`,
-        startedAt: new Date().toISOString(),
-      }, null, 2), { mode: 0o600 });
-    } catch (e) {
-      log("写入 hub_runtime.json 失败：" + (e?.message ?? e));
-    }
-  }
-
-  try {
-    const seeded = loadAgentTemplates(cfg?.configDir || "", { writeIfMissing: Boolean(cfg?.configDir) });
-    for (const err of seeded.errors) log(err);
-  } catch (e) {
-    log("节点模板初始化失败：" + (e?.message ?? e));
-  }
-
-  log(`Hub HTTP & Web 控制台已启动：http://${host}:${boundPort} （本机访问：${localUrl}）`);
-
-  return {
-    server,
-    host,
-    port: boundPort,
-    localUrl,
-    fileStore: activeFileStore,
-    close: async () => {
-      if (runtimePath) {
-        try {
-          const info = JSON.parse(fs.readFileSync(runtimePath, "utf8"));
-          if (Number(info?.pid) === process.pid) fs.unlinkSync(runtimePath);
-        } catch { /* ignore */ }
-      }
-      await new Promise((resolve) => {
-        server.close(() => resolve());
-        server.closeAllConnections?.();
+      res.writeHead(200, {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "no-cache",
       });
-      ownFileStore?.close?.();
-    },
-  };
+      res.end(fs.readFileSync(kitPath, "utf8"));
+      return;
+    }
+
+    // ---- 5. Templates & Settings & Notifier（仅机主） ----
+    if (method === "GET" && pathname === "/api/v1/templates") {
+      if (!requireOwner()) return;
+      return sendJson(res, 200, { ok: true, templates: loadAgentTemplates(configDir) });
+    }
+
+    if (method === "GET" && pathname === "/api/v1/schedules") {
+      if (!requireOwner()) return;
+      return sendJson(res, 200, { ok: true, schedules: schedules ? schedules.listWithStatus() : [] });
+    }
+
+    if (method === "GET" && pathname === "/api/v1/admin/settings") {
+      if (!requireOwner()) return;
+      const appEnv = loadAppEnv(configDir);
+      return sendJson(res, 200, {
+        ok: true,
+        hub_url: getHubUrl(),
+        public_key: approvalPublicKey,
+        auth_required: Boolean(curOwnerToken),
+        notifier: {
+          feishu_webhook: appEnv.AH_FEISHU_WEBHOOK || "",
+          bark_url: appEnv.AH_BARK_URL || "",
+          telegram_bot_token_set: Boolean(appEnv.AH_TELEGRAM_BOT_TOKEN),
+          telegram_chat_id: appEnv.AH_TELEGRAM_CHAT_ID || "",
+          notify_webhook: appEnv.AH_NOTIFY_WEBHOOK || "",
+          notify_on: appEnv.AH_NOTIFY_ON || "action",
+        },
+      });
+    }
+
+    if (method === "POST" && pathname === "/api/v1/admin/settings") {
+      if (!requireOwner()) return;
+      const body = await readJsonBody(req);
+      const updates = {};
+      if (body.feishu_webhook !== undefined) updates.AH_FEISHU_WEBHOOK = String(body.feishu_webhook || "").trim();
+      if (body.bark_url !== undefined) updates.AH_BARK_URL = String(body.bark_url || "").trim();
+      if (body.telegram_bot_token !== undefined && body.telegram_bot_token !== "") {
+        updates.AH_TELEGRAM_BOT_TOKEN = String(body.telegram_bot_token).trim();
+      }
+      if (body.telegram_chat_id !== undefined) updates.AH_TELEGRAM_CHAT_ID = String(body.telegram_chat_id || "").trim();
+      if (body.notify_webhook !== undefined) updates.AH_NOTIFY_WEBHOOK = String(body.notify_webhook || "").trim();
+      if (body.notify_on !== undefined) updates.AH_NOTIFY_ON = body.notify_on === "all" ? "all" : "action";
+      if (body.public_url !== undefined) updates.AH_PUBLIC_URL = String(body.public_url || "").trim().replace(/\/+$/, "");
+
+      for (const k of ["AH_FEISHU_WEBHOOK", "AH_BARK_URL", "AH_NOTIFY_WEBHOOK", "AH_PUBLIC_URL"]) {
+        if (updates[k]) {
+          const chk = validateWebhookUrl(updates[k]);
+          if (!chk.ok) return sendError(res, 400, `${k}: ${chk.error}`, "invalid_url");
+        }
+      }
+
+      writeLockedAppEnvVars(configDir, updates);
+      if (notifier) notifier.updateEnv(updates);
+      return sendJson(res, 200, { ok: true, notifier: notifier ? notifier.configuredChannels() : {} });
+    }
+
+    if (method === "POST" && pathname === "/api/v1/admin/notifier-test") {
+      if (!requireOwner()) return;
+      if (!notifier) return sendError(res, 400, "Notifier 未初始化", "no_notifier");
+      const r = await notifier.sendAlert({
+        title: "a2a-hub · 通知测试",
+        body: "如果你收到这条消息，说明机主推送通道配置成功。",
+        link: getHubUrl(),
+      });
+      return sendJson(res, 200, { ok: true, result: r });
+    }
+
+    // ---- 6. 电脑设备 Device 接口 ----
+    if (method === "GET" && pathname === "/api/v1/devices") {
+      if (!requireOwner()) return;
+      const now = Date.now();
+      const devices = store.listDevices().map((d) => ({
+        ...d,
+        online: broker.isDeviceOnline(d, now),
+        connected: broker.isDeviceConnected(d.id),
+      }));
+      return sendJson(res, 200, { ok: true, devices });
+    }
+
+    if (method === "POST" && pathname === "/api/v1/devices") {
+      if (!requireOwner()) return;
+      const body = await readJsonBody(req);
+      const name = String(body.name || body.id || "").trim();
+      if (!name) return sendError(res, 400, "请填写设备名称 name", "missing_name");
+      const id = sanitizeSlug(body.id || name, "device");
+      const { device, token } = store.upsertDevice({
+        id,
+        name,
+        platform: String(body.platform || ""),
+        os_info: String(body.os_info || ""),
+        transport: body.transport === "poll" ? "poll" : "longpoll",
+        poll_interval_min: Number(body.poll_interval_min || 5),
+        max_concurrent: Number(body.max_concurrent || 4),
+        summary: String(body.summary || ""),
+        note: String(body.note || ""),
+        enabled: true,
+        issueToken: true,
+      });
+      const join_command = buildDeviceJoinCommand({
+        hubUrl: getHubUrl(),
+        deviceToken: token,
+        deviceId: device.id,
+      });
+      return sendJson(res, 201, {
+        ok: true,
+        device,
+        token,
+        hub_url: getHubUrl(),
+        join_command,
+      });
+    }
+
+    m = /^\/api\/v1\/devices\/([A-Za-z0-9._-]+)$/.exec(pathname);
+    if (m) {
+      if (!requireOwner()) return;
+      const devId = m[1];
+      if (method === "PATCH") {
+        const body = await readJsonBody(req);
+        const updated = store.updateDevice(devId, body);
+        if (!updated) return sendError(res, 404, "设备不存在", "not_found");
+        return sendJson(res, 200, { ok: true, device: updated });
+      }
+      if (method === "DELETE") {
+        const ok = store.deleteDevice(devId);
+        if (!ok) return sendError(res, 404, "设备不存在", "not_found");
+        return sendJson(res, 200, { ok: true });
+      }
+    }
+
+    m = /^\/api\/v1\/devices\/([A-Za-z0-9._-]+)\/rotate-token$/.exec(pathname);
+    if (method === "POST" && m) {
+      if (!requireOwner()) return;
+      const rotated = store.rotateDeviceToken(m[1]);
+      if (!rotated) return sendError(res, 404, "设备不存在", "not_found");
+      const join_command = buildDeviceJoinCommand({
+        hubUrl: getHubUrl(),
+        deviceToken: rotated.token,
+        deviceId: rotated.device.id,
+      });
+      return sendJson(res, 200, { ok: true, ...rotated, join_command });
+    }
+
+    m = /^\/api\/v1\/devices\/([A-Za-z0-9._-]+)\/sync$/.exec(pathname);
+    if (method === "POST" && m) {
+      const devId = m[1];
+      if (actor.kind !== "owner" && (actor.kind !== "device" || actor.id !== devId)) {
+        return sendError(res, 403, "无权同步其他设备", "forbidden");
+      }
+      const body = await readJsonBody(req);
+      const workers = Array.isArray(body.workers) ? body.workers : [];
+      const synced = store.syncDeviceWorkers(devId, workers, {
+        platform: body.platform,
+        os_info: body.os_info,
+        transport: body.transport || "longpoll",
+        max_concurrent: body.max_concurrent,
+      });
+      if (!synced) return sendError(res, 404, "设备不存在", "not_found");
+      return sendJson(res, 200, {
+        ok: true,
+        ...synced,
+        approval_public_key: approvalPublicKey,
+      });
+    }
+
+    m = /^\/api\/v1\/devices\/([A-Za-z0-9._-]+)\/poll$/.exec(pathname);
+    if (method === "GET" && m) {
+      const devId = m[1];
+      if (actor.kind !== "owner" && (actor.kind !== "device" || actor.id !== devId)) {
+        return sendError(res, 403, "无权轮询其他设备", "forbidden");
+      }
+      const dev = store.getDevice(devId);
+      if (!dev) return sendError(res, 404, "设备不存在", "not_found");
+      store.touchDeviceSeen(devId);
+      const since = Number(url.searchParams.get("since") || 0);
+      const timeout = Number(url.searchParams.get("timeout") || 30);
+      if (!dev.enabled) {
+        return sendJson(res, 200, {
+          ok: true,
+          seq: broker.currentSeq(),
+          woke: false,
+          paused: true,
+          pending_count: 0,
+          tasks: [],
+        });
+      }
+      const devAgents = store.listAgents({ device_id: devId });
+      const enabledIds = devAgents.filter((a) => a.enabled).map((a) => a.id);
+      const allIds = devAgents.map((a) => a.id);
+
+      const pendingNow = enabledIds.length
+        ? store.listTasks({ to_agent_ids: enabledIds, state: "submitted", order: "asc", limit: 50 })
+        : [];
+      if (pendingNow.length > 0 || timeout <= 0) {
+        return sendJson(res, 200, {
+          ok: true,
+          seq: broker.currentSeq(),
+          woke: pendingNow.length > 0,
+          pending_count: pendingNow.length,
+          tasks: pendingNow,
+        });
+      }
+
+      const ac = new AbortController();
+      req.on("close", () => ac.abort());
+      const waitRes = await broker.waitForChange({
+        scope: "device",
+        sinceSeq: since,
+        timeoutSec: timeout,
+        deviceId: devId,
+        agentIds: allIds,
+        signal: ac.signal,
+      });
+      store.touchDeviceSeen(devId);
+      const devAgentsAfter = store.listAgents({ device_id: devId });
+      const enabledAfter = devAgentsAfter.filter((a) => a.enabled).map((a) => a.id);
+      const tasksAfter = enabledAfter.length
+        ? store.listTasks({ to_agent_ids: enabledAfter, state: "submitted", order: "asc", limit: 50 })
+        : [];
+      return sendJson(res, 200, {
+        ok: true,
+        ...waitRes,
+        pending_count: tasksAfter.length,
+        tasks: tasksAfter,
+      });
+    }
+
+    // ---- 7. Agent 管理与协议接口 ----
+    if (method === "GET" && pathname === "/api/v1/agents") {
+      return sendJson(res, 200, { ok: true, agents: formatAgentsPublicList(actor) });
+    }
+
+    if (method === "POST" && pathname === "/api/v1/agents") {
+      if (!requireOwner()) return;
+      const body = await readJsonBody(req);
+      const name = String(body.name || body.id || "").trim();
+      if (!name) return sendError(res, 400, "请填写 Agent 名称 name", "missing_name");
+      const platform = String(body.platform || "generic-poll").trim();
+      const tpl = findTemplate(configDir, platform);
+      const id = sanitizeSlug(body.id || name, "agent");
+      const webhookUrl = String(body.webhook_url || "").trim();
+      if (webhookUrl) {
+        const chk = validateWebhookUrl(webhookUrl);
+        if (!chk.ok) return sendError(res, 400, chk.error, "invalid_webhook_url");
+      }
+
+      const { agent, token } = store.createAgent({
+        id,
+        kind: body.kind === "independent" ? "independent" : "cloud",
+        name,
+        role: body.role || tpl.role || "worker",
+        platform: tpl.id,
+        summary: String(body.summary || tpl.summary_hint || ""),
+        note: String(body.note || ""),
+        skills: Array.isArray(body.skills) ? body.skills : [],
+        tools: Array.isArray(body.tools) ? body.tools : [],
+        models: Array.isArray(body.models) ? body.models : [],
+        default_model: String(body.default_model || ""),
+        approval_policy: ["never", "always", "risk"].includes(body.approval_policy) ? body.approval_policy : "never",
+        transport: body.transport || tpl.transport || "poll",
+        poll_interval_min: Number(body.poll_interval_min || tpl.poll_interval_min || 5),
+        webhook_url: webhookUrl,
+        webhook_secret: String(body.webhook_secret || ""),
+        webhook_header: String(body.webhook_header || "X-A2A-Signature"),
+        enabled: body.enabled !== undefined ? Boolean(body.enabled) : true,
+        issueToken: true,
+      });
+
+      const onboarding_prompt = buildAgentOnboardingPrompt({
+        hubUrl: getHubUrl(),
+        agent,
+        token,
+        template: tpl,
+      });
+
+      return sendJson(res, 201, {
+        ok: true,
+        agent,
+        token,
+        hub_url: getHubUrl(),
+        onboarding_prompt,
+      });
+    }
+
+    if (method === "POST" && pathname === "/api/v1/agents/register") {
+      if (actor.kind !== "agent" && actor.kind !== "owner") {
+        return sendError(res, 403, "仅独立 Agent 或机主可调用 register", "forbidden");
+      }
+      const body = await readJsonBody(req);
+      const requestedId = String(body.id || body.node || "").trim();
+      if (actor.kind === "agent" && requestedId && requestedId !== actor.id) {
+        return sendError(res, 403, `禁止冒充其他 Agent (${requestedId})`, "impersonation_forbidden");
+      }
+      const targetId = actor.kind === "agent" ? actor.id : requestedId;
+      if (!targetId) return sendError(res, 400, "缺少 agent id", "missing_id");
+      const existing = store.getAgent(targetId);
+      if (!existing) return sendError(res, 404, "Agent 尚未在 Hub 创建，请先在控制台添加", "not_found");
+
+      const patch = {};
+      if (body.name) patch.name = String(body.name);
+      if (body.summary !== undefined) patch.summary = String(body.summary);
+      if (Array.isArray(body.skills)) patch.skills = body.skills;
+      if (Array.isArray(body.tools)) patch.tools = body.tools;
+      if (Array.isArray(body.models)) patch.models = body.models;
+      if (body.default_model !== undefined) patch.default_model = String(body.default_model);
+      if (body.metadata && typeof body.metadata === "object") {
+        patch.metadata = { ...(existing.metadata || {}), ...body.metadata };
+      }
+      const updated = store.updateAgent(targetId, patch);
+      store.touchAgentSeen(targetId, Date.now(), 0);
+      return sendJson(res, 200, { ok: true, agent: store.getAgent(updated.id) });
+    }
+
+    m = /^\/api\/v1\/agents\/([A-Za-z0-9._-]+)$/.exec(pathname);
+    if (m) {
+      const agentId = m[1];
+      if (method === "GET") {
+        if (actor.kind !== "owner" && (actor.kind !== "agent" || actor.id !== agentId)) {
+          return sendError(res, 403, "无权查看该 Agent 详情", "forbidden");
+        }
+        const ag = store.getAgent(agentId);
+        if (!ag) return sendError(res, 404, "Agent 不存在", "not_found");
+        return sendJson(res, 200, { ok: true, agent: ag });
+      }
+      if (method === "PATCH") {
+        if (!requireOwner()) return;
+        const body = await readJsonBody(req);
+        if (body.webhook_url) {
+          const chk = validateWebhookUrl(body.webhook_url);
+          if (!chk.ok) return sendError(res, 400, chk.error, "invalid_webhook_url");
+        }
+        const updated = store.updateAgent(agentId, body);
+        if (!updated) return sendError(res, 404, "Agent 不存在", "not_found");
+        return sendJson(res, 200, { ok: true, agent: updated });
+      }
+      if (method === "DELETE") {
+        if (!requireOwner()) return;
+        const ok = store.deleteAgent(agentId);
+        if (!ok) return sendError(res, 404, "Agent 不存在", "not_found");
+        return sendJson(res, 200, { ok: true });
+      }
+    }
+
+    m = /^\/api\/v1\/agents\/([A-Za-z0-9._-]+)\/rotate-token$/.exec(pathname);
+    if (method === "POST" && m) {
+      if (!requireOwner()) return;
+      const rotated = store.rotateAgentToken(m[1]);
+      if (!rotated) return sendError(res, 404, "Agent 不存在", "not_found");
+      const tpl = findTemplate(configDir, rotated.agent.platform);
+      const onboarding_prompt = buildAgentOnboardingPrompt({
+        hubUrl: getHubUrl(),
+        agent: rotated.agent,
+        token: rotated.token,
+        template: tpl,
+      });
+      return sendJson(res, 200, { ok: true, ...rotated, onboarding_prompt });
+    }
+
+    m = /^\/api\/v1\/agents\/([A-Za-z0-9._-]+)\/onboarding$/.exec(pathname);
+    if (method === "GET" && m) {
+      if (!requireOwner()) return;
+      const ag = store.getAgent(m[1]);
+      if (!ag) return sendError(res, 404, "Agent 不存在", "not_found");
+      const tpl = findTemplate(configDir, ag.platform);
+      const onboarding_prompt = buildAgentOnboardingPrompt({
+        hubUrl: getHubUrl(),
+        agent: ag,
+        token: `<使用已有 Token(${ag.token_prefix})；若遗忘请点击「重新生成 Token」>`,
+        template: tpl,
+      });
+      return sendJson(res, 200, { ok: true, agent: ag, onboarding_prompt });
+    }
+
+    m = /^\/api\/v1\/agents\/([A-Za-z0-9._-]+)\/webhook-test$/.exec(pathname);
+    if (method === "POST" && m) {
+      if (!requireOwner()) return;
+      const resTest = await webhooks.testAgentWebhook(m[1]);
+      return sendJson(res, resTest.ok ? 200 : 400, { ok: resTest.ok, result: resTest });
+    }
+
+    m = /^\/api\/v1\/agents\/([A-Za-z0-9._-]+)\/check$/.exec(pathname);
+    if (method === "GET" && m) {
+      const agentId = m[1];
+      if (actor.kind !== "owner" && (actor.kind !== "agent" || actor.id !== agentId)) {
+        return sendError(res, 403, "无权检查其他 Agent 的收件箱", "forbidden");
+      }
+      const checked = taskService.checkAgentInbox(agentId);
+      if (!checked) return sendError(res, 404, "Agent 不存在", "not_found");
+      store.touchAgentSeen(agentId);
+      return sendJson(res, 200, checked);
+    }
+
+    m = /^\/api\/v1\/agents\/([A-Za-z0-9._-]+)\/poll$/.exec(pathname);
+    if ((method === "GET" || method === "POST") && m) {
+      const agentId = m[1];
+      if (actor.kind !== "owner" && (actor.kind !== "agent" || actor.id !== agentId)) {
+        return sendError(res, 403, "无权轮询其他 Agent", "forbidden");
+      }
+      const ag = store.getAgent(agentId);
+      if (!ag) return sendError(res, 404, "Agent 不存在", "not_found");
+      store.touchAgentSeen(agentId);
+      const since = Number(url.searchParams.get("since") || 0);
+      const timeout = Number(url.searchParams.get("timeout") || 30);
+
+      const pendingNow = ag.enabled ? store.listTasks({ to_agent_id: agentId, state: "submitted", order: "asc", limit: 30 }) : [];
+      if (pendingNow.length > 0 || timeout <= 0) {
+        return sendJson(res, 200, {
+          ok: true,
+          seq: broker.currentSeq(),
+          woke: pendingNow.length > 0,
+          paused: !ag.enabled,
+          tasks: pendingNow,
+        });
+      }
+
+      const ac = new AbortController();
+      req.on("close", () => ac.abort());
+      const waitRes = await broker.waitForChange({
+        scope: "agent",
+        sinceSeq: since,
+        timeoutSec: timeout,
+        agentId,
+        signal: ac.signal,
+      });
+      store.touchAgentSeen(agentId);
+      const refreshed = store.getAgent(agentId);
+      const tasksAfter = refreshed?.enabled
+        ? store.listTasks({ to_agent_id: agentId, state: "submitted", order: "asc", limit: 30 })
+        : [];
+      return sendJson(res, 200, {
+        ok: true,
+        ...waitRes,
+        paused: !refreshed?.enabled,
+        tasks: tasksAfter,
+      });
+    }
+
+    m = /^\/api\/v1\/agents\/([A-Za-z0-9._-]+)\/inbox$/.exec(pathname);
+    if (method === "GET" && m) {
+      const agentId = m[1];
+      if (actor.kind !== "owner" && (actor.kind !== "agent" || actor.id !== agentId)) {
+        return sendError(res, 403, "无权读取其他 Agent 的收件箱", "forbidden");
+      }
+      const ag = store.getAgent(agentId);
+      if (!ag) return sendError(res, 404, "Agent 不存在", "not_found");
+      store.touchAgentSeen(agentId);
+      const tasks = store.listTasks({ to_agent_id: agentId, limit: 100 });
+      return sendJson(res, 200, { ok: true, agent: ag, tasks });
+    }
+
+    m = /^\/api\/v1\/agents\/([A-Za-z0-9._-]+)\/updates$/.exec(pathname);
+    if (method === "GET" && m) {
+      const agentId = m[1];
+      if (actor.kind !== "owner") {
+        if (actor.kind !== "agent" || actor.id !== agentId) {
+          return sendError(res, 403, "无权读取其他 Leader 的增量更新", "forbidden");
+        }
+        if (actor.role !== "leader") {
+          return sendError(res, 403, "仅 Leader 角色可使用 updates 水位增量拉取", "leader_required");
+        }
+      }
+      const since = url.searchParams.get("since");
+      const advance = url.searchParams.get("new") === "1" || url.searchParams.get("advance") === "1";
+      store.touchAgentSeen(agentId);
+      const resUpd = taskService.getLeaderUpdates(agentId, { sinceSeq: since, advance });
+      return sendJson(res, 200, { ok: true, ...resUpd });
+    }
+
+    m = /^\/api\/v1\/agents\/([A-Za-z0-9._-]+)\/schedules\/([A-Za-z0-9._-]+)$/.exec(pathname);
+    if (m) {
+      const [, agentId, scheduleId] = m;
+      if (actor.kind !== "owner" && (actor.kind !== "agent" || actor.id !== agentId)) {
+        return sendError(res, 403, "无权修改其他 Agent 的定时自报", "forbidden");
+      }
+      if (method === "PUT") {
+        const body = await readJsonBody(req);
+        const resSch = schedules.upsertForAgent(agentId, scheduleId, body);
+        return sendJson(res, 200, { ok: true, ...resSch });
+      }
+      if (method === "DELETE") {
+        const ok = schedules.deleteForAgent(agentId, scheduleId);
+        if (!ok) return sendError(res, 404, "定时条目不存在", "not_found");
+        return sendJson(res, 200, { ok: true });
+      }
+    }
+
+    // ---- 8. Tasks 与 Thread 协作协议 ----
+    if (method === "GET" && pathname === "/api/v1/tasks") {
+      const filter = {
+        state: url.searchParams.get("state") || undefined,
+        to_agent_id: url.searchParams.get("agent") || url.searchParams.get("to") || undefined,
+        context_id: url.searchParams.get("context_id") || undefined,
+        limit: Number(url.searchParams.get("limit") || 150),
+      };
+      if (actor.kind === "agent") {
+        filter.visible_to = actor.id;
+      } else if (actor.kind === "device") {
+        const devAgents = store.listAgents({ device_id: actor.id }).map((a) => a.id);
+        const tasks = store.listTasks(filter).filter((t) => devAgents.includes(t.to_agent_id) || devAgents.includes(t.from_node));
+        return sendJson(res, 200, { ok: true, tasks });
+      }
+      return sendJson(res, 200, { ok: true, tasks: store.listTasks(filter) });
+    }
+
+    if (method === "POST" && pathname === "/api/v1/tasks") {
+      if (actor.kind === "device") {
+        return sendError(res, 403, "电脑宿主凭据不可发起派单", "forbidden");
+      }
+      if (actor.kind === "agent" && actor.role !== "leader") {
+        return sendError(res, 403, "仅 Leader Agent 或机主可发起派单", "leader_required");
+      }
+      const body = await readJsonBody(req);
+      const requestedFrom = String(body.from_node || body.from || "").trim();
+      if (actor.kind === "agent" && requestedFrom && requestedFrom !== actor.id) {
+        return sendError(res, 403, `禁止伪造任务发起方 (${requestedFrom})`, "impersonation_forbidden");
+      }
+      const fromNode = actor.kind === "agent" ? actor.id : requestedFrom || "owner";
+      const result = taskService.dispatchTasks({
+        fromNode,
+        to: body.to || body.to_agent_id || body.agent_id,
+        title: body.title || "",
+        inputText: body.input_text ?? body.prompt ?? body.input ?? "",
+        params: body.params || {},
+        attachments: body.attachments || [],
+        model: body.model || "",
+        priority: body.priority,
+        contextId: body.context_id || "",
+        parentTaskId: body.parent_task_id || null,
+        source: body.source || "direct",
+        scheduleId: body.schedule_id || null,
+        idempotencyKey: body.client_token || body.idempotency_key || req.headers["idempotency-key"] || "",
+        timeoutSec: body.timeout_sec,
+        maxRetries: body.max_retries,
+      });
+      return sendJson(res, 201, { ok: true, ...result });
+    }
+
+    if (method === "POST" && pathname === "/api/v1/tasks/claim") {
+      if (actor.kind === "anonymous") return sendError(res, 401, "未认证", "unauthorized");
+      const body = await readJsonBody(req);
+      let candidateIds = [];
+      if (actor.kind === "agent") {
+        candidateIds = [actor.id];
+      } else if (actor.kind === "device") {
+        const devIds = store.listAgents({ device_id: actor.id }).filter((a) => a.enabled).map((a) => a.id);
+        if (Array.isArray(body.agent_ids) && body.agent_ids.length) {
+          candidateIds = body.agent_ids.filter((id) => devIds.includes(id));
+        } else {
+          candidateIds = devIds;
+        }
+      } else if (actor.kind === "owner") {
+        candidateIds = Array.isArray(body.agent_ids) ? body.agent_ids : store.listAgents({ enabled: true }).map((a) => a.id);
+      }
+      const task = taskService.claimNext({
+        agentIds: candidateIds,
+        claimant: actor.id,
+        leaseSec: body.lease_sec,
+      });
+      return sendJson(res, 200, { ok: true, task });
+    }
+
+    m = /^\/api\/v1\/tasks\/([A-Za-z0-9._-]+)$/.exec(pathname);
+    if (method === "GET" && m) {
+      const detail = taskService.getTaskDetail(m[1], { includeContextHistory: true });
+      if (!detail) return sendError(res, 404, "任务不存在", "not_found");
+      if (!actorCanSeeTask(actor, detail, store)) {
+        return sendError(res, 403, "无权查看该任务", "forbidden");
+      }
+      return sendJson(res, 200, { ok: true, task: detail });
+    }
+
+    m = /^\/api\/v1\/tasks\/([A-Za-z0-9._-]+)\/(claim|heartbeat|complete|fail|ask|auth|reply|cancel)$/.exec(pathname);
+    if (method === "POST" && m) {
+      const [, taskId, action] = m;
+      const existing = store.getTask(taskId);
+      if (!existing) return sendError(res, 404, "任务不存在", "not_found");
+      const body = await readJsonBody(req);
+
+      if (["claim", "heartbeat", "complete", "fail", "ask", "auth"].includes(action)) {
+        if (!actorCanOperateTaskAsWorker(actor, existing, store)) {
+          return sendError(res, 403, "无权以执行方操作此任务", "forbidden");
+        }
+        const actorId = actor.kind === "device" ? existing.to_agent_id : actor.id;
+        if (action === "claim") {
+          const allowed = actor.kind === "owner" ? null : actor.kind === "agent" ? [actor.id] : store.listAgents({ device_id: actor.id }).map((a) => a.id);
+          const task = taskService.claimTaskById(taskId, { claimant: actorId, allowedAgentIds: allowed, leaseSec: body.lease_sec });
+          return sendJson(res, 200, { ok: true, task });
+        }
+        if (action === "heartbeat") {
+          const task = taskService.heartbeat(taskId, { actorId, progress: body.progress || {}, leaseSec: body.lease_sec });
+          return sendJson(res, 200, { ok: true, task });
+        }
+        if (action === "complete") {
+          const task = taskService.complete(taskId, {
+            actorId,
+            summary: body.summary || "",
+            text: body.text || body.output || "",
+            artifacts: body.artifacts || [],
+            data: body.data || {},
+            usage: body.usage || null,
+            attachments: body.attachments || [],
+          });
+          return sendJson(res, 200, { ok: true, task });
+        }
+        if (action === "fail") {
+          const task = taskService.fail(taskId, {
+            actorId,
+            error: body.error || body.message || "execution_failed",
+            retryable: Boolean(body.retryable),
+            data: body.data || {},
+          });
+          return sendJson(res, 200, { ok: true, task });
+        }
+        if (action === "ask") {
+          const task = taskService.ask(taskId, {
+            actorId,
+            prompt: body.prompt || body.question || "",
+            choices: body.choices || [],
+            data: body.data || {},
+          });
+          return sendJson(res, 200, { ok: true, task });
+        }
+        if (action === "auth") {
+          const task = taskService.requestAuth(taskId, {
+            actorId,
+            reason: body.reason || "",
+            commandPreview: body.command_preview || "",
+            riskLevel: body.risk_level || "high",
+            data: body.data || {},
+          });
+          return sendJson(res, 200, { ok: true, task });
+        }
+      }
+
+      if (action === "reply") {
+        if (!actorCanControlTaskAsSender(actor, existing)) {
+          return sendError(res, 403, "仅机主或任务发起方可补充回复", "forbidden");
+        }
+        const task = taskService.reply(taskId, {
+          fromNode: actor.id,
+          body: body.body ?? body.text ?? body.answer ?? "",
+          data: body.data || {},
+          attachments: body.attachments || [],
+        });
+        return sendJson(res, 200, { ok: true, task });
+      }
+
+      if (action === "cancel") {
+        if (!actorCanControlTaskAsSender(actor, existing)) {
+          return sendError(res, 403, "仅机主或任务发起方可取消任务", "forbidden");
+        }
+        const task = taskService.cancel(taskId, { fromNode: actor.id, reason: body.reason || "" });
+        return sendJson(res, 200, { ok: true, task });
+      }
+    }
+
+    m = /^\/api\/v1\/approvals\/([A-Za-z0-9._-]+)\/decide$/.exec(pathname);
+    if (method === "POST" && m) {
+      if (!requireOwner()) return;
+      const body = await readJsonBody(req);
+      const task = taskService.decideApproval(m[1], {
+        fromNode: "owner",
+        decision: body.decision,
+        note: body.note || "",
+        requestId: body.request_id || "",
+      });
+      return sendJson(res, 200, { ok: true, task });
+    }
+
+    if (method === "GET" && pathname === "/api/v1/threads") {
+      if (actor.kind === "device") return sendError(res, 403, "forbidden", "forbidden");
+      const threads = taskService.listThreads({
+        limit: Number(url.searchParams.get("limit") || 60),
+        agentId: url.searchParams.get("agent") || null,
+        visibleTo: actor.kind === "agent" ? actor.id : null,
+      });
+      return sendJson(res, 200, { ok: true, threads });
+    }
+
+    m = /^\/api\/v1\/threads\/([A-Za-z0-9._-]+)$/.exec(pathname);
+    if (method === "GET" && m) {
+      const thread = taskService.getThread(m[1]);
+      if (!thread) return sendError(res, 404, "Thread 不存在", "not_found");
+      if (actor.kind === "agent") {
+        const visible = thread.tasks.some((t) => actorCanSeeTask(actor, t, store));
+        if (!visible) return sendError(res, 403, "无权查看该 Thread", "forbidden");
+      }
+      return sendJson(res, 200, { ok: true, thread });
+    }
+
+    // ---- 9. 文件中转存储 ----
+    if (method === "POST" && pathname === "/api/v1/files") {
+      if (!fileStore) return sendError(res, 500, "FileStore 未就绪", "no_file_store");
+      const ct = String(req.headers["content-type"] || "").toLowerCase();
+      let buf;
+      let name = String(req.headers["x-file-name"] || "file.bin");
+      let mime = String(req.headers["x-file-mime"] || ct || "application/octet-stream");
+      let taskId = req.headers["x-task-id"] ? String(req.headers["x-task-id"]) : null;
+      if (ct.includes("application/json")) {
+        const body = await readJsonBody(req);
+        if (!body.content_base64 && body.content === undefined) {
+          return sendError(res, 400, "缺少 content_base64 或 content", "missing_content");
+        }
+        buf = body.content_base64
+          ? Buffer.from(String(body.content_base64), "base64")
+          : Buffer.from(String(body.content), "utf8");
+        if (body.name) name = String(body.name);
+        if (body.mime) mime = String(body.mime);
+        if (body.task_id) taskId = String(body.task_id);
+      } else {
+        buf = await readRawBody(req, MAX_UPLOAD_BYTES);
+        try {
+          name = decodeURIComponent(name);
+        } catch {}
+      }
+      const meta = fileStore.put({
+        buffer: buf,
+        name,
+        mime: mime.split(";")[0].trim() || "application/octet-stream",
+        ownerNode: actor.id,
+        taskId,
+      });
+      return sendJson(res, 201, { ok: true, file: meta });
+    }
+
+    m = /^\/api\/v1\/files\/([a-f0-9]{16,64})$/.exec(pathname);
+    if (method === "GET" && m) {
+      const read = fileStore.readBuffer(m[1]);
+      if (!read) return sendError(res, 404, "文件不存在或已过期", "not_found");
+      if (actor.kind !== "owner") {
+        const allowed =
+          read.meta.owner_node === actor.id ||
+          (actor.kind === "device" && deviceOwnsAgent(store, actor.id, read.meta.owner_node)) ||
+          (read.meta.task_id && actorCanSeeTask(actor, store.getTask(read.meta.task_id), store));
+        if (!allowed) return sendError(res, 403, "无权下载该文件", "forbidden");
+      }
+      res.writeHead(200, {
+        "Content-Type": read.meta.mime || "application/octet-stream",
+        "Content-Length": read.buffer.byteLength,
+        "Content-Disposition": `attachment; filename="${encodeURIComponent(read.meta.name)}"`,
+        "X-Content-Type-Options": "nosniff",
+      });
+      res.end(read.buffer);
+      return;
+    }
+
+    return sendError(res, 404, `未知接口: ${method} ${pathname}`, "not_found");
+  }
+
+  const server = http.createServer(async (req, res) => {
+    try {
+      const url = new URL(req.url || "/", "http://127.0.0.1");
+      const pathname = url.pathname;
+
+      // 根路径携带 ?token= 时核验机主 Token 并种入 HttpOnly 会话 Cookie，302 剥离 URL 敏感参数。
+      if ((req.method || "GET") === "GET" && pathname === "/") {
+        const qToken = url.searchParams.get("token");
+        const curOwnerToken = getOwnerToken();
+        if (qToken && curOwnerToken && timingSafeEqualStr(qToken, curOwnerToken)) {
+          const cookieVal = createSessionCookieValue(curOwnerToken, approvalPrivateKey);
+          res.writeHead(302, {
+            Location: "/",
+            "Set-Cookie": buildSetSessionCookieHeader(req, cookieVal),
+            "Cache-Control": "no-store",
+          });
+          res.end();
+          return;
+        }
+        return serveStaticFile(res, WEB_ROOT, "index.html");
+      }
+
+      if (pathname.startsWith("/api/") || pathname === "/.well-known/agent.json") {
+        await handleApi(req, res, url);
+        return;
+      }
+
+      if ((req.method || "GET") === "GET") {
+        return serveStaticFile(res, WEB_ROOT, pathname);
+      }
+
+      sendError(res, 404, "Not Found", "not_found");
+    } catch (err) {
+      const status = Number(err?.statusCode) || 500;
+      const code = err?.code || "internal_error";
+      sendError(res, status, err?.message || "服务器内部错误", code);
+    }
+  });
+
+  // 长轮询hold最高 40s，Node HTTP requestTimeout 设充裕但不过长。
+  server.requestTimeout = 90_000;
+  server.keepAliveTimeout = 65_000;
+
+  return { server, listen, enrichStateSnapshot };
 }

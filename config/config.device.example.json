@@ -1,0 +1,9 @@
+{
+  "mode": "device",
+  "version": "2.0.0",
+  "deviceId": "edge-macbook",
+  "deviceName": "MacBook Pro",
+  "hubUrl": "http://<HUB_HOST>:8787",
+  "maxConcurrent": 4,
+  "hubPublicKey": "<HUB_ED25519_PUBLIC_KEY_BASE64>"
+}

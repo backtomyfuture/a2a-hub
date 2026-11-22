@@ -7,7 +7,7 @@
 #       bin\ah.cmd、bin\a2a-hub.cmd 与 bin\ahub.cmd 是命令入口（加入当前用户 PATH）。
 # Windows 不把无扩展名文件当命令，也不保证能建软链，所以入口是 cmd 包装，
 # 用 %~dp0 相对路径指向 app\bin\ah.mjs，用户名含非 ASCII 时也不靠代码页。
-# 不在这里写 node.json / commands.json。重跑本脚本 = 更新程序，已有配置不覆盖。
+# 不在这里写 config.json / workers.json。重跑本脚本 = 更新程序，已有配置不覆盖。
 # 跳过 Skill：-SkipSkill / --skip-skill，或事先 $env:AH_SKIP_SKILL=1。
 # 本文件不用 param()：irm | iex 会把顶层 param 当成命令，参数因此从 $args 读。
 & {
