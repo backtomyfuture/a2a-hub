@@ -1,8 +1,10 @@
-﻿# a2a-hub Windows 一行安装与部署：
+﻿# a2a-hub Windows 一行安装与部署（无需事先 git clone）：
 #   1) 仅安装命令行工具：
 #      irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex
-#   2) 安装并一键接入已有 Hub：
-#      $env:AH_JOIN="http://<token>@<hub-ip>:8787"; irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex
+#   2) 安装并一键启动独立 Hub：
+#      $env:AH_HUB="1"; irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex
+#   3) 安装并一键挂载当前电脑到已有 Hub：
+#      $env:AH_DEVICE="win-pc"; $env:AH_JOIN="http://<token>@<hub-ip>:8787"; irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex
 # 布局：%USERPROFILE%\.a2a-hub\ 是配置目录（可用 AH_HOME 改），其下 app\ 是程序本体，
 #       bin\ah.cmd、bin\a2a-hub.cmd 与 bin\ahub.cmd 是命令入口（加入当前用户 PATH）。
 # Windows 不把无扩展名文件当命令，也不保证能建软链，所以入口是 cmd 包装，
@@ -21,9 +23,15 @@
   $showHelp = $false
   $bootstrapMode = ""
   $joinUrl = $env:AH_JOIN
+  $deviceId = $env:AH_DEVICE
   $useService = $true
+  if ($env:AH_NO_SERVICE -eq "1" -or $env:AH_NO_SERVICE -eq "true") {
+    $useService = $false
+  }
   if (-not [string]::IsNullOrWhiteSpace($joinUrl)) {
     $bootstrapMode = "join"
+  } elseif ($env:AH_HUB -eq "1" -or $env:AH_HUB -eq "true") {
+    $bootstrapMode = "hub"
   }
   if ($env:AH_SKIP_SKILL -eq "1" -or $env:AH_SKIP_SKILL -eq "true") {
     $skipSkill = $true
@@ -44,15 +52,23 @@
         $bootstrapMode = "join"
         $joinUrl = $Matches[1]
       }
+      "^(--device|-Device)$" {
+        if ($idx + 1 -ge $args.Length) { throw "--device 需要设备 ID 参数" }
+        $deviceId = [string]$args[++$idx]
+      }
+      "^--device=(.+)$" {
+        $deviceId = $Matches[1]
+      }
     }
   }
 
   if ($showHelp) {
-    Write-Host "用法: install.ps1 [-Hub | -Join <url>] [-NoService] [-SkipSkill]"
+    Write-Host "用法: install.ps1 [-Hub | -Join <url>] [-Device <id>] [-NoService] [-SkipSkill]"
     Write-Host "      irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex"
-    Write-Host "  -Hub, --hub               安装后立即配置独立 SQLite Hub 并注册开机任务"
+    Write-Host "  -Hub, --hub               安装后立即启动独立 SQLite Hub 并注册开机任务（也可用 `$env:AH_HUB='1'）"
     Write-Host "  -Join, --join <url>       安装后立即接入已有 Hub 并注册开机任务（也可用 `$env:AH_JOIN）"
-    Write-Host "  -NoService, --no-service  仅配置与自检，不注册开机任务"
+    Write-Host "  -Device, --device <id>    指定设备 ID（也可用 `$env:AH_DEVICE）"
+    Write-Host "  -NoService, --no-service  仅配置与前台运行，不注册开机任务（也可用 `$env:AH_NO_SERVICE='1'）"
     Write-Host "  -SkipSkill, --skip-skill  跳过安装 %USERPROFILE%\.agents\skills\ah"
     Write-Host "配置目录：AH_HOME，缺省 %USERPROFILE%\.a2a-hub。"
     return
@@ -266,7 +282,8 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
   }
 
   if ($bootstrapMode -eq "hub") {
-    $setupArgs = @($entryMjs, "setup", "--role", "hub", "--bus", "sqlite", "--yes", "--auto-token")
+    $setupArgs = @($entryMjs, "up")
+    if (-not [string]::IsNullOrWhiteSpace($deviceId)) { $setupArgs += @("--device", $deviceId) }
     if ($useService) { $setupArgs += "--service" }
     if ($skipSkill) { $setupArgs += "--skip-skill" }
     Invoke-Native -File $nodeCmd.Source -ArgumentList $setupArgs
@@ -274,7 +291,8 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
   }
   if ($bootstrapMode -eq "join") {
     if ([string]::IsNullOrWhiteSpace($joinUrl)) { throw "-Join 缺少 Hub URL" }
-    $setupArgs = @($entryMjs, "setup", "--role", "node", "--bus", "http", "--join", $joinUrl, "--yes", "--force")
+    $setupArgs = @($entryMjs, "join", $joinUrl)
+    if (-not [string]::IsNullOrWhiteSpace($deviceId)) { $setupArgs += @("--device", $deviceId) }
     if ($useService) { $setupArgs += "--service" }
     if ($skipSkill) { $setupArgs += "--skip-skill" }
     Invoke-Native -File $nodeCmd.Source -ArgumentList $setupArgs

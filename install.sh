@@ -1,9 +1,9 @@
 #!/bin/sh
-# a2a-hub 一行安装与部署：
-#   1) 全新 Mac mini / 服务器一键安装并启动独立 Hub：
+# a2a-hub 一行安装与部署（无需事先 git clone / 安装 Node）：
+#   1) 全新 Mac / Linux 一键安装并启动独立 Hub：
 #      curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --hub
-#   2) 全新机器一键安装并接入已有 Hub（自动同步公钥与 Token）：
-#      curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --join http://<token>@<hub-ip>:8787
+#   2) 全新电脑一键安装并接入已有 Hub（自动装 Node 24 + ah + 探测 26 种 CLI + 后台自启）：
+#      curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --join "http://<token>@<hub-ip>:8787" --device mac-mini
 #   3) 仅安装命令行工具（不立即配置）：
 #      curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh
 # 布局：~/.a2a-hub/ 是配置目录（可用 AH_HOME 改），~/.a2a-hub/app/ 是程序本体，
@@ -43,10 +43,10 @@ while [ "$n" -gt 0 ]; do
       USE_SERVICE=0
       ;;
     -h|--help)
-      echo "用法: install.sh [--hub | --join <url>] [--no-service] [--skip-skill] [setup flags...]"
-      echo "  --hub         一键配置独立 SQLite Hub 并注册自启（等价于自动安装后运行 ah up --service）"
-      echo "  --join <url>  一键接入已有独立 Hub 并注册自启（支持内嵌 token：http://<token>@<ip>:8787）"
-      echo "  --no-service  仅生成配置并自检，不注册开机自启"
+      echo "用法: install.sh [--hub | --join <url>] [--device <id>] [--no-service] [--skip-skill] [setup flags...]"
+      echo "  --hub         一键安装并启动独立 SQLite Hub（默认注册开机自启，等价于 ah up --service）"
+      echo "  --join <url>  一键安装并挂载当前电脑到已有 Hub（等价于 ah join <url> --service）"
+      echo "  --no-service  仅生成配置并在前台运行，不注册开机自启"
       echo "  --skip-skill  跳过自动安装 ~/.agents/skills/ah（也可设置环境变量 AH_SKIP_SKILL=1）"
       echo "配置目录：AH_HOME，缺省 \$HOME/.a2a-hub。"
       exit 0
@@ -236,14 +236,13 @@ if [ "$BOOTSTRAP_MODE" = "hub" ]; then
   if [ "$USE_SERVICE" = "1" ]; then
     set -- "$@" "--service"
   fi
-  exec node "$APP/bin/ah.mjs" setup --role hub --bus sqlite --yes --auto-token "$@"
+  exec node "$APP/bin/ah.mjs" up "$@"
 elif [ "$BOOTSTRAP_MODE" = "join" ]; then
   [ -n "$JOIN_URL" ] || { echo "install.sh: --join 缺少 Hub URL" >&2; exit 2; }
   if [ "$USE_SERVICE" = "1" ]; then
     set -- "$@" "--service"
   fi
-  # 与 ah join 一致：重复接入要刷新地址、Token 与公钥。
-  exec node "$APP/bin/ah.mjs" setup --role node --bus http --join "$JOIN_URL" --yes --force "$@"
+  exec node "$APP/bin/ah.mjs" join "$JOIN_URL" "$@"
 fi
 
 cat <<EOF

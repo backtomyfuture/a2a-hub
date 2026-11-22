@@ -1,157 +1,165 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 640" role="img" aria-labelledby="t">
-<title id="t">a2a-hub 架构图：SQLite WAL 总线与统一 HTTP 网关</title>
+<title id="t">a2a-hub v2.0 架构图：SQLite WAL 与统一 HTTP 网关</title>
 <defs>
 <style>
-svg{--bg:#faf9f5;--ink:#1d1c19;--muted:#6e6b64;--line:#d6d3cb;--card:#fff;--item:#f4f2ec;--accent:#c2491d;--core:#1d1c19;--core-ink:#faf9f5;--core-duty:#33302a;--core-chip:#282621;--core-line:#423f38;--core-sub:#b9b5ab;--core-accent:#ef8a62;--tag-bg:#3d261c;--tag-ink:#ffb08e;--you-bg:#fff4ee}
-@media (prefers-color-scheme:dark){svg{--bg:#151412;--ink:#f1efe9;--muted:#a29e95;--line:#45433d;--card:#1e1d1a;--item:#262420;--accent:#ef8a62;--core:#f1efe9;--core-ink:#1d1c19;--core-duty:#dedad0;--core-chip:#e6e3da;--core-line:#cac5b9;--core-sub:#57544d;--core-accent:#c2491d;--tag-bg:#f8dfd3;--tag-ink:#a83810;--you-bg:#2a1f1a}}
-text{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Noto Sans CJK SC","Microsoft YaHei",sans-serif;font-size:14px;fill:var(--ink)}
-.h2{font-size:17px;font-weight:600}
-.s{font-size:12.5px;fill:var(--muted)}
-.r{font-size:13.5px}
-.l{font-size:13.5px;font-weight:600;fill:var(--accent)}
+svg{--bg:#faf9f5;--ink:#1d1c19;--muted:#6e6b64;--line:#d6d3cb;--card:#fff;--item:#f4f2ec;--accent:#4f46e5;--core:#111113;--core-ink:#fafafa;--core-duty:#1e1e24;--core-chip:#1b1b1f;--core-line:#30303a;--core-sub:#a1a1aa;--tag-bg:rgba(99,102,241,0.22);--tag-ink:#c7d2fe;--you-bg:#eef2ff}
+@media (prefers-color-scheme:dark){svg{--bg:#09090b;--ink:#f4f4f5;--muted:#8b8b94;--line:#27272a;--card:#111113;--item:#18181b;--accent:#818cf8;--core:#18181b;--core-ink:#fafafa;--core-duty:#202026;--core-chip:#27272a;--core-line:#3f3f46;--core-sub:#a1a1aa;--tag-bg:rgba(99,102,241,0.22);--tag-ink:#c7d2fe;--you-bg:rgba(99,102,241,0.12)}}
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Noto Sans CJK SC","Microsoft YaHei",sans-serif;font-size:13.5px;fill:var(--ink)}
+.h2{font-size:16px;font-weight:700}
+.s{font-size:12px;fill:var(--muted)}
+.r{font-size:13px}
+.l{font-size:12.5px;font-weight:600;fill:var(--accent)}
 .bg{fill:var(--bg)}
-.plug{fill:var(--card);stroke:var(--muted);stroke-width:1.3;stroke-dasharray:6 5}
+.plug{fill:var(--card);stroke:var(--line);stroke-width:1.4}
 .item{fill:var(--item);stroke:var(--line)}
 .more{fill:none;stroke:var(--line);stroke-dasharray:4 4}
 .dot{fill:var(--muted)}
-.core{fill:var(--core);stroke:var(--core-accent);stroke-width:2}
+.core{fill:var(--core);stroke:var(--accent);stroke-width:2}
 .duty{fill:var(--core-duty);stroke:var(--core-line)}
-.chip{fill:var(--core-chip)}
-.tag{fill:var(--tag-bg);stroke:var(--core-accent);stroke-width:1}
-.ct{font-size:22px;font-weight:700;fill:var(--core-ink)}
-.cs{font-size:12px;fill:var(--core-sub)}
-.cn{font-size:14.5px;font-weight:600;fill:var(--core-ink)}
-.cd{font-size:12px;fill:var(--core-sub)}
-.tn{font-size:12.5px;font-weight:700;fill:var(--tag-ink)}
-.td{font-size:11.8px;fill:var(--core-ink)}
-.you{fill:var(--you-bg);stroke:var(--accent);stroke-width:2.4}
-.you-t{font-size:20px;font-weight:700;fill:var(--accent)}
-.you-s{font-size:13px;font-weight:600;fill:var(--ink)}
+.chip{fill:var(--core-chip);stroke:var(--core-line);stroke-width:0.8}
+.tag{fill:var(--tag-bg);stroke:var(--accent);stroke-width:1}
+.ct{font-size:20px;font-weight:700;fill:var(--core-ink)}
+.cs{font-size:11.5px;fill:var(--core-sub)}
+.cn{font-size:14px;font-weight:600;fill:var(--core-ink)}
+.cd{font-size:11.5px;fill:var(--core-sub)}
+.tn{font-size:12px;font-weight:700;fill:var(--tag-ink)}
+.td{font-size:11.5px;fill:var(--core-ink)}
+.you{fill:var(--you-bg);stroke:var(--accent);stroke-width:2}
+.you-t{font-size:19px;font-weight:700;fill:var(--accent)}
+.you-s{font-size:12.5px;font-weight:600;fill:var(--ink)}
 .badge{fill:var(--accent)}
-.n{font-size:12.5px;font-weight:700;fill:var(--bg)}
-.conn{fill:none;stroke:var(--accent);stroke-width:2.1;marker-end:url(#a)}
+.n{font-size:12px;font-weight:700;fill:#fff}
+.conn{fill:none;stroke:var(--accent);stroke-width:2;marker-end:url(#a)}
 .both{fill:none;stroke:var(--accent);stroke-width:1.8;marker-start:url(#a);marker-end:url(#a)}
 .pill{fill:var(--you-bg);stroke:var(--accent);stroke-width:1.4}
-.pill-t{font-size:13px;font-weight:600;fill:var(--accent)}
+.pill-t{font-size:12.5px;font-weight:600;fill:var(--accent)}
 </style>
-<marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" style="fill:var(--accent)"/></marker>
+<marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" style="fill:var(--accent)"/></marker>
 </defs>
-<rect class="bg" x="0" y="0" width="960" height="640" rx="18"/>
+
+<rect class="bg" x="0" y="0" width="960" height="640" rx="16"/>
 
 <!-- 顶部主张 -->
-<rect class="pill" x="270" y="14" width="420" height="30" rx="15"/>
-<text x="480" y="34" class="pill-t" text-anchor="middle">边缘只出不进：SQLite WAL 托管状态，HTTP 长轮询毫秒唤醒</text>
+<rect class="pill" x="220" y="14" width="520" height="30" rx="15"/>
+<text x="480" y="34" class="pill-t" text-anchor="middle">单一总线零外置依赖：Node 24 SQLite WAL 落库，40s 长轮询毫秒唤醒</text>
 
 <!-- 左：发起方 -->
-<rect class="plug" x="22" y="64" width="170" height="340" rx="14"/>
-<text x="38" y="96" class="h2">发起方</text>
-<text x="38" y="117" class="s">把活说清楚就行</text>
-<rect class="item" x="36" y="138" width="142" height="36" rx="8"/>
-<text x="107" y="161" class="r" text-anchor="middle">你 · 终端 ah</text>
-<rect class="item" x="36" y="184" width="142" height="36" rx="8"/>
-<text x="107" y="207" class="r" text-anchor="middle">Web 控制台 / HTTP</text>
-<rect class="item" x="36" y="230" width="142" height="36" rx="8"/>
-<text x="107" y="253" class="r" text-anchor="middle">定时自报 · 扇出协作</text>
-<rect class="more" x="36" y="282" width="142" height="32" rx="8"/>
-<circle class="dot" cx="95" cy="298" r="2.4"/>
-<circle class="dot" cx="107" cy="298" r="2.4"/>
-<circle class="dot" cx="119" cy="298" r="2.4"/>
+<rect class="plug" x="22" y="64" width="174" height="346" rx="14"/>
+<text x="38" y="95" class="h2">发起方</text>
+<text x="38" y="115" class="s">派单 · 追派 · 审批</text>
+<rect class="item" x="36" y="136" width="146" height="44" rx="8"/>
+<text x="109" y="156" class="r" text-anchor="middle">Web 控制台 / ah CLI</text>
+<text x="109" y="172" class="s" text-anchor="middle">HttpOnly Cookie · Token</text>
+<rect class="item" x="36" y="190" width="146" height="44" rx="8"/>
+<text x="109" y="210" class="r" text-anchor="middle">云端 Leader Agent</text>
+<text x="109" y="226" class="s" text-anchor="middle">Muse / OpenClaw 扇出</text>
+<rect class="item" x="36" y="244" width="146" height="44" rx="8"/>
+<text x="109" y="264" class="r" text-anchor="middle">定时巡检 · 手动触发</text>
+<text x="109" y="280" class="s" text-anchor="middle">schedules + run=true</text>
+<rect class="more" x="36" y="302" width="146" height="86" rx="8"/>
+<text x="109" y="330" class="s" text-anchor="middle">POST /api/v1/tasks</text>
+<text x="109" y="350" class="s" text-anchor="middle">to: [agentA, agentB]</text>
+<text x="109" y="370" class="s" text-anchor="middle">自动关联 context_id</text>
 
 <!-- 1: 建单 -->
-<path class="conn" d="M194 226H242"/>
-<circle class="badge" cx="218" cy="203" r="12"/>
-<text x="218" y="207.5" class="n" text-anchor="middle">1</text>
-<text x="218" y="246" class="l" text-anchor="middle">建单</text>
+<path class="conn" d="M196 226H242"/>
+<circle class="badge" cx="219" cy="203" r="12"/>
+<text x="219" y="207.5" class="n" text-anchor="middle">1</text>
+<text x="219" y="246" class="l" text-anchor="middle">建单</text>
 
 <!-- 中：Hub SQLite WAL + HTTP 网关 -->
-<rect class="core" x="246" y="64" width="424" height="340" rx="22"/>
-<text x="268" y="100" class="ct">SQLite WAL + HTTP 网关</text>
-<text x="648" y="98" class="cs" text-anchor="end">唯一事实来源</text>
+<rect class="core" x="246" y="64" width="424" height="346" rx="20"/>
+<text x="266" y="96" class="ct">SQLite WAL + HTTP 网关</text>
+<text x="650" y="95" class="cs" text-anchor="end">唯一事实来源</text>
 
-<rect class="duty" x="264" y="114" width="388" height="52" rx="10"/>
-<text x="458" y="137" class="cn" text-anchor="middle">任务全生命周期只认 Hub 总线这一份账本</text>
-<text x="458" y="156" class="cd" text-anchor="middle">seq 游标长轮询唤醒，内容按 REST 拉取——断线、重启都不丢活</text>
+<rect class="duty" x="264" y="110" width="388" height="48" rx="9"/>
+<text x="458" y="131" class="cn" text-anchor="middle">BEGIN IMMEDIATE 单事务提交，commit 后再唤醒长轮询</text>
+<text x="458" y="149" class="cd" text-anchor="middle">seq 单调事件流 + 幂等去重 + 陈旧任务自动回收 (STALE_MIN=20)</text>
 
-<rect class="chip" x="264" y="178" width="388" height="38" rx="9"/>
-<rect class="tag" x="272" y="184" width="128" height="26" rx="6"/>
-<text x="336" y="201.5" class="tn" text-anchor="middle">Tasks</text>
-<text x="412" y="201.5" class="td">A2A 八种状态，认领、心跳、终局都在这一行</text>
+<rect class="chip" x="264" y="168" width="388" height="34" rx="8"/>
+<rect class="tag" x="272" y="173" width="122" height="24" rx="5"/>
+<text x="333" y="189" class="tn" text-anchor="middle">devices &amp; agents</text>
+<text x="406" y="189" class="td">电脑宿主、Worker 能力与云端 Agent 名片</text>
 
-<rect class="chip" x="264" y="224" width="388" height="38" rx="9"/>
-<rect class="tag" x="272" y="230" width="128" height="26" rx="6"/>
-<text x="336" y="247.5" class="tn" text-anchor="middle">Messages</text>
-<text x="412" y="247.5" class="td">对话与回执只追加，Ref_Task_IDs 表达派生关联</text>
+<rect class="chip" x="264" y="208" width="388" height="34" rx="8"/>
+<rect class="tag" x="272" y="213" width="122" height="24" rx="5"/>
+<text x="333" y="229" class="tn" text-anchor="middle">tasks (A2A 8 态)</text>
+<text x="406" y="229" class="td">认领租约、retry_count、context_id 线程</text>
 
-<rect class="chip" x="264" y="270" width="388" height="38" rx="9"/>
-<rect class="tag" x="272" y="276" width="128" height="26" rx="6"/>
-<text x="336" y="293.5" class="tn" text-anchor="middle">Parts</text>
-<text x="412" y="293.5" class="td">text / file / data 内容块，指令与数据严格分离</text>
+<rect class="chip" x="264" y="248" width="388" height="34" rx="8"/>
+<rect class="tag" x="272" y="253" width="122" height="24" rx="5"/>
+<text x="333" y="269" class="tn" text-anchor="middle">messages</text>
+<text x="406" y="269" class="td">只追加时间线（追问 / 签名审批 / 回执）</text>
 
-<rect class="chip" x="264" y="316" width="388" height="38" rx="9"/>
-<rect class="tag" x="272" y="322" width="128" height="26" rx="6"/>
-<text x="336" y="339.5" class="tn" text-anchor="middle">Artifacts</text>
-<text x="412" y="339.5" class="td">交付产物与指针登记，大成果不塞回执正文</text>
+<rect class="chip" x="264" y="288" width="388" height="34" rx="8"/>
+<rect class="tag" x="272" y="293" width="122" height="24" rx="5"/>
+<text x="333" y="309" class="tn" text-anchor="middle">schedules</text>
+<text x="406" y="309" class="td">定时心跳自报、超时判定与历史执行追踪</text>
 
-<rect class="chip" x="264" y="362" width="388" height="38" rx="9"/>
-<rect class="tag" x="272" y="368" width="128" height="26" rx="6"/>
-<text x="336" y="385.5" class="tn" text-anchor="middle">AgentCards</text>
-<text x="412" y="385.5" class="td">三层能力名片 · 定时计划 Metadata.schedules</text>
+<rect class="chip" x="264" y="328" width="388" height="34" rx="8"/>
+<rect class="tag" x="272" y="333" width="122" height="24" rx="5"/>
+<text x="333" y="349" class="tn" text-anchor="middle">files &amp; blobs</text>
+<text x="406" y="349" class="td">SHA256 附件中转与产物（7 天自动过期清理）</text>
+
+<rect class="chip" x="264" y="368" width="388" height="30" rx="8"/>
+<text x="458" y="387" class="cd" text-anchor="middle">指令数据分离：拒绝一切含 command / cwd / env 的任务控制键</text>
 
 <!-- 2 & 3: 认领与回写 -->
-<path class="conn" d="M672 190H712"/>
-<circle class="badge" cx="692" cy="167" r="12"/>
-<text x="692" y="171.5" class="n" text-anchor="middle">2</text>
-<text x="692" y="210" class="l" text-anchor="middle">认领</text>
+<path class="conn" d="M670 190H712"/>
+<circle class="badge" cx="691" cy="167" r="12"/>
+<text x="691" y="171.5" class="n" text-anchor="middle">2</text>
+<text x="691" y="210" class="l" text-anchor="middle">唤醒</text>
 
-<path class="conn" d="M712 266H672"/>
-<circle class="badge" cx="692" cy="243" r="12"/>
-<text x="692" y="247.5" class="n" text-anchor="middle">3</text>
-<text x="692" y="286" class="l" text-anchor="middle">回写</text>
+<path class="conn" d="M712 268H670"/>
+<circle class="badge" cx="691" cy="245" r="12"/>
+<text x="691" y="249.5" class="n" text-anchor="middle">3</text>
+<text x="691" y="288" class="l" text-anchor="middle">回执</text>
 
 <!-- 右：执行节点 -->
-<rect class="plug" x="716" y="64" width="222" height="340" rx="14"/>
-<text x="732" y="96" class="h2">执行节点</text>
-<text x="732" y="117" class="s">出站轮询、干完回写</text>
-<rect class="item" x="730" y="138" width="194" height="36" rx="8"/>
-<text x="827" y="161" class="r" text-anchor="middle">家用 Mac · agy / paseo</text>
-<rect class="item" x="730" y="184" width="194" height="36" rx="8"/>
-<text x="827" y="207" class="r" text-anchor="middle">工作机 · claude / codex</text>
-<rect class="item" x="730" y="230" width="194" height="36" rx="8"/>
-<text x="827" y="253" class="r" text-anchor="middle">独立 Agent（ah inbox）</text>
-<rect class="item" x="730" y="276" width="194" height="36" rx="8"/>
-<text x="827" y="299" class="r" text-anchor="middle">云端 Agent（HTTP 网关）</text>
-<rect class="more" x="730" y="322" width="194" height="32" rx="8"/>
-<circle class="dot" cx="815" cy="338" r="2.4"/>
-<circle class="dot" cx="827" cy="338" r="2.4"/>
-<circle class="dot" cx="839" cy="338" r="2.4"/>
+<rect class="plug" x="716" y="64" width="222" height="346" rx="14"/>
+<text x="732" y="95" class="h2">执行侧（零入站）</text>
+<text x="732" y="115" class="s">纯出站拉单、干完回写</text>
+<rect class="item" x="730" y="136" width="194" height="44" rx="8"/>
+<text x="827" y="156" class="r" text-anchor="middle">电脑节点 DeviceDaemon</text>
+<text x="827" y="172" class="s" text-anchor="middle">26+ CLI · 并发池 ≤ 4</text>
+<rect class="item" x="730" y="190" width="194" height="44" rx="8"/>
+<text x="827" y="210" class="r" text-anchor="middle">本地 workers.json</text>
+<text x="827" y="226" class="s" text-anchor="middle">锁定真实命令、cwd 与策略</text>
+<rect class="item" x="730" y="244" width="194" height="44" rx="8"/>
+<text x="827" y="264" class="r" text-anchor="middle">独立 Agent（ah daemon）</text>
+<text x="827" y="280" class="s" text-anchor="middle">容器 / 脚本长连接或 inbox</text>
+<rect class="item" x="730" y="298" width="194" height="44" rx="8"/>
+<text x="827" y="318" class="r" text-anchor="middle">云端 Bot / 工作流</text>
+<text x="827" y="334" class="s" text-anchor="middle">14 套模板 · 轮询 / Webhook</text>
+<text x="827" y="376" class="s" text-anchor="middle">同 context_id 自动续接 Session</text>
 
 <!-- 4: 待批 / 结果 / 告警 -->
-<path class="conn" d="M458 406V460"/>
-<circle class="badge" cx="458" cy="433" r="12"/>
-<text x="458" y="437.5" class="n" text-anchor="middle">4</text>
-<text x="478" y="438" class="l">待批 · 结果 · 告警</text>
+<path class="conn" d="M458 410V462"/>
+<circle class="badge" cx="458" cy="436" r="12"/>
+<text x="458" y="440.5" class="n" text-anchor="middle">4</text>
+<text x="478" y="441" class="l">审批 · 结果 · 告警</text>
 
 <!-- 下：hub 与机主 -->
-<rect class="you" x="22" y="464" width="170" height="104" rx="26"/>
-<text x="107" y="508" class="you-t" text-anchor="middle">机主</text>
-<text x="107" y="532" class="you-s" text-anchor="middle">只管拍板</text>
+<rect class="you" x="22" y="466" width="174" height="104" rx="22"/>
+<text x="109" y="510" class="you-t" text-anchor="middle">机主 Owner</text>
+<text x="109" y="534" class="you-s" text-anchor="middle">签字放行 · 全局可控</text>
 
-<path class="both" d="M194 516H242"/>
-<circle class="badge" cx="218" cy="490" r="12"/>
-<text x="218" y="494.5" class="n" text-anchor="middle">5</text>
-<text x="218" y="540" class="l" text-anchor="middle">拍板</text>
+<path class="both" d="M196 518H242"/>
+<circle class="badge" cx="219" cy="492" r="12"/>
+<text x="219" y="496.5" class="n" text-anchor="middle">5</text>
+<text x="219" y="542" class="l" text-anchor="middle">签名</text>
 
-<rect class="plug" x="246" y="464" width="692" height="104" rx="14"/>
-<text x="266" y="492" class="h2">hub（枢纽 · 单进程超集）</text>
-<text x="444" y="492" class="s">Web 控制台签名审批、呈递、回收、定时看板与可选提醒</text>
-<rect class="item" x="266" y="510" width="158" height="36" rx="8"/>
-<text x="345" y="533" class="r" text-anchor="middle">ed25519 签名审批</text>
-<rect class="item" x="434" y="510" width="158" height="36" rx="8"/>
-<text x="513" y="533" class="r" text-anchor="middle">结果原路呈递</text>
-<rect class="item" x="602" y="510" width="158" height="36" rx="8"/>
-<text x="681" y="533" class="r" text-anchor="middle">陈旧任务回收</text>
-<rect class="item" x="770" y="510" width="158" height="36" rx="8"/>
-<text x="849" y="533" class="r" text-anchor="middle">定时总览 · 外部提醒</text>
+<rect class="plug" x="246" y="466" width="692" height="104" rx="14"/>
+<text x="266" y="494" class="h2">Hub 控制与安全底座</text>
+<text x="436" y="494" class="s">Web 控制台（深浅主题）、Ed25519 私钥签名与实时通道推送</text>
+<rect class="item" x="266" y="512" width="158" height="36" rx="8"/>
+<text x="345" y="535" class="r" text-anchor="middle">Ed25519 审批验签</text>
+<rect class="item" x="434" y="512" width="158" height="36" rx="8"/>
+<text x="513" y="535" class="r" text-anchor="middle">Thread 线程聚合</text>
+<rect class="item" x="602" y="512" width="158" height="36" rx="8"/>
+<text x="681" y="535" class="r" text-anchor="middle">20 分钟陈旧回收</text>
+<rect class="item" x="770" y="512" width="158" height="36" rx="8"/>
+<text x="849" y="535" class="r" text-anchor="middle">飞书 / Bark / Telegram</text>
 
-<text x="480" y="606" class="s" text-anchor="middle">宿主节点、独立 Agent 与云端 Agent 均只出站连接；总线在，活就不丢。</text>
+<text x="480" y="608" class="s" text-anchor="middle">所有边缘设备与独立 Agent 均只出站请求 Hub；无第三方 npm 依赖，单 SQLite WAL 即开即用。</text>
 </svg>

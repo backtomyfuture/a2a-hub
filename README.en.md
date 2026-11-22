@@ -1,236 +1,252 @@
+<div align="center">
+
 # a2a-hub
 
-**A self-hosted, zero-external-dependency multi-agent orchestration hub** — combining the **A2A eight-state model**, **three-layer addressing (`Node` → `Worker` → `Skill`)**, **instruction/data separation**, and **ed25519-signed approvals** over one unified **SQLite WAL + HTTP Gateway** architecture (outbound HTTP Long-Polling for host daemons + REST Agent Gateway for pure cloud/cron Agents), with a built-in **Web Console** and **`Context_ID` multi-turn session memory / Leader fan-out orchestration**.
+**Zero-Dependency, Self-Hosted Personal Multi-Agent Orchestration Hub (v2.0)**
 
-[中文说明](README.md) · [Standard (Chinese)](docs/standard.md) · [Configuration & CLI](docs/configuration.md) · [HTTP Agent Runbook](docs/protocol-node-runbook.md) · [Architecture](docs/architecture.md) · [Security Model](SECURITY.md) · [Changelog](CHANGELOG.md)
+Unify cloud chatbots & Leader agents with local coding CLIs across your computers (Claude Code, Codex, Amp, Droid, Antigravity, Grok, Cursor, OpenCode, Qwen, Kimi — **26+ CLIs auto-discovered**) inside one minimal control plane backed by SQLite WAL, 40s outbound HTTP long-polling, Ed25519 approval signing, and a zero-build Web console.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-![Node >= 24](https://img.shields.io/badge/Node-%3E%3D24-339933.svg)
-![Zero Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)
+<p>
+  <a href="README.md">简体中文</a> ·
+  <a href="README.en.md"><strong>English</strong></a> ·
+  <a href="docs/architecture.md">Architecture</a> ·
+  <a href="docs/configuration.md">Configuration</a> ·
+  <a href="docs/standard.md">A2A Spec</a> ·
+  <a href="SECURITY.md">Security</a>
+</p>
+
+<p>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" /></a>
+  <img src="https://img.shields.io/badge/Node.js-%3E%3D24-339933.svg" alt="Node.js >= 24" />
+  <img src="https://img.shields.io/badge/Dependencies-0%20runtime-10b981.svg" alt="Zero Runtime Dependencies" />
+  <img src="https://img.shields.io/badge/Local%20CLIs-26%2B%20Auto--Discovery-6366f1.svg" alt="26+ CLIs" />
+  <img src="https://img.shields.io/badge/Cloud%20Templates-14%20Presets-0ea5e9.svg" alt="14 Cloud Templates" />
+  <img src="https://img.shields.io/badge/Protocol-A2A%208--State-f59e0b.svg" alt="A2A 8-State" />
+</p>
+
+</div>
+
+---
+
+```mermaid
+flowchart TB
+    HUB["a2a-hub v2.0 Control Plane\nSQLite WAL · REST + 40s Long-Poll · Ed25519 Signing · Web Console"]
+    HUB <-->|"ah up (Built-in DeviceDaemon)"| M1["Mac mini (Local Host)\nclaude · codex · amp · droid · agy · grok · cursor · codebuddy"]
+    HUB <-->|"install.sh --join (Outbound Only)"| M2["Linux / GPU Workstation\nqwen · kimi · cline · kilo · openhands · opencode"]
+    HUB <-->|"install.ps1 AH_JOIN (Outbound Only)"| M3["Windows / Work PC\ncopilot · gemini · devin · custom scripts"]
+    HUB <-->|"14 Onboarding Presets\n(Poll / Long-Poll / Webhook)"| C1["Cloud & Leader Agents\nMuse · OpenClaw · Hermes · Manus · Coze · Dify · n8n · Feishu"]
+```
 
 ---
 
 ## Why `a2a-hub`
 
-- **Self-Hosted Standalone Hub (`busType: "sqlite"`)**: Run `ah daemon --role hub` on a persistent server (such as a Mac mini or Linux VPS) backed by Node >= 24's built-in `node:sqlite` (WAL mode) and zero third-party npm dependencies (`dependencies: {}`).
-- **Two Connection Modes Over Pure HTTP, Zero Open Node Ports**:
-  - **Host Daemon Nodes (`ah join`)**: Workstations, NUCs, office Macs, or GPU hosts run a thin outbound daemon (`GET /api/v1/poll`) that wakes within milliseconds to execute local CLIs/scripts safely via `commands.json`. Follow-up tasks sharing the same A2A `Context_ID` automatically resume prior CLI sessions (`sessions/<Context_ID>.json` + `resume_command`) and receive `context_history` without needing a persistent terminal multiplexer.
-  - **Pure HTTP External Agents (Muse, Grok Bot, etc.)**: No daemon. The owner issues a per-agent token in the console (not the owner `AH_API_TOKEN`). `GET /.well-known/agent.json` is public; `/api/v1/skills*` and every other API call need that token. Owners can configure a per-agent polling interval in minutes (`poll_interval_min`, default `5` min for scheduled check and `30` min for webhook fallback; supports 1–1440 min such as `60` for hourly agents), and the hub computes online status using `interval × 1.5`. A timer runs the check script at that cadence: `IDLE` stops, `WORK` then calls `poll?timeout=0` or `updates?new=1`. A leader both claims and follows up. Each run starts with no prior context.
-- **Built-in Web Console** (`http://<hub>:8787`, owner token):
-  - **Needs you**: Home list of approvals, questions, and tasks worth a look.
-  - **Agents**: Grouped by node, with admission, display names, and token rotate/revoke.
-  - **Dispatch**: Plain-language form.
-  - **Add Agent**: Three steps (access type, name and role, token plus onboarding). HTTP agents get a one-time token.
-  - **Task Detail**: Timeline, artifact & attachment viewer, ed25519 approve/reject, and inline replies.
-- **Lightweight Leader Orchestration (Fan-out & `Context_ID` Continuity)**: `POST /api/v1/tasks` accepts `to: ["agent-a", "agent-b"]` to fan out parallel subtasks under one shared `Context_ID`, letting a single Leader dynamically coordinate multi-agent follow-ups without brittle static DAG pipelines.
-- **Optional Webhook Notifications**: Configure `notifications` in `node.json` to push alerts via group bot webhooks, Bark, Telegram, or generic webhooks.
+- **One-Line Start Without `git clone`**: Zero external npm dependencies (`dependencies: {}`). A single installer bootstraps Node.js 24 LTS (if missing, SHA-256 verified into `~/.local/node`), installs `ah`, initializes SQLite + Ed25519 keys, and prints a one-click login console URL.
+- **Zero-Prerequisite Machine Onboarding**: Adding a fresh Mac, Linux box, or Windows PC doesn't require pre-installing `ah` or Node. The Web UI generates a **single unified command** that installs Node 24 + `ah`, connects with embedded credentials, scans 26 local CLI tools, and registers a background service — purely outbound, zero open inbound ports.
+- **26+ Auto-Discovered CLI Workers & True Concurrency**: Automatically discovers local CLIs (Claude Code, Codex, OpenCode, Amp, Droid, Agy, Grok, Cursor Agent, CodeBuddy, Copilot, Qwen, Kimi, Kiro, Cline, Kilo, Auggie, Vibe, Crush, Pi, Devin, OpenHands, iFlow, Qoder, Gemini, Aider, Goose). Each host executes up to `maxConcurrent = 4` tasks in parallel while serializing per `(context_id, worker_key)` to protect native CLI `--resume` sessions.
+- **14 Cloud & Workflow Agent Presets**: Ready-to-use onboarding prompts with scoped per-agent tokens for **Muse / OpenClaw (Leaders)**, Hermes, Manus, Kimi, Grok Bot, WorkBuddy, Doubao, Qwen, Coze, Dify, n8n, and Feishu.
+- **Strict Execution Isolation & Ed25519 Signed Approvals**: Task payloads can never inject `command`, `cwd`, or `env` keys (`HTTP 400`). Risk-gated `auth-required` tasks can only be unlocked by the owner's Ed25519 signature, verified locally on the worker host via `hubPublicKey`.
+- **Minimalist Zero-Build Web Console**: Light/dark themes, two-column command dashboard, device-grouped collapsible worker view with instant search, grouped fan-out dispatcher, `Context_ID` threads, and scheduled job telemetry.
 
 ---
 
-## Architecture Overview
+## 1-Minute Quick Start (No `git clone` Needed)
 
-```mermaid
-flowchart LR
-    WEB["Web Console / CLI (ah)"] --> HUB
-    subgraph HUB["Persistent Hub Server (e.g., Mac mini :8787)"]
-        direction TB
-        SQL[("SQLite WAL Bus\ntasks · messages · parts\nartifacts · agentCards")]
-        API["HTTP REST API + LongPollBroker + agent-gateway\nGET /.well-known/agent.json · ed25519 Signer"]
-        SQL <--> API
-    end
-    HUB <-->|"Outbound HTTP Long-Polling (GET /api/v1/poll)"| N1["Workstation Daemon (ah join)"]
-    HUB <-->|"HTTP Short/Long-Poll (/api/v1/agents/grok-bot/poll)"| N2["Cloud Worker: Grok Bot (HTTP Agent)"]
-    HUB <-->|"HTTP Dispatch + Updates (/api/v1/tasks & /updates)"| N3["Cloud Leader: Muse (HTTP Agent)"]
-    HUB -.->|"Optional Webhooks (Bot / Bark / Telegram)"| OWNER["Owner Alerts"]
-```
+> **Zero prerequisites**: If Node.js >= 24 is not installed yet, the installer automatically downloads and SHA-256 verifies official Node 24 LTS into `~/.local/node` without root privileges.
 
-### 1. Three-Level Addressing: `Node → Worker → Skill`
+### Option 1: One-Line Local Hub (Mac mini / Linux / Windows)
 
-- **Node**: A physical or virtual machine (`mac-mini-hub`, `edge-node-1`).
-- **Worker**: An agent runtime template configured under `workers` in `commands.json` (represented in `AgentCards` with `Skill_ID=agent`).
-- **Skill**: A specialized skill targeting `workers: [...]` or a deterministic node script (`mode: json`).
-- Console and prompt wording: 节点 = Node, Agent = Worker (`Skill_ID=agent`), 能力 = Skill. API fields stay `node`, `Worker`, and `Skill_ID`.
+<table>
+<tr>
+<th>macOS / Linux</th>
+<th>Windows PowerShell</th>
+</tr>
+<tr>
+<td>
 
-### 2. Eight-State A2A Task Lifecycle
-
-Tasks progress strictly across the eight A2A states: `submitted` → `working` ↔ `input-required` / `auth-required` → terminal (`completed` / `failed` / `canceled` / `rejected`). Terminal tasks are immutable; follow-up tasks share `Context_ID` and reference predecessors via `Ref_Task_IDs`.
-
-![Task lifecycle](docs/images/lifecycle.svg)
-
----
-
-## Quick Start
-
-### Prerequisites
-
-- **Node.js >= 24** (uses built-in `node:sqlite`, `node:http`, `node:crypto`, and global `fetch`; zero npm install needed).
-
-### Option A: True 1-Line Install & Start (Recommended)
-
-**1) Start the Standalone Hub (e.g., on a Mac mini / Linux host):**
-
-```bash
+```sh
 curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --hub
 ```
 
-This generates an ed25519 approval keypair + random `apiToken`, configures SQLite WAL, registers user-level autostart (add `--no-service` to run foreground-only), and prints:
-- A one-click Web Console URL `http://<LAN_IP>:8787/?token=...` (saved to `localStorage` and scrubbed from the address bar on load)
-- A copy-paste 1-line join command for worker machines.
+</td>
+<td>
 
-**2) Connect a Remote Edge Node (Outbound Long-Polling Only, Zero Open Ports):**
-
-```bash
-# macOS / Linux:
-curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --join "http://<AH_API_TOKEN>@<HUB_IP>:8787"
-
-# Windows PowerShell:
-$env:AH_JOIN = "http://<AH_API_TOKEN>@<HUB_IP>:8787"; irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex
+```powershell
+$env:AH_HUB="1"; irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex
 ```
 
-`--join` extracts the embedded token into mode-600 `app.env` (never written to `node.json`), fetches `hubPublicKey` from `GET /api/v1/health`, and starts the outbound long-polling daemon/service.
+</td>
+</tr>
+</table>
 
-### Option B: From a Cloned Checkout
+The installer prints a direct Web console URL with your owner token (`http://127.0.0.1:8787/?token=...`) and registers a user-level background daemon (LaunchAgent / systemd / Windows Scheduled Task). Pass `--no-service` (`$env:AH_NO_SERVICE="1"` on Windows) to run in the foreground instead.
 
-```bash
-git clone https://github.com/backtomyfuture/a2a-hub.git
-cd a2a-hub
-# Optional: expose `ah` / `a2a-hub` / `ahub` globally
-npm link
+---
 
-# 1) Start the Hub in one line (add --service to register autostart):
-node bin/ah.mjs up
+### Option 2: Instant Public HTTPS for a Local Hub (Zero Domain Setup)
 
-# 2) Join from any worker machine (add --service for autostart):
-node bin/ah.mjs join http://<AH_API_TOKEN>@<HUB_IP>:8787
+#### A. Tailscale Funnel (Fixed 443 HTTPS in One Command)
+
+If your Hub runs on a home Mac mini or Linux box signed in to Tailscale, expose it securely at `https://<host>.<tailnet>.ts.net` and populate `AH_PUBLIC_URL` automatically:
+
+```sh
+ah expose tailscale --auto-token   # Enable Funnel 443 HTTPS + ensure strong AH_API_TOKEN
+ah expose status                   # Inspect public URL and run end-to-end health probe
+ah expose off                      # Disable Tailscale Funnel
 ```
 
-### Option C: Connect Pure HTTP External Agents (Muse / Grok Bot, No Daemon)
+#### B. Cloudflare Tunnel + Bot Fight Mode Probe
 
-Cloud Agents do not install a daemon. Add the agent in the Web Console, copy its per-agent token (shown once), and pick a receive mode: scheduled check (default, `receive_mode=http-poll`), resident long-poll (`http-longpoll`), or a webhook doorbell (`webhook`; the owner sets the URL, and the push has no instruction body). Discovery at `GET http://<HUB_IP>:8787/.well-known/agent.json` is unauthenticated. Skill fetch (`GET /api/v1/skills/a2a-leader` or `a2a-worker`) and every other call need that token. `<AGENT_TOKEN>` below is not the owner `AH_API_TOKEN`. The sample is the scheduled check.
+Attach your own domain and verify that Cloudflare WAF / Bot Fight Mode is not blocking non-browser agents or long-poll streams:
 
-```bash
-# 1) Register a Leader (Muse, every 15 minutes) or Worker (Grok Bot, every 10 minutes)
-curl -X POST http://<HUB_IP>:8787/api/v1/agents/register \
-  -H "Authorization: Bearer <AGENT_TOKEN>" -H "Content-Type: application/json" \
-  -d '{"node":"muse","role":"leader","kind":"agent","receive_mode":"http-poll"}'
-
-curl -X POST http://<HUB_IP>:8787/api/v1/agents/register \
-  -H "Authorization: Bearer <AGENT_TOKEN>" -H "Content-Type: application/json" \
-  -d '{"node":"grok-bot","role":"worker","kind":"agent","receive_mode":"http-poll","caps":[{"skill_id":"research","skill_name":"Grok Research"}]}'
-
-# 2) Muse dispatches, then reads only new changes (new terminals + still-open questions/approvals)
-curl -X POST http://<HUB_IP>:8787/api/v1/tasks \
-  -H "Authorization: Bearer <AGENT_TOKEN>" -H "Content-Type: application/json" \
-  -d '{"from":"muse","to":"grok-bot","cap":"research","text":"Compare HTTP poll vs long-poll"}'
-curl -H "Authorization: Bearer <AGENT_TOKEN>" \
-  "http://<HUB_IP>:8787/api/v1/agents/muse/updates?new=1"
-
-# 3) Grok Bot short-polls, then claims and finishes in the same run
-curl -H "Authorization: Bearer <AGENT_TOKEN>" \
-  "http://<HUB_IP>:8787/api/v1/agents/grok-bot/poll?timeout=0"
-curl -X POST "http://<HUB_IP>:8787/api/v1/tasks/<TASK_ID>/claim" \
-  -H "Authorization: Bearer <AGENT_TOKEN>" -H "Content-Type: application/json" -d '{"node":"grok-bot"}'
-curl -X POST "http://<HUB_IP>:8787/api/v1/tasks/<TASK_ID>/complete" \
-  -H "Authorization: Bearer <AGENT_TOKEN>" -H "Content-Type: application/json" \
-  -d '{"node":"grok-bot","text":"Comparison report ready","artifact":"https://example.com/report.md"}'
+```sh
+ah expose cf https://hub.yourdomain.com --auto-token
 ```
 
-See [HTTP Agent Runbook](docs/protocol-node-runbook.md) for the full lifecycle API.
+> If the probe detects a `403` Cloudflare challenge page, disable **Bot Fight Mode** or add a WAF Custom Rule to **Skip** `/api/v1/*` and `/.well-known/*`.
+
+---
+
+### Option 3: 60-Second Cloud PaaS Templates (24/7 Hosted Hub)
+
+Built around [`Dockerfile`](Dockerfile) (Node 24-slim, zero third-party npm packages, automatic `$PORT`, `AH_API_TOKEN`, `AH_PUBLIC_URL`, and `X-Forwarded-Proto` support):
+
+| Platform | Config | One-Click Deploy / Command | Persistent Storage |
+| --- | --- | --- | --- |
+| **Railway** | [`railway.json`](railway.json) | [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/template?referralCode=&repo=https://github.com/backtomyfuture/a2a-hub) | Attach a volume at `/data`, set `AH_API_TOKEN` |
+| **Render** | [`render.yaml`](render.yaml) | [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/backtomyfuture/a2a-hub) | Auto-creates 1GB disk `/data` + `AH_API_TOKEN` |
+| **Fly.io** | [`fly.toml`](fly.toml) | `fly launch --copy-config` | Mounts `a2a_hub_data -> /data` |
+| **Zeabur** | [`zeabur.json`](zeabur.json) | Import repo to deploy template | Mount `/data` and set `AH_API_TOKEN` |
+| **Docker** | [`Dockerfile`](Dockerfile) | See Docker command below | `-v a2a_hub_data:/data` |
+
+```sh
+docker build -t a2a-hub .
+docker run -d --name a2a-hub -p 8787:8787 \
+  -v a2a_hub_data:/data \
+  -e AH_API_TOKEN="your-strong-secret-token" \
+  -e AH_PUBLIC_URL="https://your-public-domain" \
+  a2a-hub
+```
 
 <details>
-<summary>Advanced: Manual step-by-step setup / custom flags</summary>
+<summary>Developer Mode: Run Directly From Cloned Source</summary>
 
-1) Standalone Hub:
-
-```bash
-node bin/ah.mjs setup \
-  --role hub \
-  --bus sqlite \
-  --node mac-mini-hub \
-  --zone home \
-  --prefix mm \
-  --listen 0.0.0.0:8787 \
-  --public-url http://127.0.0.1:8787 \
-  --api-token "<YOUR_SECRET_TOKEN>" \
-  --yes
-
-node bin/ah.mjs doctor --role hub
-node bin/ah.mjs daemon --role hub
-node bin/ah.mjs service --role hub
-```
-
-2) Manual Remote Edge Node (see [`config/node.remote.example.json`](config/node.remote.example.json) and [`config/commands.example.json`](config/commands.example.json)):
-
-```bash
-node bin/ah.mjs setup \
-  --role node \
-  --bus http \
-  --hub-url http://<HUB_IP>:8787 \
-  --api-token "<AH_API_TOKEN>" \
-  --hub-key "<HUB_ED25519_PUBLIC_KEY>" \
-  --node edge-node-1 \
-  --zone office \
-  --prefix e1 \
-  --yes
-
-node bin/ah.mjs doctor
-node bin/ah.mjs daemon
+```sh
+git clone https://github.com/backtomyfuture/a2a-hub.git
+cd a2a-hub
+npm link                # Optional: register global ah / a2a-hub / ahub CLI
+node bin/ah.mjs up      # Initialize and start Hub (+ --service for background daemon)
 ```
 
 </details>
 
 ---
 
-## Agent Skills (2x2 Matrix)
+## Connecting Additional Computers & Cloud Agents
 
-Skills are separated along **Leader vs. Worker** and **CLI (`ah`) vs. Pure HTTP** so local sub-agents and cloud bots never receive conflicting instructions:
+### 1. Mount Another Computer (Unified Zero-Prerequisite Command)
 
-| Role \ Runtime | Local with `ah` CLI | Pure HTTP (Cloud / Cron Agent, no CLI) |
-|---|---|---|
-| **Controller / Leader** (inspect, dispatch & fan-out, collect updates) | [`skills/ah/SKILL.md`](skills/ah/SKILL.md) | [`skills/a2a-leader/SKILL.md`](skills/a2a-leader/SKILL.md) (`GET /api/v1/skills/a2a-leader`, authenticated) |
-| **Executor / Worker** (poll, claim, ask, auth, complete/fail) | [`skills/ah-inbox/SKILL.md`](skills/ah-inbox/SKILL.md) (auto-installed for `kind=agent`) | [`skills/a2a-worker/SKILL.md`](skills/a2a-worker/SKILL.md) (`GET /api/v1/skills/a2a-worker`, authenticated) |
+No manual Node or `ah` setup required on the target machine. Open **"+ 接入 Agent / 电脑" → "挂载一台电脑"** in the Web console to copy a self-contained one-liner (or send it directly to an AI assistant on that machine):
 
----
+- **macOS / Linux (fresh machine)**:
+  ```sh
+  curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --join "https://<DEVICE_TOKEN>@<HUB_HOST>" --device <device-id>
+  ```
+- **Windows PowerShell (fresh machine)**:
+  ```powershell
+  $env:AH_DEVICE="<device-id>"; $env:AH_JOIN="https://<DEVICE_TOKEN>@<HUB_HOST>"; irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex
+  ```
+- **Machines that already have `ah` installed**:
+  ```sh
+  ah join "https://<DEVICE_TOKEN>@<HUB_HOST>" --device <device-id> --service
+  ```
 
-## Common Commands (`ah`, aliases: `a2a-hub` / `ahub`)
+New CLIs installed later can be added anytime without overwriting existing custom settings via the Web console **"扫描 CLI"** button or `ah workers scan`.
 
-Configuration defaults to `~/.a2a-hub` (app installed under `~/.a2a-hub/app/`, override with `--config <dir>` or `AH_HOME`). See [Configuration & CLI](docs/configuration.md) for the complete reference.
+### 2. Onboard Cloud / Standalone Agents
 
-| Area | Command | Purpose |
-|---|---|---|
-| **One-Line Setup** | `ah up [--listen …] [--service] [--no-daemon]` | Initialize SQLite Hub (auto token + ed25519 key) and start |
-| | `ah join <hub_url> [--node …] [--service] [--no-daemon]` | Extract credentials, sync `hubPublicKey`, and start long-poll node |
-| **Setup & Ops** | `ah setup [--role node\|hub] [--bus sqlite\|http]` | Initialize a standalone SQLite Hub or remote HTTP node |
-| | `ah daemon [--role node\|hub]` | Start the node or full Hub runtime (HTTP server, Web UI) |
-| | `ah doctor [--role node\|hub]` | Read-only checks for config, `commands.json`, bus connectivity, autostart |
-| | `ah service [--role node\|hub] [--remove]` | Install or remove user-level autostart (launchd / systemd / Windows) |
-| | `ah inventory` | Inspect this node's AgentCards and task counts |
-| | `ah reconcile` | Run a single sweep/reconciliation pass and exit |
-| **Tasks & Debug** | `ah task create --to <node> [--worker <W>] [--cap <skill>] [--schedule <id>] --text …` | Validate roster and create a task (with optional `--schedule` link) |
-| | `ah present [--wait <sec>] [--task <ID>] [--pop]` | Read or wait for receipts in `present_queue.jsonl` |
-| | `ah task reply --task <ID> --text …` | Reply to an `input-required` question and resume the task |
-| | `ah task cancel --task <ID> [--text …]` | Cancel a non-terminal task |
-| | `ah task why <ID> [--json]` | Reconstruct full timeline, acceptance summary, and local flight/outbox state |
-| **Standalone Inbox** | `ah inbox [--pop] [--limit <n>] [--json]` / `ah inbox done \| ask \| fail \| auth` | Consume `agent_inbox.jsonl` and report results from standalone agents (cron plans report via `/agents/:node/schedules/:id`) |
+In **"+ 接入 Agent / 电脑" → "接入独立 Agent"**, pick any of the **14 presets** (`generic`, `muse`, `openclaw`, `hermes`, `manus`, `kimi-agent`, `grok-bot`, `workbuddy`, `doubao`, `qwen`, `coze`, `dify`, `n8n`, `feishu-bot`). Submitting generates a scoped per-agent token and a ready-to-paste onboarding prompt with exact REST endpoints.
 
 ---
 
-## Security Model
+## Architecture & A2A 8-State Lifecycle
 
-See [SECURITY.md](SECURITY.md) for full trust boundaries:
+```mermaid
+flowchart LR
+    U["Web Console / ah CLI / Leader"] -->|POST /tasks| GW["Hub HTTP Gateway\nLongPollBroker (40s) + Ed25519"]
+    GW <-->|BEGIN IMMEDIATE| DB[("SQLite WAL\nhub.db\ndevices · agents · tasks · messages · schedules · files")]
+    GW <-->|Outbound Long-Poll| DEV["DeviceDaemon Pool (maxConcurrent=4)\n26+ Auto-Discovered CLIs + --resume"]
+    GW <-->|Poll / Webhook| CLD["Cloud & Standalone Agents\n14 Built-in Presets"]
+    GW -.->|Alerts| NTF["Feishu / Bark / Telegram / Webhook"]
+```
 
-- **Edge nodes are outbound-only**: No open ports or reverse tunnels on worker nodes; only the Hub exposes its configured HTTP bind address with Bearer token protection (`GET /api/v1/health` exposes only minimal health metadata).
-- **Instruction/data separation**: Executable templates, `cwd`, and `verify` live strictly in local `commands.json`. Task inputs are written to mode-600 `runs/<Task_ID>/input.json`; requests containing control keys (`command`, `cwd`, `context`, `agent`, `verify`, etc.) in params are rejected.
-- **ed25519-signed approvals**: The Hub signs `auth_decision` records with `approval_key.pem` (`0600`) bound to `Task_ID` + `Status_Msg`. Nodes configured with `hubPublicKey` reject forged or unsigned decisions.
-- **Secrets never committed**: `app.env`, `approval_key.pem`, `hub.db*`, `*_state.json`, and `runs/` are excluded in `.gitignore`.
+```mermaid
+stateDiagram-v2
+    [*] --> submitted
+    submitted --> working: claim
+    submitted --> auth_required: preflight (always)
+    submitted --> rejected: policy violation
+    submitted --> canceled: cancel
+    working --> completed: complete
+    working --> input_required: ask
+    working --> auth_required: risk gate
+    working --> failed: fail (retries exhausted)
+    working --> submitted: retry / stale reclaim (20m)
+    working --> canceled: cancel
+    input_required --> submitted: reply
+    auth_required --> submitted: owner Ed25519 approve
+    auth_required --> rejected: owner deny
+```
 
 ---
 
-## Testing
+## Supported Ecosystem
 
-Zero external dependencies — run the full Node built-in `node:test` suite directly:
+<details>
+<summary><strong>Click to expand: 26 Auto-Discovered Local CLIs + 14 Cloud / Workflow Agent Presets</strong></summary>
 
-```bash
+- **Local CLIs ([`src/core/config.mjs`](src/core/config.mjs))**: `claude` (Claude Code), `codex` (Codex CLI), `opencode` (OpenCode), `gemini` (Gemini CLI), `aider` (Aider), `goose` (Goose), `amp` (Amp CLI), `droid` (Factory Droid), `agy` (Antigravity CLI), `grok` (Grok CLI), `cursor` (`cursor-agent`), `codebuddy` (`codebuddy`/`cbc`), `copilot` (GitHub Copilot CLI), `qwen` (Qwen Code), `kimi` (Kimi Code CLI), `kiro` (`kiro-cli`), `cline` (Cline CLI), `kilo` (`kilo`/`kilocode`), `auggie` (Augment Auggie), `vibe` (Mistral Vibe), `crush` (Charm Crush), `pi` (Pi Coding Agent), `devin` (Devin CLI), `openhands` (OpenHands CLI), `iflow` (iFlow CLI), `qoder` (`qodercli`/`qoder`).
+- **Cloud & Workflow Templates ([`src/core/templates.mjs`](src/core/templates.mjs))**: `generic`, `muse` (Leader), `openclaw` (Leader), `hermes`, `manus`, `kimi-agent`, `grok-bot`, `workbuddy`, `doubao`, `qwen`, `coze`, `dify`, `n8n`, `feishu-bot`.
+
+</details>
+
+---
+
+## Essential CLI Reference
+
+Default config directory: `~/.a2a-hub` (override with `--config <dir>` or `AH_HOME`; aliases `ah` / `a2a-hub` / `ahub`):
+
+| Command | Description |
+| --- | --- |
+| `ah up [--listen …] [--service]` | Initialize and start a standalone SQLite Hub |
+| `ah join <url> [--device <id>] [--service]` | Attach this machine to an existing Hub and auto-discover CLIs |
+| `ah expose [tailscale\|cf <url>\|status\|off] [--auto-token]` | Expose local Hub via Tailscale Funnel 443 or probe Cloudflare WAF |
+| `ah workers <list \| scan \| add \| remove>` | List, incrementally scan 26+ CLIs, add, or remove local workers |
+| `ah doctor` | Read-only check of config, `0600` permissions, keys, SQLite, and reachability |
+| `ah agents [list \| pause <id> \| resume <id>]` | Inspect agent catalog or pause/resume an agent |
+| `ah task <create \| list \| show \| reply \| cancel>` | Dispatch tasks (supports fan-out & `context_id`), reply, or cancel |
+| `ah present [list \| approve <id> \| deny <id> \| reply <id>]` | Owner CLI for Ed25519 signed approvals and question replies |
+| `ah inbox <check \| list \| claim \| complete \| ask \| updates>` | Headless inbox interface for standalone CLI agents |
+| `ah service [--ensure \| --remove]` / `ah update` | Manage OS background service or pull updates & refresh skills |
+
+---
+
+## Security Boundaries
+
+See [`SECURITY.md`](SECURITY.md) and [`docs/standard.md`](docs/standard.md) for the complete threat model:
+
+- **Command / Data Separation**: Executable commands, `cwd`, and `approval_policy` live strictly in local `workers.json`; any task request containing execution control keys (`command`, `cwd`, `env`, etc.) is rejected with `HTTP 400`.
+- **Zero Inbound Node Ports**: Worker hosts and standalone daemons only initiate outbound HTTP(S) long-polls to the Hub.
+- **Ed25519 Signed Approvals**: Only the `owner` role can decide `auth-required` tasks via `/api/v1/approvals/:taskId/decide` using the Hub's `0600` private key (`approval_key.pem`); remote hosts verify signatures with `hubPublicKey` before execution.
+
+---
+
+## Development & Tests
+
+Zero external npm dependencies — powered directly by Node.js >= 24 built-in `node:test`:
+
+```sh
+for f in bin/*.mjs src/*/*.mjs src/web/*.js src/web/*/*.js tests/*.mjs; do node --check "$f" || exit 1; done
 npm test
 ```
 

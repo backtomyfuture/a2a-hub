@@ -263,11 +263,20 @@ export function buildAgentOnboardingPrompt({ hubUrl, agent, token, template }) {
   return lines.join("\n");
 }
 
-export function buildDeviceJoinCommand({ hubUrl, deviceToken, deviceId }) {
+export function buildDeviceJoinCommands({ hubUrl, deviceToken, deviceId }) {
   const parsed = new URL(String(hubUrl || "http://127.0.0.1:8787"));
   const authUrl = deviceToken
     ? `${parsed.protocol}//${encodeURIComponent(deviceToken)}@${parsed.host}${parsed.pathname.replace(/\/$/, "")}`
     : String(hubUrl).replace(/\/$/, "");
   const nameFlag = deviceId ? ` --device ${deviceId}` : "";
-  return `ah join "${authUrl}"${nameFlag} --service`;
+  const winDevicePrefix = deviceId ? `$env:AH_DEVICE="${deviceId}"; ` : "";
+  return {
+    unix: `curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --join "${authUrl}"${nameFlag}`,
+    windows: `${winDevicePrefix}$env:AH_JOIN="${authUrl}"; irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex`,
+    cli: `ah join "${authUrl}"${nameFlag} --service`,
+  };
+}
+
+export function buildDeviceJoinCommand(opts) {
+  return buildDeviceJoinCommands(opts).unix;
 }

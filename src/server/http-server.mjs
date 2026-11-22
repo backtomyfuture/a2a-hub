@@ -21,7 +21,7 @@ import {
 import { shellQuote } from "../core/receipt.mjs";
 import {
   buildAgentOnboardingPrompt,
-  buildDeviceJoinCommand,
+  buildDeviceJoinCommands,
   findTemplate,
   loadAgentTemplates,
 } from "../core/templates.mjs";
@@ -515,7 +515,7 @@ export function startHubHttpServer({
         enabled: true,
         issueToken: true,
       });
-      const join_command = buildDeviceJoinCommand({
+      const join_commands = buildDeviceJoinCommands({
         hubUrl: getHubUrl(),
         deviceToken: token,
         deviceId: device.id,
@@ -525,7 +525,8 @@ export function startHubHttpServer({
         device,
         token,
         hub_url: getHubUrl(),
-        join_command,
+        join_command: join_commands.unix,
+        join_commands,
       });
     }
 
@@ -551,12 +552,12 @@ export function startHubHttpServer({
       if (!requireOwner()) return;
       const rotated = store.rotateDeviceToken(m[1]);
       if (!rotated) return sendError(res, 404, "设备不存在", "not_found");
-      const join_command = buildDeviceJoinCommand({
+      const join_commands = buildDeviceJoinCommands({
         hubUrl: getHubUrl(),
         deviceToken: rotated.token,
         deviceId: rotated.device.id,
       });
-      return sendJson(res, 200, { ok: true, ...rotated, join_command });
+      return sendJson(res, 200, { ok: true, ...rotated, join_command: join_commands.unix, join_commands });
     }
 
     if (method === "GET" && pathname === "/api/v1/worker-presets") {

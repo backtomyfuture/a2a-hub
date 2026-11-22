@@ -4,11 +4,13 @@ import { copyText, escapeHtml, showToast } from "../utils.js";
 
 let modalTab = "agent";
 let selectedTemplateId = "generic";
+let selectedJoinPlatform = "unix";
 let createdResult = null;
 
 export function resetAddModalState(defaultTab = "agent") {
   modalTab = defaultTab;
   selectedTemplateId = "generic";
+  selectedJoinPlatform = "unix";
   createdResult = null;
 }
 
@@ -90,6 +92,15 @@ export function renderAddModal(root, refreshFn) {
   });
 
   if (createdResult) {
+    root.querySelectorAll("[data-join-plat]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        selectedJoinPlatform = btn.getAttribute("data-join-plat") || "unix";
+        if (createdResult.joinCommands) {
+          createdResult.copyText = createdResult.joinCommands[selectedJoinPlatform] || createdResult.copyText;
+        }
+        renderAddModal(root, refreshFn);
+      });
+    });
     root.querySelector("#btn-copy-created")?.addEventListener("click", () => {
       copyText(createdResult.copyText, "已复制到剪贴板");
     });
@@ -195,14 +206,21 @@ export function renderAddModal(root, refreshFn) {
         max_concurrent: Number(fd.get("max_concurrent") || 4),
         summary: String(fd.get("summary") || "").trim(),
       });
+      const joinCommands = res.join_commands || {
+        unix: res.join_command || "",
+        windows: res.join_command || "",
+        cli: res.join_command || "",
+      };
+      selectedJoinPlatform = "unix";
       createdResult = {
         kind: "device",
         title: `设备「${res.device.name}」凭据已生成`,
         token: res.token,
-        copyLabel: "复制电脑端一键挂载命令",
-        copyText: res.join_command,
+        copyLabel: "复制一行安装挂载命令",
+        copyText: joinCommands[selectedJoinPlatform] || res.join_command,
+        joinCommands,
       };
-      showToast("设备已创建，请在目标电脑运行命令完成挂载");
+      showToast("设备已创建，请在目标电脑运行命令完成安装并挂载");
       await refreshFn();
       renderAddModal(root, refreshFn);
     } catch (err) {
@@ -296,9 +314,9 @@ function renderDeviceForm() {
   return `
     <form id="form-create-device" class="stack-md">
       <div class="card" style="background:var(--bg);padding:12px">
-        <div style="font-weight:600;margin-bottom:4px">电脑自动挂载说明</div>
+        <div style="font-weight:600;margin-bottom:4px">零前置一行挂载说明</div>
         <div class="muted" style="font-size:12px">
-          在目标 Mac / Linux / Windows 电脑运行生成的 <code>ah join</code> 命令后，设备会自动探测本机已安装的 Claude Code、Codex、OpenCode、Gemini 等 CLI，并将所有能力卡片实时同步到中台。
+          生成的命令已融合「安装 <code>Node 24</code> + 安装 <code>ah</code> + 挂载上线 + 开机自启」。在目标 Mac / Linux / Windows 电脑直接粘贴运行即可自动探测本机 26 种常见 CLI Agent，纯出站连接，无需开放入站端口。
         </div>
       </div>
 
@@ -332,6 +350,14 @@ function renderDeviceForm() {
 }
 
 function renderResultStep(res) {
+  const isDevice = res.kind === "device" && res.joinCommands;
+  const activeCmd = isDevice ? (res.joinCommands[selectedJoinPlatform] || res.copyText) : res.copyText;
+  const platLabels = [
+    { id: "unix", label: "macOS / Linux 一键安装挂载" },
+    { id: "windows", label: "Windows PowerShell" },
+    { id: "cli", label: "已装 ah 快捷接入" },
+  ];
+
   return `
     <div class="stack-md">
       <div class="pill pill-success">${escapeHtml(res.title)}</div>
@@ -346,9 +372,29 @@ function renderResultStep(res) {
             </div>`
           : ""
       }
+      ${
+        isDevice
+          ? `<div class="filter-bar">
+              ${platLabels
+                .map(
+                  (p) => `
+                <button type="button" class="filter-chip ${selectedJoinPlatform === p.id ? "active" : ""}" data-join-plat="${p.id}">
+                  ${p.label}
+                </button>
+              `
+                )
+                .join("")}
+            </div>`
+          : ""
+      }
       <div class="field">
-        <span>${res.kind === "agent" ? "请把下面整段提示词发给目标 Agent：" : "请在目标电脑终端运行以下命令："}</span>
-        <div class="code-box">${escapeHtml(res.copyText)}</div>
+        <span>${res.kind === "agent" ? "请把下面整段提示词发给目标 Agent：" : "请在目标电脑终端运行以下命令（也可直接发给该电脑上的 AI 助手代为执行）："}</span>
+        <div class="code-box" id="created-command-box">${escapeHtml(activeCmd)}</div>
+        ${
+          isDevice && selectedJoinPlatform !== "cli"
+            ? `<span class="muted" style="font-size:11px">零前置：会自动检测并安装 Node 24 与 <code>ah</code>，同步本机 26 种 CLI 并注册系统后台自启。</span>`
+            : ""
+        }
       </div>
       <div class="row-between">
         <button type="button" class="btn btn-primary" id="btn-copy-created">${escapeHtml(res.copyLabel)}</button>

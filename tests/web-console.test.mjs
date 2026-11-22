@@ -64,6 +64,18 @@ test("Web Console: 静态资源托管完整性、登录鉴权与 /api/v1/state �
     assert.ok(agJson.onboarding_prompt.includes(agJson.token));
     assert.equal(agJson.agent.enabled, true);
 
+    const devResp = await fetch(`${rt.url}/api/v1/devices`, {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "office-mac", name: "Office Mac" }),
+    });
+    const devJson = await devResp.json();
+    assert.equal(devJson.ok, true);
+    assert.ok(devJson.join_command.includes("install.sh") && devJson.join_command.includes("--join") && devJson.join_command.includes("--device office-mac"));
+    assert.ok(devJson.join_commands?.unix.includes("install.sh"));
+    assert.ok(devJson.join_commands?.windows.includes("install.ps1") && devJson.join_commands?.windows.includes("AH_JOIN"));
+    assert.ok(devJson.join_commands?.cli.startsWith("ah join "));
+
     const stateResp = await fetch(`${rt.url}/api/v1/state`, { headers: { Cookie: cookie } });
     const state = await stateResp.json();
     assert.equal(state.ok, true);
@@ -204,4 +216,7 @@ test("Web Console UI & Templates: 主题变量切换规则、控件可读文字�
 
   const dispatchSrc = fs.readFileSync(path.resolve("src", "web", "components", "dispatch-modal.js"), "utf8");
   assert.ok(dispatchSrc.includes("dispatch-group") && dispatchSrc.includes("#dispatch-agent-search"));
+
+  const addModalSrc = fs.readFileSync(path.resolve("src", "web", "components", "add-modal.js"), "utf8");
+  assert.ok(addModalSrc.includes("data-join-plat") && addModalSrc.includes("Windows PowerShell"));
 });

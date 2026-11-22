@@ -1,188 +1,167 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 660" role="img" aria-labelledby="t">
-<title id="t">Hub → Node → Worker → Skill：派单寻址的四级拓扑</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 640" role="img" aria-labelledby="t">
+<title id="t">a2a-hub v2.0 多节点与多 Agent 编排拓扑</title>
 <defs>
 <style>
-svg{--bg:#faf9f5;--ink:#1d1c19;--muted:#6e6b64;--line:#d6d3cb;--card:#fff;--item:#f4f2ec;--accent:#c2491d;--core:#1d1c19;--core-ink:#faf9f5;--core-duty:#33302a;--core-chip:#282621;--core-line:#423f38;--core-sub:#b9b5ab;--core-accent:#ef8a62;--tag-bg:#3d261c;--tag-ink:#ffb08e;--you-bg:#fff4ee}
-@media (prefers-color-scheme:dark){svg{--bg:#151412;--ink:#f1efe9;--muted:#a29e95;--line:#45433d;--card:#1e1d1a;--item:#262420;--accent:#ef8a62;--core:#f1efe9;--core-ink:#1d1c19;--core-duty:#dedad0;--core-chip:#e6e3da;--core-line:#cac5b9;--core-sub:#57544d;--core-accent:#c2491d;--tag-bg:#f8dfd3;--tag-ink:#a83810;--you-bg:#2a1f1a}}
-text{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Noto Sans CJK SC","Microsoft YaHei",sans-serif;font-size:14px;fill:var(--ink)}
-.h2{font-size:16px;font-weight:600}
-.s{font-size:12px;fill:var(--muted)}
-.r{font-size:13px}
-.l{font-size:12.5px;font-weight:600;fill:var(--accent)}
+svg{--bg:#faf9f5;--ink:#1d1c19;--muted:#6e6b64;--line:#d6d3cb;--card:#fff;--item:#f4f2ec;--accent:#4f46e5;--core:#111113;--core-ink:#fafafa;--core-chip:#1b1b1f;--core-line:#2e2e36;--core-sub:#a1a1aa;--tag-bg:rgba(99,102,241,0.18);--tag-ink:#a5b4fc;--hi-bg:#eef2ff}
+@media (prefers-color-scheme:dark){svg{--bg:#09090b;--ink:#f4f4f5;--muted:#8b8b94;--line:#27272a;--card:#111113;--item:#18181b;--accent:#818cf8;--core:#18181b;--core-ink:#fafafa;--core-chip:#27272a;--core-line:#3f3f46;--core-sub:#a1a1aa;--tag-bg:rgba(99,102,241,0.2);--tag-ink:#c7d2fe;--hi-bg:rgba(99,102,241,0.12)}}
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Noto Sans CJK SC","Microsoft YaHei",sans-serif;font-size:13px;fill:var(--ink)}
 .bg{fill:var(--bg)}
-.plug{fill:var(--card);stroke:var(--muted);stroke-width:1.3;stroke-dasharray:6 5}
-.item{fill:var(--item);stroke:var(--line);stroke-width:1.2}
-.more{fill:none;stroke:var(--line);stroke-dasharray:4 4}
-.core{fill:var(--core);stroke:var(--core-accent);stroke-width:2}
-.tag{fill:var(--tag-bg);stroke:var(--core-accent);stroke-width:1}
-.ct{font-size:20px;font-weight:700;fill:var(--core-ink)}
-.cs{font-size:12.5px;fill:var(--core-sub)}
-.tn{font-size:11px;font-weight:700;fill:var(--tag-ink)}
-.you{fill:var(--you-bg);stroke:var(--accent);stroke-width:2}
-.sn{font-size:15px;font-weight:700}
+.h2{font-size:15px;font-weight:700}
+.s{font-size:11.5px;fill:var(--muted)}
+.l{font-size:12px;font-weight:600;fill:var(--accent)}
+.core{fill:var(--core);stroke:var(--accent);stroke-width:2}
+.ct{font-size:19px;font-weight:700;fill:var(--core-ink)}
+.cs{font-size:12px;fill:var(--core-sub)}
+.chip{fill:var(--core-chip);stroke:var(--core-line);stroke-width:1}
+.cn{font-size:12px;font-weight:600;fill:var(--core-ink)}
+.plug{fill:var(--card);stroke:var(--line);stroke-width:1.4}
+.plug-hi{fill:var(--card);stroke:var(--accent);stroke-width:1.6}
+.item{fill:var(--item);stroke:var(--line);stroke-width:1.1}
+.you{fill:var(--hi-bg);stroke:var(--accent);stroke-width:1.4}
+.sn{font-size:14px;font-weight:700}
 .sd{font-size:11.5px;fill:var(--muted)}
-.flow{fill:none;stroke:var(--muted);stroke-width:1.4;marker-end:url(#b)}
-.dash-flow{fill:none;stroke:var(--accent);stroke-width:1.4;stroke-dasharray:4 4;marker-end:url(#a)}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11px;fill:var(--accent);font-weight:600}
+.tag{fill:var(--tag-bg);stroke:var(--accent);stroke-width:1}
+.tn{font-size:11px;font-weight:600;fill:var(--accent)}
+.flow{fill:none;stroke:var(--muted);stroke-width:1.5;marker-end:url(#b)}
+.dash-flow{fill:none;stroke:var(--accent);stroke-width:1.6;stroke-dasharray:5 4;marker-end:url(#a)}
 .div-line{stroke:var(--line);stroke-width:1;stroke-dasharray:4 4}
 </style>
-<marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" style="fill:var(--accent)"/></marker>
-<marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" style="fill:var(--muted)"/></marker>
+<marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" style="fill:var(--accent)"/></marker>
+<marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" style="fill:var(--muted)"/></marker>
 </defs>
-<rect class="bg" x="0" y="0" width="960" height="660" rx="18"/>
+
+<rect class="bg" x="0" y="0" width="960" height="640" rx="16"/>
 
 <!-- 左侧层级标尺 -->
-<!-- 1. Hub 级标签 -->
-<text x="56" y="58" class="h2" text-anchor="middle">Hub</text>
-<text x="56" y="78" class="s" text-anchor="middle">枢纽</text>
-<path class="div-line" d="M96 136H946"/>
+<text x="52" y="64" class="h2" text-anchor="middle">Hub</text>
+<text x="52" y="82" class="s" text-anchor="middle">统一中台</text>
+<path class="div-line" d="M96 138H942"/>
 
-<!-- 2. Node 级标签 -->
-<text x="56" y="186" class="h2" text-anchor="middle">Node</text>
-<text x="56" y="206" class="s" text-anchor="middle">节点</text>
-<path class="div-line" d="M96 236H946"/>
+<text x="52" y="192" class="h2" text-anchor="middle">Nodes</text>
+<text x="52" y="210" class="s" text-anchor="middle">电脑 / 云端</text>
+<path class="div-line" d="M96 254H942"/>
 
-<!-- 3. Worker 级标签 -->
-<text x="56" y="324" class="h2" text-anchor="middle">Worker</text>
-<text x="56" y="344" class="l" text-anchor="middle">（Agent）</text>
-<path class="div-line" d="M96 464H946"/>
+<text x="52" y="362" class="h2" text-anchor="middle">Workers</text>
+<text x="52" y="380" class="l" text-anchor="middle">能力卡片池</text>
+<path class="div-line" d="M96 492H942"/>
 
-<!-- 4. Skill 级标签 -->
-<text x="56" y="508" class="h2" text-anchor="middle">Skill</text>
-<text x="56" y="528" class="s" text-anchor="middle">技能</text>
+<text x="52" y="544" class="h2" text-anchor="middle">Context</text>
+<text x="52" y="562" class="s" text-anchor="middle">续接 · 协议</text>
 
-<!-- ──────────────── Hub 级 ──────────────── -->
-<rect class="core" x="270" y="32" width="420" height="64" rx="16"/>
-<text x="480" y="58" class="ct" text-anchor="middle">hub（枢纽）</text>
-<text x="480" y="80" class="cs" text-anchor="middle">审批 · 呈递 · 回收 · 复查</text>
+<!-- 1. Hub 层 -->
+<rect class="core" x="150" y="24" width="760" height="94" rx="16"/>
+<text x="530" y="52" class="ct" text-anchor="middle">a2a-hub v2.0 个人编排中台</text>
+<text x="530" y="72" class="cs" text-anchor="middle">Mac mini 本机 (Tailscale / Cloudflare) 或 7×24 云主机 (Railway / Render / Fly.io / Zeabur / Docker)</text>
+<rect class="chip" x="174" y="84" width="166" height="24" rx="6"/>
+<text x="257" y="100" class="cn" text-anchor="middle">SQLite WAL 单文件库</text>
+<rect class="chip" x="352" y="84" width="176" height="24" rx="6"/>
+<text x="440" y="100" class="cn" text-anchor="middle">40s 出站长轮询 + Webhook</text>
+<rect class="chip" x="540" y="84" width="166" height="24" rx="6"/>
+<text x="623" y="100" class="cn" text-anchor="middle">Ed25519 私钥签名审批</text>
+<rect class="chip" x="718" y="84" width="172" height="24" rx="6"/>
+<text x="804" y="100" class="cn" text-anchor="middle">零构建深浅主题 Web 控制台</text>
 
-<!-- Hub 到 Node 级 hub 节点的连线（强调色虚线：hub 也是节点） -->
-<path class="dash-flow" d="M270 64H170Q162 64 162 72V154"/>
-<text x="216" y="55" class="l" text-anchor="middle">hub 也是节点</text>
+<!-- Hub 到 4 个 Node 连线 -->
+<path class="flow" style="marker-end:none" d="M530 118V138"/>
+<path class="flow" d="M530 138H206Q198 138 198 146V158"/>
+<path class="flow" d="M530 138H418Q410 138 410 146V158"/>
+<path class="flow" d="M530 138H618Q626 138 626 146V158"/>
+<path class="dash-flow" d="M530 138H826Q834 138 834 146V158"/>
 
-<!-- Hub 核心块向下分叉连到各节点的连线（灰色平滑总线：Hub → Node） -->
-<path class="flow" style="marker-end:none" d="M480 96V118"/>
-<path class="flow" d="M480 118H412Q404 118 404 126V154"/>
-<path class="flow" d="M480 118H702V154"/>
-<path class="flow" d="M702 118H880Q888 118 888 126V154"/>
+<!-- 2. Node 层 (4个节点) -->
+<rect class="plug-hi" x="108" y="162" width="194" height="74" rx="12"/>
+<text x="205" y="188" class="sn" text-anchor="middle">Mac mini (本机宿主)</text>
+<text x="205" y="207" class="sd" text-anchor="middle">内置 DeviceDaemon · 并发 ≤ 4</text>
+<text x="205" y="224" class="mono" text-anchor="middle">ah up --service</text>
 
-<!-- ──────────────── Node 级 ──────────────── -->
-<!-- 节点 1: hub（独立 Agent 节点） -->
-<rect class="plug" x="104" y="160" width="116" height="64" rx="12"/>
-<text x="162" y="187" class="sn" text-anchor="middle">hub</text>
-<text x="162" y="209" class="sd" text-anchor="middle">独立 Agent 节点</text>
+<rect class="plug" x="318" y="162" width="194" height="74" rx="12"/>
+<text x="415" y="188" class="sn" text-anchor="middle">Linux / GPU 工作站</text>
+<text x="415" y="207" class="sd" text-anchor="middle">纯出站长轮询 · 零入站端口</text>
+<text x="415" y="224" class="mono" text-anchor="middle">install.sh --join</text>
 
-<!-- 节点 2: home-mac（主机节点） -->
-<rect class="plug" x="234" y="160" width="340" height="64" rx="12"/>
-<text x="404" y="187" class="sn" text-anchor="middle">home-mac</text>
-<text x="404" y="209" class="sd" text-anchor="middle">主机节点（host）</text>
+<rect class="plug" x="528" y="162" width="194" height="74" rx="12"/>
+<text x="625" y="188" class="sn" text-anchor="middle">Windows / 办公电脑</text>
+<text x="625" y="207" class="sd" text-anchor="middle">自动装 Node 24 + ah 自启</text>
+<text x="625" y="224" class="mono" text-anchor="middle">install.ps1 (AH_JOIN)</text>
 
-<!-- 节点 3: work-mac（主机节点） -->
-<rect class="plug" x="588" y="160" width="228" height="64" rx="12"/>
-<text x="702" y="187" class="sn" text-anchor="middle">work-mac</text>
-<text x="702" y="209" class="sd" text-anchor="middle">主机节点（host）</text>
+<rect class="plug-hi" x="738" y="162" width="194" height="74" rx="12"/>
+<text x="835" y="188" class="sn" text-anchor="middle">独立 / 云端 Agent</text>
+<text x="835" y="207" class="sd" text-anchor="middle">14 套模板 · 含 Leader 协调</text>
+<text x="835" y="224" class="mono" text-anchor="middle">Poll / Longpoll / Webhook</text>
 
-<!-- 节点 4: agent-box（独立 Agent 节点） -->
-<rect class="plug" x="830" y="160" width="116" height="64" rx="12"/>
-<text x="888" y="187" class="sn" text-anchor="middle">agent-box</text>
-<text x="888" y="209" class="sd" text-anchor="middle">独立 Agent 节点</text>
+<!-- Node 到 Worker 连线 -->
+<path class="flow" d="M205 236V272"/>
+<path class="flow" d="M415 236V272"/>
+<path class="flow" d="M625 236V272"/>
+<path class="dash-flow" d="M835 236V272"/>
 
-<!-- ──────────────── 连线：Node → Worker ──────────────── -->
-<!-- hub 节点到 hub Worker -->
-<path class="flow" d="M162 224V260"/>
+<!-- 3. Worker 卡片组 -->
+<!-- Mac mini Workers -->
+<rect class="plug" x="108" y="276" width="194" height="198" rx="12"/>
+<text x="205" y="298" class="l" text-anchor="middle">本机 CLI Worker (示例)</text>
+<rect class="item" x="120" y="310" width="170" height="32" rx="7"/>
+<text x="205" y="330" class="sn" style="font-size:12.5px" text-anchor="middle">Claude Code · Codex CLI</text>
+<rect class="item" x="120" y="348" width="170" height="32" rx="7"/>
+<text x="205" y="368" class="sn" style="font-size:12.5px" text-anchor="middle">Amp · Droid · Agy · Grok</text>
+<rect class="item" x="120" y="386" width="170" height="32" rx="7"/>
+<text x="205" y="406" class="sn" style="font-size:12.5px" text-anchor="middle">Cursor · CodeBuddy · OpenCode</text>
+<rect class="tag" x="120" y="428" width="170" height="32" rx="7"/>
+<text x="205" y="448" class="tn" text-anchor="middle">同 context_id 自动 --resume</text>
 
-<!-- home-mac 节点到 3 个 Worker/槽（平滑分叉总线） -->
-<path class="flow" d="M404 224V260"/>
-<path class="flow" d="M404 236Q404 244 396 244H301Q293 244 293 252V260"/>
-<path class="flow" d="M404 236Q404 244 412 244H506Q514 244 514 252V260"/>
+<!-- Linux Workers -->
+<rect class="plug" x="318" y="276" width="194" height="198" rx="12"/>
+<text x="415" y="298" class="l" text-anchor="middle">远端工作站 CLI</text>
+<rect class="item" x="330" y="310" width="170" height="32" rx="7"/>
+<text x="415" y="330" class="sn" style="font-size:12.5px" text-anchor="middle">Qwen Code · Kimi CLI</text>
+<rect class="item" x="330" y="348" width="170" height="32" rx="7"/>
+<text x="415" y="368" class="sn" style="font-size:12.5px" text-anchor="middle">Cline · Kilo · OpenHands</text>
+<rect class="item" x="330" y="386" width="170" height="32" rx="7"/>
+<text x="415" y="406" class="sn" style="font-size:12.5px" text-anchor="middle">Aider · Goose · Crush · Pi</text>
+<rect class="tag" x="330" y="428" width="170" height="32" rx="7"/>
+<text x="415" y="448" class="tn" text-anchor="middle">共支持 26 种 CLI 自动发现</text>
 
-<!-- work-mac 节点到 2 个 Worker（平滑分叉总线） -->
-<path class="flow" d="M702 224V236Q702 244 694 244H655Q647 244 647 252V260"/>
-<path class="flow" d="M702 224V236Q702 244 710 244H749Q757 244 757 252V260"/>
+<!-- Windows Workers -->
+<rect class="plug" x="528" y="276" width="194" height="198" rx="12"/>
+<text x="625" y="298" class="l" text-anchor="middle">办公机 &amp; 自定义脚本</text>
+<rect class="item" x="540" y="310" width="170" height="32" rx="7"/>
+<text x="625" y="330" class="sn" style="font-size:12.5px" text-anchor="middle">Copilot · Gemini · Kiro CLI</text>
+<rect class="item" x="540" y="348" width="170" height="32" rx="7"/>
+<text x="625" y="368" class="sn" style="font-size:12.5px" text-anchor="middle">Auggie · Devin · Vibe · iFlow</text>
+<rect class="item" x="540" y="386" width="170" height="32" rx="7"/>
+<text x="625" y="406" class="sn" style="font-size:12.5px" text-anchor="middle">本地构建 / 测试 / 运维脚本</text>
+<rect class="tag" x="540" y="428" width="170" height="32" rx="7"/>
+<text x="625" y="448" class="tn" text-anchor="middle">本地 workers.json 指令隔离</text>
 
-<!-- agent-box 节点到 agent-box Worker -->
-<path class="flow" d="M888 224V260"/>
+<!-- Cloud / Leader Workers -->
+<rect class="plug-hi" x="738" y="276" width="194" height="198" rx="12"/>
+<text x="835" y="298" class="l" text-anchor="middle">Leader 与云端生态</text>
+<rect class="you" x="750" y="310" width="170" height="44" rx="7"/>
+<text x="835" y="329" class="sn" style="font-size:12.5px" text-anchor="middle">Muse / OpenClaw (Leader)</text>
+<text x="835" y="346" class="s" text-anchor="middle">to: [...] 并发扇出 + 增量消费</text>
+<rect class="item" x="750" y="362" width="170" height="32" rx="7"/>
+<text x="835" y="382" class="sn" style="font-size:12.5px" text-anchor="middle">Grok Bot · Manus · Kimi</text>
+<rect class="item" x="750" y="400" width="170" height="32" rx="7"/>
+<text x="835" y="420" class="sn" style="font-size:12.5px" text-anchor="middle">Coze · Dify · n8n · 飞书 · 豆包</text>
+<rect class="tag" x="750" y="438" width="170" height="24" rx="6"/>
+<text x="835" y="454" class="tn" text-anchor="middle">14 套预设生成自包含提示词</text>
 
-<!-- ──────────────── Worker 级 ──────────────── -->
-<!-- 1. hub Worker（本尊即 Worker） -->
-<rect class="you" x="106" y="266" width="112" height="136" rx="12"/>
-<text x="162" y="292" class="sn" text-anchor="middle">hub</text>
-<rect class="tag" x="118" y="302" width="88" height="20" rx="5"/>
-<text x="162" y="316" class="tn" text-anchor="middle">本尊即 Worker</text>
-<text x="162" y="338" class="sd" text-anchor="middle">inbox</text>
-<text x="162" y="364" class="r" text-anchor="middle">通用执行</text>
-<text x="162" y="384" class="s" text-anchor="middle">Skill_ID=agent</text>
+<!-- 4. 底部 Context 与 2x2 Skill 总结 -->
+<rect class="item" x="108" y="510" width="268" height="96" rx="10"/>
+<text x="242" y="535" class="sn" text-anchor="middle">Context_ID 跨任务统一线程</text>
+<text x="242" y="556" class="s" text-anchor="middle">多节点并发扇出的子任务自动汇入同一线程</text>
+<text x="242" y="574" class="s" text-anchor="middle">后续追派自动注入前情 + 续接本地 CLI 会话</text>
+<text x="242" y="592" class="mono" text-anchor="middle">(context_id, worker_key) 串行锁保护</text>
 
-<!-- 2. home-mac 下 Worker agy -->
-<rect class="you" x="242" y="266" width="102" height="136" rx="12"/>
-<text x="293" y="295" class="sn" text-anchor="middle">agy</text>
-<text x="293" y="318" class="l" text-anchor="middle">Worker</text>
-<text x="293" y="352" class="r" text-anchor="middle">通用执行</text>
-<text x="293" y="372" class="s" text-anchor="middle">Skill_ID=agent</text>
+<rect class="item" x="392" y="510" width="268" height="96" rx="10"/>
+<text x="526" y="535" class="sn" text-anchor="middle">2×2 标准化 Agent Skills</text>
+<text x="526" y="556" class="s" text-anchor="middle">本机控制台 CLI：skills/ah（含 ah workers scan）</text>
+<text x="526" y="574" class="s" text-anchor="middle">无头长驻执行端：skills/ah-inbox</text>
+<text x="526" y="592" class="s" text-anchor="middle">纯 HTTP 云端：a2a-leader / a2a-worker</text>
 
-<!-- 3. home-mac 下 Worker paseo -->
-<rect class="you" x="352" y="266" width="102" height="136" rx="12"/>
-<text x="403" y="295" class="sn" text-anchor="middle">paseo</text>
-<text x="403" y="318" class="l" text-anchor="middle">Worker</text>
-<text x="403" y="352" class="r" text-anchor="middle">通用执行</text>
-<text x="403" y="372" class="s" text-anchor="middle">Skill_ID=agent</text>
-
-<!-- 4. home-mac 下 节点本尊（非 Worker）虚线槽 -->
-<rect class="more" x="462" y="266" width="104" height="136" rx="12"/>
-<text x="514" y="296" class="r" text-anchor="middle" style="font-weight:600">节点本尊</text>
-<text x="514" y="316" class="s" text-anchor="middle">（非 Worker）</text>
-<text x="514" y="352" class="s" text-anchor="middle">直接执行</text>
-<text x="514" y="372" class="s" text-anchor="middle">无 Worker 名片</text>
-
-<!-- 5. work-mac 下 Worker agy -->
-<rect class="you" x="596" y="266" width="102" height="136" rx="12"/>
-<text x="647" y="295" class="sn" text-anchor="middle">agy</text>
-<text x="647" y="318" class="l" text-anchor="middle">Worker</text>
-<text x="647" y="352" class="r" text-anchor="middle">通用执行</text>
-<text x="647" y="372" class="s" text-anchor="middle">Skill_ID=agent</text>
-
-<!-- 6. work-mac 下 Worker claude -->
-<rect class="you" x="706" y="266" width="102" height="136" rx="12"/>
-<text x="757" y="295" class="sn" text-anchor="middle">claude</text>
-<text x="757" y="318" class="l" text-anchor="middle">Worker</text>
-<text x="757" y="352" class="r" text-anchor="middle">通用执行</text>
-<text x="757" y="372" class="s" text-anchor="middle">Skill_ID=agent</text>
-
-<!-- 7. agent-box Worker（本尊即 Worker） -->
-<rect class="you" x="832" y="266" width="112" height="136" rx="12"/>
-<text x="888" y="292" class="sn" text-anchor="middle">agent-box</text>
-<rect class="tag" x="844" y="302" width="88" height="20" rx="5"/>
-<text x="888" y="316" class="tn" text-anchor="middle">本尊即 Worker</text>
-<text x="888" y="338" class="sd" text-anchor="middle">inbox</text>
-<text x="888" y="364" class="r" text-anchor="middle">通用执行</text>
-<text x="888" y="384" class="s" text-anchor="middle">Skill_ID=agent</text>
-
-<!-- ──────────────── 连线：Worker → Skill ──────────────── -->
-<!-- agy -> ops-check -->
-<path class="flow" d="M293 402V484"/>
-
-<!-- 节点本尊 -> daily-briefing -->
-<path class="flow" d="M514 402V484"/>
-
-<!-- claude -> review -->
-<path class="flow" d="M757 402V484"/>
-
-<!-- ──────────────── Skill 级 ──────────────── -->
-<!-- 1. ops-check 芯片 -->
-<rect class="item" x="242" y="490" width="102" height="52" rx="8"/>
-<text x="293" y="513" class="r" text-anchor="middle" style="font-weight:600">ops-check</text>
-<text x="293" y="531" class="s" text-anchor="middle">专长技能</text>
-
-<!-- 2. daily-briefing 芯片（本尊脚本） -->
-<rect class="item" x="462" y="490" width="104" height="52" rx="8"/>
-<text x="514" y="513" class="r" text-anchor="middle" style="font-weight:600">daily-briefing</text>
-<text x="514" y="531" class="s" text-anchor="middle">本尊脚本</text>
-
-<!-- 3. review 芯片 -->
-<rect class="item" x="706" y="490" width="102" height="52" rx="8"/>
-<text x="757" y="513" class="r" text-anchor="middle" style="font-weight:600">review</text>
-<text x="757" y="531" class="s" text-anchor="middle">专长技能</text>
-
-<!-- ──────────────── 底部图例 ──────────────── -->
-<rect class="item" x="96" y="598" width="850" height="34" rx="8"/>
-<text x="521" y="620" class="s" text-anchor="middle">派单寻址：--to &lt;节点&gt; --worker &lt;Worker&gt; --cap &lt;技能&gt; · 名片 Cap_ID：CAP-&lt;前缀&gt;-&lt;Worker&gt;-&lt;技能&gt; · 只点 Worker = 通用执行</text>
+<rect class="item" x="676" y="510" width="256" height="96" rx="10"/>
+<text x="804" y="535" class="sn" text-anchor="middle">定时巡检与实时告警</text>
+<text x="804" y="556" class="s" text-anchor="middle">Worker / 云端 Agent 定时心跳自报与超期检测</text>
+<text x="804" y="574" class="s" text-anchor="middle">最近 10 次状态柱条直达对应对话线程</text>
+<text x="804" y="592" class="s" text-anchor="middle">支持飞书 / Bark / Telegram / Webhook 提醒</text>
 </svg>
