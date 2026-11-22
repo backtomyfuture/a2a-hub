@@ -8,10 +8,10 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { f1 } from "../src/bus/tables.mjs";
-import { capIdOf, capIdsOf, controlKeysIn, normalizeCommands, resolveCapKey } from "../src/config.mjs";
+import { canExecuteModel, capIdOf, capIdsOf, controlKeysIn, normalizeCommands, resolveCapKey } from "../src/config.mjs";
 import { createTask, parseCreateArgv } from "../src/hub/create.mjs";
 import { Kernel } from "../src/kernel.mjs";
-import { buildAgentCommands } from "../src/setup.mjs";
+import { buildAgentCommands, discoverLocalAgents } from "../src/setup.mjs";
 import { withTemp, TABLES } from "./helpers.mjs";
 import { MockBus } from "./mocks/mock-bus.mjs";
 
@@ -258,3 +258,68 @@ test("setup：检测到的 Agent 写进 workers，并取代旧的扁平条目", 
   assert.deepEqual(out.workers, { agy: entry });
   assert.deepEqual([...capIdsOf(out, "mini")].sort(), ["CAP-mini-agy-agent", "CAP-mini-briefing"]);
 });
+
+test("setup：discoverLocalAgents 排除 paseo/orca，并为支持的 harness 注入 {model_args} 与扫描 default_model", async () => withTemp(async (dir) => {
+  const binDir = path.join(dir, "bin");
+  const homeDir = path.join(dir, "home");
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.mkdirSync(path.join(homeDir, ".claude"), { recursive: true });
+  fs.mkdirSync(path.join(homeDir, ".codex"), { recursive: true });
+  fs.mkdirSync(path.join(homeDir, ".grok"), { recursive: true });
+  fs.mkdirSync(path.join(homeDir, ".gemini", "antigravity-cli"), { recursive: true });
+  fs.mkdirSync(path.join(homeDir, ".config", "opencode"), { recursive: true });
+  fs.mkdirSync(path.join(homeDir, ".cursor"), { recursive: true });
+
+  for (const name of ["claude", "codex", "grok", "agy", "droid", "cursor-agent", "opencode", "paseo", "orca"]) {
+    const binPath = path.join(binDir, name);
+    fs.writeFileSync(binPath, "#!/bin/sh\nexit 0\n");
+    fs.chmodSync(binPath, 0o755);
+  }
+  fs.writeFileSync(path.join(homeDir, ".claude", "settings.json"), JSON.stringify({ model: "sonnet" }));
+  fs.writeFileSync(path.join(homeDir, ".codex", "config.toml"), 'model = "gpt-5.4"\n[profiles.fast]\nmodel = "ignored"\n');
+  fs.writeFileSync(path.join(homeDir, ".grok", "config.toml"), '[cli]\nauto_update = true\n[models]\ndefault = "grok-4"\n');
+  fs.writeFileSync(path.join(homeDir, ".gemini", "antigravity-cli", "settings.json"), JSON.stringify({ model: "Gemini 4 Neon" }));
+  fs.writeFileSync(path.join(homeDir, ".config", "opencode", "opencode.json"), JSON.stringify({ model: "anthropic/claude-sonnet" }));
+  fs.writeFileSync(path.join(homeDir, ".cursor", "cli-config.json"), JSON.stringify({ model: { modelId: "gpt-5" } }));
+
+  const discovered = discoverLocalAgents({ homeDir, pathEnv: binDir });
+  const workers = discovered.map((a) => a.worker);
+  assert.deepEqual(workers, ["claude", "codex", "agy", "droid", "grok", "cursor", "opencode"]);
+
+  const byWorker = Object.fromEntries(discovered.map((a) => [a.worker, a.entry]));
+  assert.equal(byWorker.claude.harness, "claude");
+  assert.equal(byWorker.claude.default_model, "sonnet");
+  assert.match(byWorker.claude.command, /\{model_args\}/);
+  assert.match(byWorker.claude.resume_command, /\{model_args\}/);
+  assert.equal(canExecuteModel(byWorker.claude), true);
+
+  assert.equal(byWorker.codex.harness, "codex");
+  assert.equal(byWorker.codex.default_model, "gpt-5.4");
+  assert.match(byWorker.codex.command, /\{model_args\}/);
+  assert.equal(canExecuteModel(byWorker.codex), true);
+
+  assert.equal(byWorker.grok.harness, "grok");
+  assert.equal(byWorker.grok.default_model, "grok-4");
+  assert.match(byWorker.grok.command, /\{model_args\}/);
+  assert.equal(canExecuteModel(byWorker.grok), true);
+
+  assert.equal(byWorker.agy.harness, "agy");
+  assert.equal(byWorker.agy.default_model, "Gemini 4 Neon");
+  assert.match(byWorker.agy.command, /\{model_args\} --print/);
+  assert.equal(canExecuteModel(byWorker.agy), true);
+
+  assert.equal(byWorker.droid.harness, "droid");
+  assert.equal(byWorker.droid.default_model, undefined);
+  assert.match(byWorker.droid.command, /\{model_args\}/);
+  assert.equal(canExecuteModel(byWorker.droid), true);
+
+  assert.equal(byWorker.cursor.harness, "cursor");
+  assert.equal(byWorker.cursor.default_model, "gpt-5");
+  assert.match(byWorker.cursor.command, /\{model_args\}/);
+  assert.equal(canExecuteModel(byWorker.cursor), true);
+
+  assert.equal(byWorker.opencode.harness, "opencode");
+  assert.equal(byWorker.opencode.default_model, "anthropic/claude-sonnet");
+  assert.match(byWorker.opencode.command, /\{model_args\}/);
+  assert.equal(canExecuteModel(byWorker.opencode), true);
+}));

@@ -131,8 +131,8 @@ function richPath() {
   return [...new Set([...extra, ...cur])].join(path.delimiter);
 }
 
-function findExecutable(binName) {
-  const dirs = richPath().split(path.delimiter);
+function findExecutable(binName, searchPath = richPath()) {
+  const dirs = String(searchPath).split(path.delimiter);
   for (const dir of dirs) {
     if (!dir) continue;
     const fullPath = path.join(dir, binName);
@@ -172,26 +172,29 @@ const KNOWN_AGENTS = [
   {
     bin: "claude",
     skill: "claude-agent",
+    harness: "claude",
     name: "Claude Code Agent",
     // 无头 -p 会停在权限确认，没人点就卡住；跳过权限必须写进模板。
-    cmdTemplate: (b) => `${b} -p --dangerously-skip-permissions {prompt}`,
-    resumeTemplate: (b) => `${b} --resume {session} -p --dangerously-skip-permissions {prompt}`,
+    cmdTemplate: (b) => `${b} -p --dangerously-skip-permissions {model_args} {prompt}`,
+    resumeTemplate: (b) => `${b} --resume {session} -p --dangerously-skip-permissions {model_args} {prompt}`,
     desc: "以 Claude Code (claude) 为执行主体，带本机终端与文件工具面处理开发、排障与自动化任务",
   },
   {
     bin: "codex",
     skill: "codex-agent",
+    harness: "codex",
     name: "Codex Agent",
     // 默认沙箱是只读档，写类任务必失败，所以模板钉 workspace-write。
-    cmdTemplate: (b) => `${b} exec --sandbox workspace-write {prompt}`,
+    cmdTemplate: (b) => `${b} exec --sandbox workspace-write {model_args} {prompt}`,
     desc: "以 OpenAI Codex CLI (codex) 为执行主体，处理代码编写、终端排障与自动化任务",
   },
   {
     bin: "agy",
     skill: "agy-agent",
+    harness: "agy",
     name: "Antigravity Agent",
-    // --print 会把紧随其后的参数当成 prompt 吞掉，批准参数必须放在 --print 前面（本机实测）。
-    cmdTemplate: (b) => `${b} --dangerously-skip-permissions --print {prompt}`,
+    // --print 会把紧随其后的参数当成 prompt 吞掉，批准参数与 {model_args} 必须放在 --print 前面（本机实测）。
+    cmdTemplate: (b) => `${b} --dangerously-skip-permissions {model_args} --print {prompt}`,
     desc: "以 Antigravity (agy) 为执行主体，带本机终端与工具面处理开放式开发与运维任务",
   },
   {
@@ -213,16 +216,18 @@ const KNOWN_AGENTS = [
   {
     bin: "droid",
     skill: "droid-agent",
+    harness: "droid",
     name: "Factory Droid Agent",
     // 分级自治取中档，避免默认停在确认，也不放到最高档。
-    cmdTemplate: (b) => `${b} exec --auto medium {prompt}`,
+    cmdTemplate: (b) => `${b} exec --auto medium {model_args} {prompt}`,
     desc: "以 Factory Droid (droid) 为执行主体，处理本地开发、重构与终端自动化任务",
   },
   {
     bin: "grok",
     skill: "grok-agent",
+    harness: "grok",
     name: "Grok CLI Agent",
-    cmdTemplate: (b) => `${b} -p {prompt}`,
+    cmdTemplate: (b) => `${b} -p {model_args} {prompt}`,
     desc: "以本机 Grok CLI (grok) 为执行主体，处理调研、分析与本地工具执行任务",
   },
   {
@@ -235,17 +240,19 @@ const KNOWN_AGENTS = [
   {
     bin: "cursor-agent",
     skill: "cursor-agent",
+    harness: "cursor",
     name: "Cursor Agent",
-    cmdTemplate: (b) => `${b} -p {prompt}`,
+    cmdTemplate: (b) => `${b} -p {model_args} {prompt}`,
     desc: "以 Cursor Agent (cursor-agent) 为执行主体，处理代码编辑与本机终端任务",
   },
   {
     bin: "opencode",
     skill: "opencode-agent",
+    harness: "opencode",
     name: "OpenCode Agent",
     // 无头 run 需要显式放开权限。参数名有版本差异，以目标机 opencode --help 为准：
     // 本机较新版本 --help 可见的是 --auto；--dangerously-skip-permissions 是旧名/隐藏别名。
-    cmdTemplate: (b) => `${b} run --dangerously-skip-permissions {prompt}`,
+    cmdTemplate: (b) => `${b} run --dangerously-skip-permissions {model_args} {prompt}`,
     desc: "以 OpenCode (opencode) 为执行主体，处理本地编程与自动化任务",
   },
   {
@@ -255,28 +262,75 @@ const KNOWN_AGENTS = [
     cmdTemplate: (b) => `${b} --message {prompt} --yes`,
     desc: "以 Aider (aider) 为执行主体，处理本地代码修改任务",
   },
-  {
-    bin: "paseo",
-    skill: "paseo-agent",
-    name: "Paseo Agent",
-    // 不写 --provider 时没有默认执行主体，运行必失败（mba/mini 两台因此集体翻车）。
-    // 非交互沿用 antigravity；交互模式在选中后再问，并回填这条命令。
-    cmdTemplate: (b) => paseoRunCommand(b),
-    desc: "以 Paseo (paseo) 为执行主体，调度 Paseo 宿主或 Agent 执行复杂编排任务",
-  },
-  {
-    bin: "orca",
-    skill: "orca-agent",
-    name: "Orca Agent",
-    cmdTemplate: (b) => `${b} task run {prompt}`,
-    desc: "以 Orca CLI (orca) 为执行主体，带多 Agent 与工作区环境执行终端与协同任务",
-  },
 ];
 
-export function discoverLocalAgents() {
+// 从各 CLI 本地配置读取默认模型，避免初始化后还得手动翻配置文件补 default_model；读不到则静默留空。
+function readTomlSectionKey(text, targetSection, keyName) {
+  let section = "";
+  for (const rawLine of String(text ?? "").split(/\r?\n/)) {
+    const line = rawLine.replace(/#.*$/, "").trim();
+    if (!line) continue;
+    const sec = line.match(/^\[([^\]]+)\]$/);
+    if (sec) {
+      section = sec[1].trim();
+      continue;
+    }
+    if (section !== targetSection) continue;
+    const m = line.match(new RegExp(`^${keyName}\\s*=\\s*(?:"([^"]+)"|'([^']+)')`));
+    if (m) {
+      const val = (m[1] ?? m[2] ?? "").trim();
+      if (val) return val;
+    }
+  }
+  return null;
+}
+
+export function detectDefaultModel(harness, homeDir = os.homedir()) {
+  try {
+    if (harness === "claude") {
+      const raw = JSON.parse(fs.readFileSync(path.join(homeDir, ".claude", "settings.json"), "utf8"));
+      const m = typeof raw?.model === "string" ? raw.model.trim() : "";
+      return m || null;
+    }
+    if (harness === "codex") {
+      const text = fs.readFileSync(path.join(homeDir, ".codex", "config.toml"), "utf8");
+      return readTomlSectionKey(text, "", "model");
+    }
+    if (harness === "grok") {
+      const text = fs.readFileSync(path.join(homeDir, ".grok", "config.toml"), "utf8");
+      return readTomlSectionKey(text, "models", "default");
+    }
+    if (harness === "agy") {
+      const raw = JSON.parse(fs.readFileSync(path.join(homeDir, ".gemini", "antigravity-cli", "settings.json"), "utf8"));
+      const m = typeof raw?.model === "string" ? raw.model.trim() : "";
+      return m || null;
+    }
+    if (harness === "opencode") {
+      const raw = JSON.parse(fs.readFileSync(path.join(homeDir, ".config", "opencode", "opencode.json"), "utf8"));
+      const m = typeof raw?.model === "string" ? raw.model.trim() : "";
+      return m || null;
+    }
+    if (harness === "droid") {
+      const raw = JSON.parse(fs.readFileSync(path.join(homeDir, ".factory", "settings.json"), "utf8"));
+      const m = typeof raw?.model === "string" ? raw.model.trim() : "";
+      return m || null;
+    }
+    if (harness === "cursor") {
+      const raw = JSON.parse(fs.readFileSync(path.join(homeDir, ".cursor", "cli-config.json"), "utf8"));
+      const m = typeof raw?.model === "string" ? raw.model.trim() : typeof raw?.model?.modelId === "string" ? raw.model.modelId.trim() : "";
+      return m && m !== "default" ? m : null;
+    }
+  } catch {
+    /* 本地配置文件不存在或格式非预期时，静默回退 CLI 默认 */
+  }
+  return null;
+}
+
+export function discoverLocalAgents({ homeDir = os.homedir(), pathEnv } = {}) {
   const discovered = [];
+  const searchPath = pathEnv ?? richPath();
   for (const item of KNOWN_AGENTS) {
-    const fullPath = findExecutable(item.bin);
+    const fullPath = findExecutable(item.bin, searchPath);
     if (fullPath) {
       const entry = {
         command: item.cmdTemplate(fullPath),
@@ -289,6 +343,11 @@ export function discoverLocalAgents() {
       };
       if (item.resumeTemplate) {
         entry.resume_command = item.resumeTemplate(fullPath);
+      }
+      if (item.harness) {
+        entry.harness = item.harness;
+        const defaultModel = detectDefaultModel(item.harness, homeDir);
+        if (defaultModel) entry.default_model = defaultModel;
       }
       discovered.push({
         ...item,
@@ -314,40 +373,6 @@ export function buildAgentCommands(selectedAgents, existingCommands = {}) {
   }
   if (Object.keys(workers).length) result.workers = workers;
   return result;
-}
-
-// provider 空则 antigravity：paseo 没有默认执行主体时运行必失败。
-// model 空只写 --provider <p>；非空写成 --provider <p>/<model>，钉在节点本地模板里。
-export function formatPaseoProviderSpec(provider, model) {
-  const p = String(provider ?? "").trim() || "antigravity";
-  const m = String(model ?? "").trim();
-  return m ? `${p}/${m}` : p;
-}
-
-export function paseoRunCommand(binPath, provider, model) {
-  return `${binPath} agent run --provider ${formatPaseoProviderSpec(provider, model)} {prompt}`;
-}
-
-// 问题发生在「选了哪些 Agent」之后：没选 paseo 就不问。答案回填 command，
-// 不改 cmdTemplate 的一元形状（discover 时还没有用户答案）。
-async function applyPaseoInteractive(selectedAgents, ask) {
-  const out = [];
-  for (const agent of selectedAgents) {
-    if (agent.skill !== "paseo-agent") {
-      out.push(agent);
-      continue;
-    }
-    const provider = await ask("Worker paseo 默认 provider", "antigravity");
-    const model = await ask("Worker paseo 默认 model（可留空）", "");
-    out.push({
-      ...agent,
-      entry: {
-        ...agent.entry,
-        command: paseoRunCommand(agent.path, provider, model),
-      },
-    });
-  }
-  return out;
 }
 
 function readLockedAppEnv(configDir) {
@@ -523,7 +548,8 @@ async function finalizeSetup({ configDir, appDir, role, kind, node, prefix, bus,
     if (discoveredAgents.length > 0) {
       console.log(`\n  · 扫描到本机已安装 ${discoveredAgents.length} 个终端 Agent：`);
       discoveredAgents.forEach((a, idx) => {
-        console.log(`    ${idx + 1}. [${a.worker}] ${a.name} (${a.path})`);
+        const modelHint = a.entry.default_model ? `, model=${a.entry.default_model}` : "";
+        console.log(`    ${idx + 1}. [${a.worker}] ${a.name} (${a.path}${modelHint})`);
       });
 
       let pick = "all";
@@ -543,7 +569,6 @@ async function finalizeSetup({ configDir, appDir, role, kind, node, prefix, bus,
       console.log("  · 未扫描到常见本机终端 Agent（本机暂无可接单能力，装好后重跑 ah setup 或手写 commands.json）");
     }
 
-    if (interactive) selectedAgents = await applyPaseoInteractive(selectedAgents, ask);
     const baseCmds = (!cmdExisted || isExample) ? {} : existingCmds;
     finalCmds = buildAgentCommands(selectedAgents, baseCmds);
   }

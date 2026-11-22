@@ -14,7 +14,15 @@ export function modelAuditOf(rawMetadata) {
 }
 
 // 执行适配器只知道原生 CLI 参数，不维护任何模型标识表。
-const MODEL_FLAGS = Object.freeze({ claude: "--model", codex: "--model", grok: "--model" });
+const MODEL_FLAGS = Object.freeze({
+  claude: "--model",
+  codex: "--model",
+  grok: "--model",
+  agy: "--model",
+  droid: "--model",
+  cursor: "--model",
+  opencode: "--model",
+});
 export function modelArgs(harness, model) {
   if (model === null) return [];
   const flag = Object.hasOwn(MODEL_FLAGS, harness) ? MODEL_FLAGS[harness] : null;
