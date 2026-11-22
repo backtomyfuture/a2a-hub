@@ -20,6 +20,12 @@ import {
 } from "../core/config.mjs";
 import { shellQuote } from "../core/receipt.mjs";
 import {
+  MCP_PROTOCOL_VERSION,
+  handleMcpRpcMessage,
+  resolveMcpActorContext,
+} from "../core/mcp-server.mjs";
+import {
+  buildAgentMcpOnboarding,
   buildAgentOnboardingPrompt,
   buildDeviceJoinCommands,
   findTemplate,
@@ -358,6 +364,65 @@ export function startHubHttpServer({
       }
       return true;
     };
+
+    // ---- 2.5 原生 Streamable HTTP MCP 网关入口 (JSON-RPC 2.0) ----
+    if (pathname === "/api/v1/mcp") {
+      const requestedAgentId = req.headers["x-a2a-node"] || url.searchParams.get("agent") || "";
+      const requestedRole = req.headers["x-a2a-role"] || url.searchParams.get("role") || "";
+      const mcpCtx = resolveMcpActorContext(actor, store, {
+        requestedAgentId,
+        requestedRole,
+      });
+
+      if (method === "GET") {
+        return sendJson(res, 200, {
+          ok: true,
+          protocol: "mcp",
+          protocolVersion: MCP_PROTOCOL_VERSION,
+          serverInfo: { name: "a2a-hub", version: DAEMON_VERSION },
+          actor: {
+            kind: mcpCtx.actorKind,
+            agent_id: mcpCtx.agentId,
+            role: mcpCtx.role,
+          },
+        });
+      }
+
+      if (method === "DELETE") {
+        return sendJson(res, 200, { ok: true });
+      }
+
+      if (method === "POST") {
+        const buf = await readRawBody(req, MAX_JSON_BODY_BYTES);
+        const raw = buf.toString("utf8").trim();
+        let rpcPayload;
+        try {
+          rpcPayload = raw ? JSON.parse(raw) : null;
+        } catch {
+          return sendJson(res, 200, {
+            jsonrpc: "2.0",
+            id: null,
+            error: { code: -32700, message: "Parse error" },
+          });
+        }
+        const ac = new AbortController();
+        req.on("close", () => ac.abort());
+        const rpcRes = await handleMcpRpcMessage(rpcPayload, {
+          ...mcpCtx,
+          store,
+          taskService,
+          broker,
+          formatAgentsPublicList,
+          signal: ac.signal,
+        });
+        if (rpcRes === null) {
+          res.writeHead(202, { "Cache-Control": "no-store" });
+          res.end();
+          return;
+        }
+        return sendJson(res, 200, rpcRes);
+      }
+    }
 
     // ---- 3. Web 控制台状态与长轮询 ----
     if (method === "GET" && pathname === "/api/v1/state") {
@@ -704,7 +769,12 @@ export function startHubHttpServer({
         return sendError(res, 403, "无权同步其他设备", "forbidden");
       }
       const body = await readJsonBody(req);
-      const workers = Array.isArray(body.workers) ? body.workers : [];
+      const isLocalHubDevice = Boolean(hubDeviceId && devId === hubDeviceId && fs.existsSync(path.join(configDir, "workers.json")));
+      const workers = isLocalHubDevice
+        ? loadWorkersJson(configDir)
+        : Array.isArray(body.workers)
+          ? body.workers
+          : [];
       const synced = store.syncDeviceWorkers(devId, workers, {
         platform: body.platform,
         os_info: body.os_info,
@@ -828,6 +898,12 @@ export function startHubHttpServer({
         token,
         template: tpl,
       });
+      const mcp_onboarding = buildAgentMcpOnboarding({
+        hubUrl: getHubUrl(),
+        agent,
+        token,
+        template: tpl,
+      });
 
       return sendJson(res, 201, {
         ok: true,
@@ -835,6 +911,7 @@ export function startHubHttpServer({
         token,
         hub_url: getHubUrl(),
         onboarding_prompt,
+        mcp_onboarding,
       });
     }
 
@@ -935,7 +1012,13 @@ export function startHubHttpServer({
         token: rotated.token,
         template: tpl,
       });
-      return sendJson(res, 200, { ok: true, ...rotated, onboarding_prompt });
+      const mcp_onboarding = buildAgentMcpOnboarding({
+        hubUrl: getHubUrl(),
+        agent: rotated.agent,
+        token: rotated.token,
+        template: tpl,
+      });
+      return sendJson(res, 200, { ok: true, ...rotated, onboarding_prompt, mcp_onboarding });
     }
 
     m = /^\/api\/v1\/agents\/([A-Za-z0-9._-]+)\/onboarding$/.exec(pathname);
@@ -944,13 +1027,20 @@ export function startHubHttpServer({
       const ag = store.getAgent(m[1]);
       if (!ag) return sendError(res, 404, "Agent 不存在", "not_found");
       const tpl = findTemplate(configDir, ag.platform);
+      const placeholderTok = `<使用已有 Token(${ag.token_prefix})；若遗忘请点击「重新生成 Token」>`;
       const onboarding_prompt = buildAgentOnboardingPrompt({
         hubUrl: getHubUrl(),
         agent: ag,
-        token: `<使用已有 Token(${ag.token_prefix})；若遗忘请点击「重新生成 Token」>`,
+        token: placeholderTok,
         template: tpl,
       });
-      return sendJson(res, 200, { ok: true, agent: ag, onboarding_prompt });
+      const mcp_onboarding = buildAgentMcpOnboarding({
+        hubUrl: getHubUrl(),
+        agent: ag,
+        token: placeholderTok,
+        template: tpl,
+      });
+      return sendJson(res, 200, { ok: true, agent: ag, onboarding_prompt, mcp_onboarding });
     }
 
     m = /^\/api\/v1\/agents\/([A-Za-z0-9._-]+)\/webhook-test$/.exec(pathname);

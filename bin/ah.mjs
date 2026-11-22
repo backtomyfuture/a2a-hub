@@ -24,6 +24,7 @@ import { DeviceDaemon } from "../src/client/device-daemon.mjs";
 import { AgentDaemon } from "../src/client/agent-daemon.mjs";
 import { GatewayClient } from "../src/client/gateway-client.mjs";
 import { parseSimpleFlags, runInboxCommand, runPresentCommand } from "../src/client/inbox.mjs";
+import { runMcpStdioCommand } from "../src/core/mcp-server.mjs";
 import { runDeviceJoin, runHubSetup, runInteractiveSetup } from "../src/cli/setup.mjs";
 import { runDoctor } from "../src/cli/doctor.mjs";
 import { runExpose } from "../src/cli/expose.mjs";
@@ -105,6 +106,8 @@ function helpText() {
   ah task <create | list | show | reply | cancel> [...]
   ah present [list | approve <id> | deny <id> | reply <id> <text>]
   ah inbox <check | list | show | claim | complete | fail | ask | auth | updates> [...]
+  ah mcp [--hub <url>] [--token <tok>] [--agent <id>] [--role leader|worker]
+      启动本机 Stdio MCP 服务（供 Gemini CLI / Claude Desktop / Cursor 等客户端免弹窗挂载）
   ah update [--check] [--skip-skill]
 `;
 }
@@ -280,6 +283,10 @@ async function main() {
 
   if (cmd === "inbox") {
     return await runInboxCommand(restArgs, { configDir });
+  }
+
+  if (cmd === "mcp") {
+    return await runMcpStdioCommand(restArgs, { configDir });
   }
 
   if (cmd === "agents") {

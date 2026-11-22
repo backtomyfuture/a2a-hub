@@ -255,22 +255,76 @@ export function renderAgentDrawer(root, refreshFn) {
     }
   });
 
-  const renderPromptBox = (promptText, token = "") => {
+  let drawerConnectMode = "mcp";
+  let drawerMcpTab = "http_json";
+
+  const getMcpSnippet = (mcp, tab) => {
+    if (!mcp) return "";
+    if (tab === "stdio_json") return mcp.stdio_json || "";
+    if (tab === "gemini_cli") return mcp.cli_commands?.gemini || "";
+    if (tab === "claude_cli") return mcp.cli_commands?.claude || "";
+    return mcp.http_json || "";
+  };
+
+  const renderPromptBox = (promptText, token = "", mcpOnboarding = null) => {
     const box = root.querySelector("#drawer-onboarding-box");
     if (!box) return;
     box.classList.remove("hidden");
+    const isMcp = Boolean(mcpOnboarding && drawerConnectMode === "mcp");
+    const activePrompt = isMcp ? mcpOnboarding.mcp_prompt : promptText;
+    const mcpCfgText = isMcp ? getMcpSnippet(mcpOnboarding, drawerMcpTab) : "";
+
     box.innerHTML = `
       ${token ? `<div class="pill pill-warning">新 Token（仅显示本次）：<span class="mono">${escapeHtml(token)}</span></div>` : ""}
-      <div class="code-box">${escapeHtml(promptText)}</div>
-      <button type="button" class="btn btn-primary btn-sm" id="drawer-copy-prompt">复制完整接入提示词</button>
+      ${
+        mcpOnboarding
+          ? `<div class="filter-bar">
+              <button type="button" class="filter-chip ${drawerConnectMode === "mcp" ? "active" : ""}" data-drawer-connect="mcp">🔌 MCP 原生接入</button>
+              <button type="button" class="filter-chip ${drawerConnectMode === "http" ? "active" : ""}" data-drawer-connect="http">🌐 HTTP 提示词</button>
+            </div>`
+          : ""
+      }
+      ${
+        isMcp
+          ? `<div class="card stack-sm" style="padding:10px;background:var(--bg)">
+              <div class="row-between">
+                <span class="muted" style="font-size:11px">步骤 1：客户端 MCP 挂载配置（凭据隔离）</span>
+                <button type="button" class="btn btn-secondary btn-sm" id="drawer-copy-mcp-cfg">复制 MCP 配置</button>
+              </div>
+              <div class="filter-bar">
+                <button type="button" class="filter-chip ${drawerMcpTab === "http_json" ? "active" : ""}" data-drawer-mcp-tab="http_json">HTTP JSON</button>
+                <button type="button" class="filter-chip ${drawerMcpTab === "stdio_json" ? "active" : ""}" data-drawer-mcp-tab="stdio_json">Stdio (ah mcp)</button>
+                <button type="button" class="filter-chip ${drawerMcpTab === "gemini_cli" ? "active" : ""}" data-drawer-mcp-tab="gemini_cli">Gemini CLI</button>
+                <button type="button" class="filter-chip ${drawerMcpTab === "claude_cli" ? "active" : ""}" data-drawer-mcp-tab="claude_cli">Claude CLI</button>
+              </div>
+              <div class="code-box" style="max-height:130px">${escapeHtml(mcpCfgText)}</div>
+            </div>`
+          : ""
+      }
+      <div class="code-box">${escapeHtml(activePrompt)}</div>
+      <button type="button" class="btn btn-primary btn-sm" id="drawer-copy-prompt">${isMcp ? "复制 MCP 脱敏激活提示词" : "复制完整接入提示词"}</button>
     `;
-    box.querySelector("#drawer-copy-prompt")?.addEventListener("click", () => copyText(promptText, "已复制接入提示词"));
+    box.querySelectorAll("[data-drawer-connect]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        drawerConnectMode = btn.getAttribute("data-drawer-connect") || "mcp";
+        renderPromptBox(promptText, token, mcpOnboarding);
+      });
+    });
+    box.querySelectorAll("[data-drawer-mcp-tab]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        drawerMcpTab = btn.getAttribute("data-drawer-mcp-tab") || "http_json";
+        renderPromptBox(promptText, token, mcpOnboarding);
+      });
+    });
+    box.querySelector("#drawer-copy-mcp-cfg")?.addEventListener("click", () => copyText(mcpCfgText, "已复制 MCP 配置"));
+    box.querySelector("#drawer-copy-prompt")?.addEventListener("click", () => copyText(activePrompt, "已复制接入提示词"));
   };
 
   root.querySelector("#drawer-view-onboarding")?.addEventListener("click", async () => {
     try {
       const r = await api.agentOnboarding(agent.id);
-      renderPromptBox(r.onboarding_prompt);
+      drawerConnectMode = r.mcp_onboarding?.preferred_connect || "mcp";
+      renderPromptBox(r.onboarding_prompt, "", r.mcp_onboarding || null);
     } catch (err) {
       showToast(err.message, true);
     }
@@ -280,7 +334,8 @@ export function renderAgentDrawer(root, refreshFn) {
     if (!confirm("重新生成 Token 会立即使旧 Token 失效，确定继续？")) return;
     try {
       const r = await api.rotateAgentToken(agent.id);
-      renderPromptBox(r.onboarding_prompt, r.token);
+      drawerConnectMode = r.mcp_onboarding?.preferred_connect || "mcp";
+      renderPromptBox(r.onboarding_prompt, r.token, r.mcp_onboarding || null);
       showToast("已生成新 Token 并更新接入提示词");
       await refreshFn();
     } catch (err) {

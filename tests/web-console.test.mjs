@@ -174,21 +174,28 @@ test("Web Console UI & Templates: 主题变量切换规则、控件可读文字�
   );
   assert.ok(DEFAULT_AGENT_TEMPLATES.some((t) => t.id === "muse" && t.role === "leader"));
   assert.ok(DEFAULT_AGENT_TEMPLATES.some((t) => t.id === "grok-bot" && t.transport === "webhook"));
-  for (const id of ["openclaw", "hermes", "manus", "kimi-agent", "lingguang", "coze", "dify", "n8n", "feishu-bot"]) {
+  for (const id of ["openclaw", "hermes", "manus", "kimi-agent", "lingguang", "gemini", "claude-client", "cursor-agent", "lobechat"]) {
     assert.ok(DEFAULT_AGENT_TEMPLATES.some((t) => t.id === id), `DEFAULT_AGENT_TEMPLATES 缺少 ${id}`);
   }
+  for (const removedId of ["coze", "dify", "n8n", "feishu-bot"]) {
+    assert.equal(DEFAULT_AGENT_TEMPLATES.some((t) => t.id === removedId), false, `DEFAULT_AGENT_TEMPLATES 不应包含已移除的 ${removedId}`);
+  }
 
-  // 验证已有旧版 agent_templates.json 时会无损增量追加新增内置模板
+  // 验证已有旧版 agent_templates.json 时会无损增量追加新增内置模板并过滤已移除模板
   const tplDir = fs.mkdtempSync(path.join(os.tmpdir(), "ah-test-tpl-"));
   try {
     fs.writeFileSync(
       path.join(tplDir, "agent_templates.json"),
-      JSON.stringify([{ id: "custom-org", name: "Custom Org", role: "worker", transport: "poll", poll_interval_min: 5 }])
+      JSON.stringify([
+        { id: "custom-org", name: "Custom Org", role: "worker", transport: "poll", poll_interval_min: 5 },
+        { id: "coze", name: "Coze", role: "worker", transport: "webhook", poll_interval_min: 30 },
+      ])
     );
     const mergedTpls = loadAgentTemplates(tplDir);
     assert.equal(mergedTpls[0].id, "custom-org");
     assert.ok(mergedTpls.some((t) => t.id === "openclaw"));
-    assert.ok(mergedTpls.some((t) => t.id === "dify"));
+    assert.ok(mergedTpls.some((t) => t.id === "gemini"));
+    assert.equal(mergedTpls.some((t) => t.id === "coze"), false);
   } finally {
     fs.rmSync(tplDir, { recursive: true, force: true });
   }

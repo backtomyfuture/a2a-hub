@@ -5,12 +5,16 @@ import { copyText, escapeHtml, showToast } from "../utils.js";
 let modalTab = "agent";
 let selectedTemplateId = "generic";
 let selectedJoinPlatform = "unix";
+let selectedAgentConnectMode = "mcp";
+let selectedMcpConfigTab = "http_json";
 let createdResult = null;
 
 export function resetAddModalState(defaultTab = "agent") {
   modalTab = defaultTab;
   selectedTemplateId = "generic";
   selectedJoinPlatform = "unix";
+  selectedAgentConnectMode = "mcp";
+  selectedMcpConfigTab = "http_json";
   createdResult = null;
 }
 
@@ -101,8 +105,27 @@ export function renderAddModal(root, refreshFn) {
         renderAddModal(root, refreshFn);
       });
     });
+    root.querySelectorAll("[data-agent-connect-mode]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        selectedAgentConnectMode = btn.getAttribute("data-agent-connect-mode") || "mcp";
+        renderAddModal(root, refreshFn);
+      });
+    });
+    root.querySelectorAll("[data-mcp-cfg-tab]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        selectedMcpConfigTab = btn.getAttribute("data-mcp-cfg-tab") || "http_json";
+        renderAddModal(root, refreshFn);
+      });
+    });
+    root.querySelector("#btn-copy-mcp-cfg")?.addEventListener("click", () => {
+      copyText(getMcpConfigSnippet(createdResult.mcpOnboarding, selectedMcpConfigTab), "已复制 MCP 挂载配置");
+    });
     root.querySelector("#btn-copy-created")?.addEventListener("click", () => {
-      copyText(createdResult.copyText, "已复制到剪贴板");
+      const textToCopy =
+        createdResult.kind === "agent" && selectedAgentConnectMode === "mcp" && createdResult.mcpOnboarding
+          ? createdResult.mcpOnboarding.mcp_prompt
+          : createdResult.copyText;
+      copyText(textToCopy, "已复制到剪贴板");
     });
     root.querySelector("#btn-copy-token")?.addEventListener("click", () => {
       copyText(createdResult.token, "Token 已复制");
@@ -180,12 +203,20 @@ export function renderAddModal(root, refreshFn) {
           webhook_url: String(fd.get("webhook_url") || "").trim(),
           webhook_secret: String(fd.get("webhook_secret") || "").trim(),
         });
+        const preferred = res.mcp_onboarding?.preferred_connect || activeTpl.preferred_connect || "mcp";
+        selectedAgentConnectMode = preferred;
+        selectedMcpConfigTab = selectedTemplateId === "gemini"
+          ? "gemini_cli"
+          : selectedTemplateId === "claude-client"
+            ? "claude_cli"
+            : "http_json";
         createdResult = {
           kind: "agent",
           title: `Agent「${res.agent.name}」已创建并立即激活`,
           token: res.token,
           copyLabel: "复制发给对方的接入提示词",
           copyText: res.onboarding_prompt,
+          mcpOnboarding: res.mcp_onboarding || null,
         };
         showToast("Agent 创建成功");
         await refreshFn();
@@ -349,13 +380,33 @@ function renderDeviceForm() {
   `;
 }
 
+function getMcpConfigSnippet(mcp, tab) {
+  if (!mcp) return "";
+  if (tab === "stdio_json") return mcp.stdio_json || "";
+  if (tab === "gemini_cli") return mcp.cli_commands?.gemini || "";
+  if (tab === "claude_cli") return mcp.cli_commands?.claude || "";
+  return mcp.http_json || "";
+}
+
 function renderResultStep(res) {
   const isDevice = res.kind === "device" && res.joinCommands;
-  const activeCmd = isDevice ? (res.joinCommands[selectedJoinPlatform] || res.copyText) : res.copyText;
+  const isAgentWithMcp = res.kind === "agent" && res.mcpOnboarding;
+  const isMcpMode = isAgentWithMcp && selectedAgentConnectMode === "mcp";
+  const activeCmd = isDevice
+    ? (res.joinCommands[selectedJoinPlatform] || res.copyText)
+    : isMcpMode
+      ? res.mcpOnboarding.mcp_prompt
+      : res.copyText;
   const platLabels = [
     { id: "unix", label: "macOS / Linux 一键安装挂载" },
     { id: "windows", label: "Windows PowerShell" },
     { id: "cli", label: "已装 ah 快捷接入" },
+  ];
+  const mcpTabs = [
+    { id: "http_json", label: "Streamable HTTP (JSON)" },
+    { id: "stdio_json", label: "本机 Stdio (ah mcp)" },
+    { id: "gemini_cli", label: "Gemini CLI 一行命令" },
+    { id: "claude_cli", label: "Claude Code 一行命令" },
   ];
 
   return `
@@ -369,6 +420,40 @@ function renderResultStep(res) {
                 <div class="mono truncate">${escapeHtml(res.token)}</div>
               </div>
               <button type="button" class="btn btn-sm btn-secondary" id="btn-copy-token">复制 Token</button>
+            </div>`
+          : ""
+      }
+      ${
+        isAgentWithMcp
+          ? `<div class="filter-bar">
+              <button type="button" class="filter-chip ${selectedAgentConnectMode === "mcp" ? "active" : ""}" data-agent-connect-mode="mcp">
+                🔌 MCP 原生接入（免确认弹窗 · 凭据隔离${res.mcpOnboarding.preferred_connect === "mcp" ? " · 推荐" : ""}）
+              </button>
+              <button type="button" class="filter-chip ${selectedAgentConnectMode === "http" ? "active" : ""}" data-agent-connect-mode="http">
+                🌐 HTTP 提示词直连（发句话即配好${res.mcpOnboarding.preferred_connect === "http" ? " · 推荐" : ""}）
+              </button>
+            </div>`
+          : ""
+      }
+      ${
+        isMcpMode
+          ? `<div class="card stack-sm" style="padding:12px;background:var(--bg)">
+              <div class="row-between">
+                <span style="font-weight:600;font-size:12px">步骤 1：在客户端挂载 MCP 服务（Token 在传输层安全绑定，不进对话上下文）</span>
+                <button type="button" class="btn btn-sm btn-secondary" id="btn-copy-mcp-cfg">复制 MCP 配置</button>
+              </div>
+              <div class="filter-bar">
+                ${mcpTabs
+                  .map(
+                    (t) => `
+                  <button type="button" class="filter-chip ${selectedMcpConfigTab === t.id ? "active" : ""}" data-mcp-cfg-tab="${t.id}">
+                    ${escapeHtml(t.label)}
+                  </button>
+                `
+                  )
+                  .join("")}
+              </div>
+              <div class="code-box" style="max-height:150px">${escapeHtml(getMcpConfigSnippet(res.mcpOnboarding, selectedMcpConfigTab))}</div>
             </div>`
           : ""
       }
@@ -388,7 +473,13 @@ function renderResultStep(res) {
           : ""
       }
       <div class="field">
-        <span>${res.kind === "agent" ? "请把下面整段提示词发给目标 Agent：" : "请在目标电脑终端运行以下命令（也可直接发给该电脑上的 AI 助手代为执行）："}</span>
+        <span>${
+          isMcpMode
+            ? "步骤 2：把下面脱敏激活提示词发给目标 Agent（全程只调 MCP 工具，零 curl 弹窗）："
+            : res.kind === "agent"
+              ? "请把下面整段提示词发给目标 Agent："
+              : "请在目标电脑终端运行以下命令（也可直接发给该电脑上的 AI 助手代为执行）："
+        }</span>
         <div class="code-box" id="created-command-box">${escapeHtml(activeCmd)}</div>
         ${
           isDevice && selectedJoinPlatform !== "cli"
@@ -397,7 +488,7 @@ function renderResultStep(res) {
         }
       </div>
       <div class="row-between">
-        <button type="button" class="btn btn-primary" id="btn-copy-created">${escapeHtml(res.copyLabel)}</button>
+        <button type="button" class="btn btn-primary" id="btn-copy-created">${escapeHtml(isMcpMode ? "复制 MCP 激活提示词" : res.copyLabel)}</button>
         <button type="button" class="btn btn-secondary" id="btn-finish-add">完成</button>
       </div>
     </div>
