@@ -13,8 +13,8 @@ ENV AH_HOME=/data \
     PORT=8787 \
     NODE_ENV=production
 
+# 不声明 Dockerfile VOLUME（Railway 等云平台会校验拒绝），持久化通过平台 Volume 或 docker -v 挂载 /data。
 RUN mkdir -p /data
-VOLUME ["/data"]
 EXPOSE 8787
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
