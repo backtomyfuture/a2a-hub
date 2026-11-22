@@ -11,15 +11,50 @@ import { parseJoinHubUrl, resolveSkillsForHost, runDeviceJoin, runHubSetup } fro
 import { AgentDaemon } from "../src/client/agent-daemon.mjs";
 import { GatewayClient } from "../src/client/gateway-client.mjs";
 import { parseSimpleFlags } from "../src/client/inbox.mjs";
+import { loadWorkersJson } from "../src/core/config.mjs";
 import { startHubRuntime } from "../src/core/hub-runtime.mjs";
 
-test("CLI Wrapper & Flags: bin/ah.mjs --version 与布尔参数不吞位置参数", () => {
+test("CLI Wrapper & Flags: bin/ah.mjs --version、ah workers add/remove 与布尔参数不吞位置参数", () => {
   const version = execFileSync(process.execPath, [path.resolve("bin/ah.mjs"), "--version"], { encoding: "utf8" }).trim();
   assert.equal(version, "2.0.0");
 
   const parsed = parseSimpleFlags(["join", "--service", "http://127.0.0.1:8787"]);
   assert.equal(parsed.service, true);
   assert.deepEqual(parsed._, ["join", "http://127.0.0.1:8787"]);
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ah-test-workers-cli-"));
+  try {
+    execFileSync(
+      process.execPath,
+      [
+        path.resolve("bin/ah.mjs"),
+        "workers",
+        "add",
+        "--config",
+        dir,
+        "--key",
+        "custom-cli",
+        "--name",
+        "Custom CLI",
+        "--command",
+        "echo {prompt}",
+        "--summary",
+        "执行自定义命令",
+      ],
+      { encoding: "utf8" }
+    );
+    let workers = loadWorkersJson(dir);
+    assert.equal(workers.length, 1);
+    assert.equal(workers[0].key, "custom-cli");
+
+    execFileSync(process.execPath, [path.resolve("bin/ah.mjs"), "workers", "remove", "custom-cli", "--config", dir], {
+      encoding: "utf8",
+    });
+    workers = loadWorkersJson(dir);
+    assert.equal(workers.length, 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("CLI Setup & Doctor: ah up / ah join 配置生成与只读健康巡检", async () => {

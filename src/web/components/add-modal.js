@@ -3,14 +3,39 @@ import { setState, store } from "../state.js";
 import { copyText, escapeHtml, showToast } from "../utils.js";
 
 let modalTab = "agent";
-let selectedTemplateId = "muse";
+let selectedTemplateId = "generic";
 let createdResult = null;
 
 export function resetAddModalState(defaultTab = "agent") {
   modalTab = defaultTab;
-  selectedTemplateId = "muse";
+  selectedTemplateId = "generic";
   createdResult = null;
 }
+
+const FALLBACK_TEMPLATES = [
+  {
+    id: "generic",
+    name: "通用（自定义参数）",
+    default_name: "",
+    default_id: "",
+    role: "worker",
+    transport: "poll",
+    poll_interval_min: 5,
+    badge: "自由配置",
+    summary_hint: "",
+  },
+  {
+    id: "muse",
+    name: "Muse（云端主协调）",
+    default_name: "Muse",
+    default_id: "muse",
+    role: "leader",
+    transport: "longpoll",
+    poll_interval_min: 2,
+    badge: "Leader · 长连接",
+    summary_hint: "云端主调度 Agent，负责拆解目标并编排本机与云端 Worker 协同完成",
+  },
+];
 
 export function renderAddModal(root, refreshFn) {
   if (!store.showAddModal) {
@@ -18,13 +43,7 @@ export function renderAddModal(root, refreshFn) {
     return;
   }
 
-  const templates = store.templates?.length
-    ? store.templates
-    : [
-        { id: "muse", name: "Muse / 云端协调", badge: "Leader", role: "leader", transport: "poll", poll_interval_min: 1, summary_hint: "云端主调度 Agent，负责拆分目标并协调各执行节点" },
-        { id: "grok-bot", name: "Grok Bot", badge: "Worker", role: "worker", transport: "poll", poll_interval_min: 5, summary_hint: "实时检索与舆情分析 Bot" },
-        { id: "generic-poll", name: "通用 Poll Agent", badge: "Worker", role: "worker", transport: "poll", poll_interval_min: 5, summary_hint: "通用定时轮询 Agent" },
-      ];
+  const templates = store.templates?.length ? store.templates : FALLBACK_TEMPLATES;
   const activeTpl = templates.find((t) => t.id === selectedTemplateId) || templates[0];
 
   root.innerHTML = `
@@ -84,42 +103,87 @@ export function renderAddModal(root, refreshFn) {
     return;
   }
 
-  root.querySelectorAll("[data-pick-tpl]").forEach((el) => {
-    el.addEventListener("click", () => {
-      selectedTemplateId = el.getAttribute("data-pick-tpl");
-      renderAddModal(root, refreshFn);
-    });
-  });
+  const formEl = root.querySelector("#form-create-agent");
+  if (formEl) {
+    const tplSelect = formEl.querySelector("#select-agent-template");
+    const roleSelect = formEl.querySelector('select[name="role"]');
+    const transportSelect = formEl.querySelector('select[name="transport"]');
+    const pollInput = formEl.querySelector('input[name="poll_interval_min"]');
+    const nameInput = formEl.querySelector('input[name="name"]');
+    const idInput = formEl.querySelector('input[name="id"]');
+    const summaryInput = formEl.querySelector('textarea[name="summary"]');
+    const webhookBox = formEl.querySelector("#agent-webhook-fields");
+    const webhookUrlInput = formEl.querySelector('input[name="webhook_url"]');
+    const hintEl = formEl.querySelector("#tpl-preset-hint");
 
-  root.querySelector("#form-create-agent")?.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const fd = new FormData(e.target);
-    try {
-      const res = await api.createAgent({
-        platform: selectedTemplateId,
-        name: String(fd.get("name") || "").trim(),
-        id: String(fd.get("id") || "").trim() || undefined,
-        role: String(fd.get("role") || activeTpl.role),
-        transport: String(fd.get("transport") || activeTpl.transport),
-        poll_interval_min: Number(fd.get("poll_interval_min") || activeTpl.poll_interval_min || 5),
-        summary: String(fd.get("summary") || "").trim(),
-        webhook_url: String(fd.get("webhook_url") || "").trim(),
-        webhook_secret: String(fd.get("webhook_secret") || "").trim(),
-      });
-      createdResult = {
-        kind: "agent",
-        title: `Agent「${res.agent.name}」已创建并立即激活`,
-        token: res.token,
-        copyLabel: "复制发给对方的接入提示词",
-        copyText: res.onboarding_prompt,
-      };
-      showToast("Agent 创建成功");
-      await refreshFn();
-      renderAddModal(root, refreshFn);
-    } catch (err) {
-      showToast(err.message, true);
-    }
-  });
+    const syncWebhookVisibility = () => {
+      const isWh = transportSelect?.value === "webhook";
+      if (webhookBox) webhookBox.classList.toggle("hidden", !isWh);
+      if (webhookUrlInput) webhookUrlInput.required = isWh;
+    };
+
+    const formatPresetHint = (tpl) => {
+      if (!tpl || tpl.id === "generic") {
+        return "通用模式：可自由组合下方角色与接收方式（定时轮询 / 长连接 / Webhook 回调）。";
+      }
+      return `已套用「${tpl.name}」预设：角色 ${tpl.role}、接收模式 ${tpl.transport}、在线窗口 ${tpl.poll_interval_min} 分钟（仍可下方微调）。`;
+    };
+
+    tplSelect?.addEventListener("change", () => {
+      const prevTpl = templates.find((t) => t.id === selectedTemplateId) || templates[0];
+      selectedTemplateId = tplSelect.value;
+      const nextTpl = templates.find((t) => t.id === selectedTemplateId) || templates[0];
+
+      if (roleSelect) roleSelect.value = nextTpl.role || "worker";
+      if (transportSelect) transportSelect.value = nextTpl.transport || "poll";
+      if (pollInput) pollInput.value = String(nextTpl.poll_interval_min || 5);
+
+      if (nameInput && (!nameInput.value.trim() || nameInput.value.trim() === (prevTpl.default_name || ""))) {
+        nameInput.value = nextTpl.default_name || "";
+      }
+      if (idInput && (!idInput.value.trim() || idInput.value.trim() === (prevTpl.default_id || ""))) {
+        idInput.value = nextTpl.default_id || "";
+      }
+      if (summaryInput && (!summaryInput.value.trim() || summaryInput.value.trim() === (prevTpl.summary_hint || ""))) {
+        summaryInput.value = nextTpl.summary_hint || "";
+      }
+      if (hintEl) hintEl.textContent = formatPresetHint(nextTpl);
+      syncWebhookVisibility();
+    });
+
+    transportSelect?.addEventListener("change", syncWebhookVisibility);
+    syncWebhookVisibility();
+
+    formEl.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      try {
+        const res = await api.createAgent({
+          platform: selectedTemplateId,
+          name: String(fd.get("name") || "").trim(),
+          id: String(fd.get("id") || "").trim() || undefined,
+          role: String(fd.get("role") || activeTpl.role),
+          transport: String(fd.get("transport") || activeTpl.transport),
+          poll_interval_min: Number(fd.get("poll_interval_min") || activeTpl.poll_interval_min || 5),
+          summary: String(fd.get("summary") || "").trim(),
+          webhook_url: String(fd.get("webhook_url") || "").trim(),
+          webhook_secret: String(fd.get("webhook_secret") || "").trim(),
+        });
+        createdResult = {
+          kind: "agent",
+          title: `Agent「${res.agent.name}」已创建并立即激活`,
+          token: res.token,
+          copyLabel: "复制发给对方的接入提示词",
+          copyText: res.onboarding_prompt,
+        };
+        showToast("Agent 创建成功");
+        await refreshFn();
+        renderAddModal(root, refreshFn);
+      } catch (err) {
+        showToast(err.message, true);
+      }
+    });
+  }
 
   root.querySelector("#form-create-device")?.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -148,38 +212,43 @@ export function renderAddModal(root, refreshFn) {
 }
 
 function renderAgentForm(templates, activeTpl) {
+  const hint =
+    activeTpl.id === "generic"
+      ? "通用模式：可自由组合下方角色与接收方式（定时轮询 / 长连接 / Webhook 回调）。"
+      : `已套用「${activeTpl.name}」预设：角色 ${activeTpl.role}、接收模式 ${activeTpl.transport}、在线窗口 ${activeTpl.poll_interval_min} 分钟（仍可下方微调）。`;
+
   return `
     <form id="form-create-agent" class="stack-md">
-      <div class="field">
-        <span>1. 选择接入平台 / 接入方式</span>
-        <div class="tile-grid">
+      <label class="field">
+        <span>1. 平台模板（通用为自由配置，选平台则自动填好参数）</span>
+        <select id="select-agent-template" name="platform">
           ${templates
             .map(
               (t) => `
-            <button type="button" class="tile ${t.id === activeTpl.id ? "selected" : ""}" data-pick-tpl="${escapeHtml(t.id)}">
-              <div class="tile-title">${escapeHtml(t.name)}</div>
-              <div class="tile-sub">${escapeHtml(t.badge || t.transport)}</div>
-            </button>
+            <option value="${escapeHtml(t.id)}" ${t.id === activeTpl.id ? "selected" : ""}>
+              ${escapeHtml(t.name)}${t.badge ? ` — ${escapeHtml(t.badge)}` : ""}
+            </option>
           `
             )
             .join("")}
-        </div>
-      </div>
+        </select>
+        <div class="muted" id="tpl-preset-hint" style="font-size:12px">${escapeHtml(hint)}</div>
+      </label>
 
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
         <label class="field">
           <span>2. 显示名称 *</span>
-          <input type="text" name="name" placeholder="例如：Muse / 科研助手 / Grok" required />
+          <input type="text" name="name" value="${escapeHtml(activeTpl.default_name || "")}" placeholder="例如：Muse / 科研助手 / Grok" required />
         </label>
         <label class="field">
           <span>英文 ID（可选，自动生成）</span>
-          <input type="text" name="id" placeholder="如 muse-leader" />
+          <input type="text" name="id" value="${escapeHtml(activeTpl.default_id || "")}" placeholder="如 muse-leader" />
         </label>
       </div>
 
       <label class="field">
         <span>能力定位（清晰说明它擅长什么、合适接什么任务）*</span>
-        <textarea name="summary" rows="2" required>${escapeHtml(activeTpl.summary_hint || "")}</textarea>
+        <textarea name="summary" rows="2" placeholder="一句话描述该 Agent 的职责与专长..." required>${escapeHtml(activeTpl.summary_hint || "")}</textarea>
       </label>
 
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
@@ -204,22 +273,16 @@ function renderAgentForm(templates, activeTpl) {
         </label>
       </div>
 
-      ${
-        activeTpl.transport === "webhook"
-          ? `
-        <div style="display:grid;grid-template-columns:2fr 1fr;gap:10px">
-          <label class="field">
-            <span>Webhook URL *</span>
-            <input type="url" name="webhook_url" placeholder="https://..." required />
-          </label>
-          <label class="field">
-            <span>HMAC 签名密钥（可选）</span>
-            <input type="text" name="webhook_secret" placeholder="secret" />
-          </label>
-        </div>
-      `
-          : ""
-      }
+      <div id="agent-webhook-fields" class="${activeTpl.transport === "webhook" ? "" : "hidden"}" style="display:grid;grid-template-columns:2fr 1fr;gap:10px">
+        <label class="field">
+          <span>Webhook URL *</span>
+          <input type="url" name="webhook_url" placeholder="https://..." ${activeTpl.transport === "webhook" ? "required" : ""} />
+        </label>
+        <label class="field">
+          <span>HMAC 签名密钥（可选）</span>
+          <input type="text" name="webhook_secret" placeholder="secret" />
+        </label>
+      </div>
 
       <div class="row-between" style="padding-top:6px">
         <span class="muted" style="font-size:12px">创建后立即激活可用，无需再手动通过准入池。</span>

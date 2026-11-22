@@ -87,6 +87,7 @@ export async function startHubRuntime({
   const getToken = () => loadOwnerToken(configDir, appEnv);
   const { server } = startHubHttpServer({
     configDir,
+    hubDeviceId: withDeviceDaemon ? deviceId : "",
     store,
     taskService,
     broker,

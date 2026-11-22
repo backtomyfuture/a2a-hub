@@ -834,7 +834,7 @@ export class HubStore {
               transport, poll_interval_min, webhook_url, webhook_secret, webhook_header,
               token_hash, token_prefix, scopes_json, metadata_json, enabled,
               last_seen_at, active_task_id, created_at, updated_at
-            ) VALUES (?, 'device-worker', ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, '', '', 'X-A2A-Signature', NULL, '', '[]', ?, 1, ?, NULL, ?, ?)
+            ) VALUES (?, 'device-worker', ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, '', '', 'X-A2A-Signature', NULL, '', '[]', ?, ?, ?, NULL, ?, ?)
           `).run(
             agentId,
             String(deviceId),
@@ -851,6 +851,7 @@ export class HubStore {
             sqlStr(transport),
             sqlInt(dev.poll_interval_min, 5),
             JSON.stringify(meta),
+            sqlBool(w.enabled !== false),
             now,
             now,
             now

@@ -98,7 +98,7 @@ export class DeviceDaemon {
   async syncNow() {
     this._loadWorkersIfChanged();
     const payload = this.workers
-      .filter((w) => w && w.enabled !== false)
+      .filter((w) => w && w.key)
       .map((w) => ({
         key: w.key,
         name: w.name || w.key,
@@ -110,6 +110,7 @@ export class DeviceDaemon {
         models: Array.isArray(w.models) ? w.models : [],
         default_model: w.default_model || "",
         approval_policy: w.approval_policy || "never",
+        enabled: w.enabled !== false,
       }));
 
     const res = await this.client.syncDevice(this.deviceId, payload, {

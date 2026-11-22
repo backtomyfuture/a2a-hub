@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { startHubRuntime } from "../src/core/hub-runtime.mjs";
+import { DEFAULT_AGENT_TEMPLATES } from "../src/core/templates.mjs";
 import { renderAgentCard } from "../src/web/components/agent-card.js";
 import { escapeHtml } from "../src/web/utils.js";
 
@@ -27,6 +28,7 @@ test("Web Console: 静态资源托管完整性、登录鉴权与 /api/v1/state �
       "/components/agent-card.js",
       "/components/agent-drawer.js",
       "/components/add-modal.js",
+      "/components/add-worker-modal.js",
       "/components/dispatch-modal.js",
       "/views/home.js",
       "/views/agents.js",
@@ -112,4 +114,25 @@ test("Web Console DOM Safety: 非 document 对象禁止调用 getElementById", (
       .filter((m) => m[1] !== "document");
     assert.equal(bad.length, 0, `${f} 不得在 ${bad.map((m) => m[1]).join(",")} 上调用 getElementById`);
   }
+});
+
+test("Web Console UI & Templates: 主题变量切换规则、控件可读文字色与精简平台模板", () => {
+  const css = fs.readFileSync(path.resolve("src", "web", "styles.css"), "utf8");
+  assert.ok(css.includes(':root[data-theme="dark"]'));
+  assert.ok(css.includes(':root[data-theme="light"]'));
+  assert.ok(css.includes("color-scheme: dark;"));
+  assert.ok(css.includes("button, input, select, textarea"));
+
+  const html = fs.readFileSync(path.resolve("src", "web", "index.html"), "utf8");
+  assert.ok(html.includes('id="btn-theme-toggle"'));
+  assert.ok(html.includes('localStorage.getItem("ah_theme")'));
+
+  assert.equal(DEFAULT_AGENT_TEMPLATES[0].id, "generic");
+  assert.equal(
+    DEFAULT_AGENT_TEMPLATES.some((t) => t.id.startsWith("generic-")),
+    false,
+    "不应再把 poll/longpoll/webhook 拆成冗余通用模板"
+  );
+  assert.ok(DEFAULT_AGENT_TEMPLATES.some((t) => t.id === "muse" && t.role === "leader"));
+  assert.ok(DEFAULT_AGENT_TEMPLATES.some((t) => t.id === "grok-bot" && t.transport === "webhook"));
 });

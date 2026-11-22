@@ -1,6 +1,7 @@
 import { api } from "../api.js";
 import { renderAgentCard } from "../components/agent-card.js";
 import { resetAddModalState } from "../components/add-modal.js";
+import { resetAddWorkerModalState } from "../components/add-worker-modal.js";
 import { setState, store } from "../state.js";
 import { copyText, escapeHtml, formatRelativeTime, showToast } from "../utils.js";
 
@@ -41,8 +42,7 @@ export function renderAgentsView(container, refreshFn) {
         ).join("")}
       </div>
       <div class="row">
-        <button class="btn btn-secondary btn-sm" id="agents-add-device">+ 挂载一台电脑</button>
-        <button class="btn btn-primary btn-sm" id="agents-add-agent">+ 接入独立 Agent</button>
+        <button class="btn btn-primary btn-sm" id="agents-add-btn">+ 接入 Agent / 电脑</button>
       </div>
     </div>
 
@@ -75,6 +75,7 @@ export function renderAgentsView(container, refreshFn) {
                   </div>
                 </div>
                 <div class="row">
+                  <button class="btn btn-sm btn-primary" data-dev-add-worker="${escapeHtml(d.id)}">+ 添加 Worker</button>
                   <button class="btn btn-sm btn-secondary" data-dev-toggle="${escapeHtml(d.id)}" data-dev-enabled="${d.enabled ? "1" : "0"}">
                     ${d.enabled ? "暂停整机" : "恢复整机"}
                   </button>
@@ -94,13 +95,16 @@ export function renderAgentsView(container, refreshFn) {
     btn.addEventListener("click", () => setState({ agentFilter: btn.getAttribute("data-filter") }));
   });
 
-  container.querySelector("#agents-add-agent")?.addEventListener("click", () => {
+  container.querySelector("#agents-add-btn")?.addEventListener("click", () => {
     resetAddModalState("agent");
     setState({ showAddModal: "agent" });
   });
-  container.querySelector("#agents-add-device")?.addEventListener("click", () => {
-    resetAddModalState("device");
-    setState({ showAddModal: "device" });
+
+  container.querySelectorAll("[data-dev-add-worker]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      resetAddWorkerModalState();
+      setState({ showAddWorkerDeviceId: btn.getAttribute("data-dev-add-worker") });
+    });
   });
 
   container.querySelectorAll("[data-open-agent]").forEach((el) => {

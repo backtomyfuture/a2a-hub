@@ -89,3 +89,69 @@ test("Gateway HTTP: 完整闭环 (Hub 启动 -> 设备同步 -> 独立 Agent 注
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("Device Workers Management: worker-presets、本机 Worker 热增改删落盘与远端生成 CLI 命令", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ah-test-workers-"));
+  const rt = await startHubRuntime({
+    configDir: dir,
+    listen: "127.0.0.1:0",
+    env: { AH_API_TOKEN: "wk_owner_tok", AH_DEVICE_ID: "" },
+    withDeviceDaemon: true,
+  });
+
+  try {
+    const owner = new GatewayClient(rt.url, { token: "wk_owner_tok" });
+    const st0 = await owner.get("/api/v1/state");
+    const localDev = st0.devices.find((d) => d.is_local);
+    assert.ok(localDev, "本机 Device 应标记 is_local=true");
+
+    const presetsRes = await owner.get("/api/v1/worker-presets");
+    assert.ok(Array.isArray(presetsRes.presets) && presetsRes.presets.length >= 4);
+
+    // 1) 为本机新增自定义 Worker：立即写入 workers.json 并同步上线
+    const addLocal = await owner.post(`/api/v1/devices/${encodeURIComponent(localDev.id)}/workers`, {
+      key: "my-script",
+      name: "自定义构建脚本",
+      command: "echo {prompt}",
+      cwd: "/tmp",
+      summary: "运行自定义构建",
+      skills: "build,test",
+    });
+    assert.equal(addLocal.local, true);
+    const localAgentId = `${localDev.id}--my-script`;
+    const workersAfterAdd = JSON.parse(fs.readFileSync(path.join(dir, "workers.json"), "utf8"));
+    assert.ok(workersAfterAdd.some((w) => w.key === "my-script" && w.command === "echo {prompt}"));
+
+    // 2) 编辑本机 Worker 应同步回写 workers.json
+    await owner.patch(`/api/v1/agents/${encodeURIComponent(localAgentId)}`, {
+      summary: "更新后的描述",
+      command: "printf %s {prompt}",
+      cwd: "/var/tmp",
+    });
+    const workersAfterPatch = JSON.parse(fs.readFileSync(path.join(dir, "workers.json"), "utf8"));
+    const patchedEntry = workersAfterPatch.find((w) => w.key === "my-script");
+    assert.equal(patchedEntry.summary, "更新后的描述");
+    assert.equal(patchedEntry.command, "printf %s {prompt}");
+    assert.equal(patchedEntry.cwd, "/var/tmp");
+
+    // 3) 删除本机 Worker 应从 workers.json 清理
+    await owner.del(`/api/v1/agents/${encodeURIComponent(localAgentId)}`);
+    const workersAfterDel = JSON.parse(fs.readFileSync(path.join(dir, "workers.json"), "utf8"));
+    assert.equal(workersAfterDel.some((w) => w.key === "my-script"), false);
+
+    // 4) 为远端设备添加 Worker：绝不跨网络推命令，而是返回安全的 ah workers add 命令
+    await owner.post("/api/v1/devices", { id: "remote-box", name: "Remote Box" });
+    const addRemote = await owner.post("/api/v1/devices/remote-box/workers", {
+      key: "remote-bash",
+      name: "Remote Worker",
+      command: "node run.mjs {prompt}",
+      cwd: "/opt/work",
+    });
+    assert.equal(addRemote.local, false);
+    assert.ok(addRemote.cli_command.startsWith("ah workers add "));
+    assert.ok(addRemote.cli_command.includes("--key 'remote-bash'"));
+  } finally {
+    await rt.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

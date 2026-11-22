@@ -2,7 +2,8 @@
   {
     "id": "example-cloud",
     "name": "示例云端 Agent",
-    "icon": "bot",
+    "default_name": "云端助手",
+    "default_id": "example-cloud",
     "role": "worker",
     "transport": "poll",
     "poll_interval_min": 5,

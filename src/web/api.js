@@ -31,6 +31,9 @@ export const api = {
   updateDevice: (id, patch) => apiFetch(`/api/v1/devices/${encodeURIComponent(id)}`, { method: "PATCH", body: patch }),
   deleteDevice: (id) => apiFetch(`/api/v1/devices/${encodeURIComponent(id)}`, { method: "DELETE" }),
   rotateDeviceToken: (id) => apiFetch(`/api/v1/devices/${encodeURIComponent(id)}/rotate-token`, { method: "POST", body: {} }),
+  workerPresets: () => apiFetch("/api/v1/worker-presets"),
+  addDeviceWorker: (deviceId, payload) =>
+    apiFetch(`/api/v1/devices/${encodeURIComponent(deviceId)}/workers`, { method: "POST", body: payload }),
 
   createAgent: (payload) => apiFetch("/api/v1/agents", { method: "POST", body: payload }),
   updateAgent: (id, patch) => apiFetch(`/api/v1/agents/${encodeURIComponent(id)}`, { method: "PATCH", body: patch }),

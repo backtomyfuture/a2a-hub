@@ -1,5 +1,6 @@
 import { api } from "./api.js";
 import { renderAddModal, resetAddModalState } from "./components/add-modal.js";
+import { renderAddWorkerModal } from "./components/add-worker-modal.js";
 import { renderAgentDrawer } from "./components/agent-drawer.js";
 import { renderDispatchModal } from "./components/dispatch-modal.js";
 import { setState, store, subscribe } from "./state.js";
@@ -18,6 +19,32 @@ const loginError = document.getElementById("login-error");
 const livePill = document.getElementById("live-pill");
 const logoutBtn = document.getElementById("btn-logout");
 const actionBadge = document.getElementById("nav-action-badge");
+const themeBtn = document.getElementById("btn-theme-toggle");
+
+function effectiveTheme() {
+  const explicit = document.documentElement.dataset.theme;
+  if (explicit === "dark" || explicit === "light") return explicit;
+  return window.matchMedia?.("(prefers-color-scheme: dark)")?.matches ? "dark" : "light";
+}
+
+function syncThemeButton() {
+  if (!themeBtn) return;
+  const dark = effectiveTheme() === "dark";
+  themeBtn.textContent = dark ? "☀ 浅色" : "☾ 深色";
+}
+
+function toggleTheme() {
+  const next = effectiveTheme() === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  try {
+    localStorage.setItem("ah_theme", next);
+  } catch {}
+  syncThemeButton();
+}
+
+syncThemeButton();
+themeBtn?.addEventListener("click", toggleTheme);
+window.matchMedia?.("(prefers-color-scheme: dark)")?.addEventListener?.("change", syncThemeButton);
 
 let pollSeq = 0;
 let pollingStarted = false;
@@ -71,15 +98,18 @@ function renderAll() {
 
   const nextModalKey = store.showAddModal
     ? `add:${store.showAddModal}`
-    : store.showDispatchModal
-      ? `dispatch:${store.dispatchContextId}:${(store.dispatchPreselect || []).join(",")}`
-      : "";
+    : store.showAddWorkerDeviceId
+      ? `worker:${store.showAddWorkerDeviceId}`
+      : store.showDispatchModal
+        ? `dispatch:${store.dispatchContextId}:${(store.dispatchPreselect || []).join(",")}`
+        : "";
   if (!nextModalKey) {
     lastRenderedModalKey = "";
     modalRoot.innerHTML = "";
   } else if (nextModalKey !== lastRenderedModalKey) {
     lastRenderedModalKey = nextModalKey;
     if (store.showAddModal) renderAddModal(modalRoot, refreshState);
+    else if (store.showAddWorkerDeviceId) renderAddWorkerModal(modalRoot, refreshState);
     else if (store.showDispatchModal) renderDispatchModal(modalRoot, refreshState);
   }
 }
@@ -127,8 +157,15 @@ async function bootApp() {
   }
 
   loginOverlay.classList.add("hidden");
-  const [tplRes] = await Promise.all([api.templates().catch(() => ({ templates: [] })), refreshState()]);
-  setState({ templates: tplRes.templates || [] });
+  const [tplRes, presetRes] = await Promise.all([
+    api.templates().catch(() => ({ templates: [] })),
+    api.workerPresets().catch(() => ({ presets: [] })),
+    refreshState(),
+  ]);
+  setState({
+    templates: tplRes.templates || [],
+    workerPresets: presetRes.presets || [],
+  });
   void startLongPollLoop();
 }
 

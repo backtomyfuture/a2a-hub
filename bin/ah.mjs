@@ -12,8 +12,10 @@ import {
   defaultConfigDir,
   loadConfigJson,
   loadOwnerToken,
+  loadWorkersJson,
   readLiveHubUrl,
   sanitizeSlug,
+  saveWorkersJson,
 } from "../src/core/config.mjs";
 import { startHubRuntime } from "../src/core/hub-runtime.mjs";
 import { DeviceDaemon } from "../src/client/device-daemon.mjs";
@@ -96,6 +98,8 @@ function helpText() {
   ah doctor [--config <dir>]
       只读自检配置、权限、本地 CLI 与 Hub 连通性
   ah agents [list | pause <id> | resume <id>]
+  ah workers <list | add | remove> [...]
+      管理本机 workers.json 可执行 Worker 列表（新增、查看、移除）
   ah task <create | list | show | reply | cancel> [...]
   ah present [list | approve <id> | deny <id> | reply <id> <text>]
   ah inbox <check | list | show | claim | complete | fail | ask | auth | updates> [...]
@@ -298,6 +302,62 @@ async function main() {
       return 0;
     }
     throw new Error(`未知 agents 子命令: ${sub}`);
+  }
+
+  if (cmd === "workers") {
+    const sub = flags._[1] || "list";
+    const workers = loadWorkersJson(configDir);
+    if (sub === "list") {
+      if (!workers.length) {
+        console.log("workers.json 暂无已配置的本机 Worker。");
+        return 0;
+      }
+      for (const w of workers) {
+        console.log(`${String(w.key || "").padEnd(18)} ${(w.name || "").padEnd(18)} ${w.command || ""}`);
+      }
+      return 0;
+    }
+    if (sub === "add") {
+      const name = String(flags.name || flags.key || "").trim();
+      const command = String(flags.command || "").trim();
+      const key = sanitizeSlug(flags.key || name, "");
+      if (!key || !name || !command) {
+        throw new Error("用法: ah workers add --key <id> --name <名称> --command <执行命令> [--cwd <dir>] [--summary <定位>]");
+      }
+      const next = {
+        key,
+        name,
+        role: flags.role === "leader" ? "leader" : "worker",
+        platform: String(flags.platform || "cli"),
+        summary: String(flags.summary || ""),
+        skills: String(flags.skills || "").split(",").map((s) => s.trim()).filter(Boolean),
+        tools: [],
+        models: flags.model ? [String(flags.model)] : [],
+        default_model: String(flags.model || ""),
+        model_flag: String(flags["model-flag"] || ""),
+        command,
+        resume_command: String(flags.resume || ""),
+        cwd: String(flags.cwd || process.cwd()),
+        timeout_sec: Number(flags.timeout || 600) || 600,
+        approval_policy: ["never", "always", "risk"].includes(flags.approval) ? flags.approval : "never",
+        enabled: true,
+      };
+      const idx = workers.findIndex((w) => w && w.key === key);
+      if (idx >= 0) workers[idx] = { ...workers[idx], ...next };
+      else workers.push(next);
+      saveWorkersJson(configDir, workers);
+      console.log(`✓ 已写入本机 Worker: ${key}（守护进程将在下次轮询自动同步）`);
+      return 0;
+    }
+    if (sub === "remove" || sub === "rm" || sub === "delete") {
+      const key = String(flags.key || flags._[2] || "").trim();
+      if (!key) throw new Error("用法: ah workers remove <key>");
+      const filtered = workers.filter((w) => w && w.key !== key);
+      saveWorkersJson(configDir, filtered);
+      console.log(`✓ 已从 workers.json 移除: ${key}`);
+      return 0;
+    }
+    throw new Error(`未知 workers 子命令: ${sub}`);
   }
 
   if (cmd === "task") {

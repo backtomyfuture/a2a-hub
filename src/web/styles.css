@@ -1,4 +1,5 @@
 :root {
+  color-scheme: light;
   --bg: #f6f7fb;
   --surface: #ffffff;
   --surface-2: #f1f3f9;
@@ -22,7 +23,8 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
     --bg: #0b0e14;
     --surface: #131824;
     --surface-2: #1b2232;
@@ -43,6 +45,31 @@
   }
 }
 
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0b0e14;
+  --surface: #131824;
+  --surface-2: #1b2232;
+  --border: #252e42;
+  --text: #f3f4f6;
+  --muted: #9ca3af;
+  --primary: #6366f1;
+  --primary-hover: #818cf8;
+  --primary-soft: rgba(99, 102, 241, 0.16);
+  --success: #34d399;
+  --success-soft: rgba(52, 211, 153, 0.15);
+  --warning: #fbbf24;
+  --warning-soft: rgba(251, 191, 36, 0.15);
+  --danger: #f87171;
+  --danger-soft: rgba(248, 113, 113, 0.15);
+  --shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 24px 64px rgba(0, 0, 0, 0.55);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
 * { box-sizing: border-box; }
 html, body {
   margin: 0;
@@ -53,6 +80,14 @@ html, body {
   font-size: 14px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+}
+button, input, select, textarea {
+  font-family: inherit;
+  color: var(--text);
+}
+select option {
+  background: var(--surface);
+  color: var(--text);
 }
 
 .hidden { display: none !important; }
@@ -362,6 +397,7 @@ html, body {
   max-height: 90vh;
   overflow-y: auto;
   background: var(--surface);
+  color: var(--text);
   border: 1px solid var(--border);
   border-radius: 14px;
   padding: 22px;
@@ -383,6 +419,7 @@ html, body {
   height: 100%;
   overflow-y: auto;
   background: var(--surface);
+  color: var(--text);
   border-left: 1px solid var(--border);
   padding: 22px;
   box-shadow: var(--shadow-lg);

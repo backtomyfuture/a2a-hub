@@ -103,10 +103,25 @@ export function renderAgentDrawer(root, refreshFn) {
               </label>
             </div>
           `
-              : `
+              : agent.is_local_worker
+                ? `
+            <label class="field">
+              <span>工作目录 cwd（Hub 本机 Worker，保存后写入 workers.json）</span>
+              <input type="text" name="cwd" value="${escapeHtml(agent.worker_config?.cwd || "~")}" />
+            </label>
+            <label class="field">
+              <span>执行命令模板</span>
+              <input type="text" name="command" value="${escapeHtml(agent.worker_config?.command || "")}" />
+            </label>
+            <label class="field">
+              <span>续接会话命令模板（可选）</span>
+              <input type="text" name="resume_command" value="${escapeHtml(agent.worker_config?.resume_command || "")}" placeholder="含 {session} 占位符" />
+            </label>
+          `
+                : `
             <div class="card" style="padding:12px;background:var(--bg)">
               <div style="font-weight:600;margin-bottom:4px">所属设备：${escapeHtml(parentDev?.name || agent.device_id)}</div>
-              <div class="muted" style="font-size:12px">本机 CLI Worker 由设备守护进程同步管理（系统参数 ${escapeHtml(parentDev?.os_info || "-")}，最大并发 ${parentDev?.max_concurrent || 4}）。</div>
+              <div class="muted" style="font-size:12px">远端 CLI Worker 的执行命令与工作目录由该电脑上的 workers.json 本地管理（系统参数 ${escapeHtml(parentDev?.os_info || "-")}，并发 ${parentDev?.max_concurrent || 4}）。</div>
             </div>
           `
           }
@@ -205,6 +220,10 @@ export function renderAgentDrawer(root, refreshFn) {
       patch.webhook_header = String(fd.get("webhook_header") || "X-A2A-Signature").trim();
       const sec = String(fd.get("webhook_secret") || "");
       if (sec) patch.webhook_secret = sec;
+    } else if (agent.is_local_worker) {
+      patch.cwd = String(fd.get("cwd") || "").trim();
+      patch.command = String(fd.get("command") || "").trim();
+      patch.resume_command = String(fd.get("resume_command") || "").trim();
     }
     try {
       await api.updateAgent(agent.id, patch);

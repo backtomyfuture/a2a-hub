@@ -7,10 +7,16 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   DAEMON_VERSION,
-  sanitizeSlug,
-  writeLockedAppEnvVars,
+  KNOWN_CLIS,
+  detectDefaultModel,
   loadAppEnv,
+  loadWorkersJson,
+  sanitizeSlug,
+  saveWorkersJson,
+  whichBinary,
+  writeLockedAppEnvVars,
 } from "../core/config.mjs";
+import { shellQuote } from "../core/receipt.mjs";
 import {
   buildAgentOnboardingPrompt,
   buildDeviceJoinCommand,
@@ -136,6 +142,7 @@ function serveStaticFile(res, rootDir, relPath) {
 
 export function startHubHttpServer({
   configDir,
+  hubDeviceId = "",
   store,
   taskService,
   broker,
@@ -161,11 +168,15 @@ export function startHubHttpServer({
     const devicesRaw = store.listDevices();
     const agentsRaw = store.listAgents();
     const devMap = new Map(devicesRaw.map((d) => [d.id, d]));
+    const localWorkerMap = new Map(
+      (loadWorkersJson(configDir) || []).filter((w) => w && w.key).map((w) => [String(w.key), w])
+    );
 
     const devices = devicesRaw.map((d) => {
       const devAgents = agentsRaw.filter((a) => a.device_id === d.id);
       return {
         ...d,
+        is_local: Boolean(hubDeviceId && d.id === hubDeviceId),
         online: broker.isDeviceOnline(d, now),
         connected: broker.isDeviceConnected(d.id),
         worker_count: devAgents.length,
@@ -175,9 +186,23 @@ export function startHubHttpServer({
 
     const agents = agentsRaw.map((a) => {
       const dev = a.device_id ? devMap.get(a.device_id) : null;
+      const isLocalWorker = Boolean(hubDeviceId && a.kind === "device-worker" && a.device_id === hubDeviceId);
+      const localCfg = isLocalWorker ? localWorkerMap.get(a.worker_key) : null;
       return {
         ...a,
         device_name: dev?.name || "",
+        is_local_worker: isLocalWorker,
+        ...(localCfg
+          ? {
+              worker_config: {
+                command: localCfg.command || "",
+                resume_command: localCfg.resume_command || "",
+                cwd: localCfg.cwd || "",
+                model_flag: localCfg.model_flag || "",
+                timeout_sec: Number(localCfg.timeout_sec || 600),
+              },
+            }
+          : {}),
         online: broker.isAgentOnline(a, devMap, now),
         connected: a.kind === "device-worker" && a.device_id ? broker.isDeviceConnected(a.device_id) : broker.isAgentConnected(a.id),
       };
@@ -195,6 +220,7 @@ export function startHubHttpServer({
       seq: broker.currentSeq(),
       version: DAEMON_VERSION,
       hub_url: getHubUrl(),
+      hub_device_id: hubDeviceId,
       public_key: approvalPublicKey,
       auth_required: Boolean(getOwnerToken()),
       notifier: notifier ? notifier.configuredChannels() : {},
@@ -531,6 +557,109 @@ export function startHubHttpServer({
       return sendJson(res, 200, { ok: true, ...rotated, join_command });
     }
 
+    if (method === "GET" && pathname === "/api/v1/worker-presets") {
+      if (!requireOwner()) return;
+      const presets = KNOWN_CLIS.map((spec) => {
+        const binPath = whichBinary(spec.bin) || "";
+        const detected = detectDefaultModel(spec.key);
+        const binExpr = binPath || spec.bin;
+        return {
+          key: spec.key,
+          name: spec.name,
+          platform: spec.platform,
+          summary: spec.summary,
+          skills: spec.skills,
+          tools: spec.tools,
+          models: spec.defaultModels,
+          default_model: detected || spec.defaultModels?.[0] || "",
+          model_flag: spec.modelFlag,
+          command: spec.command.replace(/\{bin\}/g, binExpr),
+          resume_command: spec.resumeCommand ? spec.resumeCommand.replace(/\{bin\}/g, binExpr) : "",
+          timeout_sec: spec.timeoutSec,
+          approval_policy: spec.approvalPolicy,
+          installed: Boolean(binPath),
+        };
+      });
+      return sendJson(res, 200, { ok: true, presets });
+    }
+
+    m = /^\/api\/v1\/devices\/([A-Za-z0-9._-]+)\/workers$/.exec(pathname);
+    if (method === "POST" && m) {
+      if (!requireOwner()) return;
+      const devId = m[1];
+      const dev = store.getDevice(devId);
+      if (!dev) return sendError(res, 404, "设备不存在", "not_found");
+
+      const body = await readJsonBody(req);
+      const name = String(body.name || body.key || "").trim();
+      const command = String(body.command || "").trim();
+      const key = sanitizeSlug(body.key || name, "");
+      if (!key) return sendError(res, 400, "请填写有效的 Worker Key（英文标识）", "missing_key");
+      if (!name) return sendError(res, 400, "请填写 Worker 名称", "missing_name");
+      if (!command) return sendError(res, 400, "请填写可执行命令 command", "missing_command");
+
+      const skills = Array.isArray(body.skills)
+        ? body.skills.map((s) => String(s).trim()).filter(Boolean)
+        : String(body.skills || "")
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean);
+      const workerObj = {
+        key,
+        name,
+        role: body.role === "leader" ? "leader" : "worker",
+        platform: String(body.platform || "cli").trim() || "cli",
+        summary: String(body.summary || "").trim(),
+        skills,
+        tools: Array.isArray(body.tools) ? body.tools.map((s) => String(s).trim()).filter(Boolean) : [],
+        models: Array.isArray(body.models) ? body.models.map((s) => String(s).trim()).filter(Boolean) : [],
+        default_model: String(body.default_model || "").trim(),
+        model_flag: String(body.model_flag || "").trim(),
+        command,
+        resume_command: String(body.resume_command || "").trim(),
+        cwd: String(body.cwd || "").trim() || "~",
+        timeout_sec: Math.min(Math.max(Number(body.timeout_sec || 600) || 600, 10), 3600),
+        approval_policy: ["never", "always", "risk"].includes(body.approval_policy) ? body.approval_policy : "never",
+        enabled: true,
+      };
+
+      if (hubDeviceId && devId === hubDeviceId) {
+        const workers = loadWorkersJson(configDir);
+        const idx = workers.findIndex((w) => w && w.key === key);
+        if (idx >= 0) workers[idx] = { ...workers[idx], ...workerObj };
+        else workers.push(workerObj);
+        saveWorkersJson(configDir, workers);
+        const synced = store.syncDeviceWorkers(devId, workers, {});
+        return sendJson(res, 201, {
+          ok: true,
+          local: true,
+          worker: workerObj,
+          ...synced,
+        });
+      }
+
+      const cliParts = [
+        "ah workers add",
+        `--key ${shellQuote(workerObj.key)}`,
+        `--name ${shellQuote(workerObj.name)}`,
+        `--command ${shellQuote(workerObj.command)}`,
+      ];
+      if (workerObj.resume_command) cliParts.push(`--resume ${shellQuote(workerObj.resume_command)}`);
+      if (workerObj.cwd && workerObj.cwd !== "~") cliParts.push(`--cwd ${shellQuote(workerObj.cwd)}`);
+      if (workerObj.summary) cliParts.push(`--summary ${shellQuote(workerObj.summary)}`);
+      if (workerObj.default_model) cliParts.push(`--model ${shellQuote(workerObj.default_model)}`);
+      if (workerObj.model_flag) cliParts.push(`--model-flag ${shellQuote(workerObj.model_flag)}`);
+      if (workerObj.skills.length) cliParts.push(`--skills ${shellQuote(workerObj.skills.join(","))}`);
+      if (workerObj.approval_policy !== "never") cliParts.push(`--approval ${shellQuote(workerObj.approval_policy)}`);
+
+      return sendJson(res, 200, {
+        ok: true,
+        local: false,
+        worker: workerObj,
+        cli_command: cliParts.join(" "),
+      });
+    }
+
     m = /^\/api\/v1\/devices\/([A-Za-z0-9._-]+)\/sync$/.exec(pathname);
     if (method === "POST" && m) {
       const devId = m[1];
@@ -719,14 +848,40 @@ export function startHubHttpServer({
           const chk = validateWebhookUrl(body.webhook_url);
           if (!chk.ok) return sendError(res, 400, chk.error, "invalid_webhook_url");
         }
+        const existing = store.getAgent(agentId);
+        if (!existing) return sendError(res, 404, "Agent 不存在", "not_found");
         const updated = store.updateAgent(agentId, body);
-        if (!updated) return sendError(res, 404, "Agent 不存在", "not_found");
+        if (hubDeviceId && existing.kind === "device-worker" && existing.device_id === hubDeviceId) {
+          const workers = loadWorkersJson(configDir);
+          const idx = workers.findIndex((w) => w && w.key === existing.worker_key);
+          if (idx >= 0) {
+            const cur = workers[idx];
+            if (body.name !== undefined) cur.name = String(body.name);
+            if (body.summary !== undefined) cur.summary = String(body.summary);
+            if (body.role !== undefined) cur.role = String(body.role);
+            if (Array.isArray(body.skills)) cur.skills = body.skills;
+            if (body.default_model !== undefined) cur.default_model = String(body.default_model);
+            if (body.approval_policy !== undefined) cur.approval_policy = String(body.approval_policy);
+            if (body.enabled !== undefined) cur.enabled = Boolean(body.enabled);
+            if (body.command !== undefined && String(body.command).trim()) cur.command = String(body.command).trim();
+            if (body.resume_command !== undefined) cur.resume_command = String(body.resume_command).trim();
+            if (body.cwd !== undefined && String(body.cwd).trim()) cur.cwd = String(body.cwd).trim();
+            if (body.model_flag !== undefined) cur.model_flag = String(body.model_flag).trim();
+            if (body.timeout_sec !== undefined && Number(body.timeout_sec) > 0) cur.timeout_sec = Number(body.timeout_sec);
+            saveWorkersJson(configDir, workers);
+          }
+        }
         return sendJson(res, 200, { ok: true, agent: updated });
       }
       if (method === "DELETE") {
         if (!requireOwner()) return;
+        const existing = store.getAgent(agentId);
         const ok = store.deleteAgent(agentId);
         if (!ok) return sendError(res, 404, "Agent 不存在", "not_found");
+        if (hubDeviceId && existing?.kind === "device-worker" && existing.device_id === hubDeviceId) {
+          const workers = loadWorkersJson(configDir).filter((w) => w && w.key !== existing.worker_key);
+          saveWorkersJson(configDir, workers);
+        }
         return sendJson(res, 200, { ok: true });
       }
     }
