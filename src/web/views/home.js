@@ -14,15 +14,32 @@ function isAbnormalSchedule(sch) {
   return sch.health === "missed" || sch.health === "failing" || sch.health === "attention";
 }
 
-function miniScheduleBadge(sch) {
+function taskStatusDotClass(state) {
+  if (state === "completed") return "is-ok";
+  if (state === "failed" || state === "rejected") return "is-fail";
+  if (state === "working" || state === "submitted") return "is-run";
+  if (state === "input-required" || state === "auth-required") return "is-warn";
+  return "is-idle";
+}
+
+function scheduleStatusDotClass(sch) {
   const h = sch.health || "idle";
-  if (h === "paused") return `<span class="pill">已暂停</span>`;
-  if (h === "running") return `<span class="pill pill-primary">运行中</span>`;
-  if (h === "attention") return `<span class="pill pill-warning">待介入</span>`;
-  if (h === "missed") return `<span class="pill pill-danger">超时</span>`;
-  if (h === "failing") return `<span class="pill pill-danger">失败</span>`;
-  if (h === "healthy") return `<span class="pill pill-success">正常</span>`;
-  return `<span class="pill">待首报</span>`;
+  if (h === "missed" || h === "failing") return "is-fail";
+  if (h === "attention") return "is-warn";
+  if (h === "running") return "is-run";
+  if (h === "healthy") return "is-ok";
+  return "is-idle";
+}
+
+function cleanExcerpt(raw) {
+  return String(raw || "")
+    .replace(/\r?\n+/g, " ")
+    .replace(/\*\*(.+?)\*\*/g, "$1")
+    .replace(/__(.+?)__/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
 }
 
 function renderActionCard(task) {
@@ -62,41 +79,43 @@ function renderActionCard(task) {
 
 function renderTaskFeed(tasks, agentMap) {
   if (!tasks.length) {
-    return `<div class="empty-box" style="padding:22px">当前筛选条件下暂无任务动态。</div>`;
+    return `<div class="panel-empty">当前筛选条件下暂无任务记录。</div>`;
   }
   return `
-    <div class="card task-feed" style="padding:0">
+    <div class="task-feed">
       ${tasks
         .map((t) => {
           const ag = agentMap.get(t.to_agent_id);
-          const agentLabel = ag?.device_name ? `${ag.device_name} · ${ag.name}` : ag?.name || t.to_agent_id;
-          const snippet = t.error_message || t.receipt?.summary || "";
+          const agentLabel = ag?.device_name ? `${ag.device_name} / ${ag.name}` : ag?.name || t.to_agent_id;
+          const isErr = Boolean(t.error_message) || isFailedTaskState(t.state);
+          const excerpt = cleanExcerpt(t.error_message || t.receipt?.summary || "");
           const canCancel = t.state === "working" || t.state === "submitted";
+          const fromSuffix = t.from_node && t.from_node !== "owner" ? ` ← ${t.from_node}` : "";
 
           return `
-            <div class="task-feed-row" data-view-thread="${escapeHtml(t.context_id)}">
-              <div class="row-between" style="gap:10px">
-                <div class="row" style="min-width:0;flex:1">
-                  <span class="pill ${stateTone(t.state)}">${stateLabel(t.state)}</span>
-                  <strong class="truncate">${escapeHtml(t.title)}</strong>
+            <div class="task-feed-row ${isErr ? "is-err" : ""}" data-view-thread="${escapeHtml(t.context_id)}" title="${escapeHtml(stateLabel(t.state))}">
+              <span class="status-dot ${taskStatusDotClass(t.state)}"></span>
+              <div class="task-feed-body">
+                <div class="task-feed-top">
+                  <div class="task-feed-title">
+                    <strong class="truncate">${escapeHtml(t.title)}</strong>
+                    <span class="task-feed-target">· ${escapeHtml(agentLabel)}${escapeHtml(fromSuffix)}</span>
+                  </div>
+                  <div class="task-feed-right">
+                    <span>${formatRelativeTime(t.updated_at)}</span>
+                    ${
+                      canCancel
+                        ? `<button type="button" class="btn btn-ghost btn-sm" data-cancel-task="${escapeHtml(t.id)}">取消</button>`
+                        : ""
+                    }
+                  </div>
                 </div>
-                <div class="row" style="flex-shrink:0">
-                  <span class="muted" style="font-size:12px">${formatRelativeTime(t.updated_at)}</span>
-                  ${
-                    canCancel
-                      ? `<button type="button" class="btn btn-ghost btn-sm" data-cancel-task="${escapeHtml(t.id)}">取消</button>`
-                      : ""
-                  }
-                </div>
+                ${
+                  excerpt
+                    ? `<div class="task-excerpt ${isErr ? "is-err" : ""}">${escapeHtml(excerpt)}</div>`
+                    : ""
+                }
               </div>
-              <div class="muted" style="font-size:12px;margin-top:4px">
-                执行方：${escapeHtml(agentLabel)} · 发起方：${escapeHtml(t.from_node || "-")}
-              </div>
-              ${
-                snippet
-                  ? `<div class="task-snippet ${t.error_message ? "is-err" : ""}">${escapeHtml(snippet)}</div>`
-                  : ""
-              }
             </div>
           `;
         })
@@ -114,67 +133,57 @@ function renderNodeCapacityPanel(devices, agents) {
     return String(a.name || a.id).localeCompare(String(b.name || b.id), "zh-CN");
   });
 
-  if (!sortedDevices.length && !cloudAgents.length) {
-    return `
-      <div class="card">
-        <div class="row-between" style="margin-bottom:10px">
-          <h3 class="section-title" style="font-size:15px">节点负载</h3>
-          <button type="button" class="btn btn-ghost btn-sm" id="home-goto-agents">管理全部 →</button>
-        </div>
-        <div class="muted" style="font-size:12px">
-          暂未挂载电脑或独立 Agent，请点击右上角「+ 接入 Agent / 电脑」开始配置。
-        </div>
-      </div>
-    `;
-  }
-
   return `
-    <div class="card">
-      <div class="row-between" style="margin-bottom:10px">
-        <h3 class="section-title" style="font-size:15px">节点负载</h3>
+    <section class="panel">
+      <div class="panel-head">
+        <h3 class="panel-title">节点负载</h3>
         <button type="button" class="btn btn-ghost btn-sm" id="home-goto-agents">管理全部 →</button>
       </div>
-      <div class="stack-sm">
-        ${sortedDevices
-          .map((d) => {
-            const devWorkers = agents.filter((a) => a.kind === "device-worker" && a.device_id === d.id);
-            const devOnline = devWorkers.filter((a) => a.online && a.enabled).length;
-            const used = Number(d.active_count || 0);
-            const cap = Math.max(Number(d.max_concurrent || 1), 1);
-            const pct = Math.min(100, Math.round((used / cap) * 100));
-            const dotCls = !d.enabled ? "dot-paused" : d.online ? "dot-online" : "dot-offline";
-            return `
-              <div class="host-row" data-focus-device="${escapeHtml(d.id)}">
-                <div class="row-between">
-                  <div class="row" style="min-width:0">
-                    <span class="dot ${dotCls}"></span>
-                    <strong class="truncate">${escapeHtml(d.name || d.id)}</strong>
-                    ${d.is_local ? `<span class="pill pill-primary">本机</span>` : ""}
-                  </div>
-                  <span class="muted mono">${used}/${cap} 并发</span>
-                </div>
-                <div class="cap-bar">
-                  <div class="cap-bar-fill ${pct >= 80 ? "is-warn" : used > 0 ? "is-busy" : ""}" style="width:${pct}%"></div>
-                </div>
-                <div class="muted" style="font-size:11px">
-                  在线 Worker ${devOnline}/${devWorkers.length} · 心跳 ${formatRelativeTime(d.last_seen_at)}
-                </div>
-              </div>
-            `;
-          })
-          .join("")}
-        ${
-          cloudAgents.length
-            ? `<div class="host-row" id="home-goto-cloud">
-                <div class="row-between">
-                  <strong>独立 / 云端 Agent</strong>
-                  <span class="pill">${cloudOnline}/${cloudAgents.length} 在线</span>
-                </div>
-              </div>`
-            : ""
-        }
-      </div>
-    </div>
+      ${
+        !sortedDevices.length && !cloudAgents.length
+          ? `<div class="panel-empty">暂未接入电脑节点或独立 Agent，可点击顶栏「+ 接入 Agent / 电脑」。</div>`
+          : `<div>
+              ${sortedDevices
+                .map((d) => {
+                  const devWorkers = agents.filter((a) => a.kind === "device-worker" && a.device_id === d.id);
+                  const devOnline = devWorkers.filter((a) => a.online && a.enabled).length;
+                  const used = Number(d.active_count || 0);
+                  const cap = Math.max(Number(d.max_concurrent || 1), 1);
+                  const pct = Math.min(100, Math.round((used / cap) * 100));
+                  const dotCls = !d.enabled ? "dot-paused" : d.online ? "dot-online" : "dot-offline";
+                  return `
+                    <div class="host-row" data-focus-device="${escapeHtml(d.id)}">
+                      <div class="row-between">
+                        <div class="row" style="min-width:0;gap:7px">
+                          <span class="dot ${dotCls}"></span>
+                          <strong class="truncate" style="font-size:13px">${escapeHtml(d.name || d.id)}</strong>
+                          ${d.is_local ? `<span class="tag-subtle">本机</span>` : ""}
+                        </div>
+                        <span class="muted mono">${used}/${cap}</span>
+                      </div>
+                      <div class="row-between" style="gap:10px">
+                        <span class="muted" style="font-size:11px">在线 ${devOnline}/${devWorkers.length} · ${formatRelativeTime(d.last_seen_at)}</span>
+                        <div class="mini-meter" title="并发槽位 ${used}/${cap}">
+                          <div class="mini-meter-fill ${pct >= 80 ? "is-warn" : used > 0 ? "is-busy" : ""}" style="width:${pct}%"></div>
+                        </div>
+                      </div>
+                    </div>
+                  `;
+                })
+                .join("")}
+              ${
+                cloudAgents.length
+                  ? `<div class="host-row" id="home-goto-cloud">
+                      <div class="row-between">
+                        <span style="font-size:13px;font-weight:500">独立 / 云端 Agent</span>
+                        <span class="muted mono">${cloudOnline}/${cloudAgents.length} 在线</span>
+                      </div>
+                    </div>`
+                  : ""
+              }
+            </div>`
+      }
+    </section>
   `;
 }
 
@@ -189,14 +198,14 @@ function renderScheduleSummaryPanel(schedules, agentMap) {
     .slice(0, 4);
 
   return `
-    <div class="card">
-      <div class="row-between" style="margin-bottom:10px">
-        <h3 class="section-title" style="font-size:15px">定时巡检</h3>
+    <section class="panel">
+      <div class="panel-head">
+        <h3 class="panel-title">定时巡检</h3>
         <button type="button" class="btn btn-ghost btn-sm" id="home-goto-schedules">查看全部 →</button>
       </div>
       ${
         topSchedules.length
-          ? `<div class="stack-sm">
+          ? `<div>
               ${topSchedules
                 .map((sch) => {
                   const ag = agentMap.get(sch.agent_id);
@@ -205,26 +214,24 @@ function renderScheduleSummaryPanel(schedules, agentMap) {
                     : `data-goto-schedules="1"`;
                   return `
                     <div class="schedule-mini-row" ${targetAttr}>
-                      <div class="row-between" style="gap:8px">
-                        <div class="row" style="min-width:0;flex:1">
-                          ${miniScheduleBadge(sch)}
-                          <strong class="truncate" style="font-size:13px">${escapeHtml(sch.name)}</strong>
+                      <div class="row" style="min-width:0;flex:1;gap:8px">
+                        <span class="status-dot ${scheduleStatusDotClass(sch)}"></span>
+                        <div style="min-width:0;flex:1">
+                          <div class="truncate" style="font-size:13px;font-weight:550">${escapeHtml(sch.name)}</div>
+                          <div class="muted truncate" style="font-size:11px">${escapeHtml(ag?.name || sch.agent_id)}</div>
                         </div>
-                        <span class="muted" style="font-size:11px;flex-shrink:0">
-                          ${sch.last_run_at ? formatRelativeTime(sch.last_run_at) : "待首报"}
-                        </span>
                       </div>
-                      <div class="muted truncate" style="font-size:11px;margin-top:3px">
-                        ${escapeHtml(ag?.name || sch.agent_id)}
-                      </div>
+                      <span class="muted" style="font-size:11px;flex-shrink:0">
+                        ${sch.last_run_at ? formatRelativeTime(sch.last_run_at) : "待首报"}
+                      </span>
                     </div>
                   `;
                 })
                 .join("")}
             </div>`
-          : `<div class="muted" style="font-size:12px">暂无已登记的定时任务</div>`
+          : `<div class="panel-empty">暂无已登记的定时任务</div>`
       }
-    </div>
+    </section>
   `;
 }
 
@@ -267,38 +274,50 @@ export function renderHomeView(container, refreshFn) {
   });
 
   const TASK_FILTERS = [
-    { id: "all", label: `全部 (${tasks.length})` },
-    { id: "active", label: `进行中 (${activeTasks.length})` },
-    { id: "failed", label: `失败 (${failedTasks.length})` },
-    { id: "completed", label: `已完成 (${completedTasks.length})` },
+    { id: "all", label: `全部 ${tasks.length}` },
+    { id: "active", label: `进行中 ${activeTasks.length}` },
+    { id: "failed", label: `失败`, errCount: failedTasks.length },
+    { id: "completed", label: `已完成 ${completedTasks.length}` },
   ];
 
   container.innerHTML = `
-    <section class="kpi-grid">
-      <div class="kpi-card is-clickable" id="kpi-actions">
-        <div class="kpi-label">待我处理</div>
-        <div class="kpi-val" style="color:${actions.length ? "var(--danger)" : "var(--text)"}">${actions.length}</div>
-        <div class="kpi-sub">${actions.length ? `审批 ${authCount} · 追问 ${inputCount}` : "队列无阻塞"}</div>
-      </div>
-
-      <div class="kpi-card is-clickable" id="kpi-tasks">
-        <div class="kpi-label">任务队列</div>
-        <div class="kpi-val">${activeTasks.length} <span class="muted" style="font-size:13px;font-weight:500">执行中</span></div>
-        <div class="kpi-sub">近 24h 完成 ${done24h} · 失败 ${fail24h}</div>
-      </div>
-
-      <div class="kpi-card is-clickable" id="kpi-nodes">
-        <div class="kpi-label">节点与算力</div>
-        <div class="kpi-val">${onlineDevices}<span class="muted" style="font-size:14px"> / ${devices.length}</span></div>
-        <div class="kpi-sub">Agent ${onlineAgents}/${agents.length} · 并发 ${activeSlots}/${totalSlots}</div>
-      </div>
-
-      <div class="kpi-card is-clickable" id="kpi-schedules">
-        <div class="kpi-label">定时巡检</div>
-        <div class="kpi-val" style="color:${abnormalCount ? "var(--danger)" : "var(--text)"}">
-          ${abnormalCount ? `${abnormalCount} <span style="font-size:13px;font-weight:500">异常</span>` : `${healthyCount}<span class="muted" style="font-size:14px"> / ${schedules.length}</span>`}
+    <section class="kpi-strip">
+      <div class="kpi-cell" id="kpi-actions">
+        <div class="kpi-cell-head">
+          <span>待我处理</span>
+          <span class="status-dot ${actions.length ? "is-fail" : "is-ok"}"></span>
         </div>
-        <div class="kpi-sub">
+        <div class="kpi-num ${actions.length ? "is-alert" : ""}">${actions.length}</div>
+        <div class="kpi-meta">${actions.length ? `审批 ${authCount} · 追问 ${inputCount}` : "队列无阻塞"}</div>
+      </div>
+
+      <div class="kpi-cell" id="kpi-tasks">
+        <div class="kpi-cell-head">
+          <span>任务队列</span>
+          <span class="status-dot ${activeTasks.length ? "is-run" : "is-idle"}"></span>
+        </div>
+        <div class="kpi-num">${activeTasks.length} <span class="kpi-num-unit">执行中</span></div>
+        <div class="kpi-meta">24h 完成 ${done24h}${fail24h ? ` · 失败 ${fail24h}` : ""}</div>
+      </div>
+
+      <div class="kpi-cell" id="kpi-nodes">
+        <div class="kpi-cell-head">
+          <span>节点与算力</span>
+          <span class="status-dot ${onlineDevices ? "is-ok" : "is-idle"}"></span>
+        </div>
+        <div class="kpi-num">${onlineDevices}/${devices.length} <span class="kpi-num-unit">台在线</span></div>
+        <div class="kpi-meta">Agent ${onlineAgents}/${agents.length} · 并发 ${activeSlots}/${totalSlots}</div>
+      </div>
+
+      <div class="kpi-cell" id="kpi-schedules">
+        <div class="kpi-cell-head">
+          <span>定时巡检</span>
+          <span class="status-dot ${abnormalCount ? "is-fail" : schedules.length ? "is-ok" : "is-idle"}"></span>
+        </div>
+        <div class="kpi-num ${abnormalCount ? "is-alert" : ""}">
+          ${abnormalCount ? `${abnormalCount} <span class="kpi-num-unit">异常</span>` : `${healthyCount}/${schedules.length}`}
+        </div>
+        <div class="kpi-meta">
           ${
             abnormalCount
               ? `共 ${schedules.length} 项定时任务`
@@ -312,36 +331,34 @@ export function renderHomeView(container, refreshFn) {
       </div>
     </section>
 
+    ${
+      actions.length
+        ? `<section id="home-actions-section" style="margin-bottom:18px">
+            <div class="section-header" style="margin-top:0">
+              <h2 class="section-title">待我处理 (${actions.length})</h2>
+            </div>
+            <div class="action-list">${actions.map(renderActionCard).join("")}</div>
+          </section>`
+        : ""
+    }
+
     <div class="dashboard-grid">
       <div class="dashboard-main">
-        <section id="home-actions-section">
-          ${
-            actions.length
-              ? `
-                <div class="section-header" style="margin-top:0">
-                  <h2 class="section-title">待我处理 (${actions.length})</h2>
-                </div>
-                <div class="action-list">${actions.map(renderActionCard).join("")}</div>
-              `
-              : `<div class="all-clear-bar">✓ 队列运转平稳，当前没有需要审批或回复的阻塞任务</div>`
-          }
-        </section>
-
-        <section>
-          <div class="section-header">
-            <h2 class="section-title">任务动态</h2>
-            <div class="row" style="flex-wrap:wrap">
-              <div class="filter-bar">
+        <section class="panel">
+          <div class="panel-head">
+            <div class="row" style="gap:10px;flex-wrap:wrap">
+              <h2 class="panel-title">任务动态</h2>
+              <div class="seg-control">
                 ${TASK_FILTERS.map(
                   (item) => `
-                  <button type="button" class="filter-chip ${taskFilter === item.id ? "active" : ""}" data-home-task-filter="${item.id}">
-                    ${escapeHtml(item.label)}
+                  <button type="button" class="seg-btn ${taskFilter === item.id ? "active" : ""}" data-home-task-filter="${item.id}">
+                    ${escapeHtml(item.label)}${item.errCount ? `<span class="seg-err-count">${item.errCount}</span>` : ""}
                   </button>
                 `
                 ).join("")}
               </div>
-              <button type="button" class="btn btn-ghost btn-sm" id="home-goto-threads">全部线程 →</button>
             </div>
+            <button type="button" class="btn btn-ghost btn-sm" id="home-goto-threads">全部线程 →</button>
           </div>
           ${renderTaskFeed(filteredTasks.slice(0, 12), agentMap)}
         </section>
@@ -355,7 +372,9 @@ export function renderHomeView(container, refreshFn) {
   `;
 
   container.querySelector("#kpi-actions")?.addEventListener("click", () => {
-    container.querySelector("#home-actions-section")?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+    const actionsEl = container.querySelector("#home-actions-section");
+    if (actionsEl) actionsEl.scrollIntoView({ behavior: "smooth", block: "start" });
+    else setState({ activeTab: "threads" });
   });
   container.querySelector("#kpi-tasks")?.addEventListener("click", () => setState({ activeTab: "threads" }));
   container.querySelector("#kpi-nodes")?.addEventListener("click", () => setState({ activeTab: "agents" }));

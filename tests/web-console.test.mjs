@@ -185,7 +185,14 @@ test("Web Console UI & Templates: 主题变量切换规则、控件可读文字�
   assert.equal(homeSrc.includes("home-add-btn"), false, "概览页不得再包含重复的接入按钮");
   assert.equal(homeSrc.includes("home-dispatch-btn"), false, "概览页不得再包含重复的派发按钮");
   assert.equal(homeSrc.includes("可用 Agent 能力总览"), false, "概览页不得再重复平铺 Agent 能力卡片");
+  assert.equal(homeSrc.includes("all-clear-bar"), false, "零待办时不得渲染占位大绿条打断左右栏顶对齐");
   assert.ok(homeSrc.includes("节点负载") && homeSrc.includes("定时巡检") && homeSrc.includes("任务动态"));
+  assert.ok(
+    homeSrc.includes("kpi-strip") &&
+      homeSrc.includes("seg-control") &&
+      homeSrc.includes("task-excerpt") &&
+      homeSrc.includes("mini-meter")
+  );
 
   const agentsSrc = fs.readFileSync(path.resolve("src", "web", "views", "agents.js"), "utf8");
   assert.equal(agentsSrc.includes("agents-add-btn"), false, "Agent 与设备页顶部工具栏不得重复顶部栏接入按钮");
