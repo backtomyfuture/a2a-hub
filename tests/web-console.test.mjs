@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { startHubRuntime } from "../src/core/hub-runtime.mjs";
-import { DEFAULT_AGENT_TEMPLATES, loadAgentTemplates } from "../src/core/templates.mjs";
+import { DEFAULT_AGENT_TEMPLATES, buildAgentOnboardingPrompt, loadAgentTemplates } from "../src/core/templates.mjs";
 import { renderAgentCard } from "../src/web/components/agent-card.js";
 import { escapeHtml } from "../src/web/utils.js";
 
@@ -174,7 +174,7 @@ test("Web Console UI & Templates: 主题变量切换规则、控件可读文字�
   );
   assert.ok(DEFAULT_AGENT_TEMPLATES.some((t) => t.id === "muse" && t.role === "leader"));
   assert.ok(DEFAULT_AGENT_TEMPLATES.some((t) => t.id === "grok-bot" && t.transport === "webhook"));
-  for (const id of ["openclaw", "hermes", "manus", "kimi-agent", "coze", "dify", "n8n", "feishu-bot"]) {
+  for (const id of ["openclaw", "hermes", "manus", "kimi-agent", "lingguang", "coze", "dify", "n8n", "feishu-bot"]) {
     assert.ok(DEFAULT_AGENT_TEMPLATES.some((t) => t.id === id), `DEFAULT_AGENT_TEMPLATES 缺少 ${id}`);
   }
 
@@ -219,4 +219,25 @@ test("Web Console UI & Templates: 主题变量切换规则、控件可读文字�
 
   const addModalSrc = fs.readFileSync(path.resolve("src", "web", "components", "add-modal.js"), "utf8");
   assert.ok(addModalSrc.includes("data-join-plat") && addModalSrc.includes("Windows PowerShell"));
+
+  // 验证 workbuddy 与 qwen 使用精简免误报自动执行提示词，其他模板保留原有通用提示词
+  for (const pid of ["workbuddy", "qwen"]) {
+    const prompt = buildAgentOnboardingPrompt({
+      hubUrl: "https://example.test",
+      agent: { id: pid, name: pid, role: "worker", platform: pid, transport: "poll", poll_interval_min: 10 },
+      token: "ah_ag_test_tok",
+    });
+    assert.ok(prompt.includes("免确认自动执行范围"), `${pid} 应包含免确认白名单`);
+    assert.ok(prompt.includes("无待办静默结束"), `${pid} 应包含无待办静默约定`);
+    assert.ok(prompt.includes("/fail"), `${pid} 应包含 fail 兜底`);
+    assert.ok(!prompt.includes("/auth"), `${pid} 不应包含 /auth 高危授权`);
+    assert.ok(!prompt.includes("记忆中"), `${pid} 不应要求写入对话记忆`);
+    assert.ok(!prompt.includes("当前在线"), `${pid} 不应包含固定暗号回执`);
+  }
+  const doubaoPrompt = buildAgentOnboardingPrompt({
+    hubUrl: "https://example.test",
+    agent: { id: "doubao", name: "豆包", role: "worker", platform: "doubao", transport: "poll", poll_interval_min: 5 },
+    token: "ah_ag_test_tok",
+  });
+  assert.ok(doubaoPrompt.includes("# 接入 a2a-hub 编排中台（豆包）"));
 });

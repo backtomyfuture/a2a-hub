@@ -66,6 +66,18 @@ export const DEFAULT_AGENT_TEMPLATES = [
     intro: "你是一个连接在 a2a-hub 上的云端 Worker Agent（豆包）。",
   },
   {
+    id: "lingguang",
+    name: "灵光（蚂蚁 Agent）",
+    default_name: "灵光",
+    default_id: "lingguang",
+    role: "worker",
+    transport: "poll",
+    poll_interval_min: 5,
+    badge: "Worker · 定时轮询",
+    summary_hint: "擅长中文长文写作、资料总结与创意策划的云端 Agent",
+    intro: "你是一个连接在 a2a-hub 上的云端 Worker Agent（灵光）。",
+  },
+  {
     id: "qwen",
     name: "千问（阿里 Agent）",
     default_name: "千问",
@@ -202,10 +214,75 @@ export function findTemplate(configDir, platformId) {
   return list.find((t) => t.id === platformId) || list.find((t) => t.id === "generic") || DEFAULT_AGENT_TEMPLATES[0];
 }
 
+const WORKSPACE_AUTO_WORKER_SPECS = {
+  workbuddy: {
+    taskFocus: "办公日程、会议纪要整理与团队消息草稿",
+    whitelistHint: "办公日程梳理、会议纪要整理、信息归纳、文案或消息草稿起草",
+  },
+  qwen: {
+    taskFocus: "数据分析、文档翻译、资料总结与代码辅助",
+    whitelistHint: "文本翻译、总结归纳、文案撰写、结构化数据分析、代码解释或片段生成",
+  },
+};
+
+function buildWorkspaceAutoWorkerPrompt({ baseUrl, agent, token, tpl, spec }) {
+  const pollMin = Number(agent.poll_interval_min || tpl.poll_interval_min || 5) || 5;
+  const authHeader = token ? `-H "Authorization: Bearer ${token}"` : "";
+  const safeRegisterPayload = JSON.stringify({
+    id: agent.id,
+    name: agent.name,
+    summary: agent.summary || tpl.summary_hint,
+    skills: agent.skills?.length ? agent.skills : ["general"],
+    tools: agent.tools || [],
+  }).replace(/'/g, "'\\''");
+
+  return [
+    `帮我接入一下我自己的个人任务看板（a2a-hub），以后我在看板里统一给你派「${spec.taskFocus}」之类的纯内容/办公待办。`,
+    "",
+    "按下面 3 步直接配好就行：",
+    "",
+    "1. 把下面这组连接信息保存在你的工作区配置文件或工具配置中（不用写入对话记忆库）：",
+    `- 看板地址：\`${baseUrl}\``,
+    `- 你的 Agent ID：\`${agent.id}\``,
+    ...(token
+      ? [`- Bearer Token：\`${token}\``]
+      : ["- 鉴权模式：当前 Hub 未启用密钥，直接请求即可"]),
+    "",
+    "2. 先调用一次注册接口上线并刷新名片：",
+    "```bash",
+    `curl -sS -X POST "${baseUrl}/api/v1/agents/register" \\`,
+    ...(authHeader ? [`  ${authHeader} \\`] : []),
+    `  -H "Content-Type: application/json" \\`,
+    `  -d '${safeRegisterPayload}'`,
+    "```",
+    "",
+    `3. 帮我建一个每 ${pollMin} 分钟一次的定时执行任务（无待办静默结束，不要报空）：`,
+    `- 检查接口：\`GET ${baseUrl}/api/v1/agents/${agent.id}/check\``,
+    `- 看到 \`state = "submitted"\` 的待办时，先认领并读取完整任务与上下文（返回含 \`input_text\`、追问回复 \`messages\` 与前情 \`context_history\`）：`,
+    `  \`POST ${baseUrl}/api/v1/tasks/<task_id>/claim\``,
+    `- **免确认自动执行范围**：凡属于**${spec.whitelistHint}**这类纯内容处理（不对外发消息、不删改重要文件、不动用外部账号），**直接处理完并提交结果，不要停下来问我确认**：`,
+    `  \`POST ${baseUrl}/api/v1/tasks/<task_id>/complete\` \`{"summary":"简短结论","text":"详细内容"}\``,
+    `- **仅以下情况才挂起**：缺关键信息需要问我，或真涉及对外发消息/删改重要文件时调 \`POST ${baseUrl}/api/v1/tasks/<task_id>/ask\` \`{"prompt":"..."}\`；做不了或出错时调 \`POST ${baseUrl}/api/v1/tasks/<task_id>/fail\` \`{"error":"原因"}\`。`,
+    "",
+    "配好后把实际配置位置、注册结果和定时任务结果告诉我即可。",
+  ].join("\n");
+}
+
 export function buildAgentOnboardingPrompt({ hubUrl, agent, token, template }) {
   const baseUrl = String(hubUrl || "http://127.0.0.1:8787").replace(/\/+$/, "");
   const tpl = template || findTemplate(".", agent.platform);
   const isLeader = agent.role === "leader";
+  const platformId = tpl?.id || agent.platform;
+  if (!isLeader && Object.hasOwn(WORKSPACE_AUTO_WORKER_SPECS, platformId)) {
+    return buildWorkspaceAutoWorkerPrompt({
+      baseUrl,
+      agent,
+      token,
+      tpl,
+      spec: WORKSPACE_AUTO_WORKER_SPECS[platformId],
+    });
+  }
+
   const skillName = isLeader ? "a2a-leader" : "a2a-worker";
   const authHeader = token ? `-H "Authorization: Bearer ${token}"` : "";
 

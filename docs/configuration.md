@@ -12,7 +12,7 @@
   - `AH_NOTIFY_ON=action|all`
 - `hub.db`（`0600`）：SQLite WAL 主库（仅 Hub 模式）。
 - `approval_key.pem`（`0600`）：Hub Ed25519 审批签名私钥（仅 Hub 模式）。
-- `agent_templates.json`（`0600`）：新增独立 Agent 的 14 套平台模板目录，首次启动由 Hub 写入并在升级时无损增量合并。
+- `agent_templates.json`（`0600`）：新增独立 Agent 的 15 套平台模板目录，首次启动由 Hub 写入并在升级时无损增量合并。
 - `files/blobs/`：通过 `/api/v1/files` 中转的附件与产物，默认 7 天自动清理（`AH_FILE_TTL_MS`、`AH_FILE_MAX_BYTES` 可调）。
 
 ## 一行无前置安装与增量扫描

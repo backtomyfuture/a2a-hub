@@ -37,7 +37,7 @@
 - **真正的一行启动，无需 `git clone`**：无需预先准备仓库或数据库。Mac / Linux / Windows 一行脚本自动安装官方 Node 24 LTS、`ah` 命令、生成机主凭据与 Ed25519 密钥对，并直接打开 Web 控制台。
 - **零前置跨电脑融合挂载**：目标电脑什么都没装？控制台生成**一条融合了「安装 Node 24 + 安装 `ah` + 绑定设备 + 自动扫描 CLI + 注册自启」的一行命令**，复制运行（或直接发给对方机器上的 AI 助手）即可上线，纯出站连接，**不需要任何入站端口**。
 - **26 种本机 CLI 自动发现 + 多路真并发池**：自动识别 `claude`、`codex`、`opencode`、`amp`、`droid`、`agy`、`grok`、`cursor-agent`、`codebuddy`、`copilot`、`qwen`、`kimi` 等 **26 种编程/终端 CLI**。单台设备默认 `maxConcurrent = 4` 并行调度，同一 `(context_id, worker_key)` 自动串行加锁并 `--resume` 续接上下文。
-- **14 套云端与工作流 Agent 预设**：内置 **Muse / OpenClaw（Leader 主协调）**、Hermes、Manus、Kimi、Grok Bot、Coze、Dify、n8n、飞书机器人、豆包、千问等模板，创建即生成包含真实 Token 与注册心跳脚本的自包含接入提示词。
+- **15 套云端与工作流 Agent 预设**：内置 **Muse / OpenClaw（Leader 主协调）**、Hermes、Manus、Kimi、Grok Bot、Coze、Dify、n8n、飞书机器人、豆包、灵光、千问等模板，创建即生成包含真实 Token 与注册心跳脚本的自包含接入提示词。
 - **严格安全边界与指令数据分离**：任务请求参数严禁夹带 `command` / `cwd` / `env` 等控制键；高危任务经 `auth-required` 由机主使用 Hub 私钥产出 **Ed25519 密码学签名**，远端执行器本地验签通过才允许执行。
 - **零构建极简 Web 控制台**：内置浅色 / 深色主题切换、高密度双栏概览、按设备节点折叠收敛的「Agent 与设备」视图、按设备分组的并发扇出派单、`Context_ID` 对话线程时间线，以及 Worker 定时巡检健康看板。
 
@@ -160,7 +160,7 @@ node bin/ah.mjs up      # 初始化并前台启动 Hub（加 --service 注册开
 
 ### 2. 接入独立 / 云端 Agent（Muse、OpenClaw、Coze、Dify、n8n、Webhook 等）
 
-在控制台点击 **「+ 接入 Agent / 电脑」 → 「接入独立 Agent」**，从 14 套预设模板中选择平台（或选「通用（自定义参数）」自由组合 Poll / Longpoll / Webhook），创建后控制台会签发独立的分 Agent Token 并生成一份**自包含接入提示词**，发给目标 Agent 即可完成在线注册并接单。
+在控制台点击 **「+ 接入 Agent / 电脑」 → 「接入独立 Agent」**，从 15 套预设模板中选择平台（或选「通用（自定义参数）」自由组合 Poll / Longpoll / Webhook），创建后控制台会签发独立的分 Agent Token 并生成一份**自包含接入提示词**，发给目标 Agent 即可完成在线注册并接单。
 
 ---
 
@@ -183,7 +183,7 @@ node bin/ah.mjs up      # 初始化并前台启动 Hub（加 --service 注册开
 ## 内置兼容生态一览
 
 <details>
-<summary><strong>点击展开：26 种自动发现本机 CLI Agent + 14 套云端 / 工作流预设模板</strong></summary>
+<summary><strong>点击展开：26 种自动发现本机 CLI Agent + 15 套云端 / 工作流预设模板</strong></summary>
 
 ### 自动发现的 26 种本机 CLI Agent（[`src/core/config.mjs`](src/core/config.mjs)）
 
@@ -216,7 +216,7 @@ node bin/ah.mjs up      # 初始化并前台启动 Hub（加 --service 注册开
 | `iflow` | iFlow CLI | `iflow` | `-p {prompt} --yolo` |
 | `qoder` | Qoder CLI | `qodercli` / `qoder` | `-p {prompt} --output-format json --yolo` |
 
-### 14 套独立 / 云端 Agent 接入模板（[`src/core/templates.mjs`](src/core/templates.mjs)）
+### 15 套独立 / 云端 Agent 接入模板（[`src/core/templates.mjs`](src/core/templates.mjs)）
 
 | 模板 ID | 预设名称 | 角色 | 默认接入模式 | 典型定位 |
 | --- | --- | --- | --- | --- |
@@ -229,6 +229,7 @@ node bin/ah.mjs up      # 初始化并前台启动 Hub（加 --service 注册开
 | `grok-bot` | Grok Bot | `worker` | `webhook` | 实时联网搜索与 X/Web 舆情分析 |
 | `workbuddy` | WorkBuddy | `worker` | `poll` | 办公日程、会议纪要与团队触达 |
 | `doubao` | 豆包 | `worker` | `poll` | 中文长文写作、资料总结与创意策划 |
+| `lingguang` | 灵光 | `worker` | `poll` | 中文长文写作、资料总结与创意策划 |
 | `qwen` | 千问 | `worker` | `poll` | 结构化数据分析、翻译与代码辅助 |
 | `coze` | Coze / 扣子 Bot | `worker` | `webhook` | 扣子工作流与垂直业务插件自动化 |
 | `dify` | Dify Workflow Agent | `worker` | `webhook` | 基于 Dify 流程编排与 RAG 知识库问答 |

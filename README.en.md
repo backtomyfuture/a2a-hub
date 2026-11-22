@@ -165,7 +165,7 @@ New CLIs installed later can be added anytime without overwriting existing custo
 
 ### 2. Onboard Cloud / Standalone Agents
 
-In **"+ 接入 Agent / 电脑" → "接入独立 Agent"**, pick any of the **14 presets** (`generic`, `muse`, `openclaw`, `hermes`, `manus`, `kimi-agent`, `grok-bot`, `workbuddy`, `doubao`, `qwen`, `coze`, `dify`, `n8n`, `feishu-bot`). Submitting generates a scoped per-agent token and a ready-to-paste onboarding prompt with exact REST endpoints.
+In **"+ 接入 Agent / 电脑" → "接入独立 Agent"**, pick any of the **15 presets** (`generic`, `muse`, `openclaw`, `hermes`, `manus`, `kimi-agent`, `grok-bot`, `workbuddy`, `doubao`, `lingguang`, `qwen`, `coze`, `dify`, `n8n`, `feishu-bot`). Submitting generates a scoped per-agent token and a ready-to-paste onboarding prompt with exact REST endpoints.
 
 ---
 
@@ -176,7 +176,7 @@ flowchart LR
     U["Web Console / ah CLI / Leader"] -->|POST /tasks| GW["Hub HTTP Gateway\nLongPollBroker (40s) + Ed25519"]
     GW <-->|BEGIN IMMEDIATE| DB[("SQLite WAL\nhub.db\ndevices · agents · tasks · messages · schedules · files")]
     GW <-->|Outbound Long-Poll| DEV["DeviceDaemon Pool (maxConcurrent=4)\n26+ Auto-Discovered CLIs + --resume"]
-    GW <-->|Poll / Webhook| CLD["Cloud & Standalone Agents\n14 Built-in Presets"]
+    GW <-->|Poll / Webhook| CLD["Cloud & Standalone Agents\n15 Built-in Presets"]
     GW -.->|Alerts| NTF["Feishu / Bark / Telegram / Webhook"]
 ```
 
@@ -203,10 +203,10 @@ stateDiagram-v2
 ## Supported Ecosystem
 
 <details>
-<summary><strong>Click to expand: 26 Auto-Discovered Local CLIs + 14 Cloud / Workflow Agent Presets</strong></summary>
+<summary><strong>Click to expand: 26 Auto-Discovered Local CLIs + 15 Cloud / Workflow Agent Presets</strong></summary>
 
 - **Local CLIs ([`src/core/config.mjs`](src/core/config.mjs))**: `claude` (Claude Code), `codex` (Codex CLI), `opencode` (OpenCode), `gemini` (Gemini CLI), `aider` (Aider), `goose` (Goose), `amp` (Amp CLI), `droid` (Factory Droid), `agy` (Antigravity CLI), `grok` (Grok CLI), `cursor` (`cursor-agent`), `codebuddy` (`codebuddy`/`cbc`), `copilot` (GitHub Copilot CLI), `qwen` (Qwen Code), `kimi` (Kimi Code CLI), `kiro` (`kiro-cli`), `cline` (Cline CLI), `kilo` (`kilo`/`kilocode`), `auggie` (Augment Auggie), `vibe` (Mistral Vibe), `crush` (Charm Crush), `pi` (Pi Coding Agent), `devin` (Devin CLI), `openhands` (OpenHands CLI), `iflow` (iFlow CLI), `qoder` (`qodercli`/`qoder`).
-- **Cloud & Workflow Templates ([`src/core/templates.mjs`](src/core/templates.mjs))**: `generic`, `muse` (Leader), `openclaw` (Leader), `hermes`, `manus`, `kimi-agent`, `grok-bot`, `workbuddy`, `doubao`, `qwen`, `coze`, `dify`, `n8n`, `feishu-bot`.
+- **Cloud & Workflow Templates ([`src/core/templates.mjs`](src/core/templates.mjs))**: `generic`, `muse` (Leader), `openclaw` (Leader), `hermes`, `manus`, `kimi-agent`, `grok-bot`, `workbuddy`, `doubao`, `lingguang`, `qwen`, `coze`, `dify`, `n8n`, `feishu-bot`.
 
 </details>
 
