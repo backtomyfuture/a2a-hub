@@ -7,7 +7,7 @@ import path from "node:path";
 import { f1 } from "../bus/tables.mjs";
 import { resolveTableName } from "../bus/tables.mjs";
 import { resolveListenAddr } from "../config.mjs";
-import { agentCanSeeTask, assertAgentRoute, bindAgentBody } from "../hub/agent-access.mjs";
+import { agentCanSeeTask, assertAgentRoute, assertAgentTableWrite, bindAgentBody } from "../hub/agent-access.mjs";
 import { AgentTokenStore } from "../hub/agent-tokens.mjs";
 import {
   buildOnboarding,
@@ -485,7 +485,8 @@ export async function startHubHttpServer({
 
       // 1) HTTP 长轮询唤醒端点
       if (method === "GET" && pathname === "/api/v1/poll") {
-        const node = String(reqUrl.searchParams.get("node") ?? req.headers["x-a2a-node"] ?? "*").trim() || "*";
+        const rawNode = String(reqUrl.searchParams.get("node") ?? req.headers["x-a2a-node"] ?? "*").trim() || "*";
+        const node = principal.kind === "agent" ? principal.node : rawNode;
         const cursor = Number(reqUrl.searchParams.get("cursor") ?? 0) || 0;
         const timeoutSec = Number(reqUrl.searchParams.get("timeout") ?? 25);
         const timeoutMs = Number.isFinite(timeoutSec) ? Math.max(0, Math.min(60, timeoutSec)) * 1000 : 25_000;
@@ -530,15 +531,30 @@ export async function startHubHttpServer({
         if (method === "POST" && !recordId) {
           const body = await readJsonBodyBound();
           const clientToken = reqUrl.searchParams.get("client_token") || body.client_token || undefined;
-          const result = await bus.createRecord(table, body.fields ?? {}, clientToken);
+          const safeFields = await assertAgentTableWrite({
+            principal,
+            bus,
+            realTable: table,
+            method,
+            fields: body.fields ?? {},
+          });
+          const result = await bus.createRecord(table, safeFields, clientToken);
           onWake();
           sendJson(res, 200, { data: result });
           return;
         }
         if (method === "PUT" && recordId) {
           const body = await readJsonBodyBound();
+          const safeFields = await assertAgentTableWrite({
+            principal,
+            bus,
+            realTable: table,
+            method,
+            recordId,
+            fields: body.fields ?? {},
+          });
           try {
-            const result = await bus.updateRecord(table, recordId, body.fields ?? {});
+            const result = await bus.updateRecord(table, recordId, safeFields);
             onWake();
             sendJson(res, 200, { data: result });
           } catch (e) {
@@ -1074,20 +1090,18 @@ export async function startHubHttpServer({
           }
         }
 
-        if (access === "http") {
-          if (!tokenStore) {
-            sendJson(res, 500, { error: "未配置 configDir，无法签发 Agent Token" });
-            return;
-          }
-          // 没有机主 Token 时一旦签发 Agent Token，鉴权就会生效，机主自己将被挡在管理接口之外。
-          if (!apiToken) {
-            sendJson(res, 400, { error: "请先在 node.json 配置机主 apiToken，再签发 Agent Token" });
-            return;
-          }
-          if (tokenStore.get(node)) {
-            sendJson(res, 409, { error: `节点 ${node} 已存在（已有 Token）。如需重新接入，请在「节点」页重新生成 Token（即轮换：POST /api/v1/admin/tokens/${node}/rotate），或先删除该节点再添加` });
-            return;
-          }
+        if (!tokenStore) {
+          sendJson(res, 500, { error: "未配置 configDir，无法签发 Agent Token" });
+          return;
+        }
+        // 没有机主 Token 时一旦签发 Agent Token，鉴权就会生效，机主自己将被挡在管理接口之外。
+        if (!apiToken) {
+          sendJson(res, 400, { error: "请先在 node.json 配置机主 apiToken，再签发 Agent Token" });
+          return;
+        }
+        if (tokenStore.get(node)) {
+          sendJson(res, 409, { error: `节点 ${node} 已存在（已有 Token）。如需重新接入，请在「节点」页重新生成 Token（即轮换：POST /api/v1/admin/tokens/${node}/rotate），或先删除该节点再添加` });
+          return;
         }
 
         let card = null;
@@ -1120,10 +1134,8 @@ export async function startHubHttpServer({
           card = formatAgentCard(created?.record);
         }
 
-        let issued = null;
-        if (access === "http") {
-          issued = tokenStore.issue({ node, role, scopes: [] });
-        }
+        // 所有远端节点（http / host / inbox）均签发独立的分节点 Token，隔离主控 AH_API_TOKEN。
+        const issued = tokenStore.issue({ node, role, scopes: [], access });
         let webhookPayload = null;
         if (access === "http" && receive === "webhook") {
           if (!webhooks) throw httpError(500, "未配置 configDir，无法保存 Webhook");
@@ -1262,54 +1274,75 @@ export async function startHubHttpServer({
           if (inferred) role = inferred;
         }
         const scopes = Object.hasOwn(body, "scopes") ? body.scopes : undefined;
-        const issued = tokenStore.rotate({ node, role, scopes });
+        let access = existing?.access || "";
+        if (Object.hasOwn(body, "access") && String(body.access ?? "").trim()) {
+          access = validateAccess(body.access);
+        }
+        const mineCards = cards.filter((card) => f1(card, "Node") === node);
+        if (!access) {
+          const hasHttpCard = mineCards.some((card) => {
+            const meta = parseCardMetadata(card);
+            const rm = String(f1(card, "Receive_Mode") ?? "");
+            return f1(card, "Daemon_Version") === "http-agent"
+              || (meta.kind === "agent" && ["http-poll", "http-longpoll", "webhook"].includes(rm));
+          });
+          if (hasHttpCard) {
+            access = "http";
+          } else if (mineCards.length) {
+            const isInbox = mineCards.every((card) => parseCardMetadata(card).mode === "inbox" || parseCardMetadata(card).kind === "agent");
+            access = isInbox ? "inbox" : "host";
+          } else {
+            access = "http";
+          }
+        }
+        const issued = tokenStore.rotate({ node, role, scopes, access });
         const { presets } = agentTemplates();
         // 节点模板 id 优先于粗 template：WorkBuddy 和通用的粗分类都是 generic，只靠后者会生成同一段提示词。
         let templateId = "";
-        if (Object.hasOwn(body, "template_id") && String(body.template_id ?? "").trim()) {
-          templateId = templatePresetById(body.template_id, presets).id;
-        } else {
-          for (const card of cards) {
-            if (f1(card, "Node") !== node) continue;
-            const id = knownTemplateId(parseCardMetadata(card).template_id, presets);
-            if (id) { templateId = id; break; }
-          }
-        }
-        let templateFromCard = "";
-        for (const card of cards) {
-          if (f1(card, "Node") !== node) continue;
-          const t = parseCardMetadata(card).template;
-          if (t) { templateFromCard = t; break; }
-        }
         let template = "generic";
-        if (Object.hasOwn(body, "template")) template = validateTemplate(body.template);
-        else if (templateFromCard) template = validateTemplate(templateFromCard);
-        const storedReceive = nodeStoredReceiveMode(cards, node);
-        let receive = storedReceive === "http-longpoll" ? "longpoll" : (storedReceive === "webhook" ? "webhook" : "poll");
-        if (templateId && !Object.hasOwn(body, "template")) {
-          const preset = templatePresetById(templateId, presets);
-          // 名片接收方式已经和建单时的模板不一致时，不再套用那套提示词。
-          if (!storedReceive || preset.receive === receive) {
-            template = preset.template;
-            receive = preset.receive;
-          } else {
-            templateId = "";
-          }
-        }
-        if (!templateId) templateId = inferTemplateId(template, receive, presets);
-        receive = receiveForTemplate(template, receive);
+        let receive = "poll";
         let pollIntervalMin = null;
-        for (const card of cards) {
-          if (f1(card, "Node") !== node) continue;
-          const stored = parseCardMetadata(card).poll_interval_min;
-          if (!stored) continue;
-          pollIntervalMin = stored;
-          if (f1(card, "Receive_Mode") === storedReceive) break;
+        if (access === "http") {
+          if (Object.hasOwn(body, "template_id") && String(body.template_id ?? "").trim()) {
+            templateId = templatePresetById(body.template_id, presets).id;
+          } else {
+            for (const card of mineCards) {
+              const id = knownTemplateId(parseCardMetadata(card).template_id, presets);
+              if (id) { templateId = id; break; }
+            }
+          }
+          let templateFromCard = "";
+          for (const card of mineCards) {
+            const t = parseCardMetadata(card).template;
+            if (t) { templateFromCard = t; break; }
+          }
+          if (Object.hasOwn(body, "template")) template = validateTemplate(body.template);
+          else if (templateFromCard) template = validateTemplate(templateFromCard);
+          const storedReceive = nodeStoredReceiveMode(cards, node);
+          receive = storedReceive === "http-longpoll" ? "longpoll" : (storedReceive === "webhook" ? "webhook" : "poll");
+          if (templateId && !Object.hasOwn(body, "template")) {
+            const preset = templatePresetById(templateId, presets);
+            // 名片接收方式已经和建单时的模板不一致时，不再套用那套提示词。
+            if (!storedReceive || preset.receive === receive) {
+              template = preset.template;
+              receive = preset.receive;
+            } else {
+              templateId = "";
+            }
+          }
+          if (!templateId) templateId = inferTemplateId(template, receive, presets);
+          receive = receiveForTemplate(template, receive);
+          for (const card of mineCards) {
+            const stored = parseCardMetadata(card).poll_interval_min;
+            if (!stored) continue;
+            pollIntervalMin = stored;
+            if (f1(card, "Receive_Mode") === storedReceive) break;
+          }
         }
         const onboarding = buildOnboarding({
           hubUrl: requestHubUrl(req),
           node,
-          access: "http",
+          access,
           role: issued.role,
           authRequired: true,
           token: issued.token,

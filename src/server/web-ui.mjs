@@ -1136,12 +1136,18 @@ function receiveModeLabelZh(mode) {
 
 function isHttpNodeGroup(g) {
   if (!g) return false;
-  if (state.tokensByNode.has(g.node)) return true;
   const httpModes = new Set(["http-poll", "http-longpoll", "webhook"]);
   if ((g.cards || []).some((c) => c.daemon_version === "http-agent" || (c.kind === "agent" && httpModes.has(c.receive_mode)))) {
     return true;
   }
-  return Boolean(g.conn && g.conn.kind === "agent" && httpModes.has(g.conn.mode));
+  if ((g.cards || []).some((c) => c.kind === "host" || c.receive_mode === "event" || c.receive_mode === "longpoll")) {
+    return false;
+  }
+  if (g.conn && g.conn.kind === "agent" && httpModes.has(g.conn.mode)) return true;
+  if (g.conn && (g.conn.kind === "host" || g.conn.mode === "longpoll" || g.conn.mode === "local")) return false;
+  const tok = state.tokensByNode.get(g.node);
+  if (tok) return tok.access !== "host" && tok.access !== "inbox";
+  return false;
 }
 
 // 以名片上的 Receive_Mode 为准。连接上的 mode 只是当前这条链路，不能当成节点的接收方式。
@@ -2654,7 +2660,8 @@ function syncHostCommandVisibility() {
 
 function openAddCapModal(node) {
   const g = buildNodeGroups(state.data).find((x) => x.node === node);
-  const isHttp = g ? isHttpNodeGroup(g) : state.tokensByNode.has(node);
+  const tok = state.tokensByNode.get(node);
+  const isHttp = g ? isHttpNodeGroup(g) : Boolean(tok && tok.access !== "host" && tok.access !== "inbox");
   state.addCapTarget = { node, isHttp };
 
   document.getElementById("addCapForm").reset();
@@ -3010,8 +3017,9 @@ function renderCapTechnicalDetails(c) {
 function renderTokenManageBox(node, kind) {
   if (!state.tokensApiAvailable) return "";
   const info = state.tokensByNode.get(node);
-  // 宿主节点（含 Hub 本机）走机主 Token 的 ah daemon，专属密钥对它没有意义，只会误导机主去生成。
-  if (!info && kind === "host") return "";
+  const isHubSelf = Boolean(state.data && state.data.hubNode && node === state.data.hubNode);
+  // Hub 本机走本地 SQLite + 主控 Token；远端节点（含 host / inbox / http）均使用专属密钥。
+  if (!info && isHubSelf) return "";
   if (info) {
     const usedText = info.last_used_at ? formatRelativeTime(info.last_used_at) : "尚未使用";
     return '<div class="token-box">'

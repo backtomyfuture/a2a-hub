@@ -868,13 +868,14 @@ export async function runSetup(configDir, argv, appDir) {
       if (listenAddr) {
         const displayHost = (listenAddr.host === "0.0.0.0" || listenAddr.host === "::") ? detectLanIp() : listenAddr.host;
         const baseDisplay = publicUrl ? publicUrl.replace(/\/+$/, "") : `http://${displayHost}:${listenAddr.port}`;
-        const joinHostUrl = new URL(baseDisplay);
-        if (apiToken) joinHostUrl.username = encodeURIComponent(apiToken);
-        const joinStr = joinHostUrl.toString().replace(/\/+$/, "");
         const consoleUrl = apiToken ? `${baseDisplay}/?token=${encodeURIComponent(apiToken)}` : baseDisplay;
         console.log(`  ✓ Web 控制台地址：${consoleUrl}`);
-        console.log(`  ✓ 其他机器一行接入命令（已安装 ah）：\n    ah join ${joinStr}`);
-        console.log(`  ✓ 全新机器一行安装并接入：\n    curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --join ${joinStr}`);
+        if (apiToken) {
+          console.log("  · 其他机器 / 独立 Agent 接入：请打开 Web 控制台「节点 → + 添加 Agent」，按节点签发专属 Token（主控 AH_API_TOKEN 仅留在本机与控制台使用）。");
+        } else {
+          console.log(`  ✓ 其他机器一行接入命令（当前未设口令）：\n    ah join ${baseDisplay}`);
+          console.log(`  ✓ 全新机器一行安装并接入：\n    curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --join ${baseDisplay}`);
+        }
       }
     } else if (!hubPublicKey) {
       console.log("  · 未配置 hubPublicKey：Hub 在线时执行 ah join 或 ah setup --hub-key <公钥> 可开启 ed25519 审批验签。");

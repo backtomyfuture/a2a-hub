@@ -5,10 +5,12 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { HttpBus } from "../src/bus/http-bus.mjs";
 import { SqliteBus } from "../src/bus/sqlite-bus.mjs";
-import { DEFAULT_TABLES } from "../src/bus/tables.mjs";
-import { buildOnboarding } from "../src/hub/admission.mjs";
+import { DEFAULT_TABLES, f1 } from "../src/bus/tables.mjs";
+import { buildOnboarding, ensureLeaderIdentityCards } from "../src/hub/admission.mjs";
 import { AgentTokenStore } from "../src/hub/agent-tokens.mjs";
+import { classifyNode } from "../src/hub/capabilities.mjs";
 import { startHubHttpServer } from "../src/server/http-server.mjs";
 import { LongPollBroker } from "../src/server/longpoll-broker.mjs";
 import { withTemp } from "./helpers.mjs";
@@ -123,7 +125,7 @@ test("存储：签发只落哈希、同节点拒绝、轮换废旧、吊销、�
   });
 });
 
-test("onboarding：有 token 时内嵌明文，没有时用占位符；host/inbox 命令行仍是占位符", () => {
+test("onboarding：有 token 时内嵌明文（含 host/inbox），没有时用占位符", () => {
   const token = "aht_exampletokenvalue";
   const embedded = buildOnboarding({
     hubUrl: "https://hub.example.com/",
@@ -177,7 +179,7 @@ test("onboarding：有 token 时内嵌明文，没有时用占位符；host/inbo
   assert.match(placeholder.prompt, /<AH_API_TOKEN>/);
   assert.equal(placeholder.prompt.includes(token), false);
 
-  const host = buildOnboarding({
+  const hostWithToken = buildOnboarding({
     hubUrl: "http://hub.local:8787",
     node: "box",
     access: "host",
@@ -185,8 +187,19 @@ test("onboarding：有 token 时内嵌明文，没有时用占位符；host/inbo
     authRequired: true,
     token,
   });
-  assert.ok(host.steps.some((s) => s.includes("ah join http://hub.local:8787 --node box --api-token <AH_API_TOKEN>")));
-  assert.equal(host.steps.join("\n").includes(token), false);
+  assert.ok(hostWithToken.steps.some((s) => s.includes(`ah join http://hub.local:8787 --node box --api-token ${token}`)));
+  assert.equal(hostWithToken.prompt.includes(token), true);
+  assert.equal(hostWithToken.prompt.includes("<AH_API_TOKEN>"), false);
+
+  const hostPlaceholder = buildOnboarding({
+    hubUrl: "http://hub.local:8787",
+    node: "box",
+    access: "host",
+    role: "worker",
+    authRequired: true,
+  });
+  assert.ok(hostPlaceholder.steps.some((s) => s.includes("ah join http://hub.local:8787 --node box --api-token <AH_API_TOKEN>")));
+  assert.equal(hostPlaceholder.steps.join("\n").includes(token), false);
 });
 
 test("HTTP：机主不受影响，Agent 按角色隔离，冒充与撤单受绑定节点约束", async () => {
@@ -237,16 +250,19 @@ test("HTTP：机主不受影响，Agent 按角色隔离，冒充与撤单受绑�
       body: { node: "mac-host", access: "host", role: "worker" },
     });
     assert.equal(hostAdd.status, 200);
-    assert.equal(hostAdd.data.token, undefined);
-    assert.match(hostAdd.data.onboarding.prompt, /<AH_API_TOKEN>/);
+    const hostToken = hostAdd.data.token;
+    assert.match(hostToken, /^aht_/);
+    assert.equal(hostAdd.data.onboarding.prompt.includes(hostToken), true);
+    assert.equal(hostAdd.data.onboarding.prompt.includes("<AH_API_TOKEN>"), false);
     assert.equal(hostAdd.data.onboarding.prompt.includes(apiToken), false);
 
     const listed = await apiJson(baseUrl, "/api/v1/admin/tokens", { token: apiToken });
     assert.equal(listed.status, 200);
     assert.deepEqual(
       listed.data.tokens.map((t) => t.node).sort(),
-      ["grok-bot", "muse"],
+      ["grok-bot", "mac-host", "muse"],
     );
+    assert.equal(listed.data.tokens.find((t) => t.node === "mac-host")?.access, "host");
     assert.equal(JSON.stringify(listed.data).includes(workerToken), false);
     assert.equal(JSON.stringify(listed.data).includes("sha256:"), false);
 
@@ -489,4 +505,170 @@ test("未配置机主 Token 时拒绝签发 Agent Token，避免机主被挡在�
     assert.equal(rotated.status, 400);
     assert.equal((await apiJson(baseUrl, "/api/v1/state")).status, 200);
   }, { apiToken: "" });
+});
+
+test("远端 host / inbox 节点专属 Token：HttpBus 长轮询与表写守卫、防自授接纳与防伪造、轮换保留 access", async () => {
+  await withHub(async ({ baseUrl, apiToken, bus, hubDir }) => {
+    const hostAdd = await apiJson(baseUrl, "/api/v1/admin/agents", {
+      method: "POST",
+      token: apiToken,
+      body: { node: "edge-mac", access: "host", role: "worker" },
+    });
+    assert.equal(hostAdd.status, 200);
+    const edgeToken = hostAdd.data.token;
+    assert.match(edgeToken, /^aht_/);
+    assert.equal(hostAdd.data.onboarding.steps.some((s) => s.includes(`--api-token ${edgeToken}`)), true);
+
+    const inboxLeaderAdd = await apiJson(baseUrl, "/api/v1/admin/agents", {
+      method: "POST",
+      token: apiToken,
+      body: { node: "edge-inbox", access: "inbox", role: "leader" },
+    });
+    assert.equal(inboxLeaderAdd.status, 200);
+    assert.match(inboxLeaderAdd.data.token, /^aht_/);
+    assert.equal(inboxLeaderAdd.data.onboarding.steps.some((s) => s.includes("--kind agent")), true);
+
+    // host/inbox leader 的 token 不会在 ensureLeaderIdentityCards 被代建 http-agent 名片。
+    const tokenStore = new AgentTokenStore(hubDir);
+    const synced = await ensureLeaderIdentityCards({ bus, tokenStore });
+    assert.equal(synced, 0);
+
+    // 专属密钥无法访问管理/主控端点。
+    for (const [pathname, method] of [
+      ["/api/v1/state", "GET"],
+      ["/api/v1/approvals/TASK-1/decide", "POST"],
+      ["/api/v1/admin/agents", "POST"],
+      ["/api/v1/admin/tokens", "GET"],
+      ["/api/v1/admin/webhooks", "GET"],
+      ["/api/v1/schedules", "GET"],
+    ]) {
+      const deny = await apiJson(baseUrl, pathname, { method, token: edgeToken, body: method === "GET" ? undefined : {} });
+      assert.equal(deny.status, 403, `${method} ${pathname} should be 403`);
+    }
+
+    // /api/v1/poll 允许自身节点及 node=*（由服务端绑定至自身），拒绝冒充他人节点。
+    assert.equal((await apiJson(baseUrl, "/api/v1/poll?timeout=0", { token: edgeToken })).status, 200);
+    assert.equal((await apiJson(baseUrl, "/api/v1/poll?node=*&timeout=0", { token: edgeToken })).status, 200);
+    assert.equal((await apiJson(baseUrl, "/api/v1/poll?node=edge-inbox&timeout=0", { token: edgeToken })).status, 403);
+
+    const edgeBus = new HttpBus({ hubUrl: baseUrl, apiToken: edgeToken, node: "edge-mac", delaysMs: [0] });
+
+    // 禁止自授 Admission=admitted 或伪造 Display_Name。
+    await assert.rejects(
+      () => edgeBus.createRecord(DEFAULT_TABLES.agentCards, {
+        Cap_ID: "CAP-edge-mac-evil",
+        Node: "edge-mac",
+        Skill_ID: "echo",
+        Admission: "admitted",
+      }),
+      /api code 403/,
+    );
+    await assert.rejects(
+      () => edgeBus.createRecord(DEFAULT_TABLES.agentCards, {
+        Cap_ID: "CAP-edge-mac-evil",
+        Node: "edge-mac",
+        Skill_ID: "echo",
+        Display_Name: "hack",
+      }),
+      /api code 403/,
+    );
+
+    // 正常登记自己的能力名片（留在 pending）。
+    const cardRes = await edgeBus.createRecord(DEFAULT_TABLES.agentCards, {
+      Cap_ID: "CAP-edge-mac-echo",
+      Node: "edge-mac",
+      Skill_ID: "echo",
+      Dispatchable: "Yes",
+      Daemon_Version: "node-1.2.0",
+      Receive_Mode: "longpoll",
+      Metadata: JSON.stringify({ kind: "host", mode: "json" }),
+    });
+    const cardRecId = cardRes.record.record_id;
+    assert.equal(classifyNode("edge-mac", await bus.listRecords(DEFAULT_TABLES.agentCards), tokenStore), "host");
+
+    // 禁止 PUT 修改自己名片的 Admission，也禁止修改其他节点名片。
+    await assert.rejects(
+      () => edgeBus.updateRecord(DEFAULT_TABLES.agentCards, cardRecId, { Admission: "admitted" }),
+      /api code 403/,
+    );
+    const inboxCard = await bus.createRecord(DEFAULT_TABLES.agentCards, {
+      Cap_ID: "CAP-edge-inbox-agent",
+      Node: "edge-inbox",
+      Skill_ID: "agent",
+      Dispatchable: "Yes",
+    });
+    await assert.rejects(
+      () => edgeBus.updateRecord(DEFAULT_TABLES.agentCards, inboxCard.record.record_id, { Availability: "offline" }),
+      /api code 403/,
+    );
+
+    // 机主接纳并派单。
+    assert.equal((await apiJson(baseUrl, "/api/v1/admin/cards/CAP-edge-mac-echo/admission", {
+      method: "POST",
+      token: apiToken,
+      body: { admission: "admitted" },
+    })).status, 200);
+    const dispatched = await apiJson(baseUrl, "/api/v1/tasks", {
+      method: "POST",
+      token: apiToken,
+      body: { to: "edge-mac", cap: "echo", text: "跑一个" },
+    });
+    assert.equal(dispatched.status, 201);
+    const taskId = dispatched.data.task_id;
+    const taskRow = (await bus.listRecords(DEFAULT_TABLES.tasks)).find((r) => f1(r, "Task_ID") === taskId);
+
+    // Worker 不能直接 POST /tables/tasks，也不能伪造 Claimed_By 或修改他人的任务。
+    await assert.rejects(
+      () => edgeBus.createRecord(DEFAULT_TABLES.tasks, { Task_ID: "TASK-EVIL", Target_Node: "edge-inbox", Skill_ID: "agent", Status: "submitted" }),
+      /api code 403/,
+    );
+    await assert.rejects(
+      () => edgeBus.updateRecord(DEFAULT_TABLES.tasks, taskRow.record_id, { Status: "working", Claimed_By: "edge-inbox" }),
+      /api code 403/,
+    );
+
+    // 正常认领与写回执消息 / Parts / 产物。
+    await edgeBus.updateRecord(DEFAULT_TABLES.tasks, taskRow.record_id, { Status: "working", Claimed_By: "edge-mac" });
+    await assert.rejects(
+      () => edgeBus.createRecord(DEFAULT_TABLES.messages, {
+        Msg_ID: "MSG-EVIL-1", Task_ID: taskId, From_Node: "edge-mac", To_Node: "edge-mac", Role: "user", Kind: "auth_decision",
+      }),
+      /api code 403/,
+    );
+    await assert.rejects(
+      () => edgeBus.createRecord(DEFAULT_TABLES.messages, {
+        Msg_ID: "MSG-EVIL-2", Task_ID: taskId, From_Node: "hub", To_Node: "edge-mac", Role: "agent", Kind: "notice",
+      }),
+      /api code 403/,
+    );
+    const resMsg = await edgeBus.createRecord(DEFAULT_TABLES.messages, {
+      Msg_ID: `MSG-${taskId.slice(5)}-02`,
+      Task_ID: taskId,
+      Context_ID: f1(taskRow, "Context_ID"),
+      From_Node: "edge-mac",
+      To_Node: "hub",
+      Role: "agent",
+      Kind: "result",
+      Created_At: new Date().toISOString(),
+    });
+    await assert.rejects(
+      () => edgeBus.updateRecord(DEFAULT_TABLES.messages, resMsg.record.record_id, { Kind: "notice" }),
+      /api code 403/,
+    );
+    await edgeBus.updateRecord(DEFAULT_TABLES.tasks, taskRow.record_id, { Status: "completed", Status_Msg: `MSG-${taskId.slice(5)}-02` });
+
+    // 轮换 host Token 后仍保持 access=host，生成 host ah join 命令行且旧 Token 立即失效。
+    const rotatedHost = await apiJson(baseUrl, "/api/v1/admin/tokens/edge-mac/rotate", {
+      method: "POST",
+      token: apiToken,
+      body: {},
+    });
+    assert.equal(rotatedHost.status, 200);
+    assert.match(rotatedHost.data.token, /^aht_/);
+    assert.notEqual(rotatedHost.data.token, edgeToken);
+    assert.equal(rotatedHost.data.onboarding.access, "host");
+    assert.equal(rotatedHost.data.onboarding.steps.some((s) => s.includes(`--api-token ${rotatedHost.data.token}`)), true);
+    assert.equal((await apiJson(baseUrl, "/api/v1/poll?timeout=0", { token: edgeToken })).status, 401);
+    assert.equal((await apiJson(baseUrl, "/api/v1/poll?timeout=0", { token: rotatedHost.data.token })).status, 200);
+  });
 });

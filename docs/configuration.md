@@ -30,7 +30,7 @@
 节点身份（`node` / `zone`）、总线模式（`busType`: `sqlite`、`http` 或 `agent`）、访问口令来源（`appEnv` 指向 `0600` 的 `AH_API_TOKEN`，或 `tokenFile` 指向另一份 `0600` 凭据）、长轮询与对账周期。
 
 - `role`：`node` 或 `hub`，缺省 `node`。`ah daemon`、`doctor`、`service` 省略 `--role` 时读它。`busType=agent` 时 `role` 仍写 `node`。
-- `busType`：`sqlite`（Hub 主中枢）、`http`（远端长轮询节点，机主 Token）或 `agent`（官方 Agent Gateway 客户端，只用分 Agent Token `aht_...`）。
+- `busType`：`sqlite`（Hub 主中枢，使用机主 `AH_API_TOKEN`）、`http`（远端长轮询节点，使用按节点签发的专属 Token `aht_...`）或 `agent`（官方 Agent Gateway 客户端，同样使用分节点 Token `aht_...`）。
 - `tokenFile`：`busType=agent` 时推荐。指向 `0600` 凭据文件（一行 Token，或 `AH_API_TOKEN=` / `A2A_HUB_TOKEN=`）。明文不进 `node.json`、systemd unit 或日志。该文件优先于环境变量里的 `AH_API_TOKEN`。
 - `agentRole`：`worker` 或 `leader`（旧值 `hybrid` 按 `leader`）。只在 `busType=agent` 下表示网关角色。
 - `receiveMode`：`busType=agent` 缺省 `http-longpoll`。
@@ -370,7 +370,7 @@ HTTP 节点模板只有这一份文件。Hub 第一次启动时，如果配置�
 
 节点卡片上的「+ 添加能力」：http 节点提交 `POST /api/v1/admin/cards`，建成已接纳名片；宿主节点提交 `POST /api/v1/admin/commands-snippet`，只展示可合并进该节点 `commands.json` 的片段和复制按钮，中台不下发。`Metadata.manual` 或 `preset` 的 http 名片可以 `DELETE /api/v1/admin/cards/:capId`；宿主名片返回 409，要改本机 `commands.json`。
 
-「+ 添加 Agent」是三步向导：选择接入类型、填写名字与角色、获取密钥与接入指引。接入类型为云端 HTTP、宿主机 `ah join` 或本机独立 Agent inbox；角色为执行方 `worker` 或派单并接单的 `leader`。`hybrid` 为旧值，等同 `leader`，向导不再提供。云端 HTTP 再选接收方式：定时检查（默认）、常驻长连接、Webhook 推送（要填对方的 URL、密钥，以及可选请求头名）。云端 HTTP 的 worker 与 leader 都预建一张已接纳的默认 `agent` 名片（`CAP-<node>-agent`，`Dispatchable=Yes`，`role` 写成 `leader` 或 `worker`），`Receive_Mode` 按接收方式写入。宿主机与 inbox 不预建卡，由守护进程登记后进入待接纳。云端 HTTP 会同时签发分 Agent Token，明文只在这一次响应和提示词里出现。选了 Webhook 时，响应里的 `webhook` 只有 `url`、`header`、`secret_mask`，不含明文密钥。宿主机与 inbox 的提示词仍用机主 Token 占位符 `<AH_API_TOKEN>`（`ah join` 认的是机主钥匙），并说明这是 `ah daemon` 出站常驻长连接，接入后到「节点 → 待接纳」接纳。定时检查的提示词是脚本门控版：每 5 分钟跑检查脚本，`IDLE` 立即结束，`WORK` 才执行【处理流程】；跑不了脚本时也是每 5 分钟。Leader 的提示词同时包含接单和跟单。常驻长连接的提示词是进程内循环 `poll?timeout=25`（Leader 每轮再拉 `updates?new=1`），断线按 1 / 3 / 8 / 30 秒退避，不建定时任务。Webhook 提示词说明中台用接收端配置的密钥调用 URL，自建接收端可以验签（5 分钟时间窗），并每 30 分钟跑一次检查脚本兜底；不要保存 `A2A_HUB_WEBHOOK_SECRET`。Token 优先存进平台安全密钥空间，名称 `A2A_HUB_TOKEN`，明文只在提示词里出现一次。每次运行无上下文；worker 与接单中的 leader 须在同一次运行内做完所认领任务。接收方式只在添加时选定，控制台不再提供切换。HTTP 节点卡片副标题写上接收方式（如「云端 HTTP 节点 · Webhook 推送 · 执行方 (Worker)」）。所有节点只保留一行「接收方式」。Webhook 这一行右侧是投递徽标和「管理」；弹窗里看 URL、请求头、密钥掩码、最近投递时间与状态、最近错误，以及「Agent 每 30 分钟用检查脚本兜底一次，防止漏推，这不是第二种接收方式」。可改 URL、密钥（留空不变）和请求头，并有「测试」。`DELETE /api/v1/admin/webhooks/:node` 去掉推送配置，并把名片改回 `http-poll`。宿主与 inbox 固定为 ah daemon 常驻长连接。Hub 启动时给 `agent_tokens.json` 里还没有名片的 leader / hybrid 补建那张可派单身份名片，已有名片的 `Admission` 不覆盖。Hub 地址优先取 `node.json` 的 `publicUrl`；未配置时取本次请求的 `Host` 头（`http://<Host>`），没有 `Host` 时回退本机监听地址。在 Hub 本机用 `127.0.0.1` 打开控制台时，务必配置 `publicUrl`，否则远端拿到的地址不可达。Hub 放在 Cloudflare 之后时，浏览器完整性检查会以 `403` / `error code: 1010` 拦下 curl、python-requests、node 等默认 UA，所以云端 HTTP 提示词与 `a2a-leader` / `a2a-worker` Skill 都要求每个请求带浏览器 `User-Agent`，远端节点的 `HttpBus` 与 Webhook 出站也固定发送同一串浏览器 UA。
+「+ 添加 Agent」是三步向导：选择接入类型、填写名字与角色、获取密钥与接入指引。接入类型为云端 HTTP、宿主机 `ah join` 或本机独立 Agent inbox；角色为执行方 `worker` 或派单并接单的 `leader`。`hybrid` 为旧值，等同 `leader`，向导不再提供。云端 HTTP 再选接收方式：定时检查（默认）、常驻长连接、Webhook 推送（要填对方的 URL、密钥，以及可选请求头名）。云端 HTTP 的 worker 与 leader 都预建一张已接纳的默认 `agent` 名片（`CAP-<node>-agent`，`Dispatchable=Yes`，`role` 写成 `leader` 或 `worker`），`Receive_Mode` 按接收方式写入。宿主机与 inbox 不预建卡，由守护进程登记后进入待接纳。无论选择云端 HTTP、宿主机还是 inbox，向导都会同时签发按节点绑定的分节点 Token（`aht_...`），明文只在这一次响应和提示词/接入命令里出现，**仅 Hub 本机与 Web 控制台使用主控 `AH_API_TOKEN`**；只读 `GET /api/v1/admin/onboarding` 在未附带刚签发 Token 时仍显示 `<AH_API_TOKEN>` 占位符。选了 Webhook 时，响应里的 `webhook` 只有 `url`、`header`、`secret_mask`，不含明文密钥。宿主机与 inbox 的接入指引说明这是 `ah daemon` 出站常驻长连接，接入后到「节点 → 待接纳」接纳。定时检查的提示词是脚本门控版：每 5 分钟跑检查脚本，`IDLE` 立即结束，`WORK` 才执行【处理流程】；跑不了脚本时也是每 5 分钟。Leader 的提示词同时包含接单和跟单。常驻长连接的提示词是进程内循环 `poll?timeout=25`（Leader 每轮再拉 `updates?new=1`），断线按 1 / 3 / 8 / 30 秒退避，不建定时任务。Webhook 提示词说明中台用接收端配置的密钥调用 URL，自建接收端可以验签（5 分钟时间窗），并每 30 分钟跑一次检查脚本兜底；不要保存 `A2A_HUB_WEBHOOK_SECRET`。Token 优先存进平台安全密钥空间，名称 `A2A_HUB_TOKEN`，明文只在提示词里出现一次。每次运行无上下文；worker 与接单中的 leader 须在同一次运行内做完所认领任务。接收方式只在添加时选定，控制台不再提供切换。HTTP 节点卡片副标题写上接收方式（如「云端 HTTP 节点 · Webhook 推送 · 执行方 (Worker)」）。所有节点只保留一行「接收方式」。Webhook 这一行右侧是投递徽标和「管理」；弹窗里看 URL、请求头、密钥掩码、最近投递时间与状态、最近错误，以及「Agent 每 30 分钟用检查脚本兜底一次，防止漏推，这不是第二种接收方式」。可改 URL、密钥（留空不变）和请求头，并有「测试」。`DELETE /api/v1/admin/webhooks/:node` 去掉推送配置，并把名片改回 `http-poll`。宿主与 inbox 固定为 ah daemon 常驻长连接。Hub 启动时给 `agent_tokens.json` 里还没有名片的 HTTP leader / hybrid 补建那张可派单身份名片（`host` / `inbox` 由对端 `ah daemon` 上报，不代建），已有名片的 `Admission` 不覆盖。Hub 地址优先取 `node.json` 的 `publicUrl`；未配置时取本次请求的 `Host` 头（`http://<Host>`），没有 `Host` 时回退本机监听地址。在 Hub 本机用 `127.0.0.1` 打开控制台时，务必配置 `publicUrl`，否则远端拿到的地址不可达。Hub 放在 Cloudflare 之后时，浏览器完整性检查会以 `403` / `error code: 1010` 拦下 curl、python-requests、node 等默认 UA，所以云端 HTTP 提示词与 `a2a-leader` / `a2a-worker` Skill 都要求每个请求带浏览器 `User-Agent`，远端节点的 `HttpBus` 与 Webhook 出站也固定发送同一串浏览器 UA。
 
 「定时任务」页只读，调用 `GET /api/v1/schedules`，按节点分组展示 cron、下次触发、指向的能力、启用状态、上次任务（`last_task`，可点击进任务详情）和异常标记。各 Agent 自行管理并调度定时任务，通过 `PUT /api/v1/agents/:node/schedules/:id`（或注册时 `schedules`）自报计划，中台不据此触发。
 
@@ -397,29 +397,30 @@ HTTP 节点模板只有这一份文件。Hub 第一次启动时，如果配置�
 
 远端节点上升级前没有 `Admission` 的老名片，仍按待接纳，要在控制台接纳后才能派单。Hub 本机的空 `Admission` 由对账补成已接纳。
 
-### 7.5 分 Agent Token
+### 7.5 分节点 Token（HTTP / Host / Inbox 全覆盖）
 
-外部 HTTP Agent 每人一把 Token，与机主 `apiToken` 分开。账本是配置目录 `agent_tokens.json`（0600）。文件里是 `version: 1` 和 `tokens[]`：`node`、`role`、`scopes`、`hash`（`sha256:` 前缀）、`prefix`（展示用，不含完整密钥）、`created_at`、`last_used_at`。`last_used_at` 同一节点同一分钟最多写一次。明文格式为 `aht_` 加 32 字节 base64url，只在签发或轮换的 JSON 里出现一次。
+除 Hub 本机与机主 Web 控制台使用主控 `apiToken`（`AH_API_TOKEN`）外，所有外部接入节点（云端 HTTP、远端宿主机 `host`、独立收件箱 `inbox`）均使用分节点签发的独立 Token，账本是配置目录 `agent_tokens.json`（0600）。文件里是 `version: 1` 和 `tokens[]`：`node`、`role`、`scopes`、可选 `access`（`host` / `inbox`，`http` 缺省）、`hash`（`sha256:` 前缀）、`prefix`（展示用，不含完整密钥）、`created_at`、`last_used_at`。`last_used_at` 同一节点同一分钟最多写一次。明文格式为 `aht_` 加 32 字节 base64url，只在签发或轮换的 JSON 里出现一次。
 
-未配置机主 `apiToken` 时拒绝签发：否则账本里一有 Token，鉴权就会打开，机主自己进不了管理接口。一份机主 Token 和 Agent Token 都没有时，`/api/*` 仍免鉴权。有了任一种钥匙之后，除 `/`、`/api/v1/health`、`/.well-known/agent.json` 外都要 Bearer，包括 `/api/v1/skills`、`/api/v1/skills/:name` 与 `/api/v1/kit/a2a_check.py|.sh`。
+未配置机主 `apiToken` 时拒绝签发：否则账本里一有 Token，鉴权就会打开，机主自己进不了管理接口。一份机主 Token 和分节点 Token 都没有时，`/api/*` 仍免鉴权。有了任一种钥匙之后，除 `/`、`/api/v1/health`、`/.well-known/agent.json` 外都要 Bearer，包括 `/api/v1/skills`、`/api/v1/skills/:name` 与 `/api/v1/kit/a2a_check.py|.sh`。
 
 | 方法与路径 | 谁能调用 | 作用 |
 |---|---|---|
-| `GET /api/v1/admin/tokens` | 仅机主 | 列出节点、角色、scopes、前缀与时间，不含哈希与明文 |
+| `GET /api/v1/admin/tokens` | 仅机主 | 列出节点、角色、`access`、scopes、前缀与时间，不含哈希与明文 |
 | `GET /api/v1/admin/audit` | 仅机主 | 名录变更只追加日志。查询参数 `table`、`node`、`limit`（1–500）。没有审计表时 `{logs:[]}` |
-| `POST /api/v1/admin/tokens/:node/rotate` | 仅机主 | 重新生成。body 可带 `role`、`scopes`、`template`；省略则沿用旧值（`template` 缺省时从该节点名片的 `Metadata.template` 推导，默认 `generic`）。没有旧记录时必须给 `role`。响应含新明文和已嵌入该 Token 的接入提示词 |
+| `POST /api/v1/admin/tokens/:node/rotate` | 仅机主 | 重新生成。body 可带 `role`、`scopes`、`access`、`template`；省略则沿用旧值或按现有名片推导。没有旧记录时必须给 `role`。响应含新明文和已嵌入该 Token 的接入提示词 |
 | `DELETE /api/v1/admin/tokens/:node` | 仅机主 | 吊销。不存在则 `404` |
 
-控制台添加 HTTP Agent 时 `scopes` 为空。要让某个 Leader 代管接纳，轮换时写 `{"scopes":["admin"]}`。轮换 body 里的 `role=hybrid` 会存成 `leader`；省略 `role` 时保留账本里的旧值（含历史 `hybrid`）。
+控制台添加 Agent 时 `scopes` 为空。要让某个 Leader 代管接纳，轮换时写 `{"scopes":["admin"]}`。轮换 body 里的 `role=hybrid` 会存成 `leader`；省略 `role` 时保留账本里的旧值（含历史 `hybrid`）。
 
-路由矩阵在 `src/hub/agent-access.mjs`。`hybrid` 为旧值，等同 `leader`：
+路由与写守卫矩阵在 `src/hub/agent-access.mjs`。`hybrid` 为旧值，等同 `leader`：
 
-- 所有 Agent：`GET /api/v1/skills`、`GET /api/v1/skills/:name`、`GET /api/v1/kit/a2a_check.py`、`GET /api/v1/kit/a2a_check.sh`、`POST /api/v1/agents/register`、`GET /api/v1/agents`、自己的 `GET /api/v1/agents/:node/check`。
+- 所有节点 Token：`GET /api/v1/skills`、`GET /api/v1/skills/:name`、`GET /api/v1/kit/a2a_check.py`、`GET /api/v1/kit/a2a_check.sh`、`POST /api/v1/agents/register`、`GET /api/v1/agents`、自己的 `GET /api/v1/agents/:node/check`。
+- `host` / `inbox` 节点专属 Token（`HttpBus` / `ah daemon`）：在所属角色权限之上，额外允许自己的 `GET /api/v1/poll`（强制收敛为绑定节点）及 `/api/v1/tables/:table/records` 读写；服务端 `assertAgentTableWrite` 强制校验 `agentCards.Node`、`messages.From_Node`、`artifacts.Produced_By`、禁止自授 `Admission` / 修改 `Display_Name` / `Admin_Note`、禁止伪造 `auth_decision`、`Messages`/`Parts`/`Artifacts` 禁止 `PUT`、worker 禁止直写创建 `Tasks` 且不得跨节点改单或撤单。
 - worker：自己的 `poll` / `inbox`，以及 `claim`、`heartbeat`、`complete`、`fail`、`ask`、`auth`。不能派单。
 - leader：worker 的全部，再加上自己的 `updates`；`GET`/`POST /api/v1/tasks`（含 `to: [...]` 批量扇出）；自己发起或指向自己的任务详情；答复、撤销只限自己发起的任务。
 - `scopes` 含 `admin` 的 leader：`POST /api/v1/admin/cards/:capId/admission`、`POST /api/v1/admin/nodes/:node/admission`、profile、`GET /api/v1/admin/onboarding`，以及 `POST /api/v1/admin/cards`（给别的节点加能力）。不能 `DELETE` 名片。
 - 任何角色：`PUT` / `DELETE /api/v1/agents/:node/schedules/:id`，且只能操作 Token 绑定的节点。这是自报计划，中台不据此触发。
-- 一律拒绝：`/api/v1/approvals/*`、`/api/v1/admin/agents`、`/api/v1/admin/tokens*`、`/api/v1/admin/webhooks*`、`/api/v1/admin/commands-snippet`、`GET /api/v1/admin/audit`、`DELETE /api/v1/admin/cards/:capId`、`/api/v1/schedules`、`/api/v1/state`、`/api/v1/tables/*`、`/api/v1/poll`。
+- 一律拒绝：`/api/v1/approvals/*`、`/api/v1/admin/agents`、`/api/v1/admin/tokens*`、`/api/v1/admin/webhooks*`、`/api/v1/admin/commands-snippet`、`GET /api/v1/admin/audit`、`DELETE /api/v1/admin/cards/:capId`、`/api/v1/schedules`、`/api/v1/state`；对纯 HTTP Agent（`access=http`）仍拒绝 `/api/v1/tables/*` 与 `/api/v1/poll`。
 
 `GET /api/v1/agents/:node/check` 是给定时脚本的只读探测。`tasks` 与 `poll` 的可认领任务同一口径，`working` 是本节点已认领且仍为 `working` 的任务。`updates` 是自持久水位以来 `updates?new=1` 会返回的条数（含仍待处理的 `input-required` / `auth-required`）。leader（含旧值 `hybrid`）同时返回这三项。它不写水位，所以随后的 `updates?new=1` 仍能看到这些变化。唯一副作用是刷新该节点在线状态。Agent Token 按绑定角色计算；机主调用可用查询参数 `role`（`worker` / `leader` / `hybrid`，缺省 `leader`，即接单和跟单都算）。空闲时 `{"work":false}`。检查脚本与无脚本回退都是每 5 分钟。
 

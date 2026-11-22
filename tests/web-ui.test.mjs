@@ -445,6 +445,7 @@ test("控制台内嵌脚本：节点分层渲染、添加能力、Webhook 与定
   assert.ok(macCard && cloudCard && pollCard);
   assert.match(macCard, /工作机节点 · 执行方 \(Worker\)/);
   assert.match(macCard, /接收方式：常驻长连接（ah daemon）/);
+  assert.match(macCard, /专属密钥/);
   assert.equal(macCard.includes("Webhook 推送"), false);
   assert.equal(macCard.includes("切换接收方式"), false);
   assert.equal(macCard.includes("data-action=\"edit-webhook\""), false);

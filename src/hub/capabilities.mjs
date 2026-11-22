@@ -52,13 +52,13 @@ function cardLooksHttp(card) {
   return meta.kind === "agent" && HTTP_RECEIVE_MODES.has(text(card, "Receive_Mode"));
 }
 
-// http：任一名片像外部 Agent，或机主已经给这个节点签发过 Token。
-// host：其余有名片的节点。两边都没有则节点不存在。
+// 先看已登记名片（host 节点也会签发专属 Token，不能仅凭 Token 判成 http）；无名片时按 Token.access 兜底。
 export function classifyNode(node, cards, tokenStore) {
   const mine = nodeCards(cards, node);
-  const hasToken = Boolean(tokenStore?.get?.(node));
-  if (hasToken || mine.some(cardLooksHttp)) return "http";
+  if (mine.some(cardLooksHttp)) return "http";
   if (mine.length) return "host";
+  const tok = tokenStore?.get?.(node);
+  if (tok) return (tok.access === "host" || tok.access === "inbox") ? "host" : "http";
   return "missing";
 }
 

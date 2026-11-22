@@ -246,6 +246,7 @@ export function presetHttpCardFields({
 }
 
 // 启动时给已签发、但还没有任何名片的 leader / hybrid 补一张身份名片。已有名片不改 Admission。
+// host / inbox 节点由对端 ah daemon 自主对账上报能力，不代建 http-agent 名片。
 export async function ensureLeaderIdentityCards({ bus, tokenStore, webhookStore, now = () => new Date() } = {}) {
   if (!tokenStore || !bus?.tables?.agentCards || typeof bus.listRecords !== "function" || typeof bus.createRecord !== "function") {
     return 0;
@@ -255,6 +256,7 @@ export async function ensureLeaderIdentityCards({ bus, tokenStore, webhookStore,
   let created = 0;
   for (const token of tokens) {
     if (!actsAsLeader(token.role)) continue;
+    if (token.access === "host" || token.access === "inbox") continue;
     const mine = cards.filter((card) => f1(card, "Node") === token.node);
     if (mine.length) continue;
     const receiveMode = webhookStore?.get?.(token.node) ? "webhook" : "http-poll";
@@ -521,7 +523,7 @@ function roleSummary(role) {
   return "作为执行端（worker），负责轮询认领分配给本节点的任务、按要求回执进度与结果。";
 }
 
-// token 有值时内嵌这一次明文；没有则只用占位符。host/inbox 的 join 用的是机主 Token，命令行仍写占位符，不把 Agent Token 写进去。
+// token 有值时内嵌这一次明文（覆盖 http / host / inbox）；没有则只用占位符。
 function credentialOf(token, authRequired) {
   const secret = String(token ?? "").trim();
   if (secret) {
@@ -844,11 +846,14 @@ export function buildOnboarding({
   let steps;
   let prompt;
   if (access === "host") {
-    // join 认证的是机主 Token，与签发给 Agent 的 Token 不是同一把钥匙，命令行只写占位符。
-    const tokenFlag = authRequired ? " --api-token <AH_API_TOKEN>" : "";
+    const tokenFlag = cred.mode === "token"
+      ? ` --api-token ${cred.secret}`
+      : (authRequired ? " --api-token <AH_API_TOKEN>" : "");
+    const installCmd = `curl -fsSL ${INSTALL_SH_URL} | sh -s -- --join ${base} --node ${node}${tokenFlag}`;
+    const joinCmd = `ah join ${base} --node ${node}${tokenFlag} --service`;
     steps = [
-      `若目标宿主机尚未安装 a2a-hub CLI，运行一行安装并接入：curl -fsSL ${INSTALL_SH_URL} | sh -s -- --join ${base} --node ${node}${tokenFlag}`,
-      `若目标宿主机已安装 ah CLI，直接执行：ah join ${base} --node ${node}${tokenFlag} --service`,
+      `若目标宿主机尚未安装 a2a-hub CLI，运行一行安装并接入：${installCmd}`,
+      `若目标宿主机已安装 ah CLI，直接执行：${joinCmd}`,
       "这是常驻长连接：目标机器上的 ah daemon 向 Hub 发起出站长轮询，不开监听端口。守护进程登记名片后会进入「待接纳」池，请到 Web 控制台「节点 → 待接纳」点击接纳后再派单。",
     ];
     prompt = [
@@ -857,16 +862,22 @@ export function buildOnboarding({
       `- 你的节点名：${node}`,
       `- 接入方式：${access}，角色：${role}`,
       `- 鉴权要求：${cred.promptLine}`,
+      `- 若已安装 ah CLI，可直接执行：${joinCmd}`,
+      `- 若尚未安装，可运行一键安装并接入：${installCmd}`,
       "- 运行形态：常驻长连接。ah daemon 向 Hub 出站长轮询取任务，本机不开监听端口。",
       "- 本宿主机接入方式无需额外拉取协议 Skill，任务回执规范已内置于调度指令中。",
       "- 接入后到 Web 控制台「节点 → 待接纳」接纳该节点，然后再派单。",
       `- 职责说明：${roleSummary(role)}`,
     ].join("\n");
   } else if (access === "inbox") {
-    const tokenFlag = authRequired ? " --api-token <AH_API_TOKEN>" : "";
+    const tokenFlag = cred.mode === "token"
+      ? ` --api-token ${cred.secret}`
+      : (authRequired ? " --api-token <AH_API_TOKEN>" : "");
+    const installCmd = `curl -fsSL ${INSTALL_SH_URL} | sh -s -- --join ${base} --node ${node} --kind agent${tokenFlag}`;
+    const joinCmd = `ah join ${base} --node ${node} --kind agent${tokenFlag} --service`;
     steps = [
-      `若目标机器尚未安装 a2a-hub CLI，运行一行安装并接入（独立 Agent 模式）：curl -fsSL ${INSTALL_SH_URL} | sh -s -- --join ${base} --node ${node} --kind agent${tokenFlag}`,
-      `若已安装 ah CLI，执行（将自动安装 ah-inbox 协议 Skill）：ah join ${base} --node ${node} --kind agent${tokenFlag} --service`,
+      `若目标机器尚未安装 a2a-hub CLI，运行一行安装并接入（独立 Agent 模式）：${installCmd}`,
+      `若已安装 ah CLI，执行（将自动安装 ah-inbox 协议 Skill）：${joinCmd}`,
       "这是常驻长连接：ah daemon 向 Hub 出站长轮询，认领后写入本机收件箱。名片上线后到 Web 控制台「节点 → 待接纳」接纳该节点；随后 Agent 通过 ah inbox 接单并回执。",
     ];
     prompt = [
@@ -875,6 +886,8 @@ export function buildOnboarding({
       `- 你的节点名：${node}`,
       `- 接入方式：${access}，角色：${role}`,
       `- 鉴权要求：${cred.promptLine}`,
+      `- 若已安装 ah CLI，可直接执行：${joinCmd}`,
+      `- 若尚未安装，可运行一键安装并接入：${installCmd}`,
       "- 运行形态：常驻长连接。ah daemon 向 Hub 出站长轮询，不开监听端口；认领后的任务在本机收件箱里。",
       `- 接入后请先拉取并阅读协议 Skill：${skills.map((s) => s.url).join(" ，")}`,
       "- 接入后到 Web 控制台「节点 → 待接纳」接纳该节点，再通过 ah inbox 接单并回执。",

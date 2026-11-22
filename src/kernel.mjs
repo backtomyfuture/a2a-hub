@@ -831,8 +831,21 @@ export class Kernel {
         log("registered capability " + capId);
         continue;
       }
+      let mergedFields = fields;
+      if (f1(row, "Metadata") && fields.Metadata) {
+        try {
+          const oldMeta = JSON.parse(String(f1(row, "Metadata")));
+          const newMeta = JSON.parse(String(fields.Metadata));
+          if (oldMeta && typeof oldMeta === "object" && !Array.isArray(oldMeta)
+            && newMeta && typeof newMeta === "object" && !Array.isArray(newMeta)) {
+            const combined = { ...oldMeta, ...newMeta };
+            if (oldMeta.a2a && newMeta.a2a) combined.a2a = { ...oldMeta.a2a, ...newMeta.a2a };
+            mergedFields = { ...fields, Metadata: JSON.stringify(combined) };
+          }
+        } catch { /* 旧 Metadata 坏 JSON 时按期望字段覆写 */ }
+      }
       const upd = {};
-      for (const [k, v] of Object.entries(fields)) {
+      for (const [k, v] of Object.entries(mergedFields)) {
         if (k === "Cap_ID") continue;
         if (String(f1(row, k) ?? "") !== String(v ?? "")) upd[k] = v;
       }

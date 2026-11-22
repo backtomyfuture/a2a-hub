@@ -1,9 +1,18 @@
-// Agent Token 的路由矩阵与身份绑定。机主（owner）与未开鉴权（open）不走这里。
+// Agent Token 的路由矩阵、身份绑定与表级写守卫。机主（owner）与未开鉴权（open）不走这里。
 
+import { f1 } from "../bus/tables.mjs";
 import { httpError } from "./admission.mjs";
 
 function hasAdmin(principal) {
   return Array.isArray(principal?.scopes) && principal.scopes.includes("admin");
+}
+
+function isLeaderRole(role) {
+  return role === "leader" || role === "hybrid";
+}
+
+function isBusNode(principal) {
+  return principal?.access === "host" || principal?.access === "inbox";
 }
 
 function decodeSeg(raw) {
@@ -14,7 +23,7 @@ function decodeSeg(raw) {
   }
 }
 
-function foreverDeny(pathname, method) {
+function foreverDeny(principal, pathname, method) {
   if (pathname.startsWith("/api/v1/approvals")) return "Agent 身份不能访问审批接口 /api/v1/approvals/*";
   if (pathname === "/api/v1/admin/agents" || pathname.startsWith("/api/v1/admin/agents/")) {
     return "Agent 身份不能调用 /api/v1/admin/agents";
@@ -27,8 +36,10 @@ function foreverDeny(pathname, method) {
     return "Agent 身份不能管理 Webhook（/api/v1/admin/webhooks）";
   }
   if (pathname === "/api/v1/state") return "Agent 身份不能访问 /api/v1/state";
-  if (pathname.startsWith("/api/v1/tables/")) return "Agent 身份不能访问总线表 /api/v1/tables/*";
-  if (pathname === "/api/v1/poll") return "Agent 身份不能使用 Hub 长轮询 /api/v1/poll";
+  if (!isBusNode(principal)) {
+    if (pathname.startsWith("/api/v1/tables/")) return "Agent 身份不能访问总线表 /api/v1/tables/*";
+    if (pathname === "/api/v1/poll") return "Agent 身份不能使用 Hub 长轮询 /api/v1/poll";
+  }
   if (pathname === "/api/v1/schedules") return "Agent 身份不能查看定时任务 /api/v1/schedules";
   if (pathname === "/api/v1/admin/commands-snippet") return "Agent 身份不能生成 commands.json 片段";
   if (pathname === "/api/v1/admin/audit") return "Agent 身份不能查看名录变更审计日志";
@@ -49,8 +60,16 @@ function routeAllowed(principal, method, pathname) {
   if (method === "POST" && pathname === "/api/v1/files") return true;
   if (method === "GET" && /^\/api\/v1\/files\/[^/]+(?:\/meta)?$/.test(pathname)) return true;
 
+  if (isBusNode(principal)) {
+    if (method === "GET" && pathname === "/api/v1/poll") return true;
+    if (/^\/api\/v1\/tables\/[^/]+\/records(?:\/[^/]+)?$/.test(pathname)
+      && (method === "GET" || method === "POST" || method === "PUT")) {
+      return true;
+    }
+  }
+
   const role = principal.role;
-  const leaderish = role === "leader" || role === "hybrid";
+  const leaderish = isLeaderRole(role);
   // leader 同时接单。worker 仍不能派单。
   const workerish = role === "worker" || leaderish;
 
@@ -93,7 +112,10 @@ function collectClaims({ pathname, searchParams, headers }) {
   if (searchParams) {
     for (const key of ["node", "from"]) {
       const val = String(searchParams.get(key) ?? "").trim();
-      if (val) claims.push(val);
+      if (!val) continue;
+      // /api/v1/poll 允许不带具体节点名时传 node=*，服务端会再强制收敛为 principal.node。
+      if (pathname === "/api/v1/poll" && key === "node" && val === "*") continue;
+      claims.push(val);
     }
   }
   const headerNode = String(headers?.["x-a2a-node"] ?? "").trim();
@@ -103,7 +125,7 @@ function collectClaims({ pathname, searchParams, headers }) {
 
 export function assertAgentRoute(principal, { method, pathname, searchParams, headers } = {}) {
   if (principal?.kind !== "agent") return;
-  const denied = foreverDeny(pathname, method);
+  const denied = foreverDeny(principal, pathname, method);
   if (denied) throw httpError(403, denied);
   if (!routeAllowed(principal, method, pathname)) {
     throw httpError(403, `角色 ${principal.role} 无权访问 ${method} ${pathname}`);
@@ -118,6 +140,130 @@ export function assertAgentRoute(principal, { method, pathname, searchParams, he
     const claimed = decodeSeg(schedMatch[1]);
     if (claimed !== principal.node) throw impersonation(principal.node, claimed);
   }
+}
+
+async function resolveTaskInitiator(bus, taskRow) {
+  const taskId = String(f1(taskRow, "Task_ID") ?? "").trim();
+  if (taskId && bus?.tables?.messages) {
+    const messages = await bus.listRecords(bus.tables.messages);
+    const instr = messages.find((m) => String(f1(m, "Task_ID") ?? "").trim() === taskId && f1(m, "Kind") === "instruction");
+    const from = instr ? String(f1(instr, "From_Node") ?? "").trim() : "";
+    if (from) return from;
+  }
+  return String(f1(taskRow, "Source") ?? "").trim() || "hub";
+}
+
+// 远端宿主/收件箱节点通过 /api/v1/tables/* 写入时，服务端强制守卫节点身份与受保护字段。
+export async function assertAgentTableWrite({ principal, bus, realTable, method, recordId = "", fields }) {
+  if (principal?.kind !== "agent") return fields;
+  if (!fields || typeof fields !== "object" || Array.isArray(fields)) {
+    throw httpError(400, "fields 必须是 JSON 对象");
+  }
+  const T = bus?.tables ?? {};
+  const self = principal.node;
+  const leaderish = isLeaderRole(principal.role);
+
+  if (realTable === T.agentCards) {
+    if (method === "POST") {
+      if (!Object.hasOwn(fields, "Node") || String(fields.Node ?? "").trim() === "") {
+        fields.Node = self;
+      } else if (String(fields.Node).trim() !== self) {
+        throw impersonation(self, String(fields.Node).trim());
+      }
+      if (Object.hasOwn(fields, "Admission") && !["", "pending"].includes(String(fields.Admission ?? "").trim())) {
+        throw httpError(403, "远端节点不能自授或修改名片 Admission 状态");
+      }
+      if ((Object.hasOwn(fields, "Display_Name") && String(fields.Display_Name ?? "") !== "")
+        || (Object.hasOwn(fields, "Admin_Note") && String(fields.Admin_Note ?? "") !== "")) {
+        throw httpError(403, "远端节点不能设置名片 Display_Name 或 Admin_Note");
+      }
+      return fields;
+    }
+    if (method === "PUT") {
+      const existing = await bus.getRecord(realTable, recordId);
+      if (existing) {
+        const ownerNode = String(f1(existing, "Node") ?? "").trim();
+        if (ownerNode !== self) throw impersonation(self, ownerNode);
+      }
+      if (Object.hasOwn(fields, "Node") && String(fields.Node ?? "").trim() !== self) {
+        throw impersonation(self, String(fields.Node ?? "").trim());
+      }
+      if (Object.hasOwn(fields, "Admission") || Object.hasOwn(fields, "Display_Name") || Object.hasOwn(fields, "Admin_Note")) {
+        throw httpError(403, "远端节点不能修改名片 Admission / Display_Name / Admin_Note");
+      }
+      return fields;
+    }
+  }
+
+  if (realTable === T.messages) {
+    if (method === "PUT") throw httpError(403, "Messages 表只追加，不允许修改");
+    if (method === "POST") {
+      if (!Object.hasOwn(fields, "From_Node") || String(fields.From_Node ?? "").trim() === "") {
+        fields.From_Node = self;
+      } else if (String(fields.From_Node).trim() !== self) {
+        throw impersonation(self, String(fields.From_Node).trim());
+      }
+      const kind = String(fields.Kind ?? "").trim();
+      if (kind === "auth_decision") {
+        throw httpError(403, "远端节点不能写入 auth_decision 审批决定");
+      }
+      if (!leaderish && (kind === "instruction" || kind === "answer")) {
+        throw httpError(403, `角色 ${principal.role} 无权发送 ${kind} 消息`);
+      }
+      return fields;
+    }
+  }
+
+  if (realTable === T.parts) {
+    if (method === "PUT") throw httpError(403, "Parts 表只追加，不允许修改");
+    return fields;
+  }
+
+  if (realTable === T.artifacts) {
+    if (method === "PUT") throw httpError(403, "Artifacts 表只追加，不允许修改");
+    if (method === "POST") {
+      if (!Object.hasOwn(fields, "Produced_By") || String(fields.Produced_By ?? "").trim() === "") {
+        fields.Produced_By = self;
+      } else if (String(fields.Produced_By).trim() !== self) {
+        throw impersonation(self, String(fields.Produced_By).trim());
+      }
+      return fields;
+    }
+  }
+
+  if (realTable === T.tasks) {
+    if (method === "POST") {
+      if (!leaderish) throw httpError(403, `角色 ${principal.role} 无权直接创建任务`);
+      return fields;
+    }
+    if (method === "PUT") {
+      const existing = await bus.getRecord(realTable, recordId);
+      if (existing) {
+        const target = String(f1(existing, "Target_Node") ?? "").trim();
+        if (Object.hasOwn(fields, "Claimed_By")) {
+          const claimedBy = String(fields.Claimed_By ?? "").trim();
+          if (claimedBy && claimedBy !== self) throw impersonation(self, claimedBy);
+        }
+        const nextStatus = Object.hasOwn(fields, "Status") ? String(fields.Status ?? "").trim() : "";
+        if (target !== self) {
+          if (!leaderish) throw httpError(403, "只能更新目标节点为本节点的任务");
+          const initiator = await resolveTaskInitiator(bus, existing);
+          if (initiator !== self) throw httpError(403, "只能撤销或操作本节点发起的任务");
+          const keys = Object.keys(fields);
+          if (!keys.length || keys.some((k) => k !== "Status") || nextStatus !== "canceled") {
+            throw httpError(403, "发起方仅可取消目标节点为其他节点的任务");
+          }
+        } else if (nextStatus === "canceled") {
+          if (!leaderish) throw httpError(403, `角色 ${principal.role} 无权取消任务`);
+          const initiator = await resolveTaskInitiator(bus, existing);
+          if (initiator !== self) throw httpError(403, "只能撤销本节点发起的任务");
+        }
+      }
+      return fields;
+    }
+  }
+
+  throw httpError(403, `Agent 身份无权写入表 ${realTable}`);
 }
 
 // 省略 node/from 时补成绑定节点；写了别人的身份则拒绝。只看顶层字段。

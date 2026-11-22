@@ -31,6 +31,12 @@ function minuteKey(date) {
   return date.toISOString().slice(0, 16);
 }
 
+function normalizeAccess(raw) {
+  const val = String(raw ?? "").trim().toLowerCase();
+  if (val === "host" || val === "inbox") return val;
+  return "http";
+}
+
 export class AgentTokenStore {
   constructor(configDir, { now = () => new Date() } = {}) {
     if (!configDir) throw httpError(500, "未配置 configDir，无法管理 Agent Token");
@@ -87,17 +93,11 @@ export class AgentTokenStore {
   }
 
   listPublic() {
-    return this.#load().tokens.map((t) => ({
-      node: t.node,
-      role: t.role,
-      scopes: Array.isArray(t.scopes) ? [...t.scopes] : [],
-      prefix: t.prefix,
-      created_at: t.created_at,
-      last_used_at: t.last_used_at ?? null,
-    }));
+    return this.#load().tokens.map((t) => this.#publicOf(t));
   }
 
-  #mint(node, role, scopes) {
+  #mint(node, role, scopes, access = "http") {
+    const normalizedAccess = normalizeAccess(access);
     const secret = `aht_${randomBytes(32).toString("base64url")}`;
     return {
       token: secret,
@@ -105,6 +105,7 @@ export class AgentTokenStore {
         node,
         role,
         scopes: [...scopes],
+        ...(normalizedAccess !== "http" ? { access: normalizedAccess } : {}),
         hash: hashToken(secret),
         prefix: secret.slice(0, 10),
         created_at: this.#now().toISOString(),
@@ -113,20 +114,21 @@ export class AgentTokenStore {
     };
   }
 
-  issue({ node, role, scopes = [] } = {}) {
+  issue({ node, role, scopes = [], access = "http" } = {}) {
     const name = String(node ?? "").trim();
     const normalizedRole = issuedRole(role);
     const normalizedScopes = normalizeScopes(scopes) ?? [];
+    const normalizedAccess = normalizeAccess(access);
     const data = this.#load();
     if (data.tokens.some((t) => t.node === name)) {
       throw httpError(409, `节点 ${name} 已有 Token，请使用 POST /api/v1/admin/tokens/${name}/rotate 轮换`);
     }
-    const minted = this.#mint(name, normalizedRole, normalizedScopes);
+    const minted = this.#mint(name, normalizedRole, normalizedScopes, normalizedAccess);
     this.#save([...data.tokens, minted.record]);
     return { token: minted.token, ...this.#publicOf(minted.record) };
   }
 
-  rotate({ node, role, scopes } = {}) {
+  rotate({ node, role, scopes, access } = {}) {
     const name = String(node ?? "").trim();
     const data = this.#load();
     const idx = data.tokens.findIndex((t) => t.node === name);
@@ -139,7 +141,10 @@ export class AgentTokenStore {
     const normalizedScopes = scopes === undefined
       ? (Array.isArray(existing?.scopes) ? existing.scopes : [])
       : (normalizeScopes(scopes) ?? []);
-    const minted = this.#mint(name, normalizedRole, normalizedScopes);
+    const normalizedAccess = access == null || access === ""
+      ? (existing?.access || "http")
+      : normalizeAccess(access);
+    const minted = this.#mint(name, normalizedRole, normalizedScopes, normalizedAccess);
     const next = data.tokens.slice();
     if (idx >= 0) next[idx] = minted.record;
     else next.push(minted.record);
@@ -173,6 +178,7 @@ export class AgentTokenStore {
       node: found.node,
       role: found.role,
       scopes: Array.isArray(found.scopes) ? [...found.scopes] : [],
+      ...(found.access === "host" || found.access === "inbox" ? { access: found.access } : {}),
     };
   }
 
@@ -193,10 +199,11 @@ export class AgentTokenStore {
     return {
       node: record.node,
       role: record.role,
-      scopes: [...record.scopes],
+      scopes: Array.isArray(record.scopes) ? [...record.scopes] : [],
+      ...(record.access === "host" || record.access === "inbox" ? { access: record.access } : {}),
       prefix: record.prefix,
       created_at: record.created_at,
-      last_used_at: record.last_used_at,
+      last_used_at: record.last_used_at ?? null,
     };
   }
 }

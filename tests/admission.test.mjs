@@ -688,6 +688,8 @@ test("HTTP 管理端点：register 不覆盖 Admission、预建槽位命中同�
       });
       assert.equal(r.status, 200);
       assert.equal(r.data.card, null);
+      assert.match(r.data.token, /^aht_/);
+      assert.equal(JSON.stringify(r.data.onboarding).includes(r.data.token), true);
       assert.equal(JSON.stringify(r.data.onboarding).includes(apiToken), false);
     }
 
