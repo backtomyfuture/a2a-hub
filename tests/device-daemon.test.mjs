@@ -14,7 +14,7 @@ import {
   whichBinary,
 } from "../src/core/config.mjs";
 import { startHubRuntime } from "../src/core/hub-runtime.mjs";
-import { parseCliOutput, renderWorkerCommand } from "../src/core/receipt.mjs";
+import { formatCliFailure, parseCliOutput, renderWorkerCommand } from "../src/core/receipt.mjs";
 
 test("Receipt Parser: 解析单对象 JSON、Amp/Claude stream-json、Cline 与 Pi 输出并提取 sessionId", () => {
   const claudeOut = JSON.stringify({ result: "修改完成", session_id: "sess_claude_99", usage: { input_tokens: 10 } });
@@ -76,6 +76,50 @@ test("Receipt Parser: 解析单对象 JSON、Amp/Claude stream-json、Cline 与 
   const oc = parseCliOutput(ocJsonl);
   assert.equal(oc.text, "分析结果如下");
   assert.equal(oc.sessionId, "oc_sess_7");
+
+  // Droid 实测失败：stderr 为 Ignored hook 警告，stdout JSON 包含真正的 402 错误
+  const droidErrOut = JSON.stringify({
+    type: "result",
+    subtype: "failure",
+    is_error: true,
+    result: "402 You've reached your weekly Droid Core usage limit",
+    session_id: "ba361f7c",
+  });
+  const droidStderr = "Ignored hook settings entry: /Users/jarod/.factory/settings.json: hooks.PermissionRequest";
+  const dr = parseCliOutput(droidErrOut, droidStderr);
+  assert.equal(dr.isError, true);
+  assert.equal(dr.sessionId, "ba361f7c");
+  const droidFailure = formatCliFailure(dr, droidStderr, 1);
+  assert.ok(droidFailure.includes("402"), "错误摘要应保留 stdout 中的 402 原因");
+  assert.equal(droidFailure.includes("Ignored hook"), false, "不得让无关 stderr 警告掩盖结构化错误");
+
+  // CodeBuddy 实测顶层 JSON 数组：忽略 user <system-reminder>，取最终 result 与 session_id
+  const cbArray = JSON.stringify([
+    {
+      type: "message",
+      role: "user",
+      sessionId: "cb_sess_1",
+      content: [{ type: "input_text", text: "<system-reminder>internal prompt</system-reminder>" }],
+    },
+    {
+      type: "message",
+      role: "assistant",
+      sessionId: "cb_sess_1",
+      content: [{ type: "output_text", text: "OK" }],
+    },
+    {
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: "OK",
+      session_id: "cb_sess_1",
+    },
+  ]);
+  const cb = parseCliOutput(cbArray);
+  assert.equal(cb.text, "OK");
+  assert.equal(cb.sessionId, "cb_sess_1");
+  assert.equal(cb.isError, false);
+  assert.equal(cb.text.includes("<system-reminder>"), false);
 });
 
 test("CLI Auto-Discovery: >=26 种 CLI 唯一性、坏软链跳过、多别名探测与无损增量合并", () => {
@@ -108,15 +152,35 @@ test("CLI Auto-Discovery: >=26 种 CLI 唯一性、坏软链跳过、多别名�
     );
 
     const discovered = discoverLocalWorkers({
-      whichFn: (bin) => (bin === "amp" ? "/mock/amp" : bin === "kimi" ? "/mock/kimi" : null),
+      whichFn: (bin) =>
+        bin === "amp" || bin === "kimi" || bin === "agy" || bin === "devin" ? `/mock/${bin}` : null,
       homeDir: tmpDir,
       defaultCwd: "/work",
     });
-    assert.deepEqual(discovered.map((w) => w.key), ["amp", "kimi"]);
-    const ampCmd = renderWorkerCommand({ worker: discovered[0], prompt: "fix tests" });
+    assert.deepEqual(discovered.map((w) => w.key), ["amp", "agy", "kimi", "devin"]);
+    const ampWorker = discovered.find((w) => w.key === "amp");
+    const agyWorker = discovered.find((w) => w.key === "agy");
+    const kimiWorker = discovered.find((w) => w.key === "kimi");
+    const devinWorker = discovered.find((w) => w.key === "devin");
+
+    const ampCmd = renderWorkerCommand({ worker: ampWorker, prompt: "fix tests" });
     assert.ok(ampCmd.includes("--dangerously-allow-all") && ampCmd.includes("--stream-json"));
-    const kimiCmd = renderWorkerCommand({ worker: discovered[1], prompt: "review" });
+    const kimiCmd = renderWorkerCommand({ worker: kimiWorker, prompt: "review" });
     assert.equal(kimiCmd.includes("--yolo"), false);
+
+    // agy / devin 的 -p 须紧邻 prompt 且置于 --output-format / --permission-mode 等选项之后
+    const agyCmd = renderWorkerCommand({ worker: agyWorker, prompt: "hello" });
+    assert.ok(agyCmd.includes("--output-format json"));
+    assert.ok(agyCmd.endsWith("-p 'hello'"), `agy 命令应以 -p 'hello' 结尾，实际: ${agyCmd}`);
+    assert.ok(agyCmd.indexOf("--output-format json") < agyCmd.indexOf("-p 'hello'"));
+
+    const agyResumeCmd = renderWorkerCommand({ worker: agyWorker, prompt: "hello", sessionId: "conv_1" });
+    assert.ok(agyResumeCmd.includes("--conversation 'conv_1'"));
+    assert.ok(agyResumeCmd.endsWith("-p 'hello'"), `agy 续接命令应以 -p 'hello' 结尾，实际: ${agyResumeCmd}`);
+
+    const devinCmd = renderWorkerCommand({ worker: devinWorker, prompt: "hello" });
+    assert.ok(devinCmd.includes("--permission-mode dangerous"));
+    assert.ok(devinCmd.endsWith("-p 'hello'"), `devin 命令应以 -p 'hello' 结尾，实际: ${devinCmd}`);
 
     // 增量合并默认保留用户既有配置与自定义 key，仅追加新发现项
     const existing = [
@@ -124,7 +188,7 @@ test("CLI Auto-Discovery: >=26 种 CLI 唯一性、坏软链跳过、多别名�
       { key: "my-script", name: "Script", command: "echo {prompt}", cwd: "/scripts" },
     ];
     const m1 = mergeDiscoveredWorkers(existing, discovered, { force: false });
-    assert.deepEqual(m1.added.map((w) => w.key), ["kimi"]);
+    assert.deepEqual(m1.added.map((w) => w.key), ["agy", "kimi", "devin"]);
     assert.equal(m1.updated.length, 0);
     assert.equal(m1.workers.find((w) => w.key === "amp").cwd, "/custom");
     assert.ok(m1.workers.some((w) => w.key === "my-script"));
@@ -132,7 +196,7 @@ test("CLI Auto-Discovery: >=26 种 CLI 唯一性、坏软链跳过、多别名�
     // force: true 覆盖同名内置 CLI 但依然保留用户自定义 key
     const m2 = mergeDiscoveredWorkers(existing, discovered, { force: true });
     assert.deepEqual(m2.updated.map((w) => w.key), ["amp"]);
-    assert.deepEqual(m2.added.map((w) => w.key), ["kimi"]);
+    assert.deepEqual(m2.added.map((w) => w.key), ["agy", "kimi", "devin"]);
     assert.equal(m2.workers.find((w) => w.key === "amp").cwd, "/work");
     assert.ok(m2.workers.some((w) => w.key === "my-script"));
   } finally {
@@ -170,20 +234,42 @@ test("DeviceDaemon: 真并发多 Worker 执行、同上下文 Session 续接与 
         command: "mock-codex {prompt}",
         approval_policy: "always",
       },
+      {
+        key: "droid",
+        name: "Droid",
+        summary: "故障透传测试",
+        command: "mock-droid {prompt}",
+        approval_policy: "never",
+      },
     ]);
 
     let activeConcurrent = 0;
     let maxObservedConcurrent = 0;
     const cmdsSeen = [];
+    const stdinSeen = [];
 
-    const mockRunner = async (cmd) => {
+    const mockRunner = async (cmd, stdinText) => {
       cmdsSeen.push(cmd);
+      stdinSeen.push(stdinText);
       activeConcurrent++;
       maxObservedConcurrent = Math.max(maxObservedConcurrent, activeConcurrent);
       await new Promise((r) => setTimeout(r, 80));
       activeConcurrent--;
       if (cmd.includes("mock-claude")) {
         return { code: 0, stdout: JSON.stringify({ result: "Claude OK", session_id: "cl_sess_1" }), stderr: "" };
+      }
+      if (cmd.includes("mock-droid")) {
+        return {
+          code: 1,
+          stdout: JSON.stringify({
+            type: "result",
+            subtype: "failure",
+            is_error: true,
+            result: "402 usage limit reached",
+            session_id: "dr_1",
+          }),
+          stderr: "Ignored hook settings entry: hooks.PermissionRequest",
+        };
       }
       return { code: 0, stdout: "Codex OK", stderr: "" };
     };
@@ -234,6 +320,16 @@ test("DeviceDaemon: 真并发多 Worker 执行、同上下文 Session 续接与 
     const codexFinal = (await owner.getTask(dc.tasks[0].id)).task;
     assert.equal(codexFinal.state, "completed");
     assert.equal(codexFinal.receipt.text, "Codex OK");
+    assert.ok(stdinSeen.every((s) => s === null), "命令已含 {prompt} 占位符时不应重复写入 stdin");
+
+    // 4) 失败结构化 JSON + 无害 stderr 警告时，任务错误摘要保留真实 JSON 报错而非被 stderr 覆盖
+    const df = await owner.dispatchTask({ to: "mbp-test--droid", title: "额度测试", input_text: "hello" });
+    await daemon.runOnce();
+    await Promise.all([...daemon._activeTasks.values()]);
+    const droidFinal = (await owner.getTask(df.tasks[0].id)).task;
+    assert.equal(droidFinal.state, "failed");
+    assert.ok(droidFinal.error_message.includes("402 usage limit reached"));
+    assert.equal(droidFinal.error_message.includes("Ignored hook"), false);
   } finally {
     await rt.stop();
     fs.rmSync(hubDir, { recursive: true, force: true });

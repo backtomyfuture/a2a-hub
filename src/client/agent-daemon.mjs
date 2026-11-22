@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { clampTimeoutSec, loadConfigJson, sanitizeSlug } from "../core/config.mjs";
 import { runDetachedCommand } from "../core/proc.mjs";
-import { parseCliOutput, renderWorkerCommand } from "../core/receipt.mjs";
+import { formatCliFailure, parseCliOutput, renderWorkerCommand } from "../core/receipt.mjs";
 import { GatewayClient } from "./gateway-client.mjs";
 
 export class AgentDaemon {
@@ -76,6 +76,7 @@ export class AgentDaemon {
     const promptText = claimed.input_text || claimed.title || "";
     fs.writeFileSync(promptPath, promptText, { mode: 0o600 });
 
+    const usesPromptArg = /\{prompt(?:_file)?\}/.test(String(this.command || ""));
     const cmd = renderWorkerCommand({
       worker: { key: this.agentId, command: this.command, cwd: this.cwd },
       prompt: promptText,
@@ -83,9 +84,9 @@ export class AgentDaemon {
       model: claimed.model || "",
     });
     const timeoutSec = clampTimeoutSec(claimed.timeout_sec);
-    const res = await this.runner(cmd, promptText, timeoutSec, this.cwd);
+    const res = await this.runner(cmd, usesPromptArg ? null : promptText, timeoutSec, this.cwd);
     const parsed = parseCliOutput(res.stdout, res.stderr);
-    if (res.code === 0) {
+    if (res.code === 0 && !parsed.isError) {
       const text = parsed.text || "(完成)";
       await this.client.complete(claimed.id, {
         summary: text.slice(0, 240),
@@ -94,7 +95,7 @@ export class AgentDaemon {
       });
     } else {
       await this.client.fail(claimed.id, {
-        error: (res.stderr || parsed.text || `exit=${res.code}`).trim().slice(0, 1000),
+        error: formatCliFailure(parsed, res.stderr, res.code),
         retryable: false,
       });
     }

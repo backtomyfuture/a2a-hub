@@ -349,8 +349,9 @@ export const KNOWN_CLIS = [
     skills: ["coding", "research", "debug", "review", "git"],
     tools: ["bash", "files", "git", "web"],
     modelFlag: "--model",
-    command: "{bin} -p --output-format json --dangerously-skip-permissions {model_args} {prompt}",
-    resumeCommand: "{bin} --conversation {session} -p --output-format json --dangerously-skip-permissions {model_args} {prompt}",
+    // agy 的 -p/--prompt 为带值参数，须紧邻 {prompt} 放在其他 flag 之后
+    command: "{bin} --output-format json --dangerously-skip-permissions {model_args} -p {prompt}",
+    resumeCommand: "{bin} --conversation {session} --output-format json --dangerously-skip-permissions {model_args} -p {prompt}",
     timeoutSec: 900,
     approvalPolicy: "never",
     defaultModels: [],
@@ -564,7 +565,7 @@ export const KNOWN_CLIS = [
     tools: ["bash", "files", "git", "web"],
     modelFlag: "--model",
     // devin -p 在未信任工作区需 --respect-workspace-trust false 才能无交互运行
-    command: "{bin} -p --permission-mode dangerous --respect-workspace-trust false {model_args} {prompt}",
+    command: "{bin} --permission-mode dangerous --respect-workspace-trust false {model_args} -p {prompt}",
     resumeCommand: "",
     timeoutSec: 900,
     approvalPolicy: "never",

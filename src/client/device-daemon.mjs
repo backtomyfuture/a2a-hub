@@ -16,7 +16,7 @@ import {
 } from "../core/config.mjs";
 import { isHubPublicKey, pickSignedDecision } from "../core/approval-sign.mjs";
 import { runDetachedCommand } from "../core/proc.mjs";
-import { parseCliOutput, renderWorkerCommand } from "../core/receipt.mjs";
+import { formatCliFailure, parseCliOutput, renderWorkerCommand } from "../core/receipt.mjs";
 import { SessionStore } from "../core/session-store.mjs";
 import { parseHubFileUri } from "../store/files.mjs";
 import { GatewayClient } from "./gateway-client.mjs";
@@ -247,6 +247,9 @@ export class DeviceDaemon {
 
     const { promptPath, promptText } = await this._prepareRunDir(task);
     const prevSess = this.sessionStore.get(task.context_id, worker.key);
+    const activeTpl = prevSess?.session_id && worker.resume_command ? worker.resume_command : worker.command;
+    // 命令模板已通过参数传入提示词时，不再向 stdin 重复注入 promptText
+    const usesPromptArg = /\{prompt(?:_file)?\}/.test(String(activeTpl || ""));
     const cmd = renderWorkerCommand({
       worker,
       prompt: promptText,
@@ -265,7 +268,7 @@ export class DeviceDaemon {
     if (typeof hbTimer.unref === "function") hbTimer.unref();
 
     try {
-      const res = await this.runner(cmd, promptText, timeoutSec, cwd);
+      const res = await this.runner(cmd, usesPromptArg ? null : promptText, timeoutSec, cwd);
       const parsed = parseCliOutput(res.stdout, res.stderr);
       if (parsed.sessionId) {
         this.sessionStore.save(task.context_id, worker.key, {
@@ -275,7 +278,7 @@ export class DeviceDaemon {
         });
       }
 
-      if (res.code === 0) {
+      if (res.code === 0 && !parsed.isError) {
         const text = parsed.text || "(执行完成，无输出文本)";
         await this.client.complete(task.id, {
           summary: text.slice(0, 240),
@@ -287,7 +290,7 @@ export class DeviceDaemon {
           },
         });
       } else {
-        const errMsg = (res.stderr || parsed.text || `exit_code=${res.code}`).trim().slice(0, 1000);
+        const errMsg = formatCliFailure(parsed, res.stderr, res.code);
         await this.client.fail(task.id, {
           error: errMsg,
           retryable: false,

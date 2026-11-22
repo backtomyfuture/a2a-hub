@@ -92,52 +92,15 @@ function pickSessionId(obj) {
   );
 }
 
-export function parseCliOutput(stdout, stderr = "") {
-  const raw = String(stdout || "").trim();
-  if (!raw) {
-    return {
-      text: String(stderr || "").trim(),
-      sessionId: "",
-      usage: null,
-      structured: null,
-    };
-  }
-
-  // 1) 单对象 JSON（如 Claude Code / Droid / Agy / Cursor / Grok / Qwen -p --output-format json）
-  const single = tryParseJson(raw);
-  if (single && typeof single === "object" && !Array.isArray(single)) {
-    const candidate =
-      single.result ??
-      single.response ??
-      single.output ??
-      single.text ??
-      single.message ??
-      single.content ??
-      single.summary;
-    const extracted = candidate !== undefined ? extractContentText(candidate) : "";
-    const text = extracted || (typeof candidate === "string" ? candidate : candidate !== undefined ? JSON.stringify(candidate) : raw);
-    const sessionId = pickSessionId(single);
-    const usage = single.usage || (single.total_cost_usd !== undefined ? { total_cost_usd: single.total_cost_usd } : null);
-    return {
-      text: typeof text === "string" ? text : JSON.stringify(text),
-      sessionId,
-      usage,
-      structured: single,
-    };
-  }
-
-  // 2) JSONL 事件流（如 Amp / Claude / Codex / OpenCode / Kimi / Cline / Pi / Kilo）
-  const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+function parseEventList(events, raw) {
   let sessionId = "";
   let finalResultText = "";
   const messageChunks = [];
   let lastUsage = null;
-  let parsedJsonl = false;
+  let isError = false;
 
-  for (const line of lines) {
-    const ev = tryParseJson(line);
+  for (const ev of events) {
     if (!ev || typeof ev !== "object") continue;
-    parsedJsonl = true;
     const evSession = pickSessionId(ev);
     if (evSession) {
       sessionId = evSession;
@@ -145,11 +108,22 @@ export function parseCliOutput(stdout, stderr = "") {
       sessionId = String(ev.id);
     }
 
-    if (ev.type === "result" && typeof ev.result === "string") {
+    if (ev.is_error === true || ev.subtype === "failure" || ev.subtype === "error" || ev.type === "error") {
+      isError = true;
+    }
+
+    if (ev.type === "result" && ev.result !== undefined) {
       // 终态 result 字段已汇总最终答复，避免与前序 assistant 分片重复拼接
-      finalResultText = ev.result;
+      finalResultText = extractContentText(ev.result) || (typeof ev.result === "string" ? ev.result : JSON.stringify(ev.result));
     } else if (ev.type === "run_result" && typeof ev.text === "string") {
       finalResultText = ev.text;
+    } else if (ev.type === "error") {
+      const errCand = ev.error ?? ev.message ?? ev.text;
+      const errTxt = errCand !== undefined ? (extractContentText(errCand) || (typeof errCand === "string" ? errCand : JSON.stringify(errCand))) : "";
+      if (errTxt) finalResultText = errTxt;
+    } else if (ev.type === "message" && ev.role === "assistant" && ev.content !== undefined) {
+      const chunk = extractContentText(ev.content);
+      if (chunk) messageChunks.push(chunk);
     } else if (ev.type === "item.completed" && ev.item?.type === "agent_message" && ev.item?.text) {
       messageChunks.push(String(ev.item.text));
     } else if (ev.type === "text" && ev.part?.text) {
@@ -165,24 +139,109 @@ export function parseCliOutput(stdout, stderr = "") {
     } else if (typeof ev.text === "string" && !["step_start", "system", "thinking"].includes(ev.type)) {
       messageChunks.push(ev.text);
     }
-    if (ev.usage) lastUsage = ev.usage;
+
+    if (ev.usage || ev.total_cost_usd !== undefined) {
+      lastUsage = ev.usage || { total_cost_usd: ev.total_cost_usd };
+    }
   }
 
-  if (parsedJsonl) {
-    const finalText = finalResultText.trim() || messageChunks.join("\n").trim() || raw;
+  return {
+    text: finalResultText.trim() || messageChunks.join("\n").trim() || raw,
+    sessionId,
+    usage: lastUsage,
+    structured: events,
+    isError,
+  };
+}
+
+export function formatCliFailure(parsed, stderr = "", code = 1) {
+  const errText = String(stderr || "").trim();
+  const outText = String(parsed?.text || "").trim();
+  if (parsed?.isError && outText) {
+    return outText.slice(0, 1000);
+  }
+  if (parsed?.structured && outText) {
+    const nonEmptyErrLines = errText
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    const onlyHarmlessWarnings =
+      nonEmptyErrLines.length === 0 ||
+      nonEmptyErrLines.every((l) => /^(warning|ignored)\b/i.test(l));
+    if (onlyHarmlessWarnings) {
+      return outText.slice(0, 1000);
+    }
+    return `${outText}\n${errText}`.slice(0, 1000);
+  }
+  return (errText || outText || `exit_code=${code}`).trim().slice(0, 1000);
+}
+
+export function parseCliOutput(stdout, stderr = "") {
+  const raw = String(stdout || "").trim();
+  if (!raw) {
     return {
-      text: finalText,
-      sessionId,
-      usage: lastUsage,
+      text: String(stderr || "").trim(),
+      sessionId: "",
+      usage: null,
       structured: null,
+      isError: false,
     };
   }
 
-  // 3) 纯文本回退
+  const parsedJson = tryParseJson(raw);
+
+  // 1) 顶层 JSON 事件数组（如 CodeBuddy -p --output-format json）
+  if (Array.isArray(parsedJson) && parsedJson.some((it) => it && typeof it === "object")) {
+    return parseEventList(parsedJson, raw);
+  }
+
+  // 2) 单对象 JSON（如 Claude Code / Droid / Agy / Cursor / Grok / Qwen -p --output-format json）
+  if (parsedJson && typeof parsedJson === "object" && !Array.isArray(parsedJson)) {
+    const isError = Boolean(
+      parsedJson.is_error ||
+        parsedJson.subtype === "failure" ||
+        parsedJson.subtype === "error" ||
+        parsedJson.error
+    );
+    const candidate =
+      parsedJson.result ??
+      parsedJson.response ??
+      parsedJson.output ??
+      parsedJson.text ??
+      parsedJson.message ??
+      parsedJson.content ??
+      parsedJson.summary ??
+      parsedJson.error;
+    const extracted = candidate !== undefined ? extractContentText(candidate) : "";
+    const text =
+      extracted ||
+      (typeof candidate === "string" ? candidate : candidate !== undefined ? JSON.stringify(candidate) : raw);
+    const sessionId = pickSessionId(parsedJson);
+    const usage =
+      parsedJson.usage ||
+      (parsedJson.total_cost_usd !== undefined ? { total_cost_usd: parsedJson.total_cost_usd } : null);
+    return {
+      text: typeof text === "string" ? text : JSON.stringify(text),
+      sessionId,
+      usage,
+      structured: parsedJson,
+      isError,
+    };
+  }
+
+  // 3) JSONL 事件流（如 Amp / Claude / Codex / OpenCode / Kimi / Cline / Pi / Kilo）
+  const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const events = lines.map(tryParseJson).filter((ev) => ev && typeof ev === "object");
+  if (events.length > 0) {
+    return parseEventList(events, raw);
+  }
+
+  // 4) 纯文本回退
   return {
     text: raw,
     sessionId: "",
     usage: null,
     structured: null,
+    isError: false,
   };
 }
