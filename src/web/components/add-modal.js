@@ -5,7 +5,7 @@ import { bindBackdropClose, copyText, escapeHtml, showToast } from "../utils.js"
 let modalTab = "agent";
 let selectedTemplateId = "generic";
 let selectedJoinPlatform = "unix";
-let selectedAgentConnectMode = "mcp";
+let selectedAgentConnectMode = "http";
 let selectedMcpConfigTab = "http_json";
 let createdResult = null;
 
@@ -13,7 +13,7 @@ export function resetAddModalState(defaultTab = "agent") {
   modalTab = defaultTab;
   selectedTemplateId = "generic";
   selectedJoinPlatform = "unix";
-  selectedAgentConnectMode = "mcp";
+  selectedAgentConnectMode = "http";
   selectedMcpConfigTab = "http_json";
   createdResult = null;
 }
@@ -27,6 +27,7 @@ const FALLBACK_TEMPLATES = [
     role: "worker",
     transport: "poll",
     poll_interval_min: 5,
+    preferred_connect: "http",
     badge: "自由配置",
     summary_hint: "",
   },
@@ -38,6 +39,7 @@ const FALLBACK_TEMPLATES = [
     role: "leader",
     transport: "longpoll",
     poll_interval_min: 2,
+    preferred_connect: "http",
     badge: "Leader · 长连接",
     summary_hint: "云端主调度 Agent，负责拆解目标并编排本机与云端 Worker 协同完成",
   },
@@ -105,7 +107,7 @@ export function renderAddModal(root, refreshFn) {
     });
     root.querySelectorAll("[data-agent-connect-mode]").forEach((btn) => {
       btn.addEventListener("click", () => {
-        selectedAgentConnectMode = btn.getAttribute("data-agent-connect-mode") || "mcp";
+        selectedAgentConnectMode = btn.getAttribute("data-agent-connect-mode") || "http";
         renderAddModal(root, refreshFn);
       });
     });
@@ -156,9 +158,10 @@ export function renderAddModal(root, refreshFn) {
 
     const formatPresetHint = (tpl) => {
       if (!tpl || tpl.id === "generic") {
-        return "通用模式：可自由组合下方角色与接收方式（定时轮询 / 长连接 / Webhook 回调）。";
+        return "通用模式（HTTP 提示词优先）：可自由组合下方角色与接收方式（定时轮询 / 长连接 / Webhook 回调）。";
       }
-      return `已套用「${tpl.name}」预设：角色 ${tpl.role}、接收模式 ${tpl.transport}、在线窗口 ${tpl.poll_interval_min} 分钟（仍可下方微调）。`;
+      const connectHint = tpl.preferred_connect === "mcp" ? "MCP 优先，支持切换 HTTP" : "HTTP 提示词优先";
+      return `已套用「${tpl.name}」预设：角色 ${tpl.role}、接收模式 ${tpl.transport}、轮询/在线窗口 ${tpl.poll_interval_min} 分钟、${connectHint}（仍可下方微调）。`;
     };
 
     tplSelect?.addEventListener("change", () => {
@@ -201,7 +204,7 @@ export function renderAddModal(root, refreshFn) {
           webhook_url: String(fd.get("webhook_url") || "").trim(),
           webhook_secret: String(fd.get("webhook_secret") || "").trim(),
         });
-        const preferred = res.mcp_onboarding?.preferred_connect || activeTpl.preferred_connect || "mcp";
+        const preferred = res.mcp_onboarding?.preferred_connect || activeTpl.preferred_connect || "http";
         selectedAgentConnectMode = preferred;
         selectedMcpConfigTab = "http_json";
         createdResult = {
@@ -257,8 +260,8 @@ export function renderAddModal(root, refreshFn) {
 function renderAgentForm(templates, activeTpl) {
   const hint =
     activeTpl.id === "generic"
-      ? "通用模式：可自由组合下方角色与接收方式（定时轮询 / 长连接 / Webhook 回调）。"
-      : `已套用「${activeTpl.name}」预设：角色 ${activeTpl.role}、接收模式 ${activeTpl.transport}、在线窗口 ${activeTpl.poll_interval_min} 分钟（仍可下方微调）。`;
+      ? "通用模式（HTTP 提示词优先）：可自由组合下方角色与接收方式（定时轮询 / 长连接 / Webhook 回调）。"
+      : `已套用「${activeTpl.name}」预设：角色 ${activeTpl.role}、接收模式 ${activeTpl.transport}、轮询/在线窗口 ${activeTpl.poll_interval_min} 分钟、${activeTpl.preferred_connect === "mcp" ? "MCP 优先，支持切换 HTTP" : "HTTP 提示词优先"}（仍可下方微调）。`;
 
   return `
     <form id="form-create-agent" class="stack-md">
@@ -311,7 +314,7 @@ function renderAgentForm(templates, activeTpl) {
           </select>
         </label>
         <label class="field">
-          <span>在线窗口 (分钟)</span>
+          <span>轮询间隔 / 在线窗口 (分钟)</span>
           <input type="number" name="poll_interval_min" min="1" max="120" value="${Number(activeTpl.poll_interval_min || 5)}" />
         </label>
       </div>
@@ -422,11 +425,11 @@ function renderResultStep(res) {
       ${
         isAgentWithMcp
           ? `<div class="filter-bar">
-              <button type="button" class="filter-chip ${selectedAgentConnectMode === "mcp" ? "active" : ""}" data-agent-connect-mode="mcp">
-                🔌 MCP 原生接入（免确认弹窗 · 凭据隔离${res.mcpOnboarding.preferred_connect === "mcp" ? " · 推荐" : ""}）
-              </button>
               <button type="button" class="filter-chip ${selectedAgentConnectMode === "http" ? "active" : ""}" data-agent-connect-mode="http">
-                🌐 HTTP 提示词直连（发句话即配好${res.mcpOnboarding.preferred_connect === "http" ? " · 推荐" : ""}）
+                🌐 HTTP 提示词直连（云端通用 · 含轮询配置${res.mcpOnboarding.preferred_connect === "http" ? " · 推荐" : ""}）
+              </button>
+              <button type="button" class="filter-chip ${selectedAgentConnectMode === "mcp" ? "active" : ""}" data-agent-connect-mode="mcp">
+                🔌 MCP 原生接入（本地客户端 · 免确认弹窗${res.mcpOnboarding.preferred_connect === "mcp" ? " · 推荐" : ""}）
               </button>
             </div>`
           : ""

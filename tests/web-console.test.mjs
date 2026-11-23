@@ -181,20 +181,26 @@ test("Web Console UI & Templates: 主题变量切换规则、控件可读文字�
     assert.equal(DEFAULT_AGENT_TEMPLATES.some((t) => t.id === removedId), false, `DEFAULT_AGENT_TEMPLATES 不应包含已移除的 ${removedId}`);
   }
 
-  // 验证已有旧版 agent_templates.json 时会无损增量追加新增内置模板并过滤已移除模板
+  // 验证已有旧版 agent_templates.json 时会无损增量追加新增内置模板、过滤已移除模板，并把 generic/muse 修正为 http 优先
   const tplDir = fs.mkdtempSync(path.join(os.tmpdir(), "ah-test-tpl-"));
   try {
     fs.writeFileSync(
       path.join(tplDir, "agent_templates.json"),
       JSON.stringify([
         { id: "custom-org", name: "Custom Org", role: "worker", transport: "poll", poll_interval_min: 5 },
+        { id: "generic", name: "自定义通用", role: "worker", transport: "poll", poll_interval_min: 5, preferred_connect: "mcp" },
+        { id: "muse", name: "Muse Custom", role: "leader", transport: "longpoll", poll_interval_min: 2, preferred_connect: "mcp" },
         { id: "coze", name: "Coze", role: "worker", transport: "webhook", poll_interval_min: 30 },
       ])
     );
     const mergedTpls = loadAgentTemplates(tplDir);
     assert.equal(mergedTpls[0].id, "custom-org");
+    assert.equal(mergedTpls[0].preferred_connect, "http");
+    assert.equal(mergedTpls.find((t) => t.id === "generic")?.preferred_connect, "http");
+    assert.equal(mergedTpls.find((t) => t.id === "muse")?.preferred_connect, "http");
+    assert.equal(mergedTpls.find((t) => t.id === "muse")?.name, "Muse Custom");
     assert.ok(mergedTpls.some((t) => t.id === "openclaw"));
-    assert.ok(mergedTpls.some((t) => t.id === "gemini"));
+    assert.ok(mergedTpls.some((t) => t.id === "gemini" && t.preferred_connect === "mcp"));
     assert.equal(mergedTpls.some((t) => t.id === "coze"), false);
   } finally {
     fs.rmSync(tplDir, { recursive: true, force: true });
@@ -226,27 +232,74 @@ test("Web Console UI & Templates: 主题变量切换规则、控件可读文字�
 
   const addModalSrc = fs.readFileSync(path.resolve("src", "web", "components", "add-modal.js"), "utf8");
   assert.ok(addModalSrc.includes("data-join-plat") && addModalSrc.includes("Windows PowerShell"));
+  const modalHttpIdx = addModalSrc.indexOf('data-agent-connect-mode="http"');
+  const modalMcpIdx = addModalSrc.indexOf('data-agent-connect-mode="mcp"');
+  assert.ok(modalHttpIdx > 0 && modalMcpIdx > modalHttpIdx, "add-modal 应将 HTTP 提示词选项卡排在 MCP 之前");
+  assert.ok(addModalSrc.includes('let selectedAgentConnectMode = "http"'));
 
-  // 验证 workbuddy 与 qwen 使用精简免误报自动执行提示词，其他模板保留原有通用提示词
-  for (const pid of ["workbuddy", "qwen"]) {
+  const agentDrawerSrc = fs.readFileSync(path.resolve("src", "web", "components", "agent-drawer.js"), "utf8");
+  const drawerHttpIdx = agentDrawerSrc.indexOf('data-drawer-connect="http"');
+  const drawerMcpIdx = agentDrawerSrc.indexOf('data-drawer-connect="mcp"');
+  assert.ok(drawerHttpIdx > 0 && drawerMcpIdx > drawerHttpIdx, "agent-drawer 应将 HTTP 提示词选项卡排在 MCP 之前");
+  assert.ok(agentDrawerSrc.includes('let drawerConnectMode = "http"'));
+
+  // 验证 6 类云端自动执行 Worker 使用精简免误报自动执行提示词，且均包含强制定时轮询、无待办静默与正确协议字段
+  for (const pid of ["workbuddy", "qwen", "doubao", "lingguang", "kimi-agent", "manus"]) {
     const prompt = buildAgentOnboardingPrompt({
       hubUrl: "https://example.test",
-      agent: { id: pid, name: pid, role: "worker", platform: pid, transport: "poll", poll_interval_min: 10 },
+      agent: { id: pid, name: `${pid}'s Bot`, role: "worker", platform: pid, transport: "poll", poll_interval_min: 10 },
       token: "ah_ag_test_tok",
     });
     assert.ok(prompt.includes("免确认自动执行范围"), `${pid} 应包含免确认白名单`);
     assert.ok(prompt.includes("无待办静默结束"), `${pid} 应包含无待办静默约定`);
+    assert.ok(prompt.includes("每 10 分钟一次的定时轮询任务"), `${pid} 应包含明确定时轮询要求`);
+    assert.ok(prompt.includes("/check"), `${pid} 应包含 /check`);
+    assert.ok(prompt.includes("/claim"), `${pid} 应包含 /claim`);
+    assert.ok(prompt.includes("/complete"), `${pid} 应包含 /complete`);
+    assert.ok(prompt.includes("/heartbeat"), `${pid} 应包含 /heartbeat`);
     assert.ok(prompt.includes("/fail"), `${pid} 应包含 fail 兜底`);
+    assert.ok(prompt.includes("'\\''"), `${pid} 应安全转义单引号`);
     assert.ok(!prompt.includes("/auth"), `${pid} 不应包含 /auth 高危授权`);
     assert.ok(!prompt.includes("记忆中"), `${pid} 不应要求写入对话记忆`);
     assert.ok(!prompt.includes("当前在线"), `${pid} 不应包含固定暗号回执`);
+    assert.ok(!prompt.includes('state = "submitted"'), `${pid} 不应误写 /check 返回 state = "submitted"`);
   }
-  const doubaoPrompt = buildAgentOnboardingPrompt({
+
+  // 验证 generic (worker + poll)、muse/openclaw (leader + longpoll)、grok-bot (worker + webhook) 与单引号转义
+  const genericPrompt = buildAgentOnboardingPrompt({
     hubUrl: "https://example.test",
-    agent: { id: "doubao", name: "豆包", role: "worker", platform: "doubao", transport: "poll", poll_interval_min: 5 },
+    agent: { id: "generic-1", name: "O'Connor", role: "worker", platform: "generic", transport: "poll", poll_interval_min: 7 },
     token: "ah_ag_test_tok",
   });
-  assert.ok(doubaoPrompt.includes("# 接入 a2a-hub 编排中台（豆包）"));
+  assert.ok(genericPrompt.includes("# 接入 a2a-hub 编排中台（O'Connor）"));
+  assert.ok(genericPrompt.includes("每 7 分钟一次的定时轮询任务"));
+  assert.ok(genericPrompt.includes("必须建立轮询 / 接收机制"));
+  assert.ok(genericPrompt.includes("静默结束本轮"));
+  assert.ok(genericPrompt.includes("O'\\''Connor"));
+  assert.ok(!genericPrompt.includes('state = "submitted"'));
+
+  for (const leaderId of ["muse", "openclaw"]) {
+    const leaderPrompt = buildAgentOnboardingPrompt({
+      hubUrl: "https://example.test",
+      agent: { id: leaderId, name: leaderId, role: "leader", platform: leaderId, transport: "longpoll", poll_interval_min: 2 },
+      token: "ah_ag_test_tok",
+    });
+    assert.ok(leaderPrompt.includes("必须建立轮询 / 接收机制"), `${leaderId} 应包含轮询章节`);
+    assert.ok(leaderPrompt.includes("云端平台降级方案"), `${leaderId} 应包含云端定时轮询降级方案`);
+    assert.ok(leaderPrompt.includes("每 2 分钟一次的定时轮询任务"), `${leaderId} 应包含定时轮询间隔`);
+    assert.ok(leaderPrompt.includes("leader_updates_count"), `${leaderId} 应包含 leader_updates_count 判定`);
+    assert.ok(leaderPrompt.includes("/updates?new=1"), `${leaderId} 应包含 /updates?new=1`);
+  }
+
+  const grokPrompt = buildAgentOnboardingPrompt({
+    hubUrl: "https://example.test",
+    agent: { id: "grok-bot", name: "Grok Bot", role: "worker", platform: "grok-bot", transport: "webhook", poll_interval_min: 30 },
+    token: "ah_ag_test_tok",
+  });
+  assert.ok(grokPrompt.includes("X-A2A-Signature"));
+  assert.ok(grokPrompt.includes("HMAC-SHA256"));
+  assert.ok(grokPrompt.includes("每 30 分钟一次的定时轮询"));
+  assert.ok(grokPrompt.includes(`/api/v1/agents/grok-bot/check`));
 });
 
 test("Web Console: 浮层防误触关闭 (bindBackdropClose) 与 Drawer 稳定渲染机制", async () => {

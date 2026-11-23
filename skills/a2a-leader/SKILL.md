@@ -45,7 +45,8 @@ Content-Type: application/json
 - 严禁在 `params` 中传递 `command`、`cwd`、`env` 等执行控制字段（会被 400 拒绝）。
 
 ## 4. 增量拉取子任务进度与回执（水位推进）
-- 只读轻量巡检（不推进水位）：`GET /api/v1/agents/<your_agent_id>/check`
+- 只读轻量巡检（不推进水位，同时刷新在线心跳）：`GET /api/v1/agents/<your_agent_id>/check`（返回 `leader_updates_count`、`pending_count` 与 `tasks`；无更新时应静默结束不报空）
+- 支持常驻循环的节点可用 `GET /api/v1/agents/<your_agent_id>/poll?since=<seq>&timeout=35` 实时等待子任务回执与直派任务；不支持常驻循环的云端节点应配置定时轮询 `/check` -> `/updates?new=1`
 - 拉取增量更新并自动推进服务端水位：`GET /api/v1/agents/<your_agent_id>/updates?new=1`
 - 查看整条协作对话线程历史：`GET /api/v1/threads/<context_id>`
 

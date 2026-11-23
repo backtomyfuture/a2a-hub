@@ -274,7 +274,7 @@ export function renderAgentDrawer(root, refreshFn) {
     }
   });
 
-  let drawerConnectMode = "mcp";
+  let drawerConnectMode = "http";
   let drawerMcpTab = "http_json";
 
   const getMcpSnippet = (mcp, tab) => {
@@ -299,8 +299,8 @@ export function renderAgentDrawer(root, refreshFn) {
       ${
         mcpOnboarding
           ? `<div class="filter-bar">
-              <button type="button" class="filter-chip ${drawerConnectMode === "mcp" ? "active" : ""}" data-drawer-connect="mcp">🔌 MCP 原生接入</button>
-              <button type="button" class="filter-chip ${drawerConnectMode === "http" ? "active" : ""}" data-drawer-connect="http">🌐 HTTP 提示词</button>
+              <button type="button" class="filter-chip ${drawerConnectMode === "http" ? "active" : ""}" data-drawer-connect="http">🌐 HTTP 提示词${mcpOnboarding.preferred_connect === "http" ? " · 推荐" : ""}</button>
+              <button type="button" class="filter-chip ${drawerConnectMode === "mcp" ? "active" : ""}" data-drawer-connect="mcp">🔌 MCP 原生接入${mcpOnboarding.preferred_connect === "mcp" ? " · 推荐" : ""}</button>
             </div>`
           : ""
       }
@@ -327,7 +327,7 @@ export function renderAgentDrawer(root, refreshFn) {
     `;
     box.querySelectorAll("[data-drawer-connect]").forEach((btn) => {
       btn.addEventListener("click", () => {
-        drawerConnectMode = btn.getAttribute("data-drawer-connect") || "mcp";
+        drawerConnectMode = btn.getAttribute("data-drawer-connect") || "http";
         renderPromptBox(promptText, token, mcpOnboarding);
       });
     });
@@ -344,7 +344,7 @@ export function renderAgentDrawer(root, refreshFn) {
   root.querySelector("#drawer-view-onboarding")?.addEventListener("click", async () => {
     try {
       const r = await api.agentOnboarding(agent.id);
-      drawerConnectMode = r.mcp_onboarding?.preferred_connect || "mcp";
+      drawerConnectMode = r.mcp_onboarding?.preferred_connect || "http";
       renderPromptBox(r.onboarding_prompt, "", r.mcp_onboarding || null);
     } catch (err) {
       showToast(err.message, true);
@@ -355,7 +355,7 @@ export function renderAgentDrawer(root, refreshFn) {
     if (!confirm("重新生成 Token 会立即使旧 Token 失效，确定继续？")) return;
     try {
       const r = await api.rotateAgentToken(agent.id);
-      drawerConnectMode = r.mcp_onboarding?.preferred_connect || "mcp";
+      drawerConnectMode = r.mcp_onboarding?.preferred_connect || "http";
       renderPromptBox(r.onboarding_prompt, r.token, r.mcp_onboarding || null);
       showToast("已生成新 Token 并更新接入提示词");
       await refreshFn();

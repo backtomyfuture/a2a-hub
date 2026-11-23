@@ -7,7 +7,7 @@ import test from "node:test";
 import { GatewayClient } from "../src/client/gateway-client.mjs";
 import { startHubRuntime } from "../src/core/hub-runtime.mjs";
 import { runMcpStdioCommand } from "../src/core/mcp-server.mjs";
-import { DEFAULT_AGENT_TEMPLATES, buildAgentMcpOnboarding } from "../src/core/templates.mjs";
+import { DEFAULT_AGENT_TEMPLATES, buildAgentMcpOnboarding, buildAgentMcpPrompt } from "../src/core/templates.mjs";
 
 test("MCP Server (Streamable HTTP & Token Identity Binding): 按 Token 角色动态裁剪工具、零参数防冒充与完整派单接单闭环", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ah-test-mcp-"));
@@ -336,13 +336,25 @@ test("MCP Stdio (`ah mcp`): 通过 stdin/stdout 行级 JSON-RPC 2.0 桥接转发
   }
 });
 
-test("Templates Preferred Connect: 客户端模板默认首选 MCP，云端定时与 Webhook 模板默认首选 HTTP", () => {
-  for (const mcpId of ["generic", "muse", "gemini", "claude-client", "cursor-agent", "lobechat"]) {
+test("Templates Preferred Connect: 仅支持自定义 MCP 的本地客户端默认推荐 MCP，通用与云端模板默认优先 HTTP", () => {
+  for (const mcpId of ["gemini", "claude-client", "cursor-agent", "lobechat"]) {
     const tpl = DEFAULT_AGENT_TEMPLATES.find((t) => t.id === mcpId);
     assert.ok(tpl, `模板应包含 ${mcpId}`);
     assert.equal(tpl.preferred_connect, "mcp", `${mcpId} 应默认推荐 mcp`);
   }
-  for (const httpId of ["workbuddy", "openclaw", "hermes", "grok-bot", "doubao", "qwen", "manus", "kimi-agent"]) {
+  for (const httpId of [
+    "generic",
+    "muse",
+    "workbuddy",
+    "openclaw",
+    "hermes",
+    "grok-bot",
+    "doubao",
+    "lingguang",
+    "qwen",
+    "manus",
+    "kimi-agent",
+  ]) {
     const tpl = DEFAULT_AGENT_TEMPLATES.find((t) => t.id === httpId);
     assert.ok(tpl, `模板应包含 ${httpId}`);
     assert.equal(tpl.preferred_connect, "http", `${httpId} 应默认推荐 http`);
@@ -358,6 +370,10 @@ test("Templates Preferred Connect: 客户端模板默认首选 MCP，云端定�
   });
   assert.equal(bundle.preferred_connect, "mcp");
   assert.ok(!bundle.mcp_prompt.includes("ag_secret_123456"));
+  assert.ok(!bundle.mcp_prompt.includes("curl "));
+  assert.ok(bundle.mcp_prompt.includes("必须建立轮询 / 待命机制"));
+  assert.ok(bundle.mcp_prompt.includes("5 分钟"));
+  assert.ok(bundle.mcp_prompt.includes("静默结束"));
   assert.ok(bundle.stdio_json.includes("ag_secret_123456"));
   assert.ok(bundle.stdio_json.includes("/opt/homebrew/bin"));
   assert.ok(bundle.npx_json.includes("github:backtomyfuture/a2a-hub"));
@@ -371,4 +387,29 @@ test("Templates Preferred Connect: 客户端模板默认首选 MCP，云端定�
   });
   assert.ok(claudeBundle.http_json.includes("Bearer ag_secret_654321"));
   assert.ok(claudeBundle.http_json.includes("?token=ag_secret_654321"));
+
+  // 未知/自定义模板与 webhook 模式均默认回落到 http，且 Leader MCP 提示词包含轮询兜底与脱敏约束
+  const customBundle = buildAgentMcpOnboarding({
+    hubUrl: "http://127.0.0.1:8787",
+    agent: { id: "custom-cloud", name: "Custom Cloud", role: "worker", platform: "unknown-cloud" },
+    token: "ag_secret_custom",
+  });
+  assert.equal(customBundle.preferred_connect, "http");
+
+  const webhookOverride = buildAgentMcpOnboarding({
+    hubUrl: "http://127.0.0.1:8787",
+    agent: { id: "gemini-wh", name: "Gemini WH", role: "worker", platform: "gemini", transport: "webhook" },
+    token: "ag_secret_wh",
+  });
+  assert.equal(webhookOverride.preferred_connect, "http");
+
+  const leaderMcpPrompt = buildAgentMcpPrompt({
+    agent: { id: "muse", name: "Muse", role: "leader", transport: "longpoll", poll_interval_min: 2 },
+    template: DEFAULT_AGENT_TEMPLATES.find((t) => t.id === "muse"),
+  });
+  assert.ok(!leaderMcpPrompt.includes("curl "));
+  assert.ok(leaderMcpPrompt.includes("必须建立轮询 / 待命机制"));
+  assert.ok(leaderMcpPrompt.includes("a2a_check_updates"));
+  assert.ok(leaderMcpPrompt.includes("每 2 分钟"));
+  assert.ok(leaderMcpPrompt.includes("静默结束"));
 });
