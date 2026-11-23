@@ -108,3 +108,32 @@ export async function copyText(text, label = "已复制") {
     showToast("复制失败，请手动选中复制", true);
   }
 }
+
+/**
+ * 安全绑定弹窗/抽屉遮罩层点击关闭
+ * 核心：只有当 mousedown 和 mouseup 均发生在 backdrop 本身（空白处）时，才触发关闭。
+ * 杜绝：在卡片内部选中文本拖拽出界、滚动条拖拽、或内部点击因重绘丢失元素后误触关闭。
+ */
+export function bindBackdropClose(backdropEl, onClose) {
+  if (!backdropEl || typeof onClose !== "function") return;
+  let downOnBackdrop = false;
+  let upOnBackdrop = false;
+
+  backdropEl.addEventListener("mousedown", (e) => {
+    downOnBackdrop = e.target === backdropEl;
+    upOnBackdrop = false;
+  });
+
+  // 内部按下、遮罩松开（或反之）时 click 的 target 会冒泡成共同祖先即遮罩，必须靠 mouseup 位置排除
+  backdropEl.addEventListener("mouseup", (e) => {
+    upOnBackdrop = e.target === backdropEl;
+  });
+
+  backdropEl.addEventListener("click", (e) => {
+    const ok = downOnBackdrop && upOnBackdrop && e.target === backdropEl;
+    downOnBackdrop = false;
+    upOnBackdrop = false;
+    if (ok) onClose(e);
+  });
+}
+

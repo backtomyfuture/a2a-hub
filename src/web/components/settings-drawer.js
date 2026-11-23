@@ -1,6 +1,6 @@
 import { api } from "../api.js";
 import { setState, store } from "../state.js";
-import { copyText, escapeHtml, showToast } from "../utils.js";
+import { bindBackdropClose, copyText, escapeHtml, showToast } from "../utils.js";
 
 let loadedSettings = null;
 let loadingSettings = false;
@@ -118,8 +118,8 @@ export function renderSettingsDrawer(root) {
     </div>
   `;
 
-  root.querySelector("[data-settings-backdrop]")?.addEventListener("click", (e) => {
-    if (e.target.hasAttribute("data-settings-backdrop")) setState({ showSettingsDrawer: false });
+  bindBackdropClose(root.querySelector("[data-settings-backdrop]"), () => {
+    setState({ showSettingsDrawer: false });
   });
   root.querySelector("#settings-drawer-close")?.addEventListener("click", () => {
     setState({ showSettingsDrawer: false });

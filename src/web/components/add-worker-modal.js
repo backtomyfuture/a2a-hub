@@ -1,6 +1,6 @@
 import { api } from "../api.js";
 import { setState, store } from "../state.js";
-import { copyText, escapeHtml, showToast } from "../utils.js";
+import { bindBackdropClose, copyText, escapeHtml, showToast } from "../utils.js";
 
 let remoteCliCommand = "";
 
@@ -132,9 +132,7 @@ export function renderAddWorkerModal(root, refreshFn) {
     setState({ showAddWorkerDeviceId: null });
   };
 
-  root.querySelector("[data-worker-modal-backdrop]")?.addEventListener("click", (e) => {
-    if (e.target.hasAttribute("data-worker-modal-backdrop")) closeModal();
-  });
+  bindBackdropClose(root.querySelector("[data-worker-modal-backdrop]"), closeModal);
   root.querySelector("#worker-modal-close")?.addEventListener("click", closeModal);
   root.querySelector("#btn-close-worker-cli")?.addEventListener("click", closeModal);
   root.querySelector("#btn-copy-worker-cli")?.addEventListener("click", () => {

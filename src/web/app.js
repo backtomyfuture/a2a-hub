@@ -1,7 +1,7 @@
 import { api } from "./api.js";
 import { renderAddModal, resetAddModalState } from "./components/add-modal.js";
 import { renderAddWorkerModal } from "./components/add-worker-modal.js";
-import { renderAgentDrawer } from "./components/agent-drawer.js";
+import { refreshAgentDrawerStatus, renderAgentDrawer } from "./components/agent-drawer.js";
 import { renderDispatchModal } from "./components/dispatch-modal.js";
 import { renderSettingsDrawer } from "./components/settings-drawer.js";
 import { setState, store, subscribe } from "./state.js";
@@ -100,10 +100,12 @@ function renderAll() {
   if (!nextDrawerKey) {
     lastRenderedDrawerKey = "";
     drawerRoot.innerHTML = "";
-  } else if (nextDrawerKey !== lastRenderedDrawerKey || !drawerRoot.contains(document.activeElement)) {
+  } else if (nextDrawerKey !== lastRenderedDrawerKey) {
     lastRenderedDrawerKey = nextDrawerKey;
     if (store.showSettingsDrawer) renderSettingsDrawer(drawerRoot);
     else renderAgentDrawer(drawerRoot, refreshState);
+  } else if (store.selectedAgentId && !store.showSettingsDrawer) {
+    refreshAgentDrawerStatus(drawerRoot);
   }
 
   const nextModalKey = store.showAddModal
@@ -217,6 +219,23 @@ logoutBtn?.addEventListener("click", async () => {
   pollingStarted = false;
   setState({ state: null });
   await bootApp();
+});
+
+window.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || e.isComposing || e.keyCode === 229 || e.defaultPrevented) return;
+  {
+    if (store.showAddModal || store.showAddWorkerDeviceId || store.showDispatchModal) {
+      setState({
+        showAddModal: null,
+        showAddWorkerDeviceId: null,
+        showDispatchModal: false,
+        dispatchPreselect: [],
+        dispatchContextId: "",
+      });
+    } else if (store.showSettingsDrawer || store.selectedAgentId) {
+      setState({ showSettingsDrawer: false, selectedAgentId: null });
+    }
+  }
 });
 
 void bootApp();

@@ -1,6 +1,6 @@
 import { api } from "../api.js";
 import { setState, store } from "../state.js";
-import { agentSourceLabel, escapeHtml, showToast } from "../utils.js";
+import { agentSourceLabel, bindBackdropClose, escapeHtml, showToast } from "../utils.js";
 
 function groupEnabledAgents(agents, devices) {
   const devOrder = [...devices].sort((a, b) => {
@@ -180,10 +180,8 @@ export function renderDispatchModal(root, refreshFn) {
     </div>
   `;
 
-  root.querySelector("[data-dispatch-backdrop]")?.addEventListener("click", (e) => {
-    if (e.target.hasAttribute("data-dispatch-backdrop")) {
-      setState({ showDispatchModal: false, dispatchPreselect: [], dispatchContextId: "" });
-    }
+  bindBackdropClose(root.querySelector("[data-dispatch-backdrop]"), () => {
+    setState({ showDispatchModal: false, dispatchPreselect: [], dispatchContextId: "" });
   });
   root.querySelector("#dispatch-close")?.addEventListener("click", () => {
     setState({ showDispatchModal: false, dispatchPreselect: [], dispatchContextId: "" });

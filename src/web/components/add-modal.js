@@ -1,6 +1,6 @@
 import { api } from "../api.js";
 import { setState, store } from "../state.js";
-import { copyText, escapeHtml, showToast } from "../utils.js";
+import { bindBackdropClose, copyText, escapeHtml, showToast } from "../utils.js";
 
 let modalTab = "agent";
 let selectedTemplateId = "generic";
@@ -80,10 +80,8 @@ export function renderAddModal(root, refreshFn) {
     </div>
   `;
 
-  root.querySelector("[data-modal-backdrop]")?.addEventListener("click", (e) => {
-    if (e.target.hasAttribute("data-modal-backdrop")) {
-      setState({ showAddModal: null });
-    }
+  bindBackdropClose(root.querySelector("[data-modal-backdrop]"), () => {
+    setState({ showAddModal: null });
   });
   root.querySelector("#add-modal-close")?.addEventListener("click", () => setState({ showAddModal: null }));
 

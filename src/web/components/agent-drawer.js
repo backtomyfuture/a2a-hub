@@ -2,6 +2,7 @@ import { api } from "../api.js";
 import { getAgentById, setState, store } from "../state.js";
 import {
   agentSourceLabel,
+  bindBackdropClose,
   copyText,
   escapeHtml,
   formatRelativeTime,
@@ -9,6 +10,22 @@ import {
   stateLabel,
   stateTone,
 } from "../utils.js";
+
+// 长轮询刷新时只更新状态区文字，避免重建整个抽屉导致表单草稿、焦点与滚动位置丢失
+export function refreshAgentDrawerStatus(root) {
+  const agent = store.selectedAgentId ? getAgentById(store.selectedAgentId) : null;
+  const box = root.querySelector("[data-drawer-status]");
+  if (!agent || !box) return;
+  const title = box.querySelector("div > div:first-child");
+  const meta = box.querySelector("div > div:nth-child(2)");
+  const btn = box.querySelector("#drawer-toggle-enabled");
+  if (title) title.textContent = agent.enabled ? "当前已启用接单" : "当前已暂停接单";
+  if (meta) meta.textContent = `最后活跃：${formatRelativeTime(agent.last_seen_at)} · ${agent.online ? "在线" : "离线"}`;
+  if (btn) {
+    btn.textContent = agent.enabled ? "暂停 Agent" : "恢复启用";
+    btn.className = `btn btn-sm ${agent.enabled ? "btn-secondary" : "btn-primary"}`;
+  }
+}
 
 export function renderAgentDrawer(root, refreshFn) {
   const agent = store.selectedAgentId ? getAgentById(store.selectedAgentId) : null;
@@ -34,7 +51,7 @@ export function renderAgentDrawer(root, refreshFn) {
           <button class="btn btn-ghost btn-sm" id="drawer-close-btn">关闭</button>
         </div>
 
-        <div class="row-between card" style="padding:10px 14px;margin-bottom:14px">
+        <div class="row-between card" style="padding:10px 14px;margin-bottom:14px" data-drawer-status>
           <div>
             <div style="font-weight:600">${agent.enabled ? "当前已启用接单" : "当前已暂停接单"}</div>
             <div class="muted" style="font-size:12px">最后活跃：${formatRelativeTime(agent.last_seen_at)} · ${agent.online ? "在线" : "离线"}</div>
@@ -176,8 +193,8 @@ export function renderAgentDrawer(root, refreshFn) {
     </div>
   `;
 
-  root.querySelector("[data-drawer-backdrop]")?.addEventListener("click", (e) => {
-    if (e.target.hasAttribute("data-drawer-backdrop")) setState({ selectedAgentId: null });
+  bindBackdropClose(root.querySelector("[data-drawer-backdrop]"), () => {
+    setState({ selectedAgentId: null });
   });
   root.querySelector("#drawer-close-btn")?.addEventListener("click", () => setState({ selectedAgentId: null }));
 
@@ -186,6 +203,7 @@ export function renderAgentDrawer(root, refreshFn) {
       await api.updateAgent(agent.id, { enabled: !agent.enabled });
       showToast(agent.enabled ? "已暂停该 Agent" : "已恢复启用");
       await refreshFn();
+      renderAgentDrawer(root, refreshFn);
     } catch (err) {
       showToast(err.message, true);
     }
@@ -229,6 +247,7 @@ export function renderAgentDrawer(root, refreshFn) {
       await api.updateAgent(agent.id, patch);
       showToast("已保存配置");
       await refreshFn();
+      renderAgentDrawer(root, refreshFn);
     } catch (err) {
       showToast(err.message, true);
     }

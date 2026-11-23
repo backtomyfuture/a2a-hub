@@ -248,3 +248,95 @@ test("Web Console UI & Templates: 主题变量切换规则、控件可读文字�
   });
   assert.ok(doubaoPrompt.includes("# 接入 a2a-hub 编排中台（豆包）"));
 });
+
+test("Web Console: 浮层防误触关闭 (bindBackdropClose) 与 Drawer 稳定渲染机制", async () => {
+  const { bindBackdropClose } = await import("../src/web/utils.js");
+
+  // 1. 模拟 DOM 元素验证 bindBackdropClose 行为
+  const makeElement = (name) => {
+    const handlers = {};
+    return {
+      name,
+      addEventListener(type, fn) {
+        handlers[type] = handlers[type] || [];
+        handlers[type].push(fn);
+      },
+      dispatch(type, target) {
+        for (const fn of handlers[type] || []) {
+          fn({ target });
+        }
+      },
+    };
+  };
+
+  const backdrop = makeElement("backdrop");
+  const card = makeElement("card");
+  let closeCallCount = 0;
+  bindBackdropClose(backdrop, () => {
+    closeCallCount++;
+  });
+
+  // 模拟正常点击空白处：mousedown 和 click 都在 backdrop
+  backdrop.dispatch("mousedown", backdrop);
+  backdrop.dispatch("mouseup", backdrop);
+  backdrop.dispatch("click", backdrop);
+  assert.equal(closeCallCount, 1, "正常点击遮罩空白处应触发关闭");
+
+  // 模拟文本拖选滑出边界：在内部 card 上 mousedown，抬起时落在 backdrop
+  backdrop.dispatch("mousedown", card);
+  backdrop.dispatch("mouseup", backdrop);
+  backdrop.dispatch("click", backdrop);
+  assert.equal(closeCallCount, 1, "内部拖选文本越界到遮罩抬起时，绝对不得触发关闭");
+
+  // 模拟在遮罩按下但拖拽到 card 内部释放
+  // 浏览器此时 click 的 target 会冒泡为共同祖先（遮罩），所以这里按真实行为派发 backdrop
+  backdrop.dispatch("mousedown", backdrop);
+  backdrop.dispatch("mouseup", card);
+  backdrop.dispatch("click", backdrop);
+  assert.equal(closeCallCount, 1, "从外部拖入内部松开不应触发关闭");
+
+  // 2. 静态断言：所有 5 个组件均使用 bindBackdropClose 防御误关闭
+  for (const comp of [
+    "src/web/components/add-modal.js",
+    "src/web/components/add-worker-modal.js",
+    "src/web/components/dispatch-modal.js",
+    "src/web/components/agent-drawer.js",
+    "src/web/components/settings-drawer.js",
+  ]) {
+    const src = fs.readFileSync(path.resolve(comp), "utf8");
+    assert.ok(src.includes("bindBackdropClose("), `${comp} 应使用 bindBackdropClose`);
+    assert.ok(
+      !src.includes(".hasAttribute(\"data-modal-backdrop\")") &&
+        !src.includes(".hasAttribute(\"data-worker-modal-backdrop\")") &&
+        !src.includes(".hasAttribute(\"data-dispatch-backdrop\")") &&
+        !src.includes(".hasAttribute(\"data-drawer-backdrop\")") &&
+        !src.includes(".hasAttribute(\"data-settings-backdrop\")"),
+      `${comp} 不应再保留粗糙的 hasAttribute 遮罩点击判定`
+    );
+  }
+
+  // 3. 抽屉状态区就地刷新：不重建 DOM，仅更新文字
+  const { refreshAgentDrawerStatus } = await import("../src/web/components/agent-drawer.js");
+  const { store, setState } = await import("../src/web/state.js");
+  setState({
+    selectedAgentId: "a1",
+    state: { agents: [{ id: "a1", name: "A", enabled: false, online: true, last_seen_at: null }] },
+  });
+  const nodes = {
+    title: { textContent: "" },
+    meta: { textContent: "" },
+    btn: { textContent: "", className: "" },
+  };
+  const box = {
+    querySelector(sel) {
+      if (sel === "div > div:first-child") return nodes.title;
+      if (sel === "div > div:nth-child(2)") return nodes.meta;
+      if (sel === "#drawer-toggle-enabled") return nodes.btn;
+      return null;
+    },
+  };
+  refreshAgentDrawerStatus({ querySelector: (s) => (s === "[data-drawer-status]" ? box : null) });
+  assert.equal(nodes.title.textContent, "当前已暂停接单");
+  assert.equal(nodes.btn.textContent, "恢复启用");
+  assert.ok(store.selectedAgentId === "a1");
+});
