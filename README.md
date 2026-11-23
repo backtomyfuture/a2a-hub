@@ -199,7 +199,7 @@ node bin/ah.mjs up      # 初始化并前台启动 Hub（加 --service 注册开
 | `droid` | Factory Droid | `droid` | `exec --output-format json --auto high`，支持 `-s {session}` 续接 |
 | `agy` | Antigravity CLI | `agy` | `--output-format json --dangerously-skip-permissions -p`，支持 `--conversation` |
 | `grok` | Grok CLI | `grok` | `--output-format json --always-approve -p`，支持 `-r {session}` 续接 |
-| `cursor` | Cursor Agent | `cursor-agent` | `-p --output-format json --force --trust`，支持 `--resume` 续接 |
+| `cursor` | Cursor Agent | `cursor-agent` | `-p --output-format json --force`，支持 `--resume` 续接 |
 | `codebuddy` | CodeBuddy Code | `codebuddy` / `cbc` | `-p --output-format json -y`，兼容数组事件流与 `-r` 续接 |
 | `copilot` | GitHub Copilot CLI | `copilot` | `-p {prompt} --allow-all --silent` |
 | `qwen` | Qwen Code | `qwen` | `-p {prompt} --yolo --output-format json`，支持 `--resume` |
