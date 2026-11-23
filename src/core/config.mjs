@@ -673,6 +673,16 @@ export function whichBinary(name, { env = process.env, homeDir = os.homedir() } 
     for (const dir of fallbacks) {
       searchDirs.push(dir);
     }
+  } else {
+    const fallbacks = [
+      path.join(homeDir, "AppData", "Roaming", "npm"),
+      path.join(homeDir, ".local", "bin"),
+      path.join(homeDir, ".cargo", "bin"),
+      path.join(homeDir, "AppData", "Local", "Programs"),
+    ];
+    for (const dir of fallbacks) {
+      searchDirs.push(dir);
+    }
   }
 
   const seen = new Set();
@@ -751,6 +761,7 @@ export function discoverLocalWorkers({ whichFn = whichBinary, homeDir = os.homed
     if (detectedModel && !models.includes(detectedModel)) {
       models.unshift(detectedModel);
     }
+    const safeBin = binPath.includes(" ") ? `"${binPath}"` : binPath;
     found.push({
       key: spec.key,
       name: spec.name,
@@ -762,8 +773,8 @@ export function discoverLocalWorkers({ whichFn = whichBinary, homeDir = os.homed
       models,
       default_model: detectedModel || models[0] || "",
       model_flag: spec.modelFlag,
-      command: spec.command.replace(/\{bin\}/g, binPath),
-      resume_command: spec.resumeCommand ? spec.resumeCommand.replace(/\{bin\}/g, binPath) : "",
+      command: spec.command.replace(/\{bin\}/g, safeBin),
+      resume_command: spec.resumeCommand ? spec.resumeCommand.replace(/\{bin\}/g, safeBin) : "",
       cwd: defaultCwd,
       timeout_sec: spec.timeoutSec,
       approval_policy: spec.approvalPolicy,

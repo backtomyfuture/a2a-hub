@@ -2,7 +2,7 @@
 
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 
 // direct 在途账本的超时收口用同一个宽限，避免两处各写一个数。
 export const KILL_GRACE_MS = 2500;
@@ -70,30 +70,143 @@ export function createBoundedCapture(headLimit = OUTPUT_HEAD_BYTES, tailLimit = 
 
 function killProcessGroup(child, sig) {
   if (!child?.pid) return;
+  if (process.platform === "win32") {
+    try {
+      execSync(`taskkill /pid ${child.pid} /T /F`, { stdio: "ignore" });
+    } catch {
+      try { child.kill(sig); } catch { /* 已退出 */ }
+    }
+    return;
+  }
   try { process.kill(-child.pid, sig); }
   catch {
     try { child.kill(sig); } catch { /* 已退出 */ }
   }
 }
 
+// 命令参数解析（支持双引号、单引号与转义符），供 Windows 无 cmd.exe 模式直跑以保留多行文本
+export function splitCommandLine(cmd) {
+  const args = [];
+  let current = "";
+  let inQuotes = false;
+  let quoteChar = "";
+  let escape = false;
+  let hasToken = false;
+
+  const s = String(cmd || "").trim();
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (escape) {
+      current += ch;
+      escape = false;
+      continue;
+    }
+    if (ch === "\\") {
+      if (i + 1 < s.length && (s[i + 1] === quoteChar || s[i + 1] === "\\" || s[i + 1] === "\"")) {
+        escape = true;
+        continue;
+      }
+      current += ch;
+      continue;
+    }
+    if (!inQuotes && (ch === "\"" || ch === "'")) {
+      inQuotes = true;
+      quoteChar = ch;
+      hasToken = true;
+      continue;
+    }
+    if (inQuotes && ch === quoteChar) {
+      inQuotes = false;
+      quoteChar = "";
+      continue;
+    }
+    if (!inQuotes && /\s/.test(ch)) {
+      if (hasToken || current.length > 0) {
+        args.push(current);
+        current = "";
+        hasToken = false;
+      }
+      continue;
+    }
+    current += ch;
+    hasToken = true;
+  }
+  if (hasToken || current.length > 0) {
+    args.push(current);
+  }
+  return args;
+}
+
+// 统一跨平台 PATH 构造与环境变量准备
+export function buildProcEnv(baseEnv = process.env, platform = process.platform) {
+  const isWin = platform === "win32";
+  const env = { ...baseEnv };
+  const pathKey = Object.keys(env).find((k) => k.toUpperCase() === "PATH") || (isWin ? "Path" : "PATH");
+  const curPath = String(
+    env[pathKey] ||
+      (isWin ? `${baseEnv.SystemRoot || "C:\\Windows"}\\System32;${baseEnv.SystemRoot || "C:\\Windows"}` : "/usr/bin:/bin")
+  );
+  const homeDir = os.homedir();
+  const extra = isWin
+    ? [
+        path.dirname(process.execPath),
+        path.join(homeDir, "AppData", "Roaming", "npm"),
+        path.join(homeDir, ".local", "bin"),
+        path.join(homeDir, ".cargo", "bin"),
+      ]
+    : [
+        "/opt/homebrew/bin",
+        path.join(homeDir, ".local/bin"),
+        "/usr/local/bin",
+      ];
+  const existingDirs = curPath.split(isWin ? ";" : ":").map((d) => d.trim()).filter(Boolean);
+  const combinedPath = [...new Set([...extra, ...existingDirs])].join(isWin ? ";" : ":");
+  env[pathKey] = combinedPath;
+  if (isWin && pathKey !== "PATH") {
+    delete env.PATH;
+  }
+  return env;
+}
+
 // 独立进程组执行。超时先向整组发 SIGTERM，宽限后再 SIGKILL，并拆掉 stdio，
 // 避免 shell 死后孙进程继续占着管道，使 close 永远不来。
 export function runDetachedCommand(command, stdinText, timeoutSec, cwd) {
   return new Promise((resolve, reject) => {
-    const env = { ...process.env };
-    const extra = ["/opt/homebrew/bin", path.join(os.homedir(), ".local/bin"), "/usr/local/bin"];
-    env.PATH = [...extra, env.PATH ?? "/usr/bin:/bin"].join(":");
+    const isWin = process.platform === "win32";
+    const env = buildProcEnv(process.env, process.platform);
     const sec = Number(timeoutSec);
     const ms = Math.min(2_147_483_647, Math.max(0, Number.isFinite(sec) ? sec : 0) * 1000);
     let p;
     try {
-      p = spawn(command, {
-        shell: true,
-        cwd: cwd || os.homedir(),
-        env,
-        detached: true,
-        stdio: ["pipe", "pipe", "pipe"],
-      });
+      if (isWin) {
+        const parts = splitCommandLine(command);
+        const bin = parts[0] || "";
+        const args = parts.slice(1);
+        const isBatch = /\.(?:bat|cmd)$/i.test(bin);
+        p = isBatch
+          ? spawn(bin, args, {
+              shell: true,
+              cwd: cwd || os.homedir(),
+              env,
+              detached: true,
+              stdio: ["pipe", "pipe", "pipe"],
+            })
+          : spawn(bin, args, {
+              shell: false,
+              cwd: cwd || os.homedir(),
+              env,
+              detached: true,
+              stdio: ["pipe", "pipe", "pipe"],
+            });
+      } else {
+        p = spawn(command, {
+          shell: true,
+          cwd: cwd || os.homedir(),
+          env,
+          detached: true,
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+      }
     } catch (e) {
       reject(e);
       return;

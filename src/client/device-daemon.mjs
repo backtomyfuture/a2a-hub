@@ -144,7 +144,11 @@ export class DeviceDaemon {
     const extraNotes = msgs.filter((m) => m.kind === "answer" || m.kind === "auth_decision");
     parts.push("### 当前任务目标");
     if (task.title) parts.push(`标题：${task.title}`);
-    parts.push(task.input_text || task.title || "");
+    if (task.input_text) {
+      parts.push(task.input_text);
+    } else if (!task.title) {
+      parts.push("(未提供具体任务文本)");
+    }
     if (extraNotes.length > 0) {
       parts.push("");
       parts.push("### 机主/发起方最新补充说明");
