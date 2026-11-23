@@ -746,8 +746,8 @@ export function renderWindowsTaskXml({ starter, configDir, role, node, userId, w
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
     <Priority>7</Priority>
     <RestartOnFailure>
-      <Interval>PT5S</Interval>
-      <Count>999</Count>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
     </RestartOnFailure>
   </Settings>
   <Actions Context="Author">

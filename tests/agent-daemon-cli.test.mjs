@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { runDoctor } from "../src/cli/doctor.mjs";
 import { probePublicEndpoint } from "../src/cli/expose.mjs";
-import { selectAutostartName, systemdUnitName, unitTextTargetsConfig } from "../src/cli/service.mjs";
+import { renderWindowsTaskXml, selectAutostartName, systemdUnitName, unitTextTargetsConfig } from "../src/cli/service.mjs";
 import { parseJoinHubUrl, resolveSkillsForHost, runDeviceJoin, runHubSetup } from "../src/cli/setup.mjs";
 import { AgentDaemon } from "../src/client/agent-daemon.mjs";
 import { GatewayClient } from "../src/client/gateway-client.mjs";
@@ -123,6 +123,17 @@ test("Expose & Service Helpers: Cloudflare Bot 拦截探测与跨平台自启命
   assert.equal(selectAutostartName({ role: "node", node: "box1", kind: "systemd" }), "ah-box1.service");
   assert.equal(unitTextTargetsConfig("--config /Users/a/.a2a-hub --role hub", "/Users/a/.a2a-hub"), true);
   assert.equal(unitTextTargetsConfig("--config /Users/a/.a2a-hub-2", "/Users/a/.a2a-hub"), false);
+
+  const xml = renderWindowsTaskXml({
+    starter: "C:\\Users\\a\\.a2a-hub\\service\\ah-node.box1.vbs",
+    configDir: "C:\\Users\\a\\.a2a-hub",
+    role: "node",
+    node: "box1",
+    userId: "DOMAIN\\user",
+    wscript: "C:\\Windows\\System32\\wscript.exe",
+  });
+  assert.ok(xml.includes("<Interval>PT1M</Interval>"), "Windows Task Scheduler Interval 必须至少为 1 分钟");
+  assert.ok(xml.includes("<Count>3</Count>"), "Windows Task Scheduler Count 必须在 unsignedByte 范围内");
 });
 
 test("AgentDaemon: 独立长连接 Agent 认领并执行完成闭环", async () => {
