@@ -1,4 +1,4 @@
-﻿# a2a-hub Windows 一行安装与部署（无需事先 git clone）：
+# a2a-hub Windows 一行安装与部署（无需事先 git clone）：
 #   1) 仅安装命令行工具：
 #      irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex
 #   2) 安装并一键启动独立 Hub：
