@@ -89,7 +89,8 @@ export class DeviceDaemon {
     } catch {
       mtime = 0;
     }
-    if (mtime === this._workersMtime && this.workers.length > 0) return false;
+    // workers 为空时也要比较 mtime，否则每轮都判定“已变更”并重复同步，形成热循环
+    if (mtime === this._workersMtime) return false;
     this._workersMtime = mtime;
     this.workers = loadWorkersJson(this.configDir);
     return true;
