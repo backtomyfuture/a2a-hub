@@ -173,11 +173,26 @@ test("Web Console UI & Templates: 主题变量切换规则、控件可读文字�
     "不应再把 poll/longpoll/webhook 拆成冗余通用模板"
   );
   assert.ok(DEFAULT_AGENT_TEMPLATES.some((t) => t.id === "muse" && t.role === "leader"));
+  assert.ok(DEFAULT_AGENT_TEMPLATES.some((t) => t.id === "autoclaw" && t.role === "leader" && t.preferred_connect === "http"));
+  assert.ok(DEFAULT_AGENT_TEMPLATES.some((t) => t.id === "gemini" && t.name.includes("桌面端") && t.preferred_connect === "mcp"));
   assert.ok(DEFAULT_AGENT_TEMPLATES.some((t) => t.id === "grok-bot" && t.transport === "webhook"));
-  for (const id of ["openclaw", "hermes", "manus", "kimi-agent", "lingguang", "gemini", "claude-client", "cursor-agent", "lobechat"]) {
+  for (const id of ["generic", "muse", "autoclaw", "gemini", "grok-bot", "workbuddy", "doubao", "lingguang", "qwen"]) {
     assert.ok(DEFAULT_AGENT_TEMPLATES.some((t) => t.id === id), `DEFAULT_AGENT_TEMPLATES 缺少 ${id}`);
   }
-  for (const removedId of ["coze", "dify", "n8n", "feishu-bot"]) {
+  assert.equal(DEFAULT_AGENT_TEMPLATES.length, 9, "应精简为 9 套保留模板");
+  for (const removedId of [
+    "coze",
+    "dify",
+    "n8n",
+    "feishu-bot",
+    "claude-client",
+    "cursor-agent",
+    "lobechat",
+    "openclaw",
+    "hermes",
+    "kimi-agent",
+    "manus",
+  ]) {
     assert.equal(DEFAULT_AGENT_TEMPLATES.some((t) => t.id === removedId), false, `DEFAULT_AGENT_TEMPLATES 不应包含已移除的 ${removedId}`);
   }
 
@@ -190,6 +205,8 @@ test("Web Console UI & Templates: 主题变量切换规则、控件可读文字�
         { id: "custom-org", name: "Custom Org", role: "worker", transport: "poll", poll_interval_min: 5 },
         { id: "generic", name: "自定义通用", role: "worker", transport: "poll", poll_interval_min: 5, preferred_connect: "mcp" },
         { id: "muse", name: "Muse Custom", role: "leader", transport: "longpoll", poll_interval_min: 2, preferred_connect: "mcp" },
+        { id: "openclaw", name: "OpenClaw", role: "leader", transport: "longpoll", poll_interval_min: 2 },
+        { id: "claude-client", name: "Claude", role: "worker", transport: "longpoll", poll_interval_min: 5 },
         { id: "coze", name: "Coze", role: "worker", transport: "webhook", poll_interval_min: 30 },
       ])
     );
@@ -199,8 +216,10 @@ test("Web Console UI & Templates: 主题变量切换规则、控件可读文字�
     assert.equal(mergedTpls.find((t) => t.id === "generic")?.preferred_connect, "http");
     assert.equal(mergedTpls.find((t) => t.id === "muse")?.preferred_connect, "http");
     assert.equal(mergedTpls.find((t) => t.id === "muse")?.name, "Muse Custom");
-    assert.ok(mergedTpls.some((t) => t.id === "openclaw"));
+    assert.ok(mergedTpls.some((t) => t.id === "autoclaw" && t.preferred_connect === "http"));
     assert.ok(mergedTpls.some((t) => t.id === "gemini" && t.preferred_connect === "mcp"));
+    assert.equal(mergedTpls.some((t) => t.id === "openclaw"), false);
+    assert.equal(mergedTpls.some((t) => t.id === "claude-client"), false);
     assert.equal(mergedTpls.some((t) => t.id === "coze"), false);
   } finally {
     fs.rmSync(tplDir, { recursive: true, force: true });
@@ -243,63 +262,153 @@ test("Web Console UI & Templates: 主题变量切换规则、控件可读文字�
   assert.ok(drawerHttpIdx > 0 && drawerMcpIdx > drawerHttpIdx, "agent-drawer 应将 HTTP 提示词选项卡排在 MCP 之前");
   assert.ok(agentDrawerSrc.includes('let drawerConnectMode = "http"'));
 
-  // 验证 6 类云端自动执行 Worker 使用精简免误报自动执行提示词，且均包含强制定时轮询、无待办静默与正确协议字段
-  for (const pid of ["workbuddy", "qwen", "doubao", "lingguang", "kimi-agent", "manus"]) {
-    const prompt = buildAgentOnboardingPrompt({
-      hubUrl: "https://example.test",
-      agent: { id: pid, name: `${pid}'s Bot`, role: "worker", platform: pid, transport: "poll", poll_interval_min: 10 },
-      token: "ah_ag_test_tok",
-    });
-    assert.ok(prompt.includes("免确认自动执行范围"), `${pid} 应包含免确认白名单`);
-    assert.ok(prompt.includes("无待办静默结束"), `${pid} 应包含无待办静默约定`);
-    assert.ok(prompt.includes("每 10 分钟一次的定时轮询任务"), `${pid} 应包含明确定时轮询要求`);
-    assert.ok(prompt.includes("/check"), `${pid} 应包含 /check`);
-    assert.ok(prompt.includes("/claim"), `${pid} 应包含 /claim`);
-    assert.ok(prompt.includes("/complete"), `${pid} 应包含 /complete`);
-    assert.ok(prompt.includes("/heartbeat"), `${pid} 应包含 /heartbeat`);
-    assert.ok(prompt.includes("/fail"), `${pid} 应包含 fail 兜底`);
-    assert.ok(prompt.includes("'\\''"), `${pid} 应安全转义单引号`);
-    assert.ok(!prompt.includes("/auth"), `${pid} 不应包含 /auth 高危授权`);
-    assert.ok(!prompt.includes("记忆中"), `${pid} 不应要求写入对话记忆`);
-    assert.ok(!prompt.includes("当前在线"), `${pid} 不应包含固定暗号回执`);
-    assert.ok(!prompt.includes('state = "submitted"'), `${pid} 不应误写 /check 返回 state = "submitted"`);
-  }
-
-  // 验证 generic (worker + poll)、muse/openclaw (leader + longpoll)、grok-bot (worker + webhook) 与单引号转义
-  const genericPrompt = buildAgentOnboardingPrompt({
-    hubUrl: "https://example.test",
-    agent: { id: "generic-1", name: "O'Connor", role: "worker", platform: "generic", transport: "poll", poll_interval_min: 7 },
-    token: "ah_ag_test_tok",
+  // 验证 Muse (VM 保活)、WorkBuddy (新沙箱)、豆包、千问、灵光/Manus/Kimi、Grok Bot 与通用三模式的实测专属提示词
+  const musePrompt = buildAgentOnboardingPrompt({
+    hubUrl: "https://hub.example.test",
+    agent: { id: "muse", name: "Muse", role: "leader", platform: "muse", transport: "longpoll", poll_interval_min: 2 },
+    token: "ah_ag_muse_tok",
   });
-  assert.ok(genericPrompt.includes("# 接入 a2a-hub 编排中台（O'Connor）"));
-  assert.ok(genericPrompt.includes("每 7 分钟一次的定时轮询任务"));
-  assert.ok(genericPrompt.includes("必须建立轮询 / 接收机制"));
-  assert.ok(genericPrompt.includes("静默结束本轮"));
-  assert.ok(genericPrompt.includes("O'\\''Connor"));
-  assert.ok(!genericPrompt.includes('state = "submitted"'));
+  assert.ok(musePrompt.includes("Muse VM"));
+  assert.ok(musePrompt.includes("install.sh"));
+  assert.ok(musePrompt.includes("0600"));
+  assert.ok(musePrompt.includes("agent.token"));
+  assert.ok(musePrompt.includes("ah join"));
+  assert.ok(musePrompt.includes("--agent --agent-role leader"));
+  assert.ok(musePrompt.includes("--token-file ~/.a2a-hub-muse/agent.token --no-daemon"));
+  assert.ok(musePrompt.includes("ensure.sh"));
+  assert.ok(musePrompt.includes("flock -n 9"));
+  assert.ok(musePrompt.includes("ah service --ensure"));
+  assert.ok(musePrompt.includes("runtime hook"));
+  assert.ok(musePrompt.includes("每 5 秒"));
+  assert.ok(musePrompt.includes("ah inbox --config ~/.a2a-hub-muse --pop --json"));
+  assert.ok(musePrompt.includes("ah task create --config ~/.a2a-hub-muse"));
 
-  for (const leaderId of ["muse", "openclaw"]) {
-    const leaderPrompt = buildAgentOnboardingPrompt({
-      hubUrl: "https://example.test",
-      agent: { id: leaderId, name: leaderId, role: "leader", platform: leaderId, transport: "longpoll", poll_interval_min: 2 },
-      token: "ah_ag_test_tok",
-    });
-    assert.ok(leaderPrompt.includes("必须建立轮询 / 接收机制"), `${leaderId} 应包含轮询章节`);
-    assert.ok(leaderPrompt.includes("云端平台降级方案"), `${leaderId} 应包含云端定时轮询降级方案`);
-    assert.ok(leaderPrompt.includes("每 2 分钟一次的定时轮询任务"), `${leaderId} 应包含定时轮询间隔`);
-    assert.ok(leaderPrompt.includes("leader_updates_count"), `${leaderId} 应包含 leader_updates_count 判定`);
-    assert.ok(leaderPrompt.includes("/updates?new=1"), `${leaderId} 应包含 /updates?new=1`);
-  }
+  const wbPrompt = buildAgentOnboardingPrompt({
+    hubUrl: "https://hub.example.test",
+    agent: { id: "workbuddy", name: "WorkBuddy", role: "worker", platform: "workbuddy", transport: "poll", poll_interval_min: 30 },
+    token: "ah_ag_wb_tok_unique",
+  });
+  assert.ok(wbPrompt.includes("每 30 分钟"));
+  assert.ok(wbPrompt.includes("新沙箱"));
+  assert.equal(wbPrompt.split("ah_ag_wb_tok_unique").length - 1, 1, "WorkBuddy 令牌全文只允许在【每次运行】出现一次");
+  assert.ok(wbPrompt.includes("预览确认"));
+  assert.ok(wbPrompt.includes("无待办则静默结束") || wbPrompt.includes("静默结束本轮"));
+  assert.ok(wbPrompt.includes("401/403") && wbPrompt.includes("5xx/429") && wbPrompt.includes("404/409/422"));
+  assert.ok(!wbPrompt.includes("/auth"));
+  assert.ok(!wbPrompt.includes('state = "submitted"'));
 
+  const doubaoPrompt = buildAgentOnboardingPrompt({
+    hubUrl: "https://hub.example.test",
+    agent: { id: "doubao", name: "豆包", role: "worker", platform: "doubao", transport: "poll", poll_interval_min: 60 },
+    token: "ah_ag_db_tok",
+  });
+  assert.ok(doubaoPrompt.includes("每 60 分钟"));
+  assert.ok(doubaoPrompt.includes("/home/user/.a2a/token"));
+  assert.ok(doubaoPrompt.includes("0600"));
+  assert.ok(doubaoPrompt.includes("/home/user/.a2a/token 缺失"));
+  assert.ok(doubaoPrompt.includes("404/409/422"));
+  assert.ok(!doubaoPrompt.includes('state = "submitted"'));
+
+  const qwenPrompt = buildAgentOnboardingPrompt({
+    hubUrl: "https://hub.example.test",
+    agent: { id: "qwen", name: "千问", role: "worker", platform: "qwen", transport: "poll", poll_interval_min: 60 },
+    token: "ah_ag_qwen_tok",
+  });
+  assert.ok(qwenPrompt.includes("每 60 分钟"));
+  assert.ok(qwenPrompt.includes("a2a_token.txt"));
+  assert.ok(qwenPrompt.includes("找不到 a2a_token.txt"));
+  assert.ok(qwenPrompt.includes("免确认"));
+  assert.ok(qwenPrompt.includes("404/409/422"));
+  assert.ok(!qwenPrompt.includes("/auth"));
+  assert.ok(!qwenPrompt.includes('state = "submitted"'));
+
+  const grokTpl = DEFAULT_AGENT_TEMPLATES.find((t) => t.id === "grok-bot");
+  assert.equal(grokTpl.webhook_header, "Authorization");
   const grokPrompt = buildAgentOnboardingPrompt({
-    hubUrl: "https://example.test",
+    hubUrl: "https://hub.example.test",
     agent: { id: "grok-bot", name: "Grok Bot", role: "worker", platform: "grok-bot", transport: "webhook", poll_interval_min: 30 },
-    token: "ah_ag_test_tok",
+    token: "ah_ag_grok_tok",
   });
-  assert.ok(grokPrompt.includes("X-A2A-Signature"));
-  assert.ok(grokPrompt.includes("HMAC-SHA256"));
-  assert.ok(grokPrompt.includes("每 30 分钟一次的定时轮询"));
-  assert.ok(grokPrompt.includes(`/api/v1/agents/grok-bot/check`));
+  assert.ok(grokPrompt.includes("A2A_HUB_TOKEN"));
+  assert.ok(grokPrompt.includes("Details → Routines"));
+  assert.ok(grokPrompt.includes("不要验签"));
+  assert.ok(grokPrompt.includes("不要读 X-A2A-*"));
+  assert.ok(grokPrompt.includes("平台已回 200"));
+  assert.ok(grokPrompt.includes("timeout=0"));
+  assert.ok(grokPrompt.includes("每 30 分钟的 routine"));
+
+  const grokLeaderPrompt = buildAgentOnboardingPrompt({
+    hubUrl: "https://hub.example.test",
+    agent: { id: "grok-leader", name: "Grok Leader", role: "leader", platform: "grok-bot", transport: "webhook", poll_interval_min: 30 },
+    token: "ah_ag_grok_leader_tok",
+  });
+  assert.ok(grokLeaderPrompt.includes("【leader 加做】"));
+  assert.ok(grokLeaderPrompt.includes("另建一条 routine"));
+
+  const autoClawPrompt = buildAgentOnboardingPrompt({
+    hubUrl: "https://hub.example.test",
+    agent: { id: "autoclaw", name: "AutoClaw", role: "leader", platform: "autoclaw", transport: "poll", poll_interval_min: 5 },
+    token: "ah_ag_autoclaw_tok",
+  });
+  assert.ok(autoClawPrompt.includes("AutoClaw"));
+  assert.ok(autoClawPrompt.includes("Cron"));
+  assert.ok(autoClawPrompt.includes("每 5 分钟"));
+  assert.ok(autoClawPrompt.includes("~/.autoclaw/a2a_token"));
+  assert.ok(autoClawPrompt.includes("【首次接入】") && autoClawPrompt.includes("【每次运行】"));
+  assert.ok(autoClawPrompt.includes("【跟单与派单】"));
+  assert.ok(autoClawPrompt.includes("/updates?new=1"));
+  assert.ok(autoClawPrompt.includes("401/403") && autoClawPrompt.includes("404/409/422"));
+
+  for (const pid of ["lingguang"]) {
+    const p = buildAgentOnboardingPrompt({
+      hubUrl: "https://hub.example.test",
+      agent: { id: pid, name: `${pid}'s Bot`, role: "worker", platform: pid, transport: "poll", poll_interval_min: 10 },
+      token: "ah_ag_cloud_tok",
+    });
+    assert.ok(p.includes("每 10 分钟"));
+    assert.ok(p.includes("免确认"));
+    assert.ok(p.includes("静默结束本轮"));
+    assert.ok(p.includes("/check") && p.includes("/poll?timeout=0") && p.includes("/claim"));
+    assert.ok(p.includes("'\\''"), `${pid} 应安全转义单引号`);
+    assert.ok(!p.includes('state = "submitted"'));
+  }
+
+  // generic 三模式与自定义 prompt 占位符替换
+  const genericPoll = buildAgentOnboardingPrompt({
+    hubUrl: "https://hub.example.test",
+    agent: { id: "gen-poll", name: "O'Connor", role: "worker", platform: "generic", transport: "poll", poll_interval_min: 7 },
+    token: "ah_ag_gen_tok",
+  });
+  assert.ok(genericPoll.includes("每 7 分钟"));
+  assert.ok(genericPoll.includes("【首次接入】") && genericPoll.includes("【每次运行】"));
+  assert.ok(genericPoll.includes("401/403") && genericPoll.includes("404/409/422"));
+  assert.ok(genericPoll.includes("O'\\''Connor"));
+
+  const genericLp = buildAgentOnboardingPrompt({
+    hubUrl: "https://hub.example.test",
+    agent: { id: "generic-lp", name: "generic", role: "leader", platform: "generic", transport: "longpoll", poll_interval_min: 2 },
+    token: "ah_ag_lp_tok",
+  });
+  assert.ok(genericLp.includes("1 秒、3 秒、8 秒、30 秒"));
+  assert.ok(genericLp.includes("云端平台降级方案"));
+  assert.ok(genericLp.includes("/updates?new=1"));
+
+  const genericWebhook = buildAgentOnboardingPrompt({
+    hubUrl: "https://hub.example.test",
+    agent: { id: "gen-wh", name: "Custom WH", role: "worker", platform: "generic", transport: "webhook", poll_interval_min: 30 },
+    token: "ah_ag_wh_tok",
+  });
+  assert.ok(genericWebhook.includes("HMAC-SHA256"));
+  assert.ok(genericWebhook.includes("每 30 分钟"));
+  assert.ok(genericWebhook.includes("/api/v1/agents/gen-wh/check"));
+
+  const customTplPrompt = buildAgentOnboardingPrompt({
+    hubUrl: "https://hub.example.test",
+    agent: { id: "custom-1", name: "Custom", role: "worker", transport: "poll", poll_interval_min: 15 },
+    token: "tok_$123",
+    template: { id: "custom-1", prompt: "HUB={{base}} NODE={{node}} ROLE={{role}} INT={{interval}} TOK={{token}}" },
+  });
+  assert.equal(customTplPrompt, "HUB=https://hub.example.test NODE=custom-1 ROLE=worker INT=15 TOK=tok_$123");
 });
 
 test("Web Console: 浮层防误触关闭 (bindBackdropClose) 与 Drawer 稳定渲染机制", async () => {

@@ -148,16 +148,32 @@ export function renderAddModal(root, refreshFn) {
     const summaryInput = formEl.querySelector('textarea[name="summary"]');
     const webhookBox = formEl.querySelector("#agent-webhook-fields");
     const webhookUrlInput = formEl.querySelector('input[name="webhook_url"]');
+    const webhookSecretInput = formEl.querySelector('input[name="webhook_secret"]');
+    const webhookSecretLabel = formEl.querySelector("#agent-webhook-secret-label");
     const hintEl = formEl.querySelector("#tpl-preset-hint");
 
-    const syncWebhookVisibility = () => {
+    const syncWebhookVisibility = (tpl = templates.find((t) => t.id === selectedTemplateId) || activeTpl) => {
       const isWh = transportSelect?.value === "webhook";
       if (webhookBox) webhookBox.classList.toggle("hidden", !isWh);
-      if (webhookUrlInput) webhookUrlInput.required = isWh;
+      if (webhookUrlInput) {
+        webhookUrlInput.required = isWh;
+        webhookUrlInput.placeholder = tpl?.webhook_url_placeholder || "https://...";
+      }
+      if (webhookSecretInput) {
+        webhookSecretInput.placeholder = tpl?.webhook_key_placeholder || "secret";
+      }
+      if (webhookSecretLabel) {
+        webhookSecretLabel.textContent =
+          tpl?.webhook_header === "Authorization"
+            ? "Webhook 密钥 / Bearer key（对方 routine key）"
+            : "HMAC 签名密钥（可选）";
+      }
     };
 
     const formatPresetHint = (tpl) => {
-      if (!tpl || tpl.id === "generic") {
+      if (!tpl) return "";
+      if (tpl.hint) return tpl.hint;
+      if (tpl.id === "generic") {
         return "通用模式（HTTP 提示词优先）：可自由组合下方角色与接收方式（定时轮询 / 长连接 / Webhook 回调）。";
       }
       const connectHint = tpl.preferred_connect === "mcp" ? "MCP 优先，支持切换 HTTP" : "HTTP 提示词优先";
@@ -183,26 +199,31 @@ export function renderAddModal(root, refreshFn) {
         summaryInput.value = nextTpl.summary_hint || "";
       }
       if (hintEl) hintEl.textContent = formatPresetHint(nextTpl);
-      syncWebhookVisibility();
+      syncWebhookVisibility(nextTpl);
     });
 
-    transportSelect?.addEventListener("change", syncWebhookVisibility);
-    syncWebhookVisibility();
+    transportSelect?.addEventListener("change", () => syncWebhookVisibility());
+    syncWebhookVisibility(activeTpl);
 
     formEl.addEventListener("submit", async (e) => {
       e.preventDefault();
       const fd = new FormData(e.target);
+      const curTpl = templates.find((t) => t.id === selectedTemplateId) || activeTpl;
+      const chosenTransport = String(fd.get("transport") || curTpl.transport);
       try {
         const res = await api.createAgent({
           platform: selectedTemplateId,
           name: String(fd.get("name") || "").trim(),
           id: String(fd.get("id") || "").trim() || undefined,
-          role: String(fd.get("role") || activeTpl.role),
-          transport: String(fd.get("transport") || activeTpl.transport),
-          poll_interval_min: Number(fd.get("poll_interval_min") || activeTpl.poll_interval_min || 5),
+          role: String(fd.get("role") || curTpl.role),
+          transport: chosenTransport,
+          poll_interval_min: Number(fd.get("poll_interval_min") || curTpl.poll_interval_min || 5),
           summary: String(fd.get("summary") || "").trim(),
           webhook_url: String(fd.get("webhook_url") || "").trim(),
           webhook_secret: String(fd.get("webhook_secret") || "").trim(),
+          ...(chosenTransport === "webhook" && curTpl.webhook_header
+            ? { webhook_header: curTpl.webhook_header }
+            : {}),
         });
         const preferred = res.mcp_onboarding?.preferred_connect || activeTpl.preferred_connect || "http";
         selectedAgentConnectMode = preferred;
@@ -259,9 +280,10 @@ export function renderAddModal(root, refreshFn) {
 
 function renderAgentForm(templates, activeTpl) {
   const hint =
-    activeTpl.id === "generic"
+    activeTpl.hint ||
+    (activeTpl.id === "generic"
       ? "通用模式（HTTP 提示词优先）：可自由组合下方角色与接收方式（定时轮询 / 长连接 / Webhook 回调）。"
-      : `已套用「${activeTpl.name}」预设：角色 ${activeTpl.role}、接收模式 ${activeTpl.transport}、轮询/在线窗口 ${activeTpl.poll_interval_min} 分钟、${activeTpl.preferred_connect === "mcp" ? "MCP 优先，支持切换 HTTP" : "HTTP 提示词优先"}（仍可下方微调）。`;
+      : `已套用「${activeTpl.name}」预设：角色 ${activeTpl.role}、接收模式 ${activeTpl.transport}、轮询/在线窗口 ${activeTpl.poll_interval_min} 分钟、${activeTpl.preferred_connect === "mcp" ? "MCP 优先，支持切换 HTTP" : "HTTP 提示词优先"}（仍可下方微调）。`);
 
   return `
     <form id="form-create-agent" class="stack-md">
@@ -322,11 +344,11 @@ function renderAgentForm(templates, activeTpl) {
       <div id="agent-webhook-fields" class="${activeTpl.transport === "webhook" ? "" : "hidden"}" style="display:grid;grid-template-columns:2fr 1fr;gap:10px">
         <label class="field">
           <span>Webhook URL *</span>
-          <input type="url" name="webhook_url" placeholder="https://..." ${activeTpl.transport === "webhook" ? "required" : ""} />
+          <input type="url" name="webhook_url" placeholder="${escapeHtml(activeTpl.webhook_url_placeholder || "https://...")}" ${activeTpl.transport === "webhook" ? "required" : ""} />
         </label>
         <label class="field">
-          <span>HMAC 签名密钥（可选）</span>
-          <input type="text" name="webhook_secret" placeholder="secret" />
+          <span id="agent-webhook-secret-label">${activeTpl.webhook_header === "Authorization" ? "Webhook 密钥 / Bearer key（对方 routine key）" : "HMAC 签名密钥（可选）"}</span>
+          <input type="text" name="webhook_secret" placeholder="${escapeHtml(activeTpl.webhook_key_placeholder || "secret")}" />
         </label>
       </div>
 

@@ -888,7 +888,7 @@ export function startHubHttpServer({
         poll_interval_min: Number(body.poll_interval_min || tpl.poll_interval_min || 5),
         webhook_url: webhookUrl,
         webhook_secret: String(body.webhook_secret || ""),
-        webhook_header: String(body.webhook_header || "X-A2A-Signature"),
+        webhook_header: String(body.webhook_header || tpl.webhook_header || "X-A2A-Signature"),
         enabled: body.enabled !== undefined ? Boolean(body.enabled) : true,
         issueToken: true,
       });

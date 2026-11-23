@@ -298,9 +298,9 @@ test("MCP Stdio (`ah mcp`): 通过 stdin/stdout 行级 JSON-RPC 2.0 桥接转发
   try {
     const owner = new GatewayClient(rt.url, { token: "stdio_owner_tok" });
     const ag = await owner.post("/api/v1/agents", {
-      id: "claude-code",
-      platform: "claude-client",
-      name: "Claude Code",
+      id: "stdio-worker",
+      platform: "generic",
+      name: "Stdio Worker",
       role: "worker",
     });
 
@@ -336,30 +336,40 @@ test("MCP Stdio (`ah mcp`): 通过 stdin/stdout 行级 JSON-RPC 2.0 桥接转发
   }
 });
 
-test("Templates Preferred Connect: 仅支持自定义 MCP 的本地客户端默认推荐 MCP，通用与云端模板默认优先 HTTP", () => {
-  for (const mcpId of ["gemini", "claude-client", "cursor-agent", "lobechat"]) {
+test("Templates Preferred Connect: 仅 Gemini 桌面端默认推荐 MCP，通用、AutoClaw 与云端模板默认优先 HTTP", () => {
+  for (const mcpId of ["gemini"]) {
     const tpl = DEFAULT_AGENT_TEMPLATES.find((t) => t.id === mcpId);
     assert.ok(tpl, `模板应包含 ${mcpId}`);
     assert.equal(tpl.preferred_connect, "mcp", `${mcpId} 应默认推荐 mcp`);
+    assert.ok(tpl.name.includes("桌面端"), `${mcpId} 应标注为桌面端`);
   }
   for (const httpId of [
     "generic",
     "muse",
+    "autoclaw",
     "workbuddy",
-    "openclaw",
-    "hermes",
     "grok-bot",
     "doubao",
     "lingguang",
     "qwen",
-    "manus",
-    "kimi-agent",
   ]) {
     const tpl = DEFAULT_AGENT_TEMPLATES.find((t) => t.id === httpId);
     assert.ok(tpl, `模板应包含 ${httpId}`);
     assert.equal(tpl.preferred_connect, "http", `${httpId} 应默认推荐 http`);
   }
-  for (const removedId of ["coze", "dify", "n8n", "feishu-bot"]) {
+  for (const removedId of [
+    "coze",
+    "dify",
+    "n8n",
+    "feishu-bot",
+    "claude-client",
+    "cursor-agent",
+    "lobechat",
+    "openclaw",
+    "hermes",
+    "kimi-agent",
+    "manus",
+  ]) {
     assert.equal(DEFAULT_AGENT_TEMPLATES.some((t) => t.id === removedId), false, `不应包含已下线模板 ${removedId}`);
   }
 
@@ -380,13 +390,14 @@ test("Templates Preferred Connect: 仅支持自定义 MCP 的本地客户端默�
   assert.ok(bundle.http_json.includes("serverUrl"));
   assert.ok(bundle.http_json.includes("?token=ag_secret_123456"));
 
-  const claudeBundle = buildAgentMcpOnboarding({
+  const autoClawBundle = buildAgentMcpOnboarding({
     hubUrl: "http://127.0.0.1:8787",
-    agent: { id: "claude", name: "Claude", role: "worker", platform: "claude-client" },
+    agent: { id: "autoclaw", name: "AutoClaw", role: "leader", platform: "autoclaw" },
     token: "ag_secret_654321",
   });
-  assert.ok(claudeBundle.http_json.includes("Bearer ag_secret_654321"));
-  assert.ok(claudeBundle.http_json.includes("?token=ag_secret_654321"));
+  assert.equal(autoClawBundle.preferred_connect, "http");
+  assert.ok(autoClawBundle.http_json.includes("Bearer ag_secret_654321"));
+  assert.ok(autoClawBundle.http_json.includes("?token=ag_secret_654321"));
 
   // 未知/自定义模板与 webhook 模式均默认回落到 http，且 Leader MCP 提示词包含轮询兜底与脱敏约束
   const customBundle = buildAgentMcpOnboarding({

@@ -25,7 +25,7 @@ import { AgentDaemon } from "../src/client/agent-daemon.mjs";
 import { GatewayClient } from "../src/client/gateway-client.mjs";
 import { parseSimpleFlags, runInboxCommand, runPresentCommand } from "../src/client/inbox.mjs";
 import { runMcpStdioCommand } from "../src/core/mcp-server.mjs";
-import { runDeviceJoin, runHubSetup, runInteractiveSetup } from "../src/cli/setup.mjs";
+import { runAgentSetup, runDeviceJoin, runHubSetup, runInteractiveSetup } from "../src/cli/setup.mjs";
 import { runDoctor } from "../src/cli/doctor.mjs";
 import { runExpose } from "../src/cli/expose.mjs";
 import { service } from "../src/cli/service.mjs";
@@ -90,6 +90,8 @@ function helpText() {
       一键初始化并在本机启动独立中台 Hub（含 Web 控制台 + SQLite + 本机 CLI 并发执行池）
   ah join <http://[token@]host:port> [--device <name>] [--service] [--config <dir>]
       将当前电脑作为设备节点接入已有 Hub，自动发现本地 Claude/Codex/OpenCode 等 CLI
+  ah join <http://host:port> --agent [--agent-role worker|leader] --node <id> --token-file <path> [--no-daemon] [--config <dir>]
+      将当前环境作为独立 Agent 接入已有 Hub（支持仅保存凭据文件、搭配 ah service --ensure 保活）
   ah setup [--mode hub|device|agent] [--config <dir>]
       运行配置向导
   ah daemon [--config <dir>]
@@ -105,7 +107,7 @@ function helpText() {
       管理本机 workers.json 可执行 Worker 列表（查看、增量扫描新 CLI、新增、移除）
   ah task <create | list | show | reply | cancel> [...]
   ah present [list | approve <id> | deny <id> | reply <id> <text>]
-  ah inbox <check | list | show | claim | complete | fail | ask | auth | updates> [...]
+  ah inbox <check | list | pop | show | claim | complete | done | fail | ask | auth | updates> [...]
   ah mcp [--hub <url>] [--token <tok>] [--agent <id>] [--role leader|worker]
       启动本机 Stdio MCP 服务（供 Gemini CLI / Claude Desktop / Cursor 等客户端免弹窗挂载）
   ah update [--check] [--skip-skill]
@@ -210,16 +212,32 @@ async function main() {
   }
 
   if (cmd === "join") {
-    const joinUrl = flags._[1] || flags.hub;
+    const agentArgUrl = typeof flags.agent === "string" && /^https?:\/\//i.test(flags.agent) ? flags.agent : "";
+    const joinUrl = flags._[1] || flags.hub || agentArgUrl;
     if (!joinUrl) throw new Error("用法: ah join http://[token@]<hub-host>:8787 [--device <name>] [--service]");
-    await runDeviceJoin({
-      configDir,
-      joinUrl,
-      deviceId: flags.device || flags.node || "",
-      token: flags.token || "",
-      force: Boolean(flags.force),
-      skipSkill: Boolean(flags["skip-skill"]),
-    });
+    if (Boolean(flags.agent) || flags.kind === "agent") {
+      const explicitAgentId =
+        typeof flags.agent === "string" && !/^https?:\/\//i.test(flags.agent) ? flags.agent : "";
+      await runAgentSetup({
+        configDir,
+        joinUrl,
+        agentId: explicitAgentId || flags.node || flags.device || "",
+        token: flags.token || "",
+        tokenFile: flags["token-file"] || "",
+        agentRole: flags["agent-role"] || "worker",
+        command: flags.command || "",
+        skipSkill: Boolean(flags["skip-skill"]),
+      });
+    } else {
+      await runDeviceJoin({
+        configDir,
+        joinUrl,
+        deviceId: flags.device || flags.node || "",
+        token: flags.token || "",
+        force: Boolean(flags.force),
+        skipSkill: Boolean(flags["skip-skill"]),
+      });
+    }
     if (flags.service) {
       return await service(
         configDir,
@@ -227,7 +245,7 @@ async function main() {
         appDir
       );
     }
-    if (flags["setup-only"]) return 0;
+    if (flags["no-daemon"] || flags["setup-only"]) return 0;
     return await runDaemon({ configDir, flags });
   }
 

@@ -16,16 +16,28 @@ export function makeClientForConfig(configDir, { hubUrl, token } = {}) {
 }
 
 export async function runInboxCommand(args, { configDir, io = console } = {}) {
-  const sub = args[0] || "list";
-  const flags = parseSimpleFlags(args.slice(1));
+  const flags = parseSimpleFlags(args);
+  const sub = flags._[0] || (flags.pop ? "pop" : "list");
+  const pos = flags._.slice(1);
   const { client, agentId } = makeClientForConfig(configDir, { hubUrl: flags.hub, token: flags.token });
-  const targetAgent = flags.agent || agentId;
+  const targetAgent = (typeof flags.agent === "string" ? flags.agent : "") || agentId;
 
   if (sub === "check") {
     if (!targetAgent) throw new Error("请指定 --agent <id> 或在 agent 模式下配置 agentId");
     const r = await client.checkAgent(targetAgent);
     io.log(JSON.stringify(r, null, 2));
-    return r.work ? 0 : 0;
+    return 0;
+  }
+
+  if (sub === "pop") {
+    const r = await client.claimNext({
+      agentIds: targetAgent ? [targetAgent] : null,
+      ...(flags.lease ? { leaseSec: Number(flags.lease) } : {}),
+    });
+    if (r?.task) {
+      io.log(JSON.stringify(r.task, null, 2));
+    }
+    return 0;
   }
 
   if (sub === "list") {
@@ -40,7 +52,7 @@ export async function runInboxCommand(args, { configDir, io = console } = {}) {
   }
 
   if (sub === "show" || sub === "read") {
-    const taskId = flags._[0];
+    const taskId = pos[0];
     if (!taskId) throw new Error("用法: ah inbox show <task_id>");
     const r = await client.getTask(taskId);
     io.log(JSON.stringify(r.task, null, 2));
@@ -48,16 +60,16 @@ export async function runInboxCommand(args, { configDir, io = console } = {}) {
   }
 
   if (sub === "claim") {
-    const taskId = flags._[0];
+    const taskId = pos[0];
     if (!taskId) throw new Error("用法: ah inbox claim <task_id>");
     const r = await client.claimTask(taskId, {});
     io.log(JSON.stringify(r.task, null, 2));
     return 0;
   }
 
-  if (sub === "complete") {
-    const taskId = flags._[0];
-    if (!taskId) throw new Error("用法: ah inbox complete <task_id> [--summary ...] [--text ...]");
+  if (sub === "complete" || sub === "done") {
+    const taskId = pos[0];
+    if (!taskId) throw new Error("用法: ah inbox done <task_id> [--summary ...] [--text ...]");
     const r = await client.complete(taskId, {
       summary: flags.summary || flags.text || "完成",
       text: flags.text || flags.summary || "完成",
@@ -67,10 +79,10 @@ export async function runInboxCommand(args, { configDir, io = console } = {}) {
   }
 
   if (sub === "fail") {
-    const taskId = flags._[0];
-    if (!taskId) throw new Error("用法: ah inbox fail <task_id> [--error ...]");
+    const taskId = pos[0];
+    if (!taskId) throw new Error("用法: ah inbox fail <task_id> [--error ... | --text ...]");
     const r = await client.fail(taskId, {
-      error: flags.error || "failed",
+      error: flags.error || flags.text || "failed",
       retryable: Boolean(flags.retryable),
     });
     io.log(JSON.stringify(r.task, null, 2));
@@ -78,7 +90,7 @@ export async function runInboxCommand(args, { configDir, io = console } = {}) {
   }
 
   if (sub === "ask") {
-    const taskId = flags._[0];
+    const taskId = pos[0];
     if (!taskId) throw new Error("用法: ah inbox ask <task_id> --prompt <问题>");
     const r = await client.ask(taskId, { prompt: flags.prompt || flags.text || "" });
     io.log(JSON.stringify(r.task, null, 2));
@@ -86,10 +98,10 @@ export async function runInboxCommand(args, { configDir, io = console } = {}) {
   }
 
   if (sub === "auth") {
-    const taskId = flags._[0];
+    const taskId = pos[0];
     if (!taskId) throw new Error("用法: ah inbox auth <task_id> --reason <原因>");
     const r = await client.requestAuth(taskId, {
-      reason: flags.reason || "需要机主审批",
+      reason: flags.reason || flags.text || "需要机主审批",
       riskLevel: flags.risk || "high",
     });
     io.log(JSON.stringify(r.task, null, 2));
@@ -110,8 +122,9 @@ export async function runInboxCommand(args, { configDir, io = console } = {}) {
 }
 
 export async function runPresentCommand(args, { configDir, io = console } = {}) {
-  const sub = args[0] || "list";
-  const flags = parseSimpleFlags(args.slice(1));
+  const flags = parseSimpleFlags(args);
+  const sub = flags._[0] || "list";
+  const pos = flags._.slice(1);
   const { client } = makeClientForConfig(configDir, { hubUrl: flags.hub, token: flags.token });
 
   if (sub === "list") {
@@ -131,7 +144,7 @@ export async function runPresentCommand(args, { configDir, io = console } = {}) 
   }
 
   if (sub === "approve" || sub === "deny") {
-    const taskId = flags._[0];
+    const taskId = pos[0];
     if (!taskId) throw new Error(`用法: ah present ${sub} <task_id> [--note ...]`);
     const r = await client.decideApproval(taskId, {
       decision: sub === "approve" ? "approve" : "deny",
@@ -142,8 +155,8 @@ export async function runPresentCommand(args, { configDir, io = console } = {}) 
   }
 
   if (sub === "reply") {
-    const taskId = flags._[0];
-    const body = flags.body || flags.text || flags._.slice(1).join(" ");
+    const taskId = pos[0];
+    const body = flags.body || flags.text || pos.slice(1).join(" ");
     if (!taskId || !body) throw new Error("用法: ah present reply <task_id> <回复文本>");
     const r = await client.replyTask(taskId, { body });
     io.log(`已回复任务 ${taskId} -> 状态 ${r.task.state}`);
@@ -169,6 +182,9 @@ const BOOLEAN_FLAGS = new Set([
   "no-token",
   "init-only",
   "setup-only",
+  "no-daemon",
+  "pop",
+  "json",
   "check",
   "new",
   "advance",

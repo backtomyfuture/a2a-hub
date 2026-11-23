@@ -71,6 +71,32 @@ test("Webhooks: URL SSRF 拦截、HMAC-SHA256 签名与禁止跟随重定向", a
     assert.equal(redirRes.ok, false);
     assert.match(redirRes.error, /重定向/);
 
+    // Grok Bot 模式：webhook_header=Authorization 时发送 Bearer <secret> 并保留 X-A2A-Signature
+    store.createAgent({
+      id: "grok-wh",
+      name: "Grok WH",
+      transport: "webhook",
+      webhook_url: "https://grok.example.com/routine",
+      webhook_secret: "grok_routine_key",
+      webhook_header: "Authorization",
+    });
+    const grokCalls = [];
+    const grokDispatcher = new WebhookDispatcher(store, {
+      fetchFn: async (url, opts) => {
+        grokCalls.push({ url, opts });
+        return { ok: true, status: 200 };
+      },
+      hubUrlResolver: () => "https://hub.example.com",
+    });
+    const grokRes = await grokDispatcher.testAgentWebhook("grok-wh");
+    assert.equal(grokRes.ok, true);
+    assert.equal(grokCalls.length, 1);
+    assert.equal(grokCalls[0].opts.headers.Authorization, "Bearer grok_routine_key");
+    assert.equal(
+      grokCalls[0].opts.headers["X-A2A-Signature"],
+      signWebhookPayload("grok_routine_key", grokCalls[0].opts.body)
+    );
+
     store.close();
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

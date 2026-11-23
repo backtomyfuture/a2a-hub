@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 import { runDoctor } from "../src/cli/doctor.mjs";
 import { probePublicEndpoint } from "../src/cli/expose.mjs";
 import { renderWindowsTaskXml, selectAutostartName, systemdUnitName, unitTextTargetsConfig } from "../src/cli/service.mjs";
@@ -11,7 +14,7 @@ import { parseJoinHubUrl, resolveSkillsForHost, runDeviceJoin, runHubSetup } fro
 import { AgentDaemon } from "../src/client/agent-daemon.mjs";
 import { GatewayClient } from "../src/client/gateway-client.mjs";
 import { parseSimpleFlags } from "../src/client/inbox.mjs";
-import { loadWorkersJson } from "../src/core/config.mjs";
+import { loadConfigJson, loadWorkersJson } from "../src/core/config.mjs";
 import { startHubRuntime } from "../src/core/hub-runtime.mjs";
 
 test("CLI Wrapper & Flags: bin/ah.mjs --version、ah workers add/remove 与布尔参数不吞位置参数", () => {
@@ -180,5 +183,108 @@ test("AgentDaemon: 独立长连接 Agent 认领并执行完成闭环", async () 
     await rt.stop();
     fs.rmSync(hubDir, { recursive: true, force: true });
     fs.rmSync(agDir, { recursive: true, force: true });
+  }
+});
+
+test("Muse VM Keepalive & Inbox Flow: ah join --agent --token-file --no-daemon、无 command 保活不抢单与 ah inbox --pop/done", async () => {
+  const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "ah-test-muse-hub-"));
+  const museDir = fs.mkdtempSync(path.join(os.tmpdir(), "ah-test-muse-ag-"));
+  const rt = await startHubRuntime({
+    configDir: hubDir,
+    listen: "127.0.0.1:0",
+    env: { AH_API_TOKEN: "muse_owner_tok" },
+    withDeviceDaemon: false,
+  });
+
+  try {
+    const owner = new GatewayClient(rt.url, { token: "muse_owner_tok" });
+    const created = await owner.post("/api/v1/agents", {
+      id: "muse",
+      platform: "muse",
+      name: "Muse",
+      role: "leader",
+      transport: "longpoll",
+    });
+
+    const tokenFile = path.join(museDir, "agent.token");
+    fs.writeFileSync(tokenFile, created.token, { mode: 0o600 });
+
+    await execFileAsync(
+      process.execPath,
+      [
+        path.resolve("bin/ah.mjs"),
+        "join",
+        rt.url,
+        "--agent",
+        "--agent-role",
+        "leader",
+        "--node",
+        "muse",
+        "--config",
+        museDir,
+        "--token-file",
+        tokenFile,
+        "--no-daemon",
+        "--skip-skill",
+      ],
+      { encoding: "utf8" }
+    );
+
+    const museCfg = loadConfigJson(museDir);
+    assert.equal(museCfg.mode, "agent");
+    assert.equal(museCfg.agentId, "muse");
+    assert.equal(museCfg.agentRole, "leader");
+    assert.equal(museCfg.tokenFile, fs.realpathSync(tokenFile).includes(museDir) ? fs.realpathSync(tokenFile) : path.resolve(tokenFile));
+    assert.equal(fs.existsSync(path.join(museDir, "app.env")), false, "使用 --token-file 时不应额外在 app.env 复制明文 Token");
+
+    // 派发任务给 Muse，验证无 command 的保活守护不会把任务误标为 failed
+    const disp = await owner.dispatchTask({
+      to: "muse",
+      title: "Muse 收件箱任务",
+      input_text: "请整理方案并回执",
+    });
+    const taskId = disp.tasks[0].id;
+
+    const keepaliveDaemon = new AgentDaemon({
+      configDir: museDir,
+      pollTimeoutSec: 1,
+      idleWaitMs: 10,
+    });
+    assert.equal(keepaliveDaemon.token, created.token);
+    const handled = await keepaliveDaemon.runOnce();
+    assert.equal(handled, 0);
+
+    const stillSubmitted = (await owner.getTask(taskId)).task;
+    assert.equal(stillSubmitted.state, "submitted", "无 command 的收件箱保活守护绝不能把待办认领并标失败");
+
+    // 验证 ah inbox --config <dir> --pop --json 认领任务，空队列静默退出，done 回执完结
+    const { stdout: popRaw } = await execFileAsync(
+      process.execPath,
+      [path.resolve("bin/ah.mjs"), "inbox", "--config", museDir, "--pop", "--json"],
+      { encoding: "utf8" }
+    );
+    const popped = JSON.parse(popRaw.trim());
+    assert.equal(popped.id, taskId);
+    assert.equal(popped.state, "working");
+
+    const { stdout: emptyPopRaw } = await execFileAsync(
+      process.execPath,
+      [path.resolve("bin/ah.mjs"), "inbox", "--config", museDir, "--pop", "--json"],
+      { encoding: "utf8" }
+    );
+    assert.equal(emptyPopRaw.trim(), "", "空队列时 --pop 应静默退出");
+
+    await execFileAsync(
+      process.execPath,
+      [path.resolve("bin/ah.mjs"), "inbox", "--config", museDir, "done", taskId, "--text", "已通过 ah inbox 完成"],
+      { encoding: "utf8" }
+    );
+    const doneTask = (await owner.getTask(taskId)).task;
+    assert.equal(doneTask.state, "completed");
+    assert.equal(doneTask.receipt.text, "已通过 ah inbox 完成");
+  } finally {
+    await rt.stop();
+    fs.rmSync(hubDir, { recursive: true, force: true });
+    fs.rmSync(museDir, { recursive: true, force: true });
   }
 });

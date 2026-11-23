@@ -78,7 +78,13 @@ export class WebhookDispatcher {
     };
     if (cfg.secret) {
       const headerName = cfg.header || "X-A2A-Signature";
-      headers[headerName] = signWebhookPayload(cfg.secret, bodyText);
+      if (headerName.toLowerCase() === "authorization") {
+        const rawSec = String(cfg.secret).trim();
+        headers[headerName] = /^Bearer\s+/i.test(rawSec) ? rawSec : `Bearer ${rawSec}`;
+        headers["X-A2A-Signature"] = signWebhookPayload(cfg.secret, bodyText);
+      } else {
+        headers[headerName] = signWebhookPayload(cfg.secret, bodyText);
+      }
     }
 
     const startedAt = Date.now();

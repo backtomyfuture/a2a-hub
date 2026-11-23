@@ -170,6 +170,15 @@ export function loadOwnerToken(configDir, env = process.env) {
     return String(appEnv.AH_API_TOKEN).trim();
   }
   const cfg = loadConfigJson(configDir);
+  if (cfg.tokenFile) {
+    const tf = path.isAbsolute(cfg.tokenFile) ? cfg.tokenFile : path.resolve(configDir, cfg.tokenFile);
+    if (fs.existsSync(tf)) {
+      try {
+        const fromFile = fs.readFileSync(tf, "utf8").trim();
+        if (fromFile) return fromFile;
+      } catch {}
+    }
+  }
   if (cfg.apiToken && String(cfg.apiToken).trim()) {
     return String(cfg.apiToken).trim();
   }

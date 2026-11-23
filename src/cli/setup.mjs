@@ -191,16 +191,19 @@ export async function runAgentSetup({
   joinUrl,
   agentId,
   token = "",
+  tokenFile = "",
   agentRole = "worker",
   command = "",
   cwd = os.homedir(),
   skipSkill = false,
+  fetchFn = globalThis.fetch,
   io = console,
 } = {}) {
   fs.mkdirSync(configDir, { recursive: true });
   const parsed = parseJoinHubUrl(joinUrl);
   const finalToken = String(token || parsed.token || "").trim();
-  if (!agentId) throw new Error("agent 模式必须指定 --agent <id>");
+  const resolvedTokenFile = tokenFile ? path.resolve(String(tokenFile)) : "";
+  if (!agentId) throw new Error("agent 模式必须指定 --agent <id> 或 --node <id>");
 
   const nextCfg = {
     mode: "agent",
@@ -208,13 +211,39 @@ export async function runAgentSetup({
     agentId: sanitizeSlug(agentId),
     agentRole: agentRole === "leader" ? "leader" : "worker",
     hubUrl: parsed.baseUrl,
+    ...(resolvedTokenFile ? { tokenFile: resolvedTokenFile } : {}),
     command,
     cwd,
   };
   saveConfigJson(configDir, nextCfg);
-  if (finalToken) {
+
+  let effectiveToken = finalToken;
+  if (resolvedTokenFile) {
+    if (!effectiveToken && fs.existsSync(resolvedTokenFile)) {
+      try {
+        effectiveToken = fs.readFileSync(resolvedTokenFile, "utf8").trim();
+      } catch {}
+    }
+  } else if (finalToken) {
     writeLockedAppEnvVars(configDir, { AH_API_TOKEN: finalToken });
   }
+
+  if (effectiveToken && parsed.baseUrl && typeof fetchFn === "function") {
+    try {
+      await fetchFn(`${parsed.baseUrl}/api/v1/agents/register`, {
+        method: "POST",
+        headers: {
+          "User-Agent": BROWSER_USER_AGENT,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          Authorization: `Bearer ${effectiveToken}`,
+        },
+        body: JSON.stringify({ id: nextCfg.agentId }),
+        signal: AbortSignal.timeout(3000),
+      });
+    } catch {}
+  }
+
   const skills = installLocalSkills(resolveSkillsForHost({ mode: "agent", agentRole: nextCfg.agentRole }), {
     skip: skipSkill,
   });
@@ -264,8 +293,9 @@ export async function runInteractiveSetup({ configDir, flags = {}, io = console 
       return runAgentSetup({
         configDir,
         joinUrl: flags.join || flags.hub,
-        agentId: flags.agent || flags.node || "",
+        agentId: (typeof flags.agent === "string" ? flags.agent : "") || flags.node || "",
         token: flags.token || "",
+        tokenFile: flags["token-file"] || "",
         agentRole: flags["agent-role"] || "worker",
         command: flags.command || "",
         skipSkill: Boolean(flags["skip-skill"]),

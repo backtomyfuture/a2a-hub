@@ -4,10 +4,12 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { clampTimeoutSec, loadConfigJson, sanitizeSlug } from "../core/config.mjs";
+import { clampTimeoutSec, loadConfigJson, loadOwnerToken, sanitizeSlug } from "../core/config.mjs";
 import { runDetachedCommand } from "../core/proc.mjs";
 import { formatCliFailure, parseCliOutput, renderWorkerCommand } from "../core/receipt.mjs";
 import { GatewayClient } from "./gateway-client.mjs";
+
+export const AGENT_RECONNECT_DELAYS_MS = [1000, 3000, 8000, 30_000];
 
 export class AgentDaemon {
   constructor({
@@ -20,18 +22,24 @@ export class AgentDaemon {
     client = null,
     runner = runDetachedCommand,
     pollTimeoutSec = 35,
+    idleWaitMs = 2000,
+    reconnectDelaysMs = AGENT_RECONNECT_DELAYS_MS,
     logger = console,
   } = {}) {
     this.configDir = configDir;
     const cfg = loadConfigJson(configDir);
     this.agentId = agentId || cfg.agentId || "";
     this.hubUrl = String(hubUrl || cfg.hubUrl || "http://127.0.0.1:8787").replace(/\/+$/, "");
-    this.token = token || cfg.agentToken || cfg.apiToken || "";
+    this.token = token || loadOwnerToken(configDir) || cfg.agentToken || cfg.apiToken || "";
     this.command = command || cfg.command || "";
     this.cwd = cwd || cfg.cwd || os.homedir();
     this.client = client || new GatewayClient(this.hubUrl, { token: this.token });
     this.runner = runner;
     this.pollTimeoutSec = pollTimeoutSec;
+    this.idleWaitMs = idleWaitMs;
+    this.reconnectDelaysMs = Array.isArray(reconnectDelaysMs) && reconnectDelaysMs.length
+      ? reconnectDelaysMs
+      : AGENT_RECONNECT_DELAYS_MS;
     this.logger = logger;
     this._running = false;
     this._seq = 0;
@@ -52,6 +60,14 @@ export class AgentDaemon {
     if (pollRes?.seq) this._seq = Math.max(this._seq, Number(pollRes.seq));
     if (pollRes?.paused || !pollRes?.tasks?.length) return 0;
 
+    // 收件箱保活模式（无 command，如 Muse VM）：仅长轮询维持在线，不抢单也不误标记 fail
+    if (!this.command) {
+      if (this.idleWaitMs > 0) {
+        await new Promise((r) => setTimeout(r, this.idleWaitMs));
+      }
+      return 0;
+    }
+
     const candidate = pollRes.tasks[0];
     let claimed;
     try {
@@ -61,14 +77,6 @@ export class AgentDaemon {
       return 0;
     }
     if (!claimed) return 0;
-
-    if (!this.command) {
-      await this.client.fail(claimed.id, {
-        error: "agent-daemon 未配置 command 执行命令",
-        retryable: false,
-      });
-      return 1;
-    }
 
     const runDir = path.join(this.configDir, "runs", sanitizeSlug(claimed.id, "task"));
     fs.mkdirSync(runDir, { recursive: true, mode: 0o700 });
@@ -104,21 +112,22 @@ export class AgentDaemon {
 
   async start() {
     this._running = true;
+    let delayIdx = 0;
+    let needRegister = true;
     while (this._running) {
       try {
-        await this.registerOnline();
-        break;
-      } catch (err) {
-        this.logger.warn?.(`[agent-daemon] 注册失败，3s 后重试: ${err?.message || err}`);
-        await new Promise((r) => setTimeout(r, 3000));
-      }
-    }
-    while (this._running) {
-      try {
+        if (needRegister) {
+          await this.registerOnline();
+          needRegister = false;
+        }
         await this.runOnce();
+        delayIdx = 0;
       } catch (err) {
-        this.logger.warn?.(`[agent-daemon] 轮询异常，3s 后重试: ${err?.message || err}`);
-        await new Promise((r) => setTimeout(r, 3000));
+        const waitMs = this.reconnectDelaysMs[Math.min(delayIdx, this.reconnectDelaysMs.length - 1)] || 3000;
+        delayIdx = Math.min(delayIdx + 1, this.reconnectDelaysMs.length - 1);
+        needRegister = true;
+        this.logger.warn?.(`[agent-daemon] 轮询异常，${Math.round(waitMs / 1000)}s 后重试: ${err?.message || err}`);
+        await new Promise((r) => setTimeout(r, waitMs));
       }
     }
   }
