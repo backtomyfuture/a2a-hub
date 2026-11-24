@@ -398,6 +398,7 @@ export class DeviceDaemon {
         await this.syncNow();
         break;
       } catch (err) {
+        if (!this._running) break;
         this.logger.warn?.(`[device-daemon] 同步失败，3s 后重试: ${err?.message || err}`);
         await new Promise((r) => setTimeout(r, 3000));
       }
@@ -407,6 +408,7 @@ export class DeviceDaemon {
       try {
         await this.runOnce();
       } catch (err) {
+        if (!this._running) break;
         this.logger.warn?.(`[device-daemon] 轮询异常，3s 后重试: ${err?.message || err}`);
         await new Promise((r) => setTimeout(r, 3000));
       }

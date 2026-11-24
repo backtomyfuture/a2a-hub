@@ -194,6 +194,8 @@ export async function startHubRuntime({
         server.closeAllConnections();
       }
     });
+    // 等待已中止的长轮询请求完成回调清理，再关闭 SQLite 句柄避免竞态报错
+    await new Promise((resolve) => setImmediate(resolve));
     try { fs.unlinkSync(runtimePath); } catch {}
     store.close();
   };

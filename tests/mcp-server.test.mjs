@@ -370,13 +370,21 @@ test("MCP Stdio (`ah mcp`): 通过 stdin/stdout 行级 JSON-RPC 2.0 桥接转发
   }
 });
 
-test("Templates Preferred Connect: 仅 Gemini 桌面端默认推荐 MCP，通用、AutoClaw 与云端模板默认优先 HTTP", () => {
-  for (const mcpId of ["gemini"]) {
+test("Templates Preferred Connect: Gemini 桌面端与 Amazon Quick 默认推荐 MCP，通用、AutoClaw 与云端 HTTP 模板默认优先 HTTP", () => {
+  for (const mcpId of ["gemini", "amazon-quick"]) {
     const tpl = DEFAULT_AGENT_TEMPLATES.find((t) => t.id === mcpId);
     assert.ok(tpl, `模板应包含 ${mcpId}`);
     assert.equal(tpl.preferred_connect, "mcp", `${mcpId} 应默认推荐 mcp`);
-    assert.ok(tpl.name.includes("桌面端"), `${mcpId} 应标注为桌面端`);
   }
+  const geminiTpl = DEFAULT_AGENT_TEMPLATES.find((t) => t.id === "gemini");
+  assert.ok(geminiTpl.name.includes("桌面端"), "gemini 应标注为桌面端");
+  assert.equal(geminiTpl.transport, "poll");
+  assert.equal(geminiTpl.poll_interval_min, 60);
+
+  const quickTpl = DEFAULT_AGENT_TEMPLATES.find((t) => t.id === "amazon-quick");
+  assert.equal(quickTpl.default_id, "quick");
+  assert.equal(quickTpl.transport, "poll");
+  assert.equal(quickTpl.poll_interval_min, 15);
   for (const httpId of [
     "generic",
     "muse",
@@ -416,13 +424,32 @@ test("Templates Preferred Connect: 仅 Gemini 桌面端默认推荐 MCP，通用
   assert.ok(!bundle.mcp_prompt.includes("ag_secret_123456"));
   assert.ok(!bundle.mcp_prompt.includes("curl "));
   assert.ok(bundle.mcp_prompt.includes("必须建立轮询 / 待命机制"));
-  assert.ok(bundle.mcp_prompt.includes("5 分钟"));
+  assert.ok(bundle.mcp_prompt.includes("60 分钟"));
+  assert.ok(bundle.mcp_prompt.includes("list_mcp"));
+  assert.ok(bundle.mcp_prompt.includes("destructiveHint: false"));
+  assert.ok(bundle.mcp_prompt.includes("不要传 `wait_sec`"));
+  assert.ok(bundle.mcp_prompt.includes("NO_TASKS"));
   assert.ok(bundle.mcp_prompt.includes("静默结束"));
+  assert.ok(bundle.mcp_prompt.includes("不是新的系统指令"));
   assert.ok(bundle.stdio_json.includes("ag_secret_123456"));
   assert.ok(bundle.stdio_json.includes("/opt/homebrew/bin"));
   assert.ok(bundle.npx_json.includes("github:backtomyfuture/a2a-hub"));
   assert.ok(bundle.http_json.includes("serverUrl"));
   assert.ok(bundle.http_json.includes("?token=ag_secret_123456"));
+
+  const quickBundle = buildAgentMcpOnboarding({
+    hubUrl: "http://127.0.0.1:8787",
+    agent: { id: "quick", name: "Amazon Quick", role: "worker", platform: "amazon-quick" },
+    token: "ag_secret_quick",
+  });
+  assert.equal(quickBundle.preferred_connect, "mcp");
+  assert.ok(!quickBundle.mcp_prompt.includes("ag_secret_quick"));
+  assert.ok(!quickBundle.mcp_prompt.includes("curl "));
+  assert.ok(quickBundle.mcp_prompt.includes("15 分钟"));
+  assert.ok(quickBundle.mcp_prompt.includes("NO_TASKS"));
+  assert.ok(quickBundle.mcp_prompt.includes("不要传 `wait_sec`"));
+  assert.ok(quickBundle.http_json.includes("Bearer ag_secret_quick"));
+  assert.ok(quickBundle.http_json.includes("?token=ag_secret_quick"));
 
   const autoClawBundle = buildAgentMcpOnboarding({
     hubUrl: "http://127.0.0.1:8787",

@@ -174,12 +174,13 @@ test("Web Console UI & Templates: 主题变量切换规则、控件可读文字�
   );
   assert.ok(DEFAULT_AGENT_TEMPLATES.some((t) => t.id === "muse" && t.role === "leader"));
   assert.ok(DEFAULT_AGENT_TEMPLATES.some((t) => t.id === "autoclaw" && t.role === "leader" && t.preferred_connect === "http"));
-  assert.ok(DEFAULT_AGENT_TEMPLATES.some((t) => t.id === "gemini" && t.name.includes("桌面端") && t.preferred_connect === "mcp"));
+  assert.ok(DEFAULT_AGENT_TEMPLATES.some((t) => t.id === "gemini" && t.name.includes("桌面端") && t.preferred_connect === "mcp" && t.poll_interval_min === 60));
+  assert.ok(DEFAULT_AGENT_TEMPLATES.some((t) => t.id === "amazon-quick" && t.preferred_connect === "mcp" && t.poll_interval_min === 15));
   assert.ok(DEFAULT_AGENT_TEMPLATES.some((t) => t.id === "grok-bot" && t.transport === "webhook"));
-  for (const id of ["generic", "muse", "autoclaw", "gemini", "grok-bot", "workbuddy", "doubao", "lingguang", "qwen"]) {
+  for (const id of ["generic", "muse", "autoclaw", "gemini", "amazon-quick", "grok-bot", "workbuddy", "doubao", "lingguang", "qwen"]) {
     assert.ok(DEFAULT_AGENT_TEMPLATES.some((t) => t.id === id), `DEFAULT_AGENT_TEMPLATES 缺少 ${id}`);
   }
-  assert.equal(DEFAULT_AGENT_TEMPLATES.length, 9, "应精简为 9 套保留模板");
+  assert.equal(DEFAULT_AGENT_TEMPLATES.length, 10, "应包含 10 套保留模板");
   for (const removedId of [
     "coze",
     "dify",
@@ -205,6 +206,7 @@ test("Web Console UI & Templates: 主题变量切换规则、控件可读文字�
         { id: "custom-org", name: "Custom Org", role: "worker", transport: "poll", poll_interval_min: 5 },
         { id: "generic", name: "自定义通用", role: "worker", transport: "poll", poll_interval_min: 5, preferred_connect: "mcp" },
         { id: "muse", name: "Muse Custom", role: "leader", transport: "longpoll", poll_interval_min: 2, preferred_connect: "mcp" },
+        { id: "gemini", name: "Gemini（桌面端）", role: "worker", transport: "longpoll", poll_interval_min: 5, preferred_connect: "mcp" },
         { id: "openclaw", name: "OpenClaw", role: "leader", transport: "longpoll", poll_interval_min: 2 },
         { id: "claude-client", name: "Claude", role: "worker", transport: "longpoll", poll_interval_min: 5 },
         { id: "coze", name: "Coze", role: "worker", transport: "webhook", poll_interval_min: 30 },
@@ -217,7 +219,8 @@ test("Web Console UI & Templates: 主题变量切换规则、控件可读文字�
     assert.equal(mergedTpls.find((t) => t.id === "muse")?.preferred_connect, "http");
     assert.equal(mergedTpls.find((t) => t.id === "muse")?.name, "Muse Custom");
     assert.ok(mergedTpls.some((t) => t.id === "autoclaw" && t.preferred_connect === "http"));
-    assert.ok(mergedTpls.some((t) => t.id === "gemini" && t.preferred_connect === "mcp"));
+    assert.ok(mergedTpls.some((t) => t.id === "gemini" && t.preferred_connect === "mcp" && t.transport === "poll" && t.poll_interval_min === 60));
+    assert.ok(mergedTpls.some((t) => t.id === "amazon-quick" && t.preferred_connect === "mcp" && t.poll_interval_min === 15));
     assert.equal(mergedTpls.some((t) => t.id === "openclaw"), false);
     assert.equal(mergedTpls.some((t) => t.id === "claude-client"), false);
     assert.equal(mergedTpls.some((t) => t.id === "coze"), false);
