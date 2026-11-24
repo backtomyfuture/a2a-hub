@@ -336,3 +336,72 @@ test("DeviceDaemon: 真并发多 Worker 执行、同上下文 Session 续接与 
     fs.rmSync(devDir, { recursive: true, force: true });
   }
 });
+
+test("DeviceDaemon: 空轮询与短队列不发起多余 POST /api/v1/tasks/claim", async () => {
+  const devDir = fs.mkdtempSync(path.join(os.tmpdir(), "ah-test-dd-empty-"));
+  try {
+    saveWorkersJson(devDir, [
+      { key: "claude", name: "Claude", command: "mock-claude {prompt}" },
+    ]);
+
+    let claimNextCalls = 0;
+    let claimTaskCalls = 0;
+    let nextTasks = [];
+    const mockClient = {
+      async syncDevice() {
+        return { ok: true };
+      },
+      async pollDevice() {
+        return { ok: true, seq: 10, woke: nextTasks.length > 0, tasks: nextTasks };
+      },
+      async claimTask(id) {
+        claimTaskCalls += 1;
+        return { task: { id, to_agent_id: "box--claude", context_id: "c1", title: "t", input_text: "p" } };
+      },
+      async claimNext() {
+        claimNextCalls += 1;
+        return { task: null };
+      },
+      async complete() {
+        return { ok: true };
+      },
+      async fail() {
+        return { ok: true };
+      },
+    };
+
+    const daemon = new DeviceDaemon({
+      configDir: devDir,
+      deviceId: "box",
+      hubUrl: "http://127.0.0.1:8787",
+      token: "tok",
+      client: mockClient,
+      maxConcurrent: 4,
+      runner: async () => ({ code: 0, stdout: "ok", stderr: "" }),
+      pollTimeoutSec: 1,
+    });
+
+    // 1) 首次同步后空轮询：不得调用 claimTask 或 claimNext
+    nextTasks = [];
+    const startedEmpty = await daemon.runOnce();
+    assert.equal(startedEmpty, 0);
+    assert.equal(claimTaskCalls, 0);
+    assert.equal(claimNextCalls, 0);
+
+    // 2) 返回 1 条候选任务时，仅精确认领这 1 条，不得在末尾再发多余 claimNext
+    nextTasks = [{ id: "tsk_one" }];
+    const startedOne = await daemon.runOnce();
+    await Promise.all([...daemon._activeTasks.values()]);
+    assert.equal(startedOne, 1);
+    assert.equal(claimTaskCalls, 1);
+    assert.equal(claimNextCalls, 0);
+
+    // 3) 无已启用 Worker 时即使传入候选也不认领
+    daemon.workers = [];
+    assert.equal(await daemon.drainPendingTasks([{ id: "tsk_ignored" }]), 0);
+    assert.equal(claimTaskCalls, 1);
+    assert.equal(claimNextCalls, 0);
+  } finally {
+    fs.rmSync(devDir, { recursive: true, force: true });
+  }
+});

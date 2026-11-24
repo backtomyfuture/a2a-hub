@@ -5,6 +5,7 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import zlib from "node:zlib";
 import {
   DAEMON_VERSION,
   KNOWN_CLIS,
@@ -63,14 +64,32 @@ const MIME_BY_EXT = {
   ".ico": "image/x-icon",
 };
 
+const COMPRESSIBLE_EXTS = new Set([".html", ".css", ".js", ".mjs", ".json", ".svg"]);
+const GZIP_MIN_BYTES = 1024;
+
+function acceptsGzip(res) {
+  return /\bgzip\b/i.test(String(res?._acceptEncoding || ""));
+}
+
 function sendJson(res, status, data, extraHeaders = {}) {
+  if (res.writableEnded || res.destroyed) return;
   const body = JSON.stringify(data);
-  res.writeHead(status, {
+  const headers = {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff",
     ...extraHeaders,
-  });
+  };
+  if (body.length >= GZIP_MIN_BYTES && acceptsGzip(res)) {
+    const gz = zlib.gzipSync(Buffer.from(body, "utf8"), { level: 6 });
+    headers["Content-Encoding"] = "gzip";
+    headers["Vary"] = "Accept-Encoding";
+    headers["Content-Length"] = gz.byteLength;
+    res.writeHead(status, headers);
+    res.end(gz);
+    return;
+  }
+  res.writeHead(status, headers);
   res.end(body);
 }
 
@@ -140,11 +159,21 @@ function serveStaticFile(res, rootDir, relPath) {
   }
   const ext = path.extname(fullPath).toLowerCase();
   const contentType = MIME_BY_EXT[ext] || "application/octet-stream";
-  res.writeHead(200, {
+  const headers = {
     "Content-Type": contentType,
     "Cache-Control": "no-cache",
     "X-Content-Type-Options": "nosniff",
-  });
+  };
+  if (COMPRESSIBLE_EXTS.has(ext) && stat.size >= GZIP_MIN_BYTES && acceptsGzip(res)) {
+    const gz = zlib.gzipSync(fs.readFileSync(fullPath), { level: 6 });
+    headers["Content-Encoding"] = "gzip";
+    headers["Vary"] = "Accept-Encoding";
+    headers["Content-Length"] = gz.byteLength;
+    res.writeHead(200, headers);
+    res.end(gz);
+    return;
+  }
+  res.writeHead(200, headers);
   fs.createReadStream(fullPath).pipe(res);
 }
 
@@ -216,8 +245,8 @@ export function startHubHttpServer({
       };
     });
 
-    const tasks = store.listTasks({ limit: 300 });
-    const threads = taskService.listThreads({ limit: 80 });
+    const tasks = store.listTasks({ limit: 300, summaryOnly: true });
+    const threads = taskService.listThreads({ limit: 80, includeTasks: false });
     const pendingActions = tasks.filter((t) => t.state === "auth-required" || t.state === "input-required").map((t) => ({
       ...t,
       messages: store.listMessages(t.id),
@@ -407,15 +436,22 @@ export function startHubHttpServer({
           });
         }
         const ac = new AbortController();
-        req.on("close", () => ac.abort());
-        const rpcRes = await handleMcpRpcMessage(rpcPayload, {
-          ...mcpCtx,
-          store,
-          taskService,
-          broker,
-          formatAgentsPublicList,
-          signal: ac.signal,
-        });
+        const onAbort = () => ac.abort();
+        req.once("close", onAbort);
+        let rpcRes;
+        try {
+          rpcRes = await handleMcpRpcMessage(rpcPayload, {
+            ...mcpCtx,
+            store,
+            taskService,
+            broker,
+            formatAgentsPublicList,
+            signal: ac.signal,
+          });
+        } finally {
+          req.off("close", onAbort);
+        }
+        if (ac.signal.aborted || res.destroyed || res.writableEnded) return;
         if (rpcRes === null) {
           res.writeHead(202, { "Cache-Control": "no-store" });
           res.end();
@@ -436,13 +472,20 @@ export function startHubHttpServer({
       const since = Number(url.searchParams.get("since") || 0);
       const timeout = Number(url.searchParams.get("timeout") || 30);
       const ac = new AbortController();
-      req.on("close", () => ac.abort());
-      const resWait = await broker.waitForChange({
-        scope: "web",
-        sinceSeq: since,
-        timeoutSec: timeout,
-        signal: ac.signal,
-      });
+      const onAbort = () => ac.abort();
+      req.once("close", onAbort);
+      let resWait;
+      try {
+        resWait = await broker.waitForChange({
+          scope: "web",
+          sinceSeq: since,
+          timeoutSec: timeout,
+          signal: ac.signal,
+        });
+      } finally {
+        req.off("close", onAbort);
+      }
+      if (resWait.aborted || ac.signal.aborted || res.destroyed || res.writableEnded) return;
       return sendJson(res, 200, { ok: true, ...resWait });
     }
 
@@ -829,15 +872,22 @@ export function startHubHttpServer({
       }
 
       const ac = new AbortController();
-      req.on("close", () => ac.abort());
-      const waitRes = await broker.waitForChange({
-        scope: "device",
-        sinceSeq: since,
-        timeoutSec: timeout,
-        deviceId: devId,
-        agentIds: allIds,
-        signal: ac.signal,
-      });
+      const onAbort = () => ac.abort();
+      req.once("close", onAbort);
+      let waitRes;
+      try {
+        waitRes = await broker.waitForChange({
+          scope: "device",
+          sinceSeq: since,
+          timeoutSec: timeout,
+          deviceId: devId,
+          agentIds: allIds,
+          signal: ac.signal,
+        });
+      } finally {
+        req.off("close", onAbort);
+      }
+      if (waitRes.aborted || ac.signal.aborted || res.destroyed || res.writableEnded) return;
       store.touchDeviceSeen(devId);
       const devAgentsAfter = store.listAgents({ device_id: devId });
       const enabledAfter = devAgentsAfter.filter((a) => a.enabled).map((a) => a.id);
@@ -940,8 +990,13 @@ export function startHubHttpServer({
       if (body.metadata && typeof body.metadata === "object") {
         patch.metadata = { ...(existing.metadata || {}), ...body.metadata };
       }
+      const wasOnline = broker.isAgentOnline(existing);
       const updated = store.updateAgent(targetId, patch);
       store.touchAgentSeen(targetId, Date.now(), 0);
+      if (!wasOnline && updated.updated_at === existing.updated_at) {
+        const seq = store.nextSeq();
+        store.emitChange({ type: "agent.updated", seq, agentId: targetId, deviceId: existing.device_id });
+      }
       return sendJson(res, 200, { ok: true, agent: store.getAgent(updated.id) });
     }
 
@@ -1087,14 +1142,21 @@ export function startHubHttpServer({
       }
 
       const ac = new AbortController();
-      req.on("close", () => ac.abort());
-      const waitRes = await broker.waitForChange({
-        scope: "agent",
-        sinceSeq: since,
-        timeoutSec: timeout,
-        agentId,
-        signal: ac.signal,
-      });
+      const onAbort = () => ac.abort();
+      req.once("close", onAbort);
+      let waitRes;
+      try {
+        waitRes = await broker.waitForChange({
+          scope: "agent",
+          sinceSeq: since,
+          timeoutSec: timeout,
+          agentId,
+          signal: ac.signal,
+        });
+      } finally {
+        req.off("close", onAbort);
+      }
+      if (waitRes.aborted || ac.signal.aborted || res.destroyed || res.writableEnded) return;
       store.touchAgentSeen(agentId);
       const refreshed = store.getAgent(agentId);
       const tasksAfter = refreshed?.enabled
@@ -1163,6 +1225,7 @@ export function startHubHttpServer({
         state: url.searchParams.get("state") || undefined,
         to_agent_id: url.searchParams.get("agent") || url.searchParams.get("to") || undefined,
         context_id: url.searchParams.get("context_id") || undefined,
+        summaryOnly: url.searchParams.get("summary") === "1",
         limit: Number(url.searchParams.get("limit") || 150),
       };
       if (actor.kind === "agent") {
@@ -1421,6 +1484,7 @@ export function startHubHttpServer({
   }
 
   const server = http.createServer(async (req, res) => {
+    res._acceptEncoding = String(req.headers["accept-encoding"] || "");
     try {
       const url = new URL(req.url || "/", "http://127.0.0.1");
       const pathname = url.pathname;

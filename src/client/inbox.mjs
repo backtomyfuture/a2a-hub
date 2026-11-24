@@ -129,8 +129,8 @@ export async function runPresentCommand(args, { configDir, io = console } = {}) 
 
   if (sub === "list") {
     const [a, q] = await Promise.all([
-      client.listTasks({ state: "auth-required" }),
-      client.listTasks({ state: "input-required" }),
+      client.listTasks({ state: "auth-required", summary: 1 }),
+      client.listTasks({ state: "input-required", summary: 1 }),
     ]);
     const items = [...(a.tasks || []), ...(q.tasks || [])].sort((x, y) => x.created_at - y.created_at);
     if (!items.length) {
@@ -183,6 +183,7 @@ const BOOLEAN_FLAGS = new Set([
   "init-only",
   "setup-only",
   "no-daemon",
+  "no-device",
   "pop",
   "json",
   "check",

@@ -1,8 +1,6 @@
 // 定时自报任务观测服务（聚合挂载 Worker、最近 10 次执行轨迹、成功率、超时未报与一键触发）。
 // 中台不替代本地 cron 触发器，只汇总各 Agent 报上来的定时任务并检测超时未报（> interval_min * 1.5）。
 
-import { serializeTask } from "../store/db.mjs";
-
 const TERMINAL_OK_STATES = new Set(["completed"]);
 const TERMINAL_FAIL_STATES = new Set(["failed", "rejected", "canceled"]);
 const TERMINAL_ALL_STATES = new Set(["completed", "failed", "rejected", "canceled"]);
@@ -15,19 +13,30 @@ export class ScheduleService {
 
   listWithStatus(agentId = null, now = Date.now()) {
     const schedules = this.store.listSchedules(agentId);
+    if (!schedules.length) return [];
     const devices = new Map(this.store.listDevices().map((d) => [d.id, d]));
     const agents = new Map(this.store.listAgents().map((a) => [a.id, a]));
 
-    // 单次批量查出最近带 schedule_id 的定时执行记录，避免 N+1 SQLite 查询。
-    const rows = this.store.db.prepare(`
-      SELECT * FROM tasks
-      WHERE schedule_id IS NOT NULL
-      ORDER BY created_at DESC
-      LIMIT 500
-    `).all();
+    // 单次批量查出最近带 schedule_id 的定时执行记录（仅投影轻量字段，避免读取超长正文）。
+    const taskCols = `id, context_id, to_agent_id, schedule_id, state, title,
+      CASE WHEN receipt_json IS NOT NULL AND json_valid(receipt_json) THEN json_extract(receipt_json, '$.summary') ELSE NULL END AS receipt_summary,
+      CASE WHEN receipt_json IS NOT NULL AND json_valid(receipt_json) THEN substr(json_extract(receipt_json, '$.text'), 1, 300) ELSE NULL END AS receipt_text_head,
+      error_message, created_at, completed_at`;
+    const rows = agentId
+      ? this.store.db.prepare(`
+          SELECT ${taskCols} FROM tasks
+          WHERE schedule_id IS NOT NULL AND to_agent_id = ?
+          ORDER BY created_at DESC
+          LIMIT 500
+        `).all(String(agentId))
+      : this.store.db.prepare(`
+          SELECT ${taskCols} FROM tasks
+          WHERE schedule_id IS NOT NULL
+          ORDER BY created_at DESC
+          LIMIT 500
+        `).all();
     const runsByKey = new Map();
-    for (const row of rows) {
-      const t = serializeTask(row);
+    for (const t of rows) {
       const key = `${t.to_agent_id}::${t.schedule_id}`;
       let arr = runsByKey.get(key);
       if (!arr) {
@@ -41,11 +50,11 @@ export class ScheduleService {
           id: t.id,
           context_id: t.context_id,
           state: t.state,
-          title: t.title,
-          summary: t.receipt?.summary || t.receipt?.text || "",
+          title: t.title || "",
+          summary: String(t.receipt_summary || t.receipt_text_head || "").slice(0, 300),
           error_message: t.error_message || "",
           created_at: t.created_at,
-          completed_at: t.completed_at,
+          completed_at: t.completed_at ?? null,
           duration_ms: durationMs,
         });
       }
@@ -68,7 +77,7 @@ export class ScheduleService {
             context_id: explicitTask.context_id,
             state: explicitTask.state,
             title: explicitTask.title,
-            summary: explicitTask.receipt?.summary || explicitTask.receipt?.text || "",
+            summary: String(explicitTask.receipt?.summary || explicitTask.receipt?.text || "").slice(0, 300),
             error_message: explicitTask.error_message || "",
             created_at: explicitTask.created_at,
             completed_at: explicitTask.completed_at,

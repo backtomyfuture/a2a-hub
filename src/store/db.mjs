@@ -49,6 +49,28 @@ function parseJson(raw, fallback) {
   }
 }
 
+function deepValuesEqual(a, b) {
+  if (Object.is(a, b)) return true;
+  if (typeof a !== typeof b || a === null || b === null) return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (!deepValuesEqual(a[i], b[i])) return false;
+    }
+    return true;
+  }
+  if (typeof a === "object") {
+    const keysA = Object.keys(a);
+    const keysB = Object.keys(b);
+    if (keysA.length !== keysB.length) return false;
+    for (const k of keysA) {
+      if (!Object.prototype.hasOwnProperty.call(b, k) || !deepValuesEqual(a[k], b[k])) return false;
+    }
+    return true;
+  }
+  return false;
+}
+
 export function maskSecret(raw) {
   const s = String(raw ?? "");
   if (!s) return "";
@@ -299,6 +321,44 @@ export function serializeTask(row) {
   };
 }
 
+export function serializeTaskSummary(row) {
+  if (!row) return null;
+  const hasReceipt = Boolean(row.has_receipt ?? row.receipt_json);
+  let receipt = null;
+  if (hasReceipt) {
+    const summary = row.receipt_summary !== undefined
+      ? String(row.receipt_summary || "")
+      : String(parseJson(row.receipt_json, null)?.summary || "");
+    receipt = { summary };
+  }
+  return {
+    id: row.id,
+    context_id: row.context_id,
+    parent_task_id: row.parent_task_id ?? null,
+    from_node: row.from_node,
+    to_agent_id: row.to_agent_id,
+    title: row.title || "",
+    model: row.model || "",
+    state: row.state,
+    priority: Number(row.priority ?? 5),
+    source: row.source || "direct",
+    schedule_id: row.schedule_id ?? null,
+    receipt,
+    error_message: row.error_message ?? null,
+    retry_count: Number(row.retry_count ?? 0),
+    max_retries: Number(row.max_retries ?? 2),
+    timeout_sec: Number(row.timeout_sec ?? 600),
+    claimed_by: row.claimed_by ?? null,
+    claimed_at: row.claimed_at ?? null,
+    lease_until: row.lease_until ?? null,
+    leader_notified: Boolean(row.leader_notified),
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    completed_at: row.completed_at ?? null,
+    changed_seq: Number(row.changed_seq ?? 0),
+  };
+}
+
 export function serializeMessage(row) {
   if (!row) return null;
   return {
@@ -344,6 +404,7 @@ export class HubStore {
     this.db.exec("PRAGMA synchronous = NORMAL;");
     this.db.exec("PRAGMA foreign_keys = ON;");
     this.db.exec("PRAGMA busy_timeout = 5000;");
+    this.db.exec("PRAGMA journal_size_limit = 16777216;");
     this.db.exec(SCHEMA_SQL);
     if (dbPath !== ":memory:") {
       try {
@@ -352,7 +413,23 @@ export class HubStore {
     }
   }
 
+  checkpointWal(mode = "PASSIVE") {
+    const safeMode = ["PASSIVE", "FULL", "RESTART", "TRUNCATE"].includes(String(mode || "").toUpperCase())
+      ? String(mode).toUpperCase()
+      : "PASSIVE";
+    this.db.exec(`PRAGMA wal_checkpoint(${safeMode});`);
+  }
+
+  pruneIdempotency(maxAgeMs = 7 * 24 * 3600 * 1000, now = Date.now()) {
+    const cutoff = now - Math.max(Number(maxAgeMs || 0), 60_000);
+    const res = this.db.prepare("DELETE FROM idempotency WHERE created_at < ?").run(cutoff);
+    return res.changes;
+  }
+
   close() {
+    try {
+      this.checkpointWal("TRUNCATE");
+    } catch {}
     this.db.close();
   }
 
@@ -702,6 +779,53 @@ export class HubStore {
     return this.transaction(() => {
       const existing = this.db.prepare("SELECT * FROM agents WHERE id = ?").get(String(id));
       if (!existing) return null;
+
+      const nextName = sqlStr(patch.name !== undefined ? patch.name : existing.name);
+      const nextRole = sqlStr(patch.role !== undefined ? patch.role : existing.role);
+      const nextPlatform = sqlStr(patch.platform !== undefined ? patch.platform : existing.platform);
+      const nextSummary = sqlStr(patch.summary !== undefined ? patch.summary : existing.summary);
+      const nextNote = sqlStr(patch.note !== undefined ? patch.note : existing.note);
+      const nextSkillsVal = patch.skills !== undefined ? patch.skills : parseJson(existing.skills_json, []);
+      const nextToolsVal = patch.tools !== undefined ? patch.tools : parseJson(existing.tools_json, []);
+      const nextModelsVal = patch.models !== undefined ? patch.models : parseJson(existing.models_json, []);
+      const nextDefaultModel = sqlStr(patch.default_model !== undefined ? patch.default_model : existing.default_model);
+      const nextApprovalPolicy = sqlStr(patch.approval_policy !== undefined ? patch.approval_policy : existing.approval_policy);
+      const nextTransport = sqlStr(patch.transport !== undefined ? patch.transport : existing.transport);
+      const nextPollInterval = sqlInt(patch.poll_interval_min !== undefined ? patch.poll_interval_min : existing.poll_interval_min, 5);
+      const nextWebhookUrl = sqlStr(patch.webhook_url !== undefined ? patch.webhook_url : existing.webhook_url);
+      const nextWebhookSecret = sqlStr(patch.webhook_secret !== undefined ? patch.webhook_secret : existing.webhook_secret);
+      const nextWebhookHeader = sqlStr(patch.webhook_header !== undefined ? patch.webhook_header : existing.webhook_header);
+      const nextScopesVal = patch.scopes !== undefined ? patch.scopes : parseJson(existing.scopes_json, []);
+      const nextMetadataVal = patch.metadata !== undefined ? patch.metadata : parseJson(existing.metadata_json, {});
+      const nextEnabled = sqlBool(patch.enabled !== undefined ? patch.enabled : existing.enabled);
+      const nextActiveTaskId = patch.active_task_id !== undefined ? sqlStr(patch.active_task_id) : existing.active_task_id;
+
+      // 名片字段完全未变化时不自增 seq，防止 Agent 重连或定时 register 唤醒全部前端拉取 /state。
+      const changed =
+        nextName !== existing.name ||
+        nextRole !== existing.role ||
+        nextPlatform !== existing.platform ||
+        nextSummary !== existing.summary ||
+        nextNote !== existing.note ||
+        !deepValuesEqual(nextSkillsVal, parseJson(existing.skills_json, [])) ||
+        !deepValuesEqual(nextToolsVal, parseJson(existing.tools_json, [])) ||
+        !deepValuesEqual(nextModelsVal, parseJson(existing.models_json, [])) ||
+        nextDefaultModel !== existing.default_model ||
+        nextApprovalPolicy !== existing.approval_policy ||
+        nextTransport !== existing.transport ||
+        nextPollInterval !== Number(existing.poll_interval_min ?? 5) ||
+        nextWebhookUrl !== existing.webhook_url ||
+        nextWebhookSecret !== existing.webhook_secret ||
+        nextWebhookHeader !== existing.webhook_header ||
+        !deepValuesEqual(nextScopesVal, parseJson(existing.scopes_json, [])) ||
+        !deepValuesEqual(nextMetadataVal, parseJson(existing.metadata_json, {})) ||
+        nextEnabled !== Number(existing.enabled) ||
+        nextActiveTaskId !== (existing.active_task_id ?? null);
+
+      if (!changed) {
+        return serializeAgent(existing);
+      }
+
       const now = Date.now();
       this.db.prepare(`
         UPDATE agents SET
@@ -713,25 +837,25 @@ export class HubStore {
           active_task_id = ?, updated_at = ?
         WHERE id = ?
       `).run(
-        sqlStr(patch.name !== undefined ? patch.name : existing.name),
-        sqlStr(patch.role !== undefined ? patch.role : existing.role),
-        sqlStr(patch.platform !== undefined ? patch.platform : existing.platform),
-        sqlStr(patch.summary !== undefined ? patch.summary : existing.summary),
-        sqlStr(patch.note !== undefined ? patch.note : existing.note),
-        patch.skills !== undefined ? JSON.stringify(patch.skills) : existing.skills_json,
-        patch.tools !== undefined ? JSON.stringify(patch.tools) : existing.tools_json,
-        patch.models !== undefined ? JSON.stringify(patch.models) : existing.models_json,
-        sqlStr(patch.default_model !== undefined ? patch.default_model : existing.default_model),
-        sqlStr(patch.approval_policy !== undefined ? patch.approval_policy : existing.approval_policy),
-        sqlStr(patch.transport !== undefined ? patch.transport : existing.transport),
-        sqlInt(patch.poll_interval_min !== undefined ? patch.poll_interval_min : existing.poll_interval_min, 5),
-        sqlStr(patch.webhook_url !== undefined ? patch.webhook_url : existing.webhook_url),
-        sqlStr(patch.webhook_secret !== undefined ? patch.webhook_secret : existing.webhook_secret),
-        sqlStr(patch.webhook_header !== undefined ? patch.webhook_header : existing.webhook_header),
-        patch.scopes !== undefined ? JSON.stringify(patch.scopes) : existing.scopes_json,
-        patch.metadata !== undefined ? JSON.stringify(patch.metadata) : existing.metadata_json,
-        sqlBool(patch.enabled !== undefined ? patch.enabled : existing.enabled),
-        patch.active_task_id !== undefined ? sqlStr(patch.active_task_id) : existing.active_task_id,
+        nextName,
+        nextRole,
+        nextPlatform,
+        nextSummary,
+        nextNote,
+        JSON.stringify(nextSkillsVal),
+        JSON.stringify(nextToolsVal),
+        JSON.stringify(nextModelsVal),
+        nextDefaultModel,
+        nextApprovalPolicy,
+        nextTransport,
+        nextPollInterval,
+        nextWebhookUrl,
+        nextWebhookSecret,
+        nextWebhookHeader,
+        JSON.stringify(nextScopesVal),
+        JSON.stringify(nextMetadataVal),
+        nextEnabled,
+        nextActiveTaskId,
         now,
         String(id)
       );
@@ -770,28 +894,32 @@ export class HubStore {
       const dev = this.db.prepare("SELECT * FROM devices WHERE id = ?").get(String(deviceId));
       if (!dev) return null;
       const now = Date.now();
-      if (deviceMeta.os_info || deviceMeta.platform || deviceMeta.max_concurrent || deviceMeta.transport) {
+      const wasOffline = !dev.last_seen_at || now - Number(dev.last_seen_at) > 5 * 60_000;
+
+      const nextPlatform = sqlStr(deviceMeta.platform ?? dev.platform);
+      const nextOsInfo = sqlStr(deviceMeta.os_info ?? dev.os_info);
+      const nextTransport = sqlStr(deviceMeta.transport ?? dev.transport ?? "longpoll");
+      const nextMaxConcurrent = sqlInt(deviceMeta.max_concurrent ?? dev.max_concurrent, 4);
+      const devMetaChanged =
+        nextPlatform !== dev.platform ||
+        nextOsInfo !== dev.os_info ||
+        nextTransport !== dev.transport ||
+        nextMaxConcurrent !== Number(dev.max_concurrent ?? 4);
+
+      if (devMetaChanged) {
         this.db.prepare(`
           UPDATE devices SET
             platform = ?, os_info = ?, transport = ?, max_concurrent = ?, last_seen_at = ?, updated_at = ?
           WHERE id = ?
-        `).run(
-          sqlStr(deviceMeta.platform ?? dev.platform),
-          sqlStr(deviceMeta.os_info ?? dev.os_info),
-          sqlStr(deviceMeta.transport ?? dev.transport),
-          sqlInt(deviceMeta.max_concurrent ?? dev.max_concurrent, 4),
-          now,
-          now,
-          String(deviceId)
-        );
-      } else {
+        `).run(nextPlatform, nextOsInfo, nextTransport, nextMaxConcurrent, now, now, String(deviceId));
+      } else if (!dev.last_seen_at || now - Number(dev.last_seen_at) >= 10_000) {
         this.db.prepare("UPDATE devices SET last_seen_at = ? WHERE id = ?").run(now, String(deviceId));
       }
 
       const existingRows = this.db.prepare("SELECT * FROM agents WHERE device_id = ? AND kind = 'device-worker'").all(String(deviceId));
       const byWorkerKey = new Map(existingRows.map((r) => [r.worker_key, r]));
       const keepIds = new Set();
-      const transport = deviceMeta.transport ?? dev.transport ?? "longpoll";
+      let workersChanged = false;
 
       for (const w of workers) {
         const key = String(w.key || "").trim();
@@ -804,29 +932,54 @@ export class HubStore {
         const models = Array.isArray(w.models) ? w.models : [];
         const meta = w.metadata && typeof w.metadata === "object" ? w.metadata : {};
         if (prev) {
-          this.db.prepare(`
-            UPDATE agents SET
-              name = ?, role = ?, platform = ?, summary = ?,
-              skills_json = ?, tools_json = ?, models_json = ?, default_model = ?,
-              approval_policy = ?, transport = ?, metadata_json = ?, last_seen_at = ?, updated_at = ?
-            WHERE id = ?
-          `).run(
-            sqlStr(w.name || prev.name || key),
-            sqlStr(w.role || prev.role || "worker"),
-            sqlStr(w.platform || prev.platform || "cli"),
-            sqlStr(w.summary !== undefined ? w.summary : prev.summary),
-            JSON.stringify(skills),
-            JSON.stringify(tools),
-            JSON.stringify(models),
-            sqlStr(w.default_model ?? prev.default_model ?? ""),
-            sqlStr(w.approval_policy || prev.approval_policy || "never"),
-            sqlStr(transport),
-            JSON.stringify(meta),
-            now,
-            now,
-            prev.id
-          );
+          const wName = sqlStr(w.name || prev.name || key);
+          const wRole = sqlStr(w.role || prev.role || "worker");
+          const wPlatform = sqlStr(w.platform || prev.platform || "cli");
+          const wSummary = sqlStr(w.summary !== undefined ? w.summary : prev.summary);
+          const wDefaultModel = sqlStr(w.default_model ?? prev.default_model ?? "");
+          const wApproval = sqlStr(w.approval_policy || prev.approval_policy || "never");
+          const rowChanged =
+            wName !== prev.name ||
+            wRole !== prev.role ||
+            wPlatform !== prev.platform ||
+            wSummary !== prev.summary ||
+            !deepValuesEqual(skills, parseJson(prev.skills_json, [])) ||
+            !deepValuesEqual(tools, parseJson(prev.tools_json, [])) ||
+            !deepValuesEqual(models, parseJson(prev.models_json, [])) ||
+            wDefaultModel !== prev.default_model ||
+            wApproval !== prev.approval_policy ||
+            nextTransport !== prev.transport ||
+            !deepValuesEqual(meta, parseJson(prev.metadata_json, {}));
+
+          if (rowChanged) {
+            workersChanged = true;
+            this.db.prepare(`
+              UPDATE agents SET
+                name = ?, role = ?, platform = ?, summary = ?,
+                skills_json = ?, tools_json = ?, models_json = ?, default_model = ?,
+                approval_policy = ?, transport = ?, metadata_json = ?, last_seen_at = ?, updated_at = ?
+              WHERE id = ?
+            `).run(
+              wName,
+              wRole,
+              wPlatform,
+              wSummary,
+              JSON.stringify(skills),
+              JSON.stringify(tools),
+              JSON.stringify(models),
+              wDefaultModel,
+              wApproval,
+              nextTransport,
+              JSON.stringify(meta),
+              now,
+              now,
+              prev.id
+            );
+          } else if (!prev.last_seen_at || now - Number(prev.last_seen_at) >= 10_000) {
+            this.db.prepare("UPDATE agents SET last_seen_at = ? WHERE id = ?").run(now, prev.id);
+          }
         } else {
+          workersChanged = true;
           this.db.prepare(`
             INSERT INTO agents (
               id, kind, device_id, worker_key, name, role, platform, summary, note,
@@ -848,7 +1001,7 @@ export class HubStore {
             JSON.stringify(models),
             sqlStr(w.default_model || ""),
             sqlStr(w.approval_policy || "never"),
-            sqlStr(transport),
+            nextTransport,
             sqlInt(dev.poll_interval_min, 5),
             JSON.stringify(meta),
             sqlBool(w.enabled !== false),
@@ -861,12 +1014,16 @@ export class HubStore {
 
       for (const prev of existingRows) {
         if (!keepIds.has(prev.id)) {
+          workersChanged = true;
           this.db.prepare("DELETE FROM agents WHERE id = ?").run(prev.id);
         }
       }
 
-      const seq = this.nextSeq();
-      this.emitChange({ type: "device.synced", seq, deviceId: String(deviceId) });
+      // 仅在配置/设备元信息真变化或设备由离线重连时才递增 seq 广播，避免幂等同步打断长轮询。
+      if (devMetaChanged || workersChanged || wasOffline) {
+        const seq = this.nextSeq();
+        this.emitChange({ type: "device.synced", seq, deviceId: String(deviceId) });
+      }
       return {
         device: this.getDevice(deviceId),
         agents: this.listAgents({ device_id: String(deviceId) }),
@@ -921,8 +1078,15 @@ export class HubStore {
     const order = filter.order === "asc"
       ? "ORDER BY created_at ASC"
       : "ORDER BY updated_at DESC, created_at DESC";
-    const rows = this.db.prepare(`SELECT * FROM tasks ${where} ${order} LIMIT ?`).all(...args, limit);
-    return rows.map((r) => serializeTask(r));
+    const cols = filter.summaryOnly
+      ? `id, context_id, parent_task_id, from_node, to_agent_id, title, model, state, priority, source, schedule_id,
+         (receipt_json IS NOT NULL) AS has_receipt,
+         CASE WHEN receipt_json IS NOT NULL AND json_valid(receipt_json) THEN json_extract(receipt_json, '$.summary') ELSE NULL END AS receipt_summary,
+         error_message, retry_count, max_retries, timeout_sec, claimed_by, claimed_at, lease_until, leader_notified,
+         created_at, updated_at, completed_at, changed_seq`
+      : "*";
+    const rows = this.db.prepare(`SELECT ${cols} FROM tasks ${where} ${order} LIMIT ?`).all(...args, limit);
+    return rows.map((r) => (filter.summaryOnly ? serializeTaskSummary(r) : serializeTask(r)));
   }
 
   listMessages(taskId) {

@@ -13,6 +13,7 @@ import {
   loadConfigJson,
   loadOwnerToken,
   resolveListenAddr,
+  resolveNoDeviceSetting,
   sanitizeSlug,
   writeJsonAtomic,
 } from "./config.mjs";
@@ -31,12 +32,15 @@ export async function startHubRuntime({
   configDir,
   listen = "",
   env = process.env,
-  withDeviceDaemon = true,
+  withDeviceDaemon,
   logger = console,
 } = {}) {
   fs.mkdirSync(configDir, { recursive: true });
   const cfg = loadConfigJson(configDir);
   const appEnv = { ...loadAppEnv(configDir), ...env };
+  const enableDeviceDaemon = withDeviceDaemon !== undefined
+    ? Boolean(withDeviceDaemon)
+    : !resolveNoDeviceSetting({ env: appEnv, cfg });
   const addr = resolveListenAddr(listen || cfg.listen, appEnv);
   const { privateKey, publicKey } = loadOrCreateHubKey(configDir);
 
@@ -71,7 +75,7 @@ export async function startHubRuntime({
   });
 
   const deviceId = sanitizeSlug(cfg.deviceId || os.hostname(), "hub-local");
-  if (withDeviceDaemon) {
+  if (enableDeviceDaemon) {
     store.upsertDevice({
       id: deviceId,
       name: cfg.deviceName || os.hostname(),
@@ -82,12 +86,21 @@ export async function startHubRuntime({
       summary: "Hub 本机运行设备",
       issueToken: false,
     });
+  } else {
+    // 禁用本机 DeviceDaemon 时，顺带清理旧版云端部署遗留的零 Worker 空壳本机设备
+    const ghostRow = store.db.prepare("SELECT id, token_hash, summary FROM devices WHERE id = ?").get(deviceId);
+    if (ghostRow && !ghostRow.token_hash && ghostRow.summary === "Hub 本机运行设备") {
+      const agentCnt = store.db.prepare("SELECT COUNT(*) AS cnt FROM agents WHERE device_id = ?").get(deviceId);
+      if (Number(agentCnt?.cnt || 0) === 0) {
+        store.deleteDevice(deviceId);
+      }
+    }
   }
 
   const getToken = () => loadOwnerToken(configDir, appEnv);
   const { server } = startHubHttpServer({
     configDir,
-    hubDeviceId: withDeviceDaemon ? deviceId : "",
+    hubDeviceId: enableDeviceDaemon ? deviceId : "",
     store,
     taskService,
     broker,
@@ -141,9 +154,17 @@ export async function startHubRuntime({
   }, 60_000);
   if (typeof staleTimer.unref === "function") staleTimer.unref();
 
+  const maintenanceTimer = setInterval(() => {
+    try {
+      store.pruneIdempotency();
+      store.checkpointWal("TRUNCATE");
+    } catch {}
+  }, 3600 * 1000);
+  if (typeof maintenanceTimer.unref === "function") maintenanceTimer.unref();
+
   let deviceDaemon = null;
   let deviceLoopPromise = null;
-  if (withDeviceDaemon) {
+  if (enableDeviceDaemon) {
     const localClient = new GatewayClient(localUrl, { token: getToken() });
     deviceDaemon = new DeviceDaemon({
       configDir,
@@ -162,6 +183,7 @@ export async function startHubRuntime({
 
   const stop = async () => {
     clearInterval(staleTimer);
+    clearInterval(maintenanceTimer);
     fileRetention.stop();
     if (deviceDaemon) {
       await deviceDaemon.stop();

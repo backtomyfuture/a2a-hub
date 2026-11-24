@@ -249,19 +249,36 @@ export class TaskService {
     const ids = [...new Set((Array.isArray(agentIds) ? agentIds : [agentIds]).map((x) => String(x || "").trim()).filter(Boolean))];
     if (!ids.length) return null;
 
+    const placeholders = ids.map(() => "?").join(",");
+    const selectSql = `
+      SELECT t.* FROM tasks t
+      JOIN agents a ON a.id = t.to_agent_id
+      LEFT JOIN devices d ON d.id = a.device_id
+      WHERE t.to_agent_id IN (${placeholders})
+        AND t.state = 'submitted'
+        AND a.enabled = 1
+        AND (a.device_id IS NULL OR d.enabled = 1)
+      ORDER BY t.priority DESC, t.created_at ASC
+      LIMIT 1
+    `;
+    // 空队列先只读检查，避免每次空认领都开启一次 SQLite BEGIN IMMEDIATE 写事务
+    if (!this.store._inTx) {
+      const probe = this.store.db.prepare(
+        `SELECT t.id FROM tasks t
+         JOIN agents a ON a.id = t.to_agent_id
+         LEFT JOIN devices d ON d.id = a.device_id
+         WHERE t.to_agent_id IN (${placeholders})
+           AND t.state = 'submitted'
+           AND a.enabled = 1
+           AND (a.device_id IS NULL OR d.enabled = 1)
+         ORDER BY t.priority DESC, t.created_at ASC
+         LIMIT 1`
+      ).get(...ids);
+      if (!probe) return null;
+    }
+
     return this.store.transaction(() => {
-      const placeholders = ids.map(() => "?").join(",");
-      const candidate = this.store.db.prepare(`
-        SELECT t.* FROM tasks t
-        JOIN agents a ON a.id = t.to_agent_id
-        LEFT JOIN devices d ON d.id = a.device_id
-        WHERE t.to_agent_id IN (${placeholders})
-          AND t.state = 'submitted'
-          AND a.enabled = 1
-          AND (a.device_id IS NULL OR d.enabled = 1)
-        ORDER BY t.priority DESC, t.created_at ASC
-        LIMIT 1
-      `).get(...ids);
+      const candidate = this.store.db.prepare(selectSql).get(...ids);
       if (!candidate) return null;
       return this._claimRow(candidate, { claimant: claimant || candidate.to_agent_id, leaseSec });
     });
@@ -857,10 +874,11 @@ export class TaskService {
 
   // ---- Thread 视角聚合 ----
 
-  listThreads({ limit = 60, agentId = null, visibleTo = null } = {}) {
+  listThreads({ limit = 60, agentId = null, visibleTo = null, includeTasks = true } = {}) {
     const tasks = this.store.listTasks({
       ...(agentId ? { to_agent_id: agentId } : {}),
       ...(visibleTo ? { visible_to: visibleTo } : {}),
+      summaryOnly: !includeTasks,
       limit: 500,
     });
 
@@ -878,7 +896,7 @@ export class TaskService {
           states: {},
           task_count: 0,
           pending_action_count: 0,
-          tasks: [],
+          ...(includeTasks ? { tasks: [] } : {}),
         };
         groups.set(t.context_id, g);
       }
@@ -893,7 +911,7 @@ export class TaskService {
       if (t.state === "input-required" || t.state === "auth-required") {
         g.pending_action_count += 1;
       }
-      g.tasks.push(t);
+      if (includeTasks) g.tasks.push(t);
     }
 
     const list = [...groups.values()].sort((a, b) => b.updated_at - a.updated_at);

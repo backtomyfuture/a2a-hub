@@ -63,6 +63,23 @@ test("TaskService: 扇出派单、幂等去重、控制字段拒收与 Thread �
     const thread = ctx.taskService.getThread(r1.context_id);
     assert.equal(thread.tasks.length, 2);
     assert.deepEqual(thread.agents.sort(), ["w1", "w2"]);
+
+    const threadSummaries = ctx.taskService.listThreads({ includeTasks: false });
+    assert.equal(threadSummaries.length, 1);
+    assert.equal(threadSummaries[0].task_count, 2);
+    assert.equal("tasks" in threadSummaries[0], false, "includeTasks=false 不应内嵌冗余完整任务数组");
+
+    // 空队列调用 claimNext 不应开启写事务或自增 seq
+    const seqBeforeClaim = ctx.store.currentSeq();
+    let txCalls = 0;
+    const origTx = ctx.store.transaction.bind(ctx.store);
+    ctx.store.transaction = (fn) => {
+      txCalls += 1;
+      return origTx(fn);
+    };
+    assert.equal(ctx.taskService.claimNext({ agentIds: ["leader-1"] }), null);
+    assert.equal(txCalls, 0, "空队列 claimNext 不应进入 BEGIN IMMEDIATE 写事务");
+    assert.equal(ctx.store.currentSeq(), seqBeforeClaim);
   } finally {
     ctx.cleanup();
   }

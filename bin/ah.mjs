@@ -11,11 +11,13 @@ import {
   DAEMON_VERSION,
   defaultConfigDir,
   discoverLocalWorkers,
+  loadAppEnv,
   loadConfigJson,
   loadOwnerToken,
   loadWorkersJson,
   mergeDiscoveredWorkers,
   readLiveHubUrl,
+  resolveNoDeviceSetting,
   sanitizeSlug,
   saveWorkersJson,
 } from "../src/core/config.mjs";
@@ -86,8 +88,8 @@ function helpText() {
   return `a2a-hub v${DAEMON_VERSION} — 个人多 Agent 编排中台 CLI
 
 用法:
-  ah up [--listen 0.0.0.0:8787] [--service] [--skip-skill] [--config <dir>]
-      一键初始化并在本机启动独立中台 Hub（含 Web 控制台 + SQLite + 本机 CLI 并发执行池）
+  ah up [--listen 0.0.0.0:8787] [--no-device] [--service] [--skip-skill] [--config <dir>]
+      一键初始化并在本机启动独立中台 Hub（含 Web 控制台 + SQLite + 可选本机 CLI 并发执行池）
   ah join <http://[token@]host:port> [--device <name>] [--service] [--config <dir>]
       将当前电脑作为设备节点接入已有 Hub，自动发现本地 Claude/Codex/OpenCode 等 CLI
   ah join <http://host:port> --agent [--agent-role worker|leader] --node <id> --token-file <path> [--no-daemon] [--config <dir>]
@@ -133,7 +135,13 @@ async function runDaemon({ configDir, flags = {} }) {
 
   try {
     if (mode === "hub") {
-      const rt = await startHubRuntime({ configDir, listen: flags.listen || "" });
+      const appEnv = { ...loadAppEnv(configDir), ...process.env };
+      const noDevice = resolveNoDeviceSetting({ flags, env: appEnv, cfg });
+      const rt = await startHubRuntime({
+        configDir,
+        listen: flags.listen || "",
+        withDeviceDaemon: !noDevice,
+      });
       cleanupFn = rt.stop;
       console.log(`✓ a2a-hub v${DAEMON_VERSION} 已启动`);
       console.log(`  本地地址: ${rt.url}`);
@@ -191,6 +199,11 @@ async function main() {
   }
 
   if (cmd === "up") {
+    const explicitNoDevice = flags["no-device"] !== undefined
+      ? resolveNoDeviceSetting({ flags })
+      : (flags.device || flags.node)
+        ? false
+        : undefined;
     await runHubSetup({
       configDir,
       listen: flags.listen || (flags.port ? `0.0.0.0:${flags.port}` : "0.0.0.0:8787"),
@@ -199,6 +212,7 @@ async function main() {
       autoToken: flags["no-token"] ? false : true,
       force: Boolean(flags.force),
       skipSkill: Boolean(flags["skip-skill"]),
+      noDevice: explicitNoDevice,
     });
     if (flags.service) {
       return await service(
@@ -416,7 +430,7 @@ async function main() {
       token: flags.token || loadOwnerToken(configDir),
     });
     if (sub === "list") {
-      const r = await client.listTasks({ state: flags.state || "", agent: flags.agent || "" });
+      const r = await client.listTasks({ state: flags.state || "", agent: flags.agent || "", summary: 1 });
       for (const t of r.tasks || []) {
         console.log(`${t.id}  [${t.state.padEnd(14)}]  -> ${t.to_agent_id}  | ${t.title}`);
       }

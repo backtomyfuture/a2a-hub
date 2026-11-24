@@ -25,6 +25,10 @@ test("CLI Wrapper & Flags: bin/ah.mjs --version、ah workers add/remove 与布�
   assert.equal(parsed.service, true);
   assert.deepEqual(parsed._, ["join", "http://127.0.0.1:8787"]);
 
+  const parsedNoDev = parseSimpleFlags(["up", "--no-device", "--skip-skill"]);
+  assert.equal(parsedNoDev["no-device"], true);
+  assert.equal(parsedNoDev["skip-skill"], true);
+
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ah-test-workers-cli-"));
   try {
     execFileSync(

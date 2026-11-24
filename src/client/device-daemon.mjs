@@ -339,29 +339,38 @@ export class DeviceDaemon {
     const capacity = this.maxConcurrent - this._activeTasks.size;
     if (capacity <= 0) return 0;
 
-    let started = 0;
     const enabledAgentIds = this.workers
       .filter((w) => w && w.enabled !== false)
       .map((w) => `${this.deviceId}--${w.key}`);
+    if (enabledAgentIds.length === 0) return 0;
 
-    // 尽量并发认领直到槽位满或队列清空
-    for (let i = 0; i < capacity; i++) {
-      let claimed = null;
-      if (candidates[i]) {
-        try {
-          const r = await this.client.claimTask(candidates[i].id, { leaseSec: 600 });
-          claimed = r?.task || null;
-        } catch {
-          claimed = null;
+    const list = Array.isArray(candidates) ? candidates : [];
+    if (list.length === 0) return 0;
+
+    let started = 0;
+    // 仅认领 poll 返回的候选任务，避免空轮询或短队列末尾多打一次无意义的 POST /tasks/claim。
+    for (const candidate of list) {
+      if (started >= capacity) break;
+      if (!candidate?.id) continue;
+      try {
+        const r = await this.client.claimTask(candidate.id, { leaseSec: 600 });
+        if (r?.task) {
+          started += 1;
+          this._enqueueExecution(r.task);
         }
+      } catch {
+        // 已被并发认领或状态已变化时跳过，继续尝试下一条候选任务
       }
-      if (!claimed) {
+    }
+
+    // 仅当服务端单次 /poll 返回达到上限（50 条）且仍有空闲槽位时，再兜底 claimNext 补抓余量。
+    if (started < capacity && list.length >= 50) {
+      while (started < capacity) {
         const r = await this.client.claimNext({ agentIds: enabledAgentIds, leaseSec: 600 });
-        claimed = r?.task || null;
+        if (!r?.task) break;
+        started += 1;
+        this._enqueueExecution(r.task);
       }
-      if (!claimed) break;
-      started += 1;
-      this._enqueueExecution(claimed);
     }
     return started;
   }

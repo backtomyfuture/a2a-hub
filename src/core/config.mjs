@@ -49,6 +49,27 @@ export function clampTimeoutSec(raw, maxSec = MAX_TIMEOUT_SEC) {
   return Math.min(Math.max(Math.trunc(n), 10), maxSec);
 }
 
+export function parseBoolSetting(raw) {
+  if (typeof raw === "boolean") return raw;
+  const s = String(raw ?? "").trim().toLowerCase();
+  if (!s) return null;
+  if (["1", "true", "yes", "on"].includes(s)) return true;
+  if (["0", "false", "no", "off"].includes(s)) return false;
+  return null;
+}
+
+// 解析是否禁用 Hub 本机 DeviceDaemon（CLI 显式参数 > 环境变量 AH_NO_DEVICE > config.json.noDevice）。
+export function resolveNoDeviceSetting({ flags = null, env = process.env, cfg = null } = {}) {
+  if (flags && flags["no-device"] !== undefined) {
+    const flagVal = parseBoolSetting(flags["no-device"]);
+    if (flagVal !== null) return flagVal;
+  }
+  if (flags?.device || flags?.node) return false;
+  const envVal = parseBoolSetting(env?.AH_NO_DEVICE);
+  if (envVal !== null) return envVal;
+  return Boolean(cfg?.noDevice);
+}
+
 export function defaultConfigDir() {
   if (process.env.AH_HOME && process.env.AH_HOME.trim()) {
     return path.resolve(process.env.AH_HOME.trim());

@@ -11,7 +11,8 @@ COPY config ./config
 
 ENV AH_HOME=/data \
     PORT=8787 \
-    NODE_ENV=production
+    NODE_ENV=production \
+    AH_NO_DEVICE=1
 
 # 不声明 Dockerfile VOLUME（Railway 等云平台会校验拒绝），持久化通过平台 Volume 或 docker -v 挂载 /data。
 RUN mkdir -p /data
@@ -21,5 +22,5 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:' + (process.env.PORT || 8787) + '/api/v1/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
 
 # 容器首次启动若未设 AH_API_TOKEN，将自动生成高强度随机密钥并写入 /data/app.env（0600）。
-# 推荐在云平台环境变量中显式配置 AH_API_TOKEN（以及可选 AH_PUBLIC_URL / AH_DISABLE_WEB_UI=1）。
+# 推荐在云平台环境变量中显式配置 AH_API_TOKEN（以及可选 AH_PUBLIC_URL / AH_DISABLE_WEB_UI=1）；默认 AH_NO_DEVICE=1 不挂载容器空设备。
 CMD ["node", "bin/ah.mjs", "up", "--config", "/data", "--skip-skill"]

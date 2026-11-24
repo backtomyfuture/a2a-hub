@@ -81,6 +81,31 @@ test("HubStore: syncDeviceWorkers 保留机主备注与暂停状态并清理已�
     assert.equal(after.enabled, false);
     assert.equal(store.getAgent("mbp--codex"), null);
 
+    // 再次用完全相同配置同步（设备仍在在线窗口内）：不应自增 seq 或广播 device.synced
+    const events = [];
+    store.setChangeHook((ev) => events.push(ev));
+    const seqBefore = store.currentSeq();
+    store.syncDeviceWorkers("mbp", [
+      { key: "claude", name: "Claude Code Pro", summary: "升级描述", skills: ["coding", "git"] },
+    ]);
+    assert.equal(store.currentSeq(), seqBefore, "幂等同步设备不应自增 seq");
+    assert.equal(events.length, 0, "幂等同步设备不应触发 device.synced 事件");
+
+    // updateAgent 传入未变化的字段时也不应自增 seq
+    store.updateAgent("mbp--claude", { summary: "升级描述", skills: ["coding", "git"] });
+    assert.equal(store.currentSeq(), seqBefore, "无字段变更的 updateAgent 不应自增 seq");
+    assert.equal(events.length, 0);
+
+    // 幂等键清理与 WAL checkpoint
+    store.saveIdempotency("dispatch:owner", "old-k", { ok: true });
+    store.db.prepare("UPDATE idempotency SET created_at = ? WHERE token_key = ?").run(Date.now() - 10 * 86400_000, "old-k");
+    store.saveIdempotency("dispatch:owner", "fresh-k", { ok: true });
+    const pruned = store.pruneIdempotency(7 * 86400_000);
+    assert.equal(pruned, 1);
+    assert.equal(store.getIdempotency("dispatch:owner", "old-k"), null);
+    assert.deepEqual(store.getIdempotency("dispatch:owner", "fresh-k"), { ok: true });
+    store.checkpointWal("TRUNCATE");
+
     store.close();
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
