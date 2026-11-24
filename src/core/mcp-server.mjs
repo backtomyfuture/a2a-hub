@@ -10,13 +10,21 @@ import { GatewayClient } from "../client/gateway-client.mjs";
 import { parseSimpleFlags } from "../client/inbox.mjs";
 import { actorCanControlTaskAsSender, actorCanOperateTaskAsWorker } from "../server/auth.mjs";
 
-export const MCP_PROTOCOL_VERSION = "2024-11-05";
+export const MCP_PROTOCOL_VERSION = "2025-03-26";
 export const MAX_MCP_WAIT_SEC = 25;
 
+// 为所有工具显式声明 MCP ToolAnnotations（避免 Gemini 桌面端等 Swift MCP SDK 客户端默认将未声明工具视为 destructiveHint=true）。
 const TOOL_REGISTER = {
   name: "a2a_register",
   description:
     "向 a2a-hub 编排中台签到上线并刷新当前 Agent 的名片信息（显示名称、一句话能力定位 summary、技能标签 skills、默认模型）。",
+  annotations: {
+    title: "签到并刷新 Agent 名片",
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  },
   inputSchema: {
     type: "object",
     properties: {
@@ -42,6 +50,13 @@ const LEADER_TOOLS = [
     name: "a2a_list_agents",
     description:
       "查看 a2a-hub 全网可用 Agent 节点（含本机 CLI Worker 与云端/独立 Agent）的 ID、能力定位 summary、技能、在线状态与当前负载。派单前请先调用此工具。",
+    annotations: {
+      title: "查看全网 Agent 节点",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     inputSchema: {
       type: "object",
       properties: {
@@ -57,6 +72,13 @@ const LEADER_TOOLS = [
     name: "a2a_dispatch_task",
     description:
       "向单个或多个目标 Agent 派发协作任务（支持并发扇出 to: ['agent1', 'agent2']，自动共享同一 context_id 多轮对话上下文）。支持 wait_sec 原地等待快速任务结果。",
+    annotations: {
+      title: "派发协作任务",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
     inputSchema: {
       type: "object",
       properties: {
@@ -88,6 +110,13 @@ const LEADER_TOOLS = [
     name: "a2a_check_updates",
     description:
       "增量拉取当前 Leader 已派发任务的最新进度、完成回执（completed）、失败原因（failed）或阻塞追问（input-required），并自动推进服务端消费水位。",
+    annotations: {
+      title: "拉取任务增量回执",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
     inputSchema: {
       type: "object",
       properties: {
@@ -111,6 +140,13 @@ const LEADER_TOOLS = [
     name: "a2a_reply_task",
     description:
       "当派发的子任务处于 input-required（追问待复）时补充回答使其恢复执行，或取消（cancel）未终结的子任务。",
+    annotations: {
+      title: "回复追问或取消任务",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
     inputSchema: {
       type: "object",
       properties: {
@@ -133,6 +169,13 @@ const WORKER_TOOLS = [
     name: "a2a_poll_inbox",
     description:
       "检查当前 Worker Agent 的待办收件箱（同时自动刷新在线心跳）。支持 wait_sec 长轮询挂起等待新任务，空闲等待不消耗 Token，有新任务时立即唤醒返回。",
+    annotations: {
+      title: "检查待办收件箱",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     inputSchema: {
       type: "object",
       properties: {
@@ -156,6 +199,13 @@ const WORKER_TOOLS = [
     name: "a2a_claim_task",
     description:
       "认领并锁定一条待办任务（状态由 submitted 转为 working），返回完整任务指令 input_text、追问消息列表 messages 与同线程历史前情 context_history。",
+    annotations: {
+      title: "认领待办任务",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
     inputSchema: {
       type: "object",
       properties: {
@@ -175,6 +225,13 @@ const WORKER_TOOLS = [
     name: "a2a_submit_receipt",
     description:
       "提交任务执行结果或状态变更：完成交付（completed）、追问补充信息（input-required）、申请机主高危签名审批（auth-required）、报错（failed）或心跳续租（heartbeat）。",
+    annotations: {
+      title: "提交任务执行回执",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
     inputSchema: {
       type: "object",
       properties: {

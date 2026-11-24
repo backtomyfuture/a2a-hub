@@ -405,6 +405,17 @@ export function startHubHttpServer({
       });
 
       if (method === "GET") {
+        const accept = String(req.headers.accept || "").toLowerCase();
+        // 按 MCP Streamable HTTP 规范：无状态网关不提供下行 SSE 事件流时，
+        // 对明确请求 text/event-stream 的 GET 必须返回 405，避免客户端（如 Gemini 桌面端 Swift SDK）每 3s 无限重连。
+        if (accept.includes("text/event-stream") && !accept.includes("application/json")) {
+          res.writeHead(405, {
+            Allow: "POST, DELETE",
+            "Cache-Control": "no-store",
+          });
+          res.end();
+          return;
+        }
         return sendJson(res, 200, {
           ok: true,
           protocol: "mcp",
@@ -420,6 +431,15 @@ export function startHubHttpServer({
 
       if (method === "DELETE") {
         return sendJson(res, 200, { ok: true });
+      }
+
+      if (method !== "POST") {
+        res.writeHead(405, {
+          Allow: "GET, POST, DELETE",
+          "Cache-Control": "no-store",
+        });
+        res.end();
+        return;
       }
 
       if (method === "POST") {

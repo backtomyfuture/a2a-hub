@@ -104,7 +104,23 @@ test("MCP Server (Streamable HTTP & Token Identity Binding): 按 Token 角色动
     });
     assert.equal(notifResp.status, 202);
 
-    // 3) 验证基于 Token 角色动态裁剪 tools/list
+    // 验证 GET /api/v1/mcp 对 SSE (Accept: text/event-stream) 返回 405，普通探测仍返回 200 JSON
+    const sseProbeResp = await fetch(`${rt.url}/api/v1/mcp?token=${encodeURIComponent(workerCreated.token)}`, {
+      method: "GET",
+      headers: { Accept: "text/event-stream" },
+    });
+    assert.equal(sseProbeResp.status, 405, "无状态 MCP 网关对 SSE GET 应返回 405 Method Not Allowed");
+    assert.ok(String(sseProbeResp.headers.get("allow") || "").includes("POST"));
+
+    const infoGetResp = await fetch(`${rt.url}/api/v1/mcp?token=${encodeURIComponent(workerCreated.token)}`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    });
+    assert.equal(infoGetResp.status, 200);
+    const infoGetJson = await infoGetResp.json();
+    assert.equal(infoGetJson.protocol, "mcp");
+
+    // 3) 验证基于 Token 角色动态裁剪 tools/list 及 MCP annotations（避免客户端默认 destructiveHint=true）
     const workerToolsRes = await workerMcp.post("/api/v1/mcp", {
       jsonrpc: "2.0",
       id: 2,
@@ -117,6 +133,13 @@ test("MCP Server (Streamable HTTP & Token Identity Binding): 按 Token 角色动
       "a2a_claim_task",
       "a2a_submit_receipt",
     ]);
+    for (const tool of workerToolsRes.result.tools) {
+      assert.equal(tool.annotations?.destructiveHint, false, `${tool.name} 应显式声明 destructiveHint=false`);
+    }
+    assert.equal(
+      workerToolsRes.result.tools.find((t) => t.name === "a2a_poll_inbox")?.annotations?.readOnlyHint,
+      true
+    );
 
     const leaderToolsRes = await leaderMcp.post("/api/v1/mcp", {
       jsonrpc: "2.0",
@@ -131,6 +154,17 @@ test("MCP Server (Streamable HTTP & Token Identity Binding): 按 Token 角色动
       "a2a_check_updates",
       "a2a_reply_task",
     ]);
+    for (const tool of leaderToolsRes.result.tools) {
+      assert.equal(tool.annotations?.destructiveHint, false, `${tool.name} 应显式声明 destructiveHint=false`);
+    }
+    assert.equal(
+      leaderToolsRes.result.tools.find((t) => t.name === "a2a_list_agents")?.annotations?.readOnlyHint,
+      true
+    );
+    assert.equal(
+      leaderToolsRes.result.tools.find((t) => t.name === "a2a_check_updates")?.annotations?.readOnlyHint,
+      true
+    );
 
     // 4) 零参数签到与防冒充校验
     const regWorker = await workerMcp.post("/api/v1/mcp", {
