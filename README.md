@@ -108,7 +108,7 @@ ah expose cf https://hub.你的域名 --auto-token
 
 | 平台 | 配置文件 | 一键部署 / 命令 | 持久化挂载 |
 | --- | --- | --- | --- |
-| **Railway** | [`railway.json`](railway.json) | [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/template?referralCode=&repo=https://github.com/backtomyfuture/a2a-hub) | 挂载 Volume 到 `/data`，配置 `AH_API_TOKEN` |
+| **Railway** | [`.railway/railway.ts`](.railway/railway.ts) | [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/template?referralCode=&repo=https://github.com/backtomyfuture/a2a-hub) | 挂载 Volume 到 `/data`，配置 `AH_API_TOKEN` |
 | **Render** | [`render.yaml`](render.yaml) | [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/backtomyfuture/a2a-hub) | 自动创建 1GB 持久化盘 `/data` 与随机 `AH_API_TOKEN` |
 | **Fly.io** | [`fly.toml`](fly.toml) | `fly launch --copy-config` | 自动挂载卷 `a2a_hub_data -> /data` |
 | **Zeabur** | [`zeabur.json`](zeabur.json) | 导入 GitHub 仓库即识别模板 | 挂载 `/data` 目录并填写 `AH_API_TOKEN` |
