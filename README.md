@@ -51,28 +51,17 @@
 
 ### 方式 1：在本机（Mac mini / Linux / Windows）一行启动独立 Hub
 
-<table>
-<tr>
-<th>macOS / Linux</th>
-<th>Windows PowerShell</th>
-</tr>
-<tr>
-<td>
+**macOS / Linux**（终端）：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --hub
 ```
 
-</td>
-<td>
+**Windows**（PowerShell）：
 
 ```powershell
 $env:AH_HUB="1"; irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex
 ```
-
-</td>
-</tr>
-</table>
 
 执行完毕后终端会自动输出**带机主口令的一次性免登 Web 控制台地址**（例如 `http://127.0.0.1:8787/?token=<AH_API_TOKEN>`），并默认注册为用户级后台自启服务（macOS LaunchAgent / Linux systemd / Windows 计划任务）。若只想在前台调试，追加 `--no-service`（Windows 设 `$env:AH_NO_SERVICE="1"`）即可。
 

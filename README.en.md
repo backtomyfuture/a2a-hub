@@ -58,28 +58,17 @@ flowchart TB
 
 ### Option 1: One-Line Local Hub (Mac mini / Linux / Windows)
 
-<table>
-<tr>
-<th>macOS / Linux</th>
-<th>Windows PowerShell</th>
-</tr>
-<tr>
-<td>
+**macOS / Linux** (Terminal):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.sh | sh -s -- --hub
 ```
 
-</td>
-<td>
+**Windows** (PowerShell):
 
 ```powershell
 $env:AH_HUB="1"; irm https://raw.githubusercontent.com/backtomyfuture/a2a-hub/main/install.ps1 | iex
 ```
-
-</td>
-</tr>
-</table>
 
 The installer prints a direct Web console URL with your owner token (`http://127.0.0.1:8787/?token=...`) and registers a user-level background daemon (LaunchAgent / systemd / Windows Scheduled Task). Pass `--no-service` (`$env:AH_NO_SERVICE="1"` on Windows) to run in the foreground instead.
 
