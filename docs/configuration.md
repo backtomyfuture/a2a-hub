@@ -12,7 +12,7 @@
   - `AH_NOTIFY_ON=action|all`
 - `hub.db`（`0600`）：SQLite WAL 主库（仅 Hub 模式）。
 - `approval_key.pem`（`0600`）：Hub Ed25519 审批签名私钥（仅 Hub 模式）。
-- `agent_templates.json`（`0600`）：新增独立 Agent 的 15 套平台模板目录，首次启动由 Hub 写入并在升级时无损增量合并。
+- `agent_templates.json`（`0600`）：新增独立 Agent 的平台模板目录（内置 10 套），首次启动由 Hub 写入并在升级时无损增量合并。
 - `files/blobs/`：通过 `/api/v1/files` 中转的附件与产物，默认 7 天自动清理（`AH_FILE_TTL_MS`、`AH_FILE_MAX_BYTES` 可调）。
 
 ## 一行无前置安装与增量扫描
@@ -32,6 +32,17 @@ node bin/ah.mjs up --config /data --skip-skill
 - `PORT` / `AH_LISTEN=0.0.0.0:8787`
 - `AH_API_TOKEN=<强随机口令>`
 - `AH_PUBLIC_URL=https://你的公网域名`（若平台提供了 `RAILWAY_PUBLIC_DOMAIN` 等变量也会自动推断）
+- `AH_NO_DEVICE=1`：镜像默认值，只运行中台，不在容器里挂载空的本机执行池。
+
+### Railway
+
+Railway 读取 [`.railway/railway.ts`](../.railway/railway.ts)（Infrastructure as Code），不再读取 `railway.json`。
+
+- 文件里写的是作者项目的卷名、区域和容量，部署到自己的项目前请改成实际值。
+- 必须保留 `/data` 的卷挂载声明（`volumeMounts: { "/data": data }`），否则 `railway config apply` 会把数据卷从服务上摘掉。
+- 在服务变量里显式设置 `PORT=8787`，否则健康检查可能连不上服务。
+- 变量不由该文件管理（`variables: { managed: false }`），`AH_API_TOKEN` 等仍在 Railway 控制台或 `railway variables` 里设置。
+- 改动前先用 `railway config plan` 预览，确认没有删除数据卷之类的破坏性变更，再 `railway config apply`。预览和应用需要 Railway 的 TypeScript SDK，可用 `npm install --no-save --no-package-lock railway` 临时安装，不改动 `package.json`。
 
 ## 浏览器免口令直达与登录安全
 

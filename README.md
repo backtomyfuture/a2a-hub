@@ -20,7 +20,7 @@
   <img src="https://img.shields.io/badge/Node.js-%3E%3D24-339933.svg" alt="Node.js >= 24" />
   <img src="https://img.shields.io/badge/Dependencies-0%20runtime-10b981.svg" alt="Zero Runtime Dependencies" />
   <img src="https://img.shields.io/badge/Local%20CLIs-26%2B%20Auto--Discovery-6366f1.svg" alt="26+ CLIs" />
-  <img src="https://img.shields.io/badge/Cloud%20Templates-14%20Presets-0ea5e9.svg" alt="14 Cloud Templates" />
+  <img src="https://img.shields.io/badge/Cloud%20Templates-10%20Presets-0ea5e9.svg" alt="10 Cloud Templates" />
   <img src="https://img.shields.io/badge/Protocol-A2A%208--State-f59e0b.svg" alt="A2A 8-State" />
 </p>
 
@@ -37,7 +37,9 @@
 - **真正的一行启动，无需 `git clone`**：无需预先准备仓库或数据库。Mac / Linux / Windows 一行脚本自动安装官方 Node 24 LTS、`ah` 命令、生成机主凭据与 Ed25519 密钥对，并直接打开 Web 控制台。
 - **零前置跨电脑融合挂载**：目标电脑什么都没装？控制台生成**一条融合了「安装 Node 24 + 安装 `ah` + 绑定设备 + 自动扫描 CLI + 注册自启」的一行命令**，复制运行（或直接发给对方机器上的 AI 助手）即可上线，纯出站连接，**不需要任何入站端口**。
 - **26 种本机 CLI 自动发现 + 多路真并发池**：自动识别 `claude`、`codex`、`opencode`、`amp`、`droid`、`agy`、`grok`、`cursor-agent`、`codebuddy`、`copilot`、`qwen`、`kimi` 等 **26 种编程/终端 CLI**。单台设备默认 `maxConcurrent = 4` 并行调度，同一 `(context_id, worker_key)` 自动串行加锁并 `--resume` 续接上下文。
-- **15 套云端与工作流 Agent 预设**：内置 **Muse / OpenClaw（Leader 主协调）**、Hermes、Manus、Kimi、Grok Bot、Coze、Dify、n8n、飞书机器人、豆包、灵光、千问等模板，创建即生成包含真实 Token 与注册心跳脚本的自包含接入提示词。
+- **10 套云端与桌面端 Agent 预设**：内置 **Muse、AutoClaw（Leader 主协调）**、Gemini 桌面端、Amazon Quick、Grok Bot、WorkBuddy、豆包、灵光、千问与通用模板，创建即生成包含专属 Token 与巡检节奏的自包含接入提示词。
+- **原生 MCP 接入**：Hub 自带零依赖 MCP 服务（Streamable HTTP `/api/v1/mcp` 与本机 stdio `ah mcp`），Gemini 桌面端、Amazon Quick、Claude Desktop、Cursor 等 MCP 客户端可直接注册、派单、取单和回执，不必手写 REST 请求。
+- **任务附件全链路**：派单、回复、追问与回执都能挂文件（`hub://files/<id>`）。多节点扇出时每个目标节点自动获得下载授权；电脑节点执行前会把附件下载到本地运行目录，并把文件名和路径写进给 CLI 的提示词。
 - **严格安全边界与指令数据分离**：任务请求参数严禁夹带 `command` / `cwd` / `env` 等控制键；高危任务经 `auth-required` 由机主使用 Hub 私钥产出 **Ed25519 密码学签名**，远端执行器本地验签通过才允许执行。
 - **零构建极简 Web 控制台**：内置浅色 / 深色主题切换、高密度双栏概览、按设备节点折叠收敛的「Agent 与设备」视图、按设备分组的并发扇出派单、`Context_ID` 对话线程时间线，以及 Worker 定时巡检健康看板。
 
@@ -108,7 +110,7 @@ ah expose cf https://hub.你的域名 --auto-token
 
 | 平台 | 配置文件 | 一键部署 / 命令 | 持久化挂载 |
 | --- | --- | --- | --- |
-| **Railway** | [`.railway/railway.ts`](.railway/railway.ts) | [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/template?referralCode=&repo=https://github.com/backtomyfuture/a2a-hub) | 挂载 Volume 到 `/data`，配置 `AH_API_TOKEN` |
+| **Railway** | [`.railway/railway.ts`](.railway/railway.ts) | [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/template?referralCode=&repo=https://github.com/backtomyfuture/a2a-hub) | 挂载 Volume 到 `/data`，配置 `AH_API_TOKEN` 与 `PORT=8787` |
 | **Render** | [`render.yaml`](render.yaml) | [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/backtomyfuture/a2a-hub) | 自动创建 1GB 持久化盘 `/data` 与随机 `AH_API_TOKEN` |
 | **Fly.io** | [`fly.toml`](fly.toml) | `fly launch --copy-config` | 自动挂载卷 `a2a_hub_data -> /data` |
 | **Zeabur** | [`zeabur.json`](zeabur.json) | 导入 GitHub 仓库即识别模板 | 挂载 `/data` 目录并填写 `AH_API_TOKEN` |
@@ -122,6 +124,10 @@ docker run -d --name a2a-hub -p 8787:8787 \
   -e AH_PUBLIC_URL="https://你的公网域名" \
   a2a-hub
 ```
+
+容器镜像默认 `AH_NO_DEVICE=1`，即只运行中台、不在容器里挂载空的本机执行池。
+
+> **Railway 说明**：Railway 已停用 `railway.json`（Config as Code），本仓库改用 [`.railway/railway.ts`](.railway/railway.ts)（Infrastructure as Code）。文件里写的是作者项目的卷名 `lobe-a2a-hub-volume`、区域 `us-west2` 和容量，部署到自己的项目前请按实际情况修改，**务必保留 `/data` 的卷挂载声明**，否则执行 `railway config apply` 会把数据卷从服务上摘掉。另外请在服务变量里显式设置 `PORT=8787`，否则健康检查可能连不上服务。修改后可先用 `railway config plan` 预览变更。
 
 <details>
 <summary>开发者模式：从 GitHub 源码目录运行</summary>
@@ -158,9 +164,37 @@ node bin/ah.mjs up      # 初始化并前台启动 Hub（加 --service 注册开
 
 挂载后设备只会发起纯出站 40s 长轮询，自动扫描本机 **26 种常见 CLI Agent** 并按设备节点汇聚展示在控制台；后续新装了 CLI 工具时，只需在控制台点 **「扫描 CLI」** 或执行 `ah workers scan` 即可无损增量补齐。
 
-### 2. 接入独立 / 云端 Agent（Muse、OpenClaw、Coze、Dify、n8n、Webhook 等）
+### 2. 接入独立 / 云端 Agent（Muse、AutoClaw、WorkBuddy、豆包、千问、Webhook 等）
 
-在控制台点击 **「+ 接入 Agent / 电脑」 → 「接入独立 Agent」**，从 15 套预设模板中选择平台（或选「通用（自定义参数）」自由组合 Poll / Longpoll / Webhook），创建后控制台会签发独立的分 Agent Token 并生成一份**自包含接入提示词**，发给目标 Agent 即可完成在线注册并接单。
+在控制台点击 **「+ 接入 Agent / 电脑」 → 「接入独立 Agent」**，从 10 套预设模板中选择平台（或选「通用（自定义参数）」自由组合 Poll / Longpoll / Webhook），创建后控制台会签发独立的分 Agent Token 并生成一份**自包含接入提示词**，发给目标 Agent 即可完成在线注册并接单。
+
+### 3. 通过 MCP 接入（Gemini 桌面端、Amazon Quick、Claude Desktop、Cursor 等）
+
+支持 MCP 的客户端有两种接法，工具清单相同（`a2a_register`、`a2a_list_agents`、`a2a_dispatch_task`、`a2a_check_updates`、`a2a_reply_task`、`a2a_poll_inbox`、`a2a_claim_task`、`a2a_submit_receipt`、`a2a_upload_file`、`a2a_read_file`）：
+
+- **Streamable HTTP 直连**：服务地址填 `https://<HUB_HOST>/api/v1/mcp?token=<AGENT_TOKEN>`（也可用 `Authorization: Bearer` 请求头）。该地址只接受 JSON-RPC POST，对 SSE 的 GET 探测返回 `405`，客户端不会反复重连。
+- **本机 stdio**：在装有 `ah` 的电脑上配置命令 `ah mcp --hub <HUB_URL> --token <AGENT_TOKEN> --agent <节点ID> [--role leader|worker]`。
+
+Gemini 与 Amazon Quick 模板生成的接入提示词默认就走 MCP。
+
+---
+
+## 任务附件（`hub://files/<id>`）
+
+附件先上传到 Hub 的文件中转存储，再以 `hub://files/<id>` 引用挂到任务或消息上：
+
+| 场景 | 用法 |
+| --- | --- |
+| Web 控制台 | 派单、回复时直接选择文件；任务详情里可预览图片、下载附件 |
+| 命令行派单 / 回复 | `ah task create --to a,b --text "…" --attach ./report.md`（`--attach` 可重复）；`ah task reply <id> "…" --attach <file>` |
+| 独立 Agent 回执 | `ah inbox done <id> --summary "…" --attach <file>` |
+| 单独上传 / 下载 | `ah file upload <filepath> [--task <task_id>]`；`ah file download <file_id\|hub://files/…> [--out <path>]` |
+| MCP 客户端 | `a2a_upload_file` 上传后把 uri 放进派单、回复或回执的 `attachments`；`a2a_read_file` 读取已授权的附件 |
+| HTTP 接口 | `POST /api/v1/files` 上传，`GET /api/v1/files/<id>` 下载，`GET /api/v1/files/<id>/meta` 查元数据 |
+
+- **授权跟着任务走**：只有上传者、机主，以及引用该文件的任务的参与节点能下载。扇出派单时，每个目标节点都会自动获得授权。
+- **电脑节点自动落地**：执行前，设备守护进程把附件下载到 `runs/<task_id>/files/`，并在提示词里列出文件名与本地路径；下载失败也会写明原因，交给 CLI 如实回执。
+- **限制与清理**：单个文件默认上限 50MB（`AH_FILE_MAX_BYTES`），默认保存 7 天（`AH_FILE_TTL_MS`），Hub 每小时清理一次过期文件。
 
 ---
 
@@ -183,7 +217,7 @@ node bin/ah.mjs up      # 初始化并前台启动 Hub（加 --service 注册开
 ## 内置兼容生态一览
 
 <details>
-<summary><strong>点击展开：26 种自动发现本机 CLI Agent + 15 套云端 / 工作流预设模板</strong></summary>
+<summary><strong>点击展开：26 种自动发现本机 CLI Agent + 10 套云端 / 桌面端预设模板</strong></summary>
 
 ### 自动发现的 26 种本机 CLI Agent（[`src/core/config.mjs`](src/core/config.mjs)）
 
@@ -216,25 +250,22 @@ node bin/ah.mjs up      # 初始化并前台启动 Hub（加 --service 注册开
 | `iflow` | iFlow CLI | `iflow` | `-p {prompt} --yolo` |
 | `qoder` | Qoder CLI | `qodercli` / `qoder` | `-p {prompt} --output-format json --yolo` |
 
-### 15 套独立 / 云端 Agent 接入模板（[`src/core/templates.mjs`](src/core/templates.mjs)）
+### 10 套独立 / 云端 Agent 接入模板（[`src/core/templates.mjs`](src/core/templates.mjs)）
 
-| 模板 ID | 预设名称 | 角色 | 默认接入模式 | 典型定位 |
-| --- | --- | --- | --- | --- |
-| `generic` | 通用（自定义参数） | `worker` | `poll` | 自由配置任何协议接入 Agent |
-| `muse` | Muse（云端主协调） | `leader` | `longpoll` | 云端主调度 Leader，拆解并扇出编排 |
-| `openclaw` | OpenClaw（个人常驻） | `leader` | `longpoll` | 24/7 常驻个人多通道主控 Agent |
-| `hermes` | Hermes Agent | `worker` | `poll` | 具备持久化记忆与技能学习的自主执行 Agent |
-| `manus` | Manus | `worker` | `poll` | 深度调研、网页操作与复杂报告交付 |
-| `kimi-agent` | Kimi（月之暗面） | `worker` | `poll` | 超长文档精读与检索资料汇总 |
-| `grok-bot` | Grok Bot | `worker` | `webhook` | 实时联网搜索与 X/Web 舆情分析 |
-| `workbuddy` | WorkBuddy | `worker` | `poll` | 办公日程、会议纪要与团队触达 |
-| `doubao` | 豆包 | `worker` | `poll` | 中文长文写作、资料总结与创意策划 |
-| `lingguang` | 灵光 | `worker` | `poll` | 中文长文写作、资料总结与创意策划 |
-| `qwen` | 千问 | `worker` | `poll` | 结构化数据分析、翻译与代码辅助 |
-| `coze` | Coze / 扣子 Bot | `worker` | `webhook` | 扣子工作流与垂直业务插件自动化 |
-| `dify` | Dify Workflow Agent | `worker` | `webhook` | 基于 Dify 流程编排与 RAG 知识库问答 |
-| `n8n` | n8n 自动化工作流 | `worker` | `webhook` | Webhook 触发多系统集成与自动通知 |
-| `feishu-bot` | 飞书机器人 / 多维表格 | `worker` | `webhook` | 飞书群协作、文档审批与多维表格处理 |
+| 模板 ID | 预设名称 | 角色 | 接入方式 | 默认节奏 | 典型定位 |
+| --- | --- | --- | --- | --- | --- |
+| `generic` | 通用（自定义参数） | `worker` | HTTP 定时检查 | 5 分钟 | 自由配置任何协议接入 Agent |
+| `muse` | Muse（临时云 VM） | `leader` | HTTP 长轮询 | 2 分钟 | 云端主调度，拆解目标并扇出编排，VM 自愈保活 |
+| `autoclaw` | AutoClaw（澳龙桌面端） | `leader` | HTTP 定时检查 | 5 分钟 | 智谱桌面端 Agent，7×24 巡检与多 Agent 协同调度 |
+| `gemini` | Gemini（桌面端） | `worker` | MCP 定时检查 | 60 分钟 | 多模态分析与超大上下文检索 |
+| `amazon-quick` | Amazon Quick（云端 MCP） | `worker` | MCP 定时检查 | 15 分钟 | Quick Flows 定时巡检与企业数据协作 |
+| `grok-bot` | Grok Bot（Webhook） | `worker` | Webhook 门铃 | 30 分钟兜底 | 实时联网搜索与 X/Web 舆情分析 |
+| `workbuddy` | WorkBuddy（云端定时版） | `worker` | HTTP 定时检查 | 30 分钟 | 办公日程、会议纪要与团队触达，每次运行都是新沙箱 |
+| `doubao` | 豆包（云端定时） | `worker` | HTTP 定时检查 | 60 分钟 | 中文长文写作、资料总结与创意策划 |
+| `lingguang` | 灵光（蚂蚁 Agent） | `worker` | HTTP 定时检查 | 5 分钟 | 中文资料整理与结构化总结 |
+| `qwen` | 千问 Go（小时级定时） | `worker` | HTTP 定时检查 | 60 分钟 | 结构化数据分析、文档翻译与代码辅助 |
+
+> 老版本 Hub 的配置目录里若已有 `agent_templates.json`，升级时会保留你自定义的模板，并自动补上新增的内置模板。
 
 </details>
 
@@ -265,9 +296,11 @@ node bin/ah.mjs up      # 初始化并前台启动 Hub（加 --service 注册开
 | | `ah doctor` | 只读体检配置、`0600` 权限、密钥、SQLite 与连通性 |
 | | `ah agents [list \| pause <id> \| resume <id>]` | 列出在线能力目录或启停某个 Agent |
 | | `ah update [--check]` | 拉取最新代码、刷新 Skill 并热重启后台服务 |
-| **派单、呈递与收件箱** | `ah task <create \| list \| show \| reply \| cancel>` | 派单（支持多目标扇出与 `context_id` 续接）与状态查询 |
+| **派单、呈递与收件箱** | `ah task <create \| list \| show \| reply \| cancel>` | 派单（支持多目标扇出、`context_id` 续接与 `--attach` 附件）与状态查询 |
 | | `ah present [list \| approve <id> \| deny <id> \| reply <id>]` | 机主命令行处理 Ed25519 审批与追问回复 |
-| | `ah inbox <check \| list \| claim \| complete \| ask \| updates>` | 供无守护进程的独立终端 Agent 读写收件箱 |
+| | `ah inbox <check \| list \| pop \| show \| claim \| done \| fail \| ask \| auth \| updates>` | 供无守护进程的独立终端 Agent 读写收件箱 |
+| **附件与 MCP** | `ah file <upload <path> \| download <id\|uri> [--out <path>]>` | 上传或下载 `hub://files/<id>` 附件 |
+| | `ah mcp [--hub <url>] [--token <tok>] [--agent <id>] [--role leader\|worker]` | 启动本机 stdio MCP 服务，供 MCP 客户端免弹窗挂载 |
 
 ---
 

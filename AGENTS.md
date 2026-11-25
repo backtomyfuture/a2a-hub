@@ -12,7 +12,7 @@ a2a-hub：自托管个人版多 Agent 编排中台（基于 A2A 八态数据模�
 - `src/core/broker.mjs`：`LongPollBroker`，维护单调序号事件流（Hold 上限 `MAX_LONGPOLL_SEC = 40` 防云网关断连）及活跃窗口在线判定。
 - `src/core/task-service.mjs`：唯一权威 A2A 八态状态机引擎（`submitted`, `working`, `input-required`, `auth-required`, `completed`, `failed`, `canceled`, `rejected`），支撑 `to: [...]` 多节点扇出、`context_id` 前情汇集、可重试故障重试、陈旧任务回收（`STALE_MIN=20`）与 Leader 水位增量消费。
 - `src/core/approval-sign.mjs`：Ed25519 审批签名与验签（私钥存于 `<configDir>/approval_key.pem`）。
-- `src/core/templates.mjs`：8 类平台模板目录（`agent_templates.json`）及一键接入提示词/设备挂载命令生成器。
+- `src/core/templates.mjs`：10 套内置平台模板（`DEFAULT_AGENT_TEMPLATES`，写入配置目录 `agent_templates.json` 并增量合并）及一键接入提示词/设备挂载命令生成器。
 - `src/core/webhooks.mjs` / `src/core/notifier.mjs` / `src/core/schedules.mjs`：HMAC-SHA256 签名 Webhook 门铃（`redirect: "manual"` 防 SSRF 重定向）、飞书/Bark/Telegram/通用 Webhook 机主实时推送、定时任务自报观测。
 - `src/core/receipt.mjs` / `src/core/session-store.mjs` / `src/core/proc.mjs`：CLI 命令安全渲染、`stdout` JSON/JSONL 解析与 `(context_id, worker_key)` 会话续接。
 - `src/core/hub-runtime.mjs`：单进程拉起 Hub（SQLite + HTTP 网关 + 本机 `DeviceDaemon`）。
@@ -26,7 +26,7 @@ a2a-hub：自托管个人版多 Agent 编排中台（基于 A2A 八态数据模�
 ## 命令
 
 ```sh
-for f in bin/*.mjs src/*.mjs src/*/*.mjs; do node --check "$f" || exit 1; done
+for f in bin/*.mjs src/*/*.mjs; do node --check "$f" || exit 1; done
 npm test
 ```
 

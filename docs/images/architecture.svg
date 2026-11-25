@@ -52,7 +52,7 @@ text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Noto
 <text x="109" y="172" class="s" text-anchor="middle">HttpOnly Cookie · Token</text>
 <rect class="item" x="36" y="190" width="146" height="44" rx="8"/>
 <text x="109" y="210" class="r" text-anchor="middle">云端 Leader Agent</text>
-<text x="109" y="226" class="s" text-anchor="middle">Muse / OpenClaw 扇出</text>
+<text x="109" y="226" class="s" text-anchor="middle">Muse / AutoClaw 扇出</text>
 <rect class="item" x="36" y="244" width="146" height="44" rx="8"/>
 <text x="109" y="264" class="r" text-anchor="middle">定时巡检 · 手动触发</text>
 <text x="109" y="280" class="s" text-anchor="middle">schedules + run=true</text>
@@ -130,7 +130,7 @@ text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Noto
 <text x="827" y="280" class="s" text-anchor="middle">容器 / 脚本长连接或 inbox</text>
 <rect class="item" x="730" y="298" width="194" height="44" rx="8"/>
 <text x="827" y="318" class="r" text-anchor="middle">云端 Bot / 工作流</text>
-<text x="827" y="334" class="s" text-anchor="middle">14 套模板 · 轮询 / Webhook</text>
+<text x="827" y="334" class="s" text-anchor="middle">10 套模板 · 轮询 / Webhook</text>
 <text x="827" y="376" class="s" text-anchor="middle">同 context_id 自动续接 Session</text>
 
 <!-- 4: 待批 / 结果 / 告警 -->

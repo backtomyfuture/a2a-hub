@@ -87,7 +87,7 @@ text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Noto
 
 <rect class="plug-hi" x="738" y="162" width="194" height="74" rx="12"/>
 <text x="835" y="188" class="sn" text-anchor="middle">独立 / 云端 Agent</text>
-<text x="835" y="207" class="sd" text-anchor="middle">14 套模板 · 含 Leader 协调</text>
+<text x="835" y="207" class="sd" text-anchor="middle">10 套模板 · 含 Leader 协调</text>
 <text x="835" y="224" class="mono" text-anchor="middle">Poll / Longpoll / Webhook</text>
 
 <!-- Node 到 Worker 连线 -->
@@ -137,14 +137,14 @@ text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Noto
 <rect class="plug-hi" x="738" y="276" width="194" height="198" rx="12"/>
 <text x="835" y="298" class="l" text-anchor="middle">Leader 与云端生态</text>
 <rect class="you" x="750" y="310" width="170" height="44" rx="7"/>
-<text x="835" y="329" class="sn" style="font-size:12.5px" text-anchor="middle">Muse / OpenClaw (Leader)</text>
+<text x="835" y="329" class="sn" style="font-size:12.5px" text-anchor="middle">Muse / AutoClaw (Leader)</text>
 <text x="835" y="346" class="s" text-anchor="middle">to: [...] 并发扇出 + 增量消费</text>
 <rect class="item" x="750" y="362" width="170" height="32" rx="7"/>
 <text x="835" y="382" class="sn" style="font-size:12.5px" text-anchor="middle">Grok Bot · Manus · Kimi</text>
 <rect class="item" x="750" y="400" width="170" height="32" rx="7"/>
 <text x="835" y="420" class="sn" style="font-size:12.5px" text-anchor="middle">Coze · Dify · n8n · 飞书 · 豆包</text>
 <rect class="tag" x="750" y="438" width="170" height="24" rx="6"/>
-<text x="835" y="454" class="tn" text-anchor="middle">14 套预设生成自包含提示词</text>
+<text x="835" y="454" class="tn" text-anchor="middle">10 套预设生成自包含提示词</text>
 
 <!-- 4. 底部 Context 与 2x2 Skill 总结 -->
 <rect class="item" x="108" y="510" width="268" height="96" rx="10"/>
