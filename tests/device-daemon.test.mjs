@@ -93,6 +93,26 @@ test("Receipt Parser: 解析单对象 JSON、Amp/Claude stream-json、Cline 与 
   assert.ok(droidFailure.includes("402"), "错误摘要应保留 stdout 中的 402 原因");
   assert.equal(droidFailure.includes("Ignored hook"), false, "不得让无关 stderr 警告掩盖结构化错误");
 
+  // Amp 实测欠费：退出码 0，result 事件无 result 字段，原因在 error 字段
+  const ampErrStream = [
+    JSON.stringify({ type: "system", subtype: "init", cwd: "/tmp", session_id: "T-amp-err", tools: ["shell_command"] }),
+    JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text: "只回复 OK" }] }, session_id: "T-amp-err" }),
+    JSON.stringify({
+      type: "result",
+      subtype: "error_during_execution",
+      is_error: true,
+      num_turns: 0,
+      error: "Out of Credits You must have at least $1 in available credits to start this request.",
+      session_id: "T-amp-err",
+    }),
+  ].join("\n");
+  const ampWarn = "Warning: Permission rules (amp.permissions) are deprecated";
+  const ampErr = parseCliOutput(ampErrStream, ampWarn);
+  assert.equal(ampErr.isError, true);
+  const ampFailure = formatCliFailure(ampErr, ampWarn, 0);
+  assert.ok(ampFailure.startsWith("Out of Credits"), `应提取 Amp 的 error 字段，实际: ${ampFailure.slice(0, 80)}`);
+  assert.equal(ampFailure.includes("\"type\":\"system\""), false, "不得把原始 JSONL 当作错误摘要");
+
   // CodeBuddy 实测顶层 JSON 数组：忽略 user <system-reminder>，取最终 result 与 session_id
   const cbArray = JSON.stringify([
     {

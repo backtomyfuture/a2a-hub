@@ -117,7 +117,8 @@ function parseEventList(events, raw) {
       finalResultText = extractContentText(ev.result) || (typeof ev.result === "string" ? ev.result : JSON.stringify(ev.result));
     } else if (ev.type === "run_result" && typeof ev.text === "string") {
       finalResultText = ev.text;
-    } else if (ev.type === "error") {
+    } else if (ev.type === "error" || (ev.type === "result" && ev.is_error === true)) {
+      // Amp 欠费等失败的 result 事件不带 result 字段，原因只在 error 里；漏取会回退成整段原始 JSONL
       const errCand = ev.error ?? ev.message ?? ev.text;
       const errTxt = errCand !== undefined ? (extractContentText(errCand) || (typeof errCand === "string" ? errCand : JSON.stringify(errCand))) : "";
       if (errTxt) finalResultText = errTxt;
