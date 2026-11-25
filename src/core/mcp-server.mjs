@@ -8,7 +8,8 @@ import { DAEMON_VERSION, loadConfigJson, loadOwnerToken, readLiveHubUrl } from "
 import { TERMINAL_STATES } from "./task-service.mjs";
 import { GatewayClient } from "../client/gateway-client.mjs";
 import { parseSimpleFlags } from "../client/inbox.mjs";
-import { actorCanControlTaskAsSender, actorCanOperateTaskAsWorker } from "../server/auth.mjs";
+import { actorCanAccessFile, actorCanControlTaskAsSender, actorCanOperateTaskAsWorker, actorCanSeeTask } from "../server/auth.mjs";
+import { extractHubFileId, guessMimeByFilename } from "../store/files.mjs";
 
 export const MCP_PROTOCOL_VERSION = "2025-03-26";
 export const MAX_MCP_WAIT_SEC = 25;
@@ -44,6 +45,83 @@ const TOOL_REGISTER = {
     additionalProperties: false,
   },
 };
+
+const ATTACHMENT_SCHEMA_PROP = {
+  type: "array",
+  description: "可选附件列表，元素可为 hub://files/<id> 字符串或 { uri, name, mime } 对象",
+  items: {
+    oneOf: [
+      { type: "string" },
+      {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          file_id: { type: "string" },
+          uri: { type: "string" },
+          url: { type: "string" },
+          name: { type: "string" },
+          mime: { type: "string" },
+        },
+      },
+    ],
+  },
+};
+
+const FILE_TOOLS = [
+  {
+    name: "a2a_upload_file",
+    description:
+      "上传文件到 a2a-hub 中转存储，返回 uri（hub://files/<id>）、download_path 与 download_url。上传后可将 uri 或文件对象挂入 a2a_dispatch_task、a2a_reply_task 或 a2a_submit_receipt 的 attachments 参数。",
+    annotations: {
+      title: "上传附件到中台",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "文件名（如 report.md）" },
+        content: { type: "string", description: "UTF-8 文本内容（与 content_base64 二选一）" },
+        content_base64: { type: "string", description: "二进制或任意文件的 Base64 编码内容（与 content 二选一）" },
+        mime: { type: "string", description: "可选 MIME 类型；留空按扩展名自动推断" },
+        task_id: { type: "string", description: "可选：立即关联到指定任务 ID" },
+      },
+      required: ["name"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "a2a_read_file",
+    description:
+      "读取 a2a-hub 上已授权给当前 Agent 的附件文件内容（支持按 file_id 或 hub://files/<id> uri 读取）。文本/JSON 自动以 utf8 返回，二进制文件以 base64 返回。",
+    annotations: {
+      title: "读取中台附件内容",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    inputSchema: {
+      type: "object",
+      properties: {
+        file_id: { type: "string", description: "文件 ID（16-64 位十六进制，与 uri 二选一）" },
+        uri: { type: "string", description: "文件 URI，如 hub://files/<id>（与 file_id 二选一）" },
+        encoding: {
+          type: "string",
+          enum: ["auto", "utf8", "base64"],
+          description: "返回编码模式，默认 auto",
+        },
+        max_bytes: {
+          type: "number",
+          description: "最大直接读取字节数（1024-2097152，默认 524288）",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+];
 
 const LEADER_TOOLS = [
   {
@@ -97,6 +175,7 @@ const LEADER_TOOLS = [
         },
         priority: { type: "number", description: "优先级 1-10，默认 5" },
         model: { type: "string", description: "可选指定目标节点使用的模型" },
+        attachments: ATTACHMENT_SCHEMA_PROP,
         wait_sec: {
           type: "number",
           description: "派单后原地挂起等待子任务回执的秒数（0-25 秒，默认 0 立即返回；设 15-25 可在快速任务完成时一次调用直接拿到结果）",
@@ -157,6 +236,7 @@ const LEADER_TOOLS = [
           description: "动作类型：reply（回答追问并恢复任务，默认）或 cancel（取消任务）",
         },
         body: { type: "string", description: "补充回复内容或取消原因" },
+        attachments: ATTACHMENT_SCHEMA_PROP,
       },
       required: ["task_id", "body"],
       additionalProperties: false,
@@ -269,6 +349,7 @@ const WORKER_TOOLS = [
           type: "boolean",
           description: "status='failed' 时是否允许自动重试（默认 false）",
         },
+        attachments: ATTACHMENT_SCHEMA_PROP,
       },
       required: ["task_id", "status"],
       additionalProperties: false,
@@ -279,12 +360,12 @@ const WORKER_TOOLS = [
 export function getMcpToolsForRole(role = "all") {
   const r = String(role || "all").toLowerCase();
   if (r === "leader") {
-    return [TOOL_REGISTER, ...LEADER_TOOLS];
+    return [TOOL_REGISTER, ...LEADER_TOOLS, ...FILE_TOOLS];
   }
   if (r === "worker") {
-    return [TOOL_REGISTER, ...WORKER_TOOLS];
+    return [TOOL_REGISTER, ...WORKER_TOOLS, ...FILE_TOOLS];
   }
-  return [TOOL_REGISTER, ...LEADER_TOOLS, ...WORKER_TOOLS];
+  return [TOOL_REGISTER, ...LEADER_TOOLS, ...WORKER_TOOLS, ...FILE_TOOLS];
 }
 
 export function resolveMcpActorContext(actor, store, { requestedAgentId = "", requestedRole = "" } = {}) {
@@ -426,6 +507,8 @@ async function executeMcpTool(toolName, rawArgs, ctx) {
       priority: args.priority,
       model: args.model || "",
       params: args.params || {},
+      attachments: Array.isArray(args.attachments) ? args.attachments : [],
+      actor: ctx.rawActor,
     });
 
     const waitSec = clampWaitSec(args.wait_sec);
@@ -518,7 +601,12 @@ async function executeMcpTool(toolName, rawArgs, ctx) {
       const task = taskService.cancel(taskId, { fromNode, reason: body || "canceled via mcp" });
       return { ok: true, task };
     }
-    const task = taskService.reply(taskId, { fromNode, body });
+    const task = taskService.reply(taskId, {
+      fromNode,
+      body,
+      attachments: Array.isArray(args.attachments) ? args.attachments : [],
+      actor: ctx.rawActor,
+    });
     return { ok: true, task };
   }
 
@@ -630,6 +718,8 @@ async function executeMcpTool(toolName, rawArgs, ctx) {
         actorId,
         summary: summary || text.slice(0, 200),
         text: text || summary,
+        attachments: Array.isArray(args.attachments) ? args.attachments : [],
+        actor: ctx.rawActor,
       });
       return { ok: true, task };
     }
@@ -674,6 +764,107 @@ async function executeMcpTool(toolName, rawArgs, ctx) {
     }
 
     throw makeToolError(`不支持的 status 动作: ${status}`, "invalid_status", 400);
+  }
+
+  if (toolName === "a2a_upload_file") {
+    if (!ctx.fileStore) throw makeToolError("FileStore 未就绪", "no_file_store", 500);
+    const name = String(args.name || "").trim();
+    if (!name) throw makeToolError("请提供文件名 name", "missing_name", 400);
+    if (args.content_base64 === undefined && args.content === undefined) {
+      throw makeToolError("请提供 content 或 content_base64", "missing_content", 400);
+    }
+    const buf = args.content_base64 !== undefined
+      ? Buffer.from(String(args.content_base64), "base64")
+      : Buffer.from(String(args.content ?? ""), "utf8");
+    const mime = String(args.mime || "").trim() || guessMimeByFilename(name);
+    const taskId = args.task_id ? String(args.task_id).trim() : null;
+    if (taskId) {
+      const targetTask = store.getTask(taskId);
+      if (!targetTask) throw makeToolError("关联任务不存在", "task_not_found", 404);
+      if (!actorCanSeeTask(ctx.rawActor, targetTask, store)) {
+        throw makeToolError("无权向该任务上传附件", "forbidden", 403);
+      }
+    }
+    const ownerNode = ctx.actorKind === "agent"
+      ? ctx.agentId
+      : ctx.agentId && ctx.agentId !== "owner"
+        ? ctx.agentId
+        : "owner";
+    const meta = ctx.fileStore.put({
+      buffer: buf,
+      name,
+      mime,
+      ownerNode,
+      taskId,
+    });
+    const hubUrl = typeof ctx.hubUrlResolver === "function" ? String(ctx.hubUrlResolver() || "") : "";
+    const downloadPath = `/api/v1/files/${meta.id}`;
+    return {
+      ok: true,
+      file: {
+        ...meta,
+        download_path: downloadPath,
+        ...(hubUrl ? { download_url: `${hubUrl}${downloadPath}` } : {}),
+      },
+    };
+  }
+
+  if (toolName === "a2a_read_file") {
+    if (!ctx.fileStore) throw makeToolError("FileStore 未就绪", "no_file_store", 500);
+    const fileId = extractHubFileId(args.uri || "") || extractHubFileId({ file_id: args.file_id });
+    if (!fileId) {
+      throw makeToolError("请提供有效的 file_id 或 hub://files/<id> uri", "invalid_file_id", 400);
+    }
+    const read = ctx.fileStore.readBuffer(fileId);
+    if (!read) throw makeToolError("文件不存在或已过期", "not_found", 404);
+    if (!actorCanAccessFile(ctx.rawActor, read.meta, store)) {
+      throw makeToolError("无权读取该文件", "forbidden", 403);
+    }
+
+    const rawMax = Number(args.max_bytes || 524288);
+    const maxBytes = Math.min(Math.max(Number.isFinite(rawMax) ? Math.trunc(rawMax) : 524288, 1024), 2097152);
+    const hubUrl = typeof ctx.hubUrlResolver === "function" ? String(ctx.hubUrlResolver() || "") : "";
+    const downloadPath = `/api/v1/files/${read.meta.id}`;
+    const downloadUrl = hubUrl ? `${hubUrl}${downloadPath}` : downloadPath;
+
+    if (read.buffer.byteLength > maxBytes) {
+      return {
+        ok: true,
+        file: {
+          ...read.meta,
+          download_path: downloadPath,
+          download_url: downloadUrl,
+        },
+        truncated: true,
+        max_bytes: maxBytes,
+        message: `文件大小 (${read.buffer.byteLength} bytes) 超过直接读取上限 (${maxBytes} bytes)，请通过 download_url 下载查看`,
+      };
+    }
+
+    const reqEnc = String(args.encoding || "auto").toLowerCase();
+    let usedEnc = reqEnc;
+    if (reqEnc === "auto") {
+      const baseMime = String(read.meta.mime || "").split(";")[0].trim().toLowerCase();
+      const textLikeMime =
+        baseMime.startsWith("text/") ||
+        ["application/json", "application/xml", "application/yaml", "application/javascript", "application/typescript", "application/x-sh"].includes(baseMime);
+      const isValidUtf8 = !read.buffer.includes(0) && Buffer.from(read.buffer.toString("utf8"), "utf8").equals(read.buffer);
+      usedEnc = textLikeMime || isValidUtf8 ? "utf8" : "base64";
+    }
+
+    return {
+      ok: true,
+      file: {
+        ...read.meta,
+        download_path: downloadPath,
+        download_url: downloadUrl,
+      },
+      encoding: usedEnc,
+      ...(usedEnc === "utf8"
+        ? { content: read.buffer.toString("utf8") }
+        : { content_base64: read.buffer.toString("base64") }),
+      truncated: false,
+    };
   }
 
   const notFoundErr = new Error(`未知 MCP 工具: ${toolName}`);

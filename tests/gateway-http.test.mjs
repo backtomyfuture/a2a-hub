@@ -56,15 +56,42 @@ test("Gateway HTTP: 完整闭环 (Hub 启动 -> 设备同步 -> 独立 Agent 注
     assert.equal(pollRes.woke, true);
     assert.equal(pollRes.tasks.length, 1);
 
-    // 3) 文件上传与定时自报
+    // 3) 文件上传、元数据查询、?inline=1 安全预览白名单与中文文件名 RFC5987 头
     const up = await owner.uploadFile({
       buffer: Buffer.from("log content", "utf8"),
-      name: "build.log",
+      name: "构建日志 build.log",
       mime: "text/plain",
       taskId: dispatched.tasks[0].id,
     });
+    assert.ok(up.file.download_path.endsWith(up.file.id));
+    assert.ok(up.file.download_url.includes(up.file.id));
+
+    const metaRes = await devClient.get(`/api/v1/files/${up.file.id}/meta`);
+    assert.equal(metaRes.file.name, "构建日志 build.log");
+
     const dl = await devClient.downloadFile(up.file.id);
     assert.equal(dl.toString("utf8"), "log content");
+
+    const inlineTxt = await fetch(`${rt.url}/api/v1/files/${up.file.id}?inline=1`, {
+      headers: { Authorization: `Bearer ${devCreated.token}` },
+    });
+    assert.equal(inlineTxt.status, 200);
+    assert.ok(inlineTxt.headers.get("content-disposition").startsWith("inline;"));
+    assert.ok(inlineTxt.headers.get("content-disposition").includes("filename*=UTF-8''"));
+    assert.equal(inlineTxt.headers.get("content-security-policy"), "default-src 'none'; sandbox");
+
+    // 危险 MIME（HTML / SVG）即使带 ?inline=1 也必须强制 attachment 下载，禁止浏览器内联脚本执行
+    const htmlUp = await owner.uploadFile({
+      buffer: Buffer.from("<script>alert(1)</script>", "utf8"),
+      name: "evil.html",
+      mime: "text/html",
+      taskId: dispatched.tasks[0].id,
+    });
+    const inlineHtml = await fetch(`${rt.url}/api/v1/files/${htmlUp.file.id}?inline=1`, {
+      headers: { Authorization: `Bearer ${devCreated.token}` },
+    });
+    assert.equal(inlineHtml.status, 200);
+    assert.ok(inlineHtml.headers.get("content-disposition").startsWith("attachment;"));
 
     const claimed = await devClient.claimTask(dispatched.tasks[0].id);
     assert.equal(claimed.task.state, "working");

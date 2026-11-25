@@ -25,7 +25,8 @@ import { startHubRuntime } from "../src/core/hub-runtime.mjs";
 import { DeviceDaemon } from "../src/client/device-daemon.mjs";
 import { AgentDaemon } from "../src/client/agent-daemon.mjs";
 import { GatewayClient } from "../src/client/gateway-client.mjs";
-import { parseSimpleFlags, runInboxCommand, runPresentCommand } from "../src/client/inbox.mjs";
+import { parseSimpleFlags, runInboxCommand, runPresentCommand, uploadLocalAttachments } from "../src/client/inbox.mjs";
+import { FILE_ID_RE, extractHubFileId, guessMimeByFilename } from "../src/store/files.mjs";
 import { runMcpStdioCommand } from "../src/core/mcp-server.mjs";
 import { runAgentSetup, runDeviceJoin, runHubSetup, runInteractiveSetup } from "../src/cli/setup.mjs";
 import { runDoctor } from "../src/cli/doctor.mjs";
@@ -108,6 +109,7 @@ function helpText() {
   ah workers <list | scan | add | remove> [...]
       管理本机 workers.json 可执行 Worker 列表（查看、增量扫描新 CLI、新增、移除）
   ah task <create | list | show | reply | cancel> [...]
+  ah file <upload <filepath> | download <file_id|uri> [--out <filepath>]>
   ah present [list | approve <id> | deny <id> | reply <id> <text>]
   ah inbox <check | list | pop | show | claim | complete | done | fail | ask | auth | updates> [...]
   ah mcp [--hub <url>] [--token <tok>] [--agent <id>] [--role leader|worker]
@@ -448,8 +450,9 @@ async function main() {
       const targets = toRaw.split(",").map((s) => s.trim()).filter(Boolean);
       const inputText = String(flags.text || flags.prompt || flags.input || flags._.slice(3).join(" ") || "");
       if (!targets.length || !inputText) {
-        throw new Error("用法: ah task create --to <agent1,agent2> --text <任务描述> [--title ...] [--context <ctx>] [--model <m>]");
+        throw new Error("用法: ah task create --to <agent1,agent2> --text <任务描述> [--title ...] [--context <ctx>] [--model <m>] [--attach <file>]");
       }
+      const attachments = await uploadLocalAttachments(client, flags.attach);
       const r = await client.dispatchTask({
         to: targets,
         title: flags.title || "",
@@ -457,6 +460,7 @@ async function main() {
         context_id: flags.context || "",
         model: flags.model || "",
         priority: flags.priority ? Number(flags.priority) : 5,
+        ...(attachments.length ? { attachments } : {}),
       });
       console.log(JSON.stringify(r, null, 2));
       return 0;
@@ -464,8 +468,11 @@ async function main() {
     if (sub === "reply") {
       const id = flags._[2];
       const body = flags.text || flags.body || flags._.slice(3).join(" ");
-      if (!id || !body) throw new Error("用法: ah task reply <task_id> <回复文本>");
-      const r = await client.replyTask(id, { body });
+      const attachments = await uploadLocalAttachments(client, flags.attach, { taskId: id });
+      if (!id || (!body && !attachments.length)) {
+        throw new Error("用法: ah task reply <task_id> <回复文本> [--attach <file>]");
+      }
+      const r = await client.replyTask(id, { body: body || "", attachments });
       console.log(`✓ 已回复任务 ${id} -> ${r.task.state}`);
       return 0;
     }
@@ -477,6 +484,45 @@ async function main() {
       return 0;
     }
     throw new Error(`未知 task 子命令: ${sub}`);
+  }
+
+  if (cmd === "file") {
+    const sub = flags._[1] || "";
+    const client = new GatewayClient(flags.hub || readLiveHubUrl(configDir), {
+      token: flags.token || loadOwnerToken(configDir),
+    });
+    if (sub === "upload") {
+      const filePath = flags._[2] || flags.file;
+      if (!filePath) throw new Error("用法: ah file upload <filepath> [--task <task_id>]");
+      const absPath = path.resolve(String(filePath));
+      if (!fs.existsSync(absPath) || !fs.statSync(absPath).isFile()) {
+        throw new Error(`文件不存在或不可读取: ${filePath}`);
+      }
+      const name = path.basename(absPath);
+      const r = await client.uploadFile({
+        buffer: fs.readFileSync(absPath),
+        name,
+        mime: guessMimeByFilename(name),
+        taskId: flags.task || null,
+      });
+      console.log(JSON.stringify(r, null, 2));
+      return 0;
+    }
+    if (sub === "download") {
+      const target = String(flags._[2] || flags.id || flags.uri || "").trim();
+      const fileId = FILE_ID_RE.test(target) ? target : extractHubFileId(target);
+      if (!fileId) throw new Error("用法: ah file download <file_id|hub://files/...> [--out <filepath>]");
+      const metaRes = await client.get(`/api/v1/files/${encodeURIComponent(fileId)}/meta`);
+      const buf = await client.downloadFile(fileId);
+      const outPath = flags.out
+        ? path.resolve(String(flags.out))
+        : path.resolve(path.basename(metaRes?.file?.name || `${fileId}.bin`) || `${fileId}.bin`);
+      fs.mkdirSync(path.dirname(outPath), { recursive: true });
+      fs.writeFileSync(outPath, buf);
+      console.log(`✓ 已下载文件至: ${outPath} (${buf.byteLength} bytes)`);
+      return 0;
+    }
+    throw new Error("用法: ah file <upload <filepath> | download <file_id|uri> [--out <filepath>]>");
   }
 
   console.error(`未知命令: ${cmd}\n`);

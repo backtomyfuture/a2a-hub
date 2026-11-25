@@ -6,6 +6,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { FILE_ID_RE, extractHubFileId } from "./files.mjs";
 
 export function hashToken(raw) {
   return crypto.createHash("sha256").update(String(raw ?? ""), "utf8").digest("hex");
@@ -216,6 +217,15 @@ CREATE TABLE IF NOT EXISTS files (
   expires_at        INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS file_links (
+  file_id           TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  task_id           TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  context_id        TEXT NOT NULL,
+  message_id        INTEGER,
+  created_at        INTEGER NOT NULL,
+  PRIMARY KEY (file_id, task_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_devices_token ON devices(token_hash);
 CREATE INDEX IF NOT EXISTS idx_agents_device ON agents(device_id);
 CREATE INDEX IF NOT EXISTS idx_agents_token ON agents(token_hash);
@@ -227,6 +237,9 @@ CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id, id ASC);
 CREATE INDEX IF NOT EXISTS idx_messages_ctx ON messages(context_id, id ASC);
 CREATE INDEX IF NOT EXISTS idx_files_expires ON files(expires_at);
 CREATE INDEX IF NOT EXISTS idx_files_task ON files(task_id);
+CREATE INDEX IF NOT EXISTS idx_file_links_file ON file_links(file_id);
+CREATE INDEX IF NOT EXISTS idx_file_links_task ON file_links(task_id);
+CREATE INDEX IF NOT EXISTS idx_file_links_context ON file_links(context_id);
 `;
 
 export function serializeDevice(row, extra = {}) {
@@ -331,6 +344,18 @@ export function serializeTaskSummary(row) {
       : String(parseJson(row.receipt_json, null)?.summary || "");
     receipt = { summary };
   }
+  const inputAttCount = row.input_attachment_count !== undefined
+    ? Number(row.input_attachment_count || 0)
+    : (() => {
+        const list = parseJson(row.attachments_json, null);
+        return Array.isArray(list) ? list.length : 0;
+      })();
+  const receiptAttCount = row.receipt_attachment_count !== undefined
+    ? Number(row.receipt_attachment_count || 0)
+    : (() => {
+        const rObj = parseJson(row.receipt_json, null);
+        return Array.isArray(rObj?.attachments) ? rObj.attachments.length : 0;
+      })();
   return {
     id: row.id,
     context_id: row.context_id,
@@ -343,6 +368,7 @@ export function serializeTaskSummary(row) {
     priority: Number(row.priority ?? 5),
     source: row.source || "direct",
     schedule_id: row.schedule_id ?? null,
+    attachment_count: inputAttCount + receiptAttCount,
     receipt,
     error_message: row.error_message ?? null,
     retry_count: Number(row.retry_count ?? 0),
@@ -406,6 +432,7 @@ export class HubStore {
     this.db.exec("PRAGMA busy_timeout = 5000;");
     this.db.exec("PRAGMA journal_size_limit = 16777216;");
     this.db.exec(SCHEMA_SQL);
+    this.backfillFileLinks();
     if (dbPath !== ":memory:") {
       try {
         fs.chmodSync(dbPath, 0o600);
@@ -1080,6 +1107,8 @@ export class HubStore {
       : "ORDER BY updated_at DESC, created_at DESC";
     const cols = filter.summaryOnly
       ? `id, context_id, parent_task_id, from_node, to_agent_id, title, model, state, priority, source, schedule_id,
+         CASE WHEN attachments_json IS NOT NULL AND json_valid(attachments_json) AND json_type(attachments_json) = 'array' THEN json_array_length(attachments_json) ELSE 0 END AS input_attachment_count,
+         CASE WHEN receipt_json IS NOT NULL AND json_valid(receipt_json) AND json_type(json_extract(receipt_json, '$.attachments')) = 'array' THEN json_array_length(json_extract(receipt_json, '$.attachments')) ELSE 0 END AS receipt_attachment_count,
          (receipt_json IS NOT NULL) AS has_receipt,
          CASE WHEN receipt_json IS NOT NULL AND json_valid(receipt_json) THEN json_extract(receipt_json, '$.summary') ELSE NULL END AS receipt_summary,
          error_message, retry_count, max_retries, timeout_sec, claimed_by, claimed_at, lease_until, leader_notified,
@@ -1118,6 +1147,111 @@ export class HubStore {
       sqlInt(created_at, Date.now())
     );
     return serializeMessage(res);
+  }
+
+  // ---- Files & 多对多任务关联 ----
+
+  getFileMeta(id, now = Date.now()) {
+    const fid = String(id || "").trim();
+    if (!FILE_ID_RE.test(fid)) return null;
+    const row = this.db.prepare("SELECT * FROM files WHERE id = ?").get(fid);
+    if (!row) return null;
+    if (Number(row.expires_at) <= now) return null;
+    return {
+      id: row.id,
+      uri: `hub://files/${row.id}`,
+      name: row.name,
+      mime: row.mime,
+      size: Number(row.size),
+      sha256: row.sha256,
+      owner_node: row.owner_node,
+      task_id: row.task_id ?? null,
+      created_at: Number(row.created_at),
+      expires_at: Number(row.expires_at),
+    };
+  }
+
+  linkFileToTask({ fileId, taskId, contextId = "", messageId = null, createdAt = Date.now() }) {
+    const fid = String(fileId || "").trim();
+    const tid = String(taskId || "").trim();
+    if (!FILE_ID_RE.test(fid) || !tid) return false;
+    const fileRow = this.db.prepare("SELECT 1 FROM files WHERE id = ?").get(fid);
+    if (!fileRow) return false;
+    const taskRow = this.db.prepare("SELECT context_id FROM tasks WHERE id = ?").get(tid);
+    if (!taskRow) return false;
+    const cid = String(contextId || taskRow.context_id || "");
+    const res = this.db.prepare(`
+      INSERT OR IGNORE INTO file_links (file_id, task_id, context_id, message_id, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(fid, tid, cid, messageId !== null && messageId !== undefined ? sqlInt(messageId) : null, sqlInt(createdAt, Date.now()));
+    return res.changes > 0;
+  }
+
+  listFileLinkedTasks(fileId) {
+    const fid = String(fileId || "").trim();
+    if (!FILE_ID_RE.test(fid)) return [];
+    const rows = this.db.prepare(`
+      SELECT t.* FROM file_links fl
+      JOIN tasks t ON t.id = fl.task_id
+      WHERE fl.file_id = ?
+      ORDER BY fl.created_at ASC
+    `).all(fid);
+    return rows.map((r) => serializeTask(r));
+  }
+
+  // 为升级前的历史任务/消息附件回填多对多绑定，确保老库中的扇出附件同样可授权下载。
+  backfillFileLinks() {
+    const fileCount = Number(this.db.prepare("SELECT COUNT(*) AS cnt FROM files").get()?.cnt || 0);
+    if (fileCount === 0) return 0;
+
+    return this.transaction(() => {
+      let inserted = 0;
+      const insertStmt = this.db.prepare(`
+        INSERT OR IGNORE INTO file_links (file_id, task_id, context_id, message_id, created_at)
+        SELECT ?, ?, ?, ?, ?
+        WHERE EXISTS (SELECT 1 FROM files WHERE id = ?)
+          AND EXISTS (SELECT 1 FROM tasks WHERE id = ?)
+      `);
+
+      const linkIfPresent = (fid, tid, cid, mid, ts) => {
+        if (!FILE_ID_RE.test(String(fid || "")) || !tid) return;
+        const r = insertStmt.run(fid, String(tid), String(cid || ""), mid, sqlInt(ts, Date.now()), fid, String(tid));
+        inserted += Number(r.changes || 0);
+      };
+
+      const fileRows = this.db.prepare("SELECT id, task_id, created_at FROM files WHERE task_id IS NOT NULL AND task_id != ''").all();
+      for (const f of fileRows) {
+        const t = this.db.prepare("SELECT context_id FROM tasks WHERE id = ?").get(f.task_id);
+        if (t) linkIfPresent(f.id, f.task_id, t.context_id, null, f.created_at);
+      }
+
+      const taskRows = this.db.prepare(
+        "SELECT id, context_id, attachments_json, receipt_json, created_at FROM tasks WHERE attachments_json != '[]' OR receipt_json IS NOT NULL"
+      ).all();
+      for (const t of taskRows) {
+        for (const att of parseJson(t.attachments_json, [])) {
+          const fid = extractHubFileId(att);
+          if (fid) linkIfPresent(fid, t.id, t.context_id, null, t.created_at);
+        }
+        const receipt = parseJson(t.receipt_json, null);
+        if (Array.isArray(receipt?.attachments)) {
+          for (const att of receipt.attachments) {
+            const fid = extractHubFileId(att);
+            if (fid) linkIfPresent(fid, t.id, t.context_id, null, t.created_at);
+          }
+        }
+      }
+
+      const msgRows = this.db.prepare("SELECT id, task_id, context_id, attachments_json, created_at FROM messages WHERE attachments_json != '[]'").all();
+      for (const m of msgRows) {
+        for (const att of parseJson(m.attachments_json, [])) {
+          const fid = extractHubFileId(att);
+          if (fid) linkIfPresent(fid, m.task_id, m.context_id, m.id, m.created_at);
+        }
+      }
+
+      return inserted;
+    });
   }
 
   // ---- Idempotency & Watermarks ----

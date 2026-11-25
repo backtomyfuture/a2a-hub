@@ -1,8 +1,80 @@
 import { api } from "../api.js";
 import { setState, store } from "../state.js";
-import { escapeHtml, formatDateTime, formatRelativeTime, showToast, stateLabel, stateTone } from "../utils.js";
+import {
+  attachmentUniqueKey,
+  bindAttachmentPreview,
+  escapeHtml,
+  formatBytes,
+  formatDateTime,
+  formatRelativeTime,
+  renderAttachmentsBar,
+  showToast,
+  stateLabel,
+  stateTone,
+} from "../utils.js";
 
 let loadingContextId = "";
+const replyPendingFiles = new Map();
+
+function countTaskUniqueAttachments(t) {
+  const keys = new Set();
+  for (const att of t.attachments || []) {
+    keys.add(attachmentUniqueKey(att));
+  }
+  for (const m of t.messages || []) {
+    for (const att of m.attachments || []) {
+      keys.add(attachmentUniqueKey(att));
+    }
+  }
+  return keys.size;
+}
+
+function getOrphanTaskAttachments(t) {
+  const inMessages = new Set();
+  for (const m of t.messages || []) {
+    for (const att of m.attachments || []) {
+      inMessages.add(attachmentUniqueKey(att));
+    }
+  }
+  return (t.attachments || []).filter((att) => !inMessages.has(attachmentUniqueKey(att)));
+}
+
+function renderReplyPendingFilesHtml(taskId) {
+  const files = replyPendingFiles.get(taskId) || [];
+  return files
+    .map(
+      (f, idx) => `
+    <span class="attachment-chip">
+      <span>📎</span>
+      <span class="attachment-name truncate">${escapeHtml(f.name)}</span>
+      <span class="attachment-size">${escapeHtml(formatBytes(f.size))}</span>
+      <button type="button" class="btn btn-ghost btn-sm attachment-action-btn" data-reply-file-rm="${escapeHtml(taskId)}:${idx}">×</button>
+    </span>
+  `
+    )
+    .join("");
+}
+
+function updateReplyPendingList(container, taskId) {
+  const listEl = container.querySelector(`[data-reply-pending-list="${CSS.escape(taskId)}"]`);
+  if (!listEl) return;
+  listEl.innerHTML = renderReplyPendingFilesHtml(taskId);
+  listEl.querySelectorAll("[data-reply-file-rm]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const raw = btn.getAttribute("data-reply-file-rm") || "";
+      const sep = raw.lastIndexOf(":");
+      const id = raw.slice(0, sep);
+      const idx = Number(raw.slice(sep + 1));
+      const cur = replyPendingFiles.get(id) || [];
+      if (Number.isInteger(idx) && idx >= 0) {
+        cur.splice(idx, 1);
+        if (cur.length) replyPendingFiles.set(id, cur);
+        else replyPendingFiles.delete(id);
+        updateReplyPendingList(container, id);
+      }
+    });
+  });
+}
 
 export function renderThreadsView(container, refreshFn) {
   const s = store.state;
@@ -41,7 +113,7 @@ export function renderThreadsView(container, refreshFn) {
               ${th.agents.map((a) => escapeHtml(a)).join(" · ")}
             </div>
             <div class="row-between muted" style="font-size:11px;margin-top:4px">
-              <span>${th.task_count} 个任务</span>
+              <span>${th.task_count} 个任务${th.attachment_count ? ` · <span class="attachment-tag">📎 ${th.attachment_count}</span>` : ""}</span>
               <span>${formatRelativeTime(th.updated_at)}</span>
             </div>
           </div>
@@ -84,15 +156,18 @@ function renderThreadDetail(detail) {
 
     <div class="stack-md">
       ${detail.tasks
-        .map(
-          (t) => `
+        .map((t) => {
+          const taskAttCount = countTaskUniqueAttachments(t);
+          const orphanAtts = getOrphanTaskAttachments(t);
+          return `
         <div class="card" style="background:var(--bg);padding:14px">
           <div class="row-between">
-            <div class="row">
+            <div class="row" style="flex-wrap:wrap">
               <span class="pill ${stateTone(t.state)}">${stateLabel(t.state)}</span>
               <strong>${escapeHtml(t.title)}</strong>
               <span class="muted">→ ${escapeHtml(t.to_agent_id)}</span>
               ${t.model ? `<span class="chip chip-model">${escapeHtml(t.model)}</span>` : ""}
+              ${taskAttCount ? `<span class="attachment-tag">📎 ${taskAttCount}</span>` : ""}
             </div>
             <div class="row">
               ${
@@ -102,6 +177,8 @@ function renderThreadDetail(detail) {
               }
             </div>
           </div>
+
+          ${orphanAtts.length ? `<div style="margin-top:8px">${renderAttachmentsBar(orphanAtts)}</div>` : ""}
 
           <div class="msg-timeline">
             ${(t.messages || [])
@@ -121,6 +198,7 @@ function renderThreadDetail(detail) {
                       <span>${formatDateTime(m.created_at)}</span>
                     </div>
                     <div class="msg-body">${escapeHtml(m.body || JSON.stringify(m.data || {}))}</div>
+                    ${renderAttachmentsBar(m.attachments || [])}
                   </div>
                 `;
               })
@@ -137,15 +215,20 @@ function renderThreadDetail(detail) {
                   </div>
                 </div>`
               : t.state === "input-required"
-                ? `<form class="row" style="margin-top:10px" data-thread-reply="${escapeHtml(t.id)}">
-                    <input type="text" name="body" placeholder="输入补充说明..." required />
-                    <button type="submit" class="btn btn-sm btn-primary">回复并恢复</button>
+                ? `<form class="stack-sm" style="margin-top:10px" data-thread-reply="${escapeHtml(t.id)}">
+                    <div class="row">
+                      <input type="text" name="body" placeholder="输入补充说明..." />
+                      <input type="file" multiple class="hidden" data-reply-file-input="${escapeHtml(t.id)}" />
+                      <button type="button" class="btn btn-sm btn-secondary" data-reply-file-btn="${escapeHtml(t.id)}" style="white-space:nowrap">📎 附件</button>
+                      <button type="submit" class="btn btn-sm btn-primary" style="white-space:nowrap">回复并恢复</button>
+                    </div>
+                    <div class="attachment-pending-list" data-reply-pending-list="${escapeHtml(t.id)}">${renderReplyPendingFilesHtml(t.id)}</div>
                   </form>`
                 : ""
           }
         </div>
-      `
-        )
+      `;
+        })
         .join("")}
     </div>
   `;
@@ -211,13 +294,58 @@ function bindThreadActions(container, refreshFn) {
     });
   });
 
+  container.querySelectorAll("[data-reply-file-btn]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const id = btn.getAttribute("data-reply-file-btn");
+      const input = container.querySelector(`[data-reply-file-input="${CSS.escape(id)}"]`);
+      input?.click();
+    });
+  });
+
+  container.querySelectorAll("[data-reply-file-input]").forEach((input) => {
+    input.addEventListener("change", () => {
+      const id = input.getAttribute("data-reply-file-input");
+      const cur = replyPendingFiles.get(id) || [];
+      for (const f of Array.from(input.files || [])) {
+        const dup = cur.some((x) => x.name === f.name && x.size === f.size && x.lastModified === f.lastModified);
+        if (!dup) cur.push(f);
+      }
+      replyPendingFiles.set(id, cur);
+      input.value = "";
+      updateReplyPendingList(container, id);
+    });
+  });
+
+  for (const form of container.querySelectorAll("[data-thread-reply]")) {
+    const id = form.getAttribute("data-thread-reply");
+    if (id) updateReplyPendingList(container, id);
+  }
+
   container.querySelectorAll("[data-thread-reply]").forEach((form) => {
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       const id = form.getAttribute("data-thread-reply");
-      const text = new FormData(form).get("body");
+      const text = String(new FormData(form).get("body") || "").trim();
+      const files = replyPendingFiles.get(id) || [];
+      if (!text && !files.length) {
+        showToast("请输入补充说明或附加文件", true);
+        return;
+      }
       try {
-        await api.replyTask(id, String(text || "").trim());
+        const uploaded = [];
+        for (const f of files) {
+          const up = await api.uploadFile(f, { taskId: id });
+          uploaded.push({
+            id: up.file.id,
+            uri: up.file.uri,
+            name: up.file.name,
+            mime: up.file.mime,
+            size: up.file.size,
+            sha256: up.file.sha256,
+          });
+        }
+        await api.replyTask(id, text, uploaded);
+        replyPendingFiles.delete(id);
         showToast("已发送回复");
         await reloadThreadAndState();
       } catch (err) {
@@ -225,4 +353,6 @@ function bindThreadActions(container, refreshFn) {
       }
     });
   });
+
+  bindAttachmentPreview(container);
 }

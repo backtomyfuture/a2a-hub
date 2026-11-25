@@ -29,12 +29,17 @@ ah inbox ask <task_id> --prompt "请确认部署目标分支是 main 还是 stag
 # 涉及高危操作需要机主在线 Ed25519 签名放行（转为 auth-required）：
 ah inbox auth <task_id> --reason "需要删除旧数据库表并重建索引"
 ```
-6. 回报完成或失败：
+6. 回报完成或失败（支持 `--attach` 上传并挂载产物文件）：
 ```sh
-ah inbox complete <task_id> --summary "简明结果" --text "详细执行结论"
+ah inbox complete <task_id> --summary "简明结果" --text "详细执行结论" [--attach ./output.txt]
 ah inbox fail <task_id> --error "错误原因" [--retryable]
 ```
 7. Leader 角色按增量水位拉取子任务回执：
 ```sh
 ah inbox updates --agent <你的leader_id> --new
+```
+8. 附件独立上传/下载：
+```sh
+ah file upload <filepath> [--task <task_id>]
+ah file download <file_id|hub://files/...> [--out <filepath>]
 ```

@@ -51,6 +51,11 @@ Content-Type: application/json
 - 查看整条协作对话线程历史：`GET /api/v1/threads/<context_id>`
 
 ## 5. 处理阻塞态
-- 若子任务进入 `input-required`，可查看提问后代答恢复：
+- 若子任务进入 `input-required`，可查看提问后代答恢复（可附带 `attachments`）：
   `POST /api/v1/tasks/<task_id>/reply` `{"body": "补充信息..."}`
 - 若子任务进入 `auth-required`：**仅机主本人有权限在控制台或 `ah present` 进行签名审批**，Leader 请勿尝试伪造或越权放行，请提示机主审批。
+
+## 6. 附件上传、扇出授权与读取
+- **上传文件**：`POST /api/v1/files`（支持 JSON `{"name":"probe.txt","content":"..."}` 或二进制流 + `X-File-Name` 请求头），返回 `file.uri`（`hub://files/<id>`）与 `file.download_path`。
+- **派单挂载附件**：在 `POST /api/v1/tasks` 请求体传入 `"attachments": [{"uri": "hub://files/<id>"}]`（或直接传 URI 字符串数组），Hub 会在同一事务内自动将该文件授权给**所有**受派节点（包括多节点扇出的全部子任务）。
+- **读取/下载附件**：`GET /api/v1/files/<file_id>`（或查看元数据 `GET /api/v1/files/<file_id>/meta`）。若通过 MCP 接入，可直接调用 `a2a_upload_file` 与 `a2a_read_file`。

@@ -34,6 +34,7 @@ import {
 } from "../core/templates.mjs";
 import { validateWebhookUrl } from "../core/webhooks.mjs";
 import {
+  actorCanAccessFile,
   actorCanControlTaskAsSender,
   actorCanOperateTaskAsWorker,
   actorCanSeeTask,
@@ -247,10 +248,14 @@ export function startHubHttpServer({
 
     const tasks = store.listTasks({ limit: 300, summaryOnly: true });
     const threads = taskService.listThreads({ limit: 80, includeTasks: false });
-    const pendingActions = tasks.filter((t) => t.state === "auth-required" || t.state === "input-required").map((t) => ({
-      ...t,
-      messages: store.listMessages(t.id),
-    }));
+    const pendingActions = tasks.filter((t) => t.state === "auth-required" || t.state === "input-required").map((t) => {
+      const full = store.getTask(t.id);
+      return {
+        ...t,
+        attachments: full?.attachments || [],
+        messages: store.listMessages(t.id),
+      };
+    });
     const scheduleList = schedules ? schedules.listWithStatus(null, now) : [];
 
     return {
@@ -465,6 +470,8 @@ export function startHubHttpServer({
             store,
             taskService,
             broker,
+            fileStore,
+            hubUrlResolver: getHubUrl,
             formatAgentsPublicList,
             signal: ac.signal,
           });
@@ -1278,6 +1285,7 @@ export function startHubHttpServer({
         inputText: body.input_text ?? body.prompt ?? body.input ?? "",
         params: body.params || {},
         attachments: body.attachments || [],
+        actor,
         model: body.model || "",
         priority: body.priority,
         contextId: body.context_id || "",
@@ -1355,6 +1363,7 @@ export function startHubHttpServer({
             data: body.data || {},
             usage: body.usage || null,
             attachments: body.attachments || [],
+            actor,
           });
           return sendJson(res, 200, { ok: true, task });
         }
@@ -1397,6 +1406,7 @@ export function startHubHttpServer({
           body: body.body ?? body.text ?? body.answer ?? "",
           data: body.data || {},
           attachments: body.attachments || [],
+          actor,
         });
         return sendJson(res, 200, { ok: true, task });
       }
@@ -1469,6 +1479,13 @@ export function startHubHttpServer({
           name = decodeURIComponent(name);
         } catch {}
       }
+      if (taskId) {
+        const targetTask = store.getTask(taskId);
+        if (!targetTask) return sendError(res, 404, "关联任务不存在", "task_not_found");
+        if (!actorCanSeeTask(actor, targetTask, store)) {
+          return sendError(res, 403, "无权向该任务上传附件", "forbidden");
+        }
+      }
       const meta = fileStore.put({
         buffer: buf,
         name,
@@ -1476,24 +1493,64 @@ export function startHubHttpServer({
         ownerNode: actor.id,
         taskId,
       });
-      return sendJson(res, 201, { ok: true, file: meta });
+      const downloadPath = `/api/v1/files/${meta.id}`;
+      return sendJson(res, 201, {
+        ok: true,
+        file: {
+          ...meta,
+          download_path: downloadPath,
+          download_url: `${getHubUrl()}${downloadPath}`,
+        },
+      });
+    }
+
+    m = /^\/api\/v1\/files\/([a-f0-9]{16,64})\/meta$/.exec(pathname);
+    if (method === "GET" && m) {
+      if (!fileStore) return sendError(res, 500, "FileStore 未就绪", "no_file_store");
+      const meta = fileStore.getMeta(m[1]);
+      if (!meta) return sendError(res, 404, "文件不存在或已过期", "not_found");
+      if (!actorCanAccessFile(actor, meta, store)) {
+        return sendError(res, 403, "无权访问该文件元数据", "forbidden");
+      }
+      const downloadPath = `/api/v1/files/${meta.id}`;
+      return sendJson(res, 200, {
+        ok: true,
+        file: {
+          ...meta,
+          download_path: downloadPath,
+          download_url: `${getHubUrl()}${downloadPath}`,
+        },
+      });
     }
 
     m = /^\/api\/v1\/files\/([a-f0-9]{16,64})$/.exec(pathname);
     if (method === "GET" && m) {
+      if (!fileStore) return sendError(res, 500, "FileStore 未就绪", "no_file_store");
       const read = fileStore.readBuffer(m[1]);
       if (!read) return sendError(res, 404, "文件不存在或已过期", "not_found");
-      if (actor.kind !== "owner") {
-        const allowed =
-          read.meta.owner_node === actor.id ||
-          (actor.kind === "device" && deviceOwnsAgent(store, actor.id, read.meta.owner_node)) ||
-          (read.meta.task_id && actorCanSeeTask(actor, store.getTask(read.meta.task_id), store));
-        if (!allowed) return sendError(res, 403, "无权下载该文件", "forbidden");
+      if (!actorCanAccessFile(actor, read.meta, store)) {
+        return sendError(res, 403, "无权下载该文件", "forbidden");
       }
+      const SAFE_INLINE_MIMES = new Set([
+        "text/plain",
+        "text/markdown",
+        "text/csv",
+        "application/json",
+        "image/png",
+        "image/jpeg",
+        "image/gif",
+        "image/webp",
+        "application/pdf",
+      ]);
+      const baseMime = String(read.meta.mime || "application/octet-stream").split(";")[0].trim().toLowerCase();
+      const allowInline = url.searchParams.get("inline") === "1" && SAFE_INLINE_MIMES.has(baseMime);
+      const dispType = allowInline ? "inline" : "attachment";
+      const asciiName = read.meta.name.replace(/[^\x20-\x7E]/g, "_").replace(/["\\]/g, "_") || "file.bin";
       res.writeHead(200, {
         "Content-Type": read.meta.mime || "application/octet-stream",
         "Content-Length": read.buffer.byteLength,
-        "Content-Disposition": `attachment; filename="${encodeURIComponent(read.meta.name)}"`,
+        "Content-Disposition": `${dispType}; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(read.meta.name)}`,
+        "Content-Security-Policy": "default-src 'none'; sandbox",
         "X-Content-Type-Options": "nosniff",
       });
       res.end(read.buffer);

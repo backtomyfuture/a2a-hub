@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { HubStore } from "../src/store/db.mjs";
-import { FileStore, parseHubFileUri } from "../src/store/files.mjs";
+import { FileStore, extractHubFileId, guessMimeByFilename, parseHubFileUri } from "../src/store/files.mjs";
 
 function makeTempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ah-test-store-"));
@@ -139,6 +139,57 @@ test("FileStore: 文件上传、SHA256 校验与过期自动清理", () => {
     assert.equal(removed, 1);
     assert.equal(files.getMeta(expired.id), null);
     assert.ok(files.getMeta(put.id));
+
+    store.close();
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("FileLinks & Backfill: 多任务绑定、幂等关联与历史库自动回填", () => {
+  const dir = makeTempDir();
+  try {
+    const dbPath = path.join(dir, "hub.db");
+    const store = new HubStore(dbPath);
+    const files = new FileStore(store, dir);
+
+    assert.equal(guessMimeByFilename("probe.txt"), "text/plain; charset=utf-8");
+    assert.equal(guessMimeByFilename("report.json"), "application/json; charset=utf-8");
+    assert.equal(guessMimeByFilename("photo.png"), "image/png");
+
+    const f1 = files.put({
+      buffer: Buffer.from("MANGO-4729", "utf8"),
+      name: "hub-probe.txt",
+      mime: "text/plain",
+      ownerNode: "muse",
+      taskId: null,
+    });
+    assert.equal(extractHubFileId(f1.uri), f1.id);
+    assert.equal(extractHubFileId(`/api/v1/files/${f1.id}`), f1.id);
+    assert.equal(extractHubFileId(`https://hub.example.com/api/v1/files/${f1.id}`), f1.id);
+
+    // 模拟升级前的历史任务（仅写入 tasks.attachments_json 与 messages.attachments_json，未写 file_links）
+    const now = Date.now();
+    for (const [tid, ag] of [["tsk_old_1", "w1"], ["tsk_old_2", "w2"]]) {
+      store.db.prepare(`
+        INSERT INTO tasks (
+          id, context_id, from_node, to_agent_id, title, input_text,
+          params_json, attachments_json, model, state, priority, source,
+          progress_json, created_at, updated_at, changed_seq
+        ) VALUES (?, 'ctx_old', 'muse', ?, '老任务', 'read', '{}', ?, '', 'submitted', 5, 'direct', '{}', ?, ?, 1)
+      `).run(tid, ag, JSON.stringify([{ uri: f1.uri, name: f1.name }]), now, now);
+    }
+
+    const backfilled = store.backfillFileLinks();
+    assert.equal(backfilled, 2, "应自动为 2 个历史扇出任务回填 file_links");
+    assert.equal(store.backfillFileLinks(), 0, "重复回填必须幂等");
+
+    const linked = store.listFileLinkedTasks(f1.id);
+    assert.deepEqual(linked.map((t) => t.id).sort(), ["tsk_old_1", "tsk_old_2"]);
+
+    // 级联删除单条任务不应影响文件本身与另一条任务的关联
+    store.db.prepare("DELETE FROM tasks WHERE id = 'tsk_old_1'").run();
+    assert.deepEqual(store.listFileLinkedTasks(f1.id).map((t) => t.id), ["tsk_old_2"]);
 
     store.close();
   } finally {

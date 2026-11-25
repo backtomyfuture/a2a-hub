@@ -8,9 +8,66 @@ export const DEFAULT_MAX_FILE_BYTES = 50 * 1024 * 1024;
 export const DEFAULT_FILE_TTL_MS = 7 * 24 * 3600 * 1000;
 export const FILE_ID_RE = /^[a-f0-9]{16,64}$/;
 
+const MIME_BY_EXT = {
+  ".txt": "text/plain; charset=utf-8",
+  ".log": "text/plain; charset=utf-8",
+  ".md": "text/markdown; charset=utf-8",
+  ".markdown": "text/markdown; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".csv": "text/csv; charset=utf-8",
+  ".yaml": "text/yaml; charset=utf-8",
+  ".yml": "text/yaml; charset=utf-8",
+  ".xml": "application/xml; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".cjs": "text/javascript; charset=utf-8",
+  ".ts": "text/typescript; charset=utf-8",
+  ".mts": "text/typescript; charset=utf-8",
+  ".py": "text/x-python; charset=utf-8",
+  ".sh": "text/x-shellscript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".html": "text/html; charset=utf-8",
+  ".htm": "text/html; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".pdf": "application/pdf",
+  ".zip": "application/zip",
+};
+
+export function guessMimeByFilename(name) {
+  const ext = path.extname(String(name || "").trim()).toLowerCase();
+  return MIME_BY_EXT[ext] || "application/octet-stream";
+}
+
 export function parseHubFileUri(uri) {
   const m = /^hub:\/\/files\/([a-f0-9]{16,64})$/.exec(String(uri || "").trim());
   return m ? m[1] : null;
+}
+
+export function extractHubFileId(att) {
+  if (!att) return null;
+  if (typeof att === "string") {
+    const raw = att.trim();
+    const byHub = parseHubFileUri(raw);
+    if (byHub) return byHub;
+    const m = /(?:^|\/)api\/v1\/files\/([a-f0-9]{16,64})(?:[/?#]|$)/.exec(raw);
+    return m ? m[1] : null;
+  }
+  if (typeof att === "object") {
+    for (const candidate of [att.uri, att.url, att.download_path]) {
+      const hit = extractHubFileId(candidate);
+      if (hit) return hit;
+    }
+    for (const rawId of [att.file_id, att.id]) {
+      const s = String(rawId || "").trim();
+      if (FILE_ID_RE.test(s)) return s;
+    }
+  }
+  return null;
 }
 
 export class FileStore {
@@ -59,6 +116,18 @@ export class FileStore {
       INSERT INTO files (id, name, mime, size, sha256, owner_node, task_id, created_at, expires_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(id, safeName, safeMime, buf.byteLength, sha256, String(ownerNode || ""), taskId ? String(taskId) : null, now, expiresAt);
+
+    if (taskId && typeof this.store.getTask === "function" && typeof this.store.linkFileToTask === "function") {
+      const linkedTask = this.store.getTask(String(taskId));
+      if (linkedTask) {
+        this.store.linkFileToTask({
+          fileId: id,
+          taskId: linkedTask.id,
+          contextId: linkedTask.context_id,
+          createdAt: now,
+        });
+      }
+    }
 
     return {
       id,

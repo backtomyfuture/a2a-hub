@@ -132,6 +132,8 @@ test("MCP Server (Streamable HTTP & Token Identity Binding): 按 Token 角色动
       "a2a_poll_inbox",
       "a2a_claim_task",
       "a2a_submit_receipt",
+      "a2a_upload_file",
+      "a2a_read_file",
     ]);
     for (const tool of workerToolsRes.result.tools) {
       assert.equal(tool.annotations?.destructiveHint, false, `${tool.name} 应显式声明 destructiveHint=false`);
@@ -153,6 +155,8 @@ test("MCP Server (Streamable HTTP & Token Identity Binding): 按 Token 角色动
       "a2a_dispatch_task",
       "a2a_check_updates",
       "a2a_reply_task",
+      "a2a_upload_file",
+      "a2a_read_file",
     ]);
     for (const tool of leaderToolsRes.result.tools) {
       assert.equal(tool.annotations?.destructiveHint, false, `${tool.name} 应显式声明 destructiveHint=false`);
@@ -314,6 +318,123 @@ test("MCP Server (Streamable HTTP & Token Identity Binding): 按 Token 角色动
     });
     assert.equal(upd2.result.structuredContent.updates.length, 1);
     assert.equal(upd2.result.structuredContent.updates[0].receipt.text, complexReport);
+
+    // 7) MCP 附件完整闭环：a2a_upload_file -> a2a_dispatch_task(attachments) -> a2a_read_file -> 回执附带产物 + 越权读拦截
+    const bystanderCreated = await owner.post("/api/v1/agents", {
+      id: "outsider",
+      name: "Outsider",
+      role: "worker",
+    });
+    const outsiderMcp = new GatewayClient(rt.url, { token: bystanderCreated.token });
+
+    const mcpUp = await leaderMcp.post("/api/v1/mcp", {
+      jsonrpc: "2.0",
+      id: 14,
+      method: "tools/call",
+      params: {
+        name: "a2a_upload_file",
+        arguments: { name: "probe.txt", content: "MANGO-4729" },
+      },
+    });
+    assert.equal(mcpUp.result.isError, false);
+    const upFile = mcpUp.result.structuredContent.file;
+    assert.ok(upFile.uri.startsWith("hub://files/"));
+
+    const mcpAttDispatch = await leaderMcp.post("/api/v1/mcp", {
+      jsonrpc: "2.0",
+      id: 15,
+      method: "tools/call",
+      params: {
+        name: "a2a_dispatch_task",
+        arguments: {
+          to: ["gemini"],
+          title: "读取 MCP 附件",
+          input_text: "请用 a2a_read_file 读取附件并返回验证码",
+          attachments: [upFile.uri],
+        },
+      },
+    });
+    assert.equal(mcpAttDispatch.result.isError, false);
+    const attTaskId = mcpAttDispatch.result.structuredContent.tasks[0].id;
+
+    // 第三方 Agent 不得读取未授权的附件
+    const outsiderRead = await outsiderMcp.post("/api/v1/mcp", {
+      jsonrpc: "2.0",
+      id: 16,
+      method: "tools/call",
+      params: {
+        name: "a2a_read_file",
+        arguments: { uri: upFile.uri },
+      },
+    });
+    assert.equal(outsiderRead.result.isError, true);
+    assert.equal(outsiderRead.result.structuredContent.error, "forbidden");
+
+    // 目标 Worker 认领后调用 a2a_read_file 读取并回传新附件
+    const claimAtt = await workerMcp.post("/api/v1/mcp", {
+      jsonrpc: "2.0",
+      id: 17,
+      method: "tools/call",
+      params: {
+        name: "a2a_claim_task",
+        arguments: { task_id: attTaskId },
+      },
+    });
+    assert.equal(claimAtt.result.structuredContent.task.attachments[0].id, upFile.id);
+
+    const workerRead = await workerMcp.post("/api/v1/mcp", {
+      jsonrpc: "2.0",
+      id: 18,
+      method: "tools/call",
+      params: {
+        name: "a2a_read_file",
+        arguments: { uri: upFile.uri },
+      },
+    });
+    assert.equal(workerRead.result.isError, false);
+    assert.equal(workerRead.result.structuredContent.encoding, "utf8");
+    assert.equal(workerRead.result.structuredContent.content, "MANGO-4729");
+
+    const workerUp = await workerMcp.post("/api/v1/mcp", {
+      jsonrpc: "2.0",
+      id: 19,
+      method: "tools/call",
+      params: {
+        name: "a2a_upload_file",
+        arguments: { name: "receipt.json", content: "{\"code\":\"MANGO-4729\"}" },
+      },
+    });
+    const receiptFile = workerUp.result.structuredContent.file;
+
+    const completeAtt = await workerMcp.post("/api/v1/mcp", {
+      jsonrpc: "2.0",
+      id: 20,
+      method: "tools/call",
+      params: {
+        name: "a2a_submit_receipt",
+        arguments: {
+          task_id: attTaskId,
+          status: "completed",
+          summary: "已读取 MANGO-4729",
+          text: "验证码 MANGO-4729，附回执文件",
+          attachments: [receiptFile.uri],
+        },
+      },
+    });
+    assert.equal(completeAtt.result.isError, false);
+    assert.equal(completeAtt.result.structuredContent.task.receipt.attachments[0].id, receiptFile.id);
+
+    const leaderReadOut = await leaderMcp.post("/api/v1/mcp", {
+      jsonrpc: "2.0",
+      id: 21,
+      method: "tools/call",
+      params: {
+        name: "a2a_read_file",
+        arguments: { file_id: receiptFile.id },
+      },
+    });
+    assert.equal(leaderReadOut.result.isError, false);
+    assert.equal(leaderReadOut.result.structuredContent.content, "{\"code\":\"MANGO-4729\"}");
   } finally {
     await rt.stop();
     fs.rmSync(dir, { recursive: true, force: true });

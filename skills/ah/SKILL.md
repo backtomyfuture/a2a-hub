@@ -19,19 +19,21 @@ ah agents pause <agent_id>
 ah agents resume <agent_id>
 ```
 
-### 2. 派发任务（支持多 Agent 并发扇出与同线程续接）
+### 2. 派发任务（支持多 Agent 并发扇出、附件与同线程续接）
 ```sh
-ah task create --to <agent_id1,agent_id2> --title "简短标题" --text "详细目标与验收要求"
+ah task create --to <agent_id1,agent_id2> --title "简短标题" --text "详细目标与验收要求" [--attach ./spec.md]
 # 在同一条 Thread 下延续上下文多轮执行：
 ah task create --to <agent_id> --context <ctx_id> --text "补充下一步要求"
 ```
 
-### 3. 查看与控制任务
+### 3. 查看、附件传输与控制任务
 ```sh
 ah task list [--state working] [--agent <agent_id>]
 ah task show <task_id>
-ah task reply <task_id> "机主补充说明"
+ah task reply <task_id> "机主补充说明" [--attach ./patch.diff]
 ah task cancel <task_id>
+ah file upload ./report.pdf [--task <task_id>]
+ah file download <file_id|hub://files/...> [--out ./report.pdf]
 ```
 
 ### 4. 处理待审批（auth-required）与追问（input-required）

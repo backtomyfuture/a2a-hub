@@ -29,6 +29,9 @@ test("CLI Wrapper & Flags: bin/ah.mjs --version、ah workers add/remove 与布�
   assert.equal(parsedNoDev["no-device"], true);
   assert.equal(parsedNoDev["skip-skill"], true);
 
+  const multiAttach = parseSimpleFlags(["create", "--attach", "a.txt", "--attach", "b.txt"]);
+  assert.deepEqual(multiAttach.attach, ["a.txt", "b.txt"]);
+
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ah-test-workers-cli-"));
   try {
     execFileSync(
@@ -166,16 +169,31 @@ test("AgentDaemon: 独立长连接 Agent 认领并执行完成闭环", async () 
       agentId: "headless-worker",
       hubUrl: rt.url,
       token: created.token,
-      command: "mock-run {prompt}",
-      runner: async () => ({ code: 0, stdout: "agent done", stderr: "" }),
+      command: "mock-run {prompt_file}",
+      runner: async (cmd, stdinText, timeoutSec, cwd, extraEnv) => {
+        const pText = fs.readFileSync(path.join(extraEnv.AH_RUN_DIR, "prompt.txt"), "utf8");
+        const inJson = JSON.parse(fs.readFileSync(path.join(extraEnv.AH_RUN_DIR, "input.json"), "utf8"));
+        assert.ok(pText.includes("你的 Agent ID：headless-worker"));
+        assert.equal(inJson.downloaded_files.length, 1);
+        assert.equal(fs.readFileSync(inJson.downloaded_files[0].local_path, "utf8"), "MANGO-4729");
+        assert.ok(pText.includes("hub-probe.txt"));
+        return { code: 0, stdout: "agent done", stderr: "" };
+      },
       pollTimeoutSec: 1,
     });
     await daemon.registerOnline();
+
+    const up = await owner.uploadFile({
+      buffer: Buffer.from("MANGO-4729", "utf8"),
+      name: "hub-probe.txt",
+      mime: "text/plain",
+    });
 
     const disp = await owner.dispatchTask({
       to: "headless-worker",
       title: "独立执行测试",
       input_text: "hello",
+      attachments: [up.file.uri],
     });
     const handled = await daemon.runOnce();
     assert.equal(handled, 1);
@@ -183,6 +201,24 @@ test("AgentDaemon: 独立长连接 Agent 认领并执行完成闭环", async () 
     const finalTask = (await owner.getTask(disp.tasks[0].id)).task;
     assert.equal(finalTask.state, "completed");
     assert.equal(finalTask.receipt.text, "agent done");
+
+    // 验证 ah file upload / download CLI 子命令（必须用异步 execFile，避免阻塞同进程 Hub 的事件循环）
+    const srcFile = path.join(agDir, "cli-upload.txt");
+    const dlOutFile = path.join(agDir, "cli-download.txt");
+    fs.writeFileSync(srcFile, "CLI FILE PAYLOAD", "utf8");
+    const { stdout: upOut } = await execFileAsync(
+      process.execPath,
+      [path.resolve("bin/ah.mjs"), "file", "upload", srcFile, "--hub", rt.url, "--token", "ag_owner_tok"],
+      { encoding: "utf8" }
+    );
+    const upJson = JSON.parse(upOut);
+    assert.ok(upJson.file.id);
+    await execFileAsync(
+      process.execPath,
+      [path.resolve("bin/ah.mjs"), "file", "download", upJson.file.uri, "--out", dlOutFile, "--hub", rt.url, "--token", "ag_owner_tok"],
+      { encoding: "utf8" }
+    );
+    assert.equal(fs.readFileSync(dlOutFile, "utf8"), "CLI FILE PAYLOAD");
   } finally {
     await rt.stop();
     fs.rmSync(hubDir, { recursive: true, force: true });

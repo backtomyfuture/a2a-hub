@@ -2,7 +2,9 @@
 // 统一处理单/多节点派单、幂等去重、认领租约、上下文历史汇总、Chase 提问回复、
 // Ed25519 审批签名放行与 Leader 增量水位消费；全部状态变更都在单事务中完成。
 
+import { actorCanAccessFile } from "../server/auth.mjs";
 import { randomId } from "../store/db.mjs";
+import { extractHubFileId } from "../store/files.mjs";
 import { controlKeysIn, clampTimeoutSec, MAX_RETRIES, STALE_MIN } from "./config.mjs";
 import { signDecision } from "./approval-sign.mjs";
 
@@ -52,6 +54,57 @@ export class TaskService {
     this.approvalPrivateKey = privateKey;
   }
 
+  _resolveAttachments(rawAttachments, { actor = null, fromNode = "owner" } = {}) {
+    const items = (Array.isArray(rawAttachments) ? rawAttachments : rawAttachments ? [rawAttachments] : []).filter(Boolean);
+    if (!items.length) return { attachments: [], fileIds: [] };
+
+    const effectiveActor =
+      actor || (String(fromNode) === "owner" ? { kind: "owner", id: "owner" } : { kind: "agent", id: String(fromNode) });
+    const normalized = [];
+    const fileIds = new Set();
+
+    for (const item of items) {
+      const fileId = extractHubFileId(item);
+      if (fileId) {
+        const meta = this.store.getFileMeta(fileId);
+        if (!meta) {
+          throw makeError(`附件不存在或已过期: ${fileId}`, 404, "file_not_found");
+        }
+        if (!actorCanAccessFile(effectiveActor, meta, this.store)) {
+          throw makeError(`无权引用该附件: ${fileId}`, 403, "file_forbidden");
+        }
+        const customName = typeof item === "object" && item?.name ? String(item.name).trim().slice(0, 200) : "";
+        normalized.push({
+          id: meta.id,
+          uri: `hub://files/${meta.id}`,
+          name: customName || meta.name,
+          mime: meta.mime,
+          size: meta.size,
+          sha256: meta.sha256,
+          download_path: `/api/v1/files/${meta.id}`,
+        });
+        fileIds.add(meta.id);
+      } else if (typeof item === "string") {
+        const uri = item.trim();
+        if (!uri) continue;
+        normalized.push({
+          uri,
+          name: uri.split("/").pop()?.slice(0, 200) || "attachment",
+        });
+      } else if (typeof item === "object") {
+        const out = {};
+        if (item.uri) out.uri = String(item.uri);
+        if (item.url) out.url = String(item.url);
+        if (item.name) out.name = String(item.name).slice(0, 200);
+        if (item.mime) out.mime = String(item.mime).slice(0, 120);
+        if (Number.isFinite(Number(item.size))) out.size = Number(item.size);
+        if (Object.keys(out).length > 0) normalized.push(out);
+      }
+    }
+
+    return { attachments: normalized, fileIds: [...fileIds] };
+  }
+
   // 构建同 Thread（context_id）的跨任务前序摘要，便于新接入的 Worker 或续接任务拿到完整前情。
   buildContextHistory(contextId, excludeTaskId = null, limit = 10) {
     const tasks = this.store.listTasks({ context_id: contextId, order: "asc", limit: 50 });
@@ -60,6 +113,8 @@ export class TaskService {
       if (excludeTaskId && t.id === excludeTaskId) continue;
       if (!["completed", "failed", "input-required", "auth-required", "working"].includes(t.state)) continue;
       const summary = t.receipt?.summary || t.receipt?.text || t.error_message || "";
+      // 同轮并发扇出下仍在执行且尚无产出的兄弟任务，不注入其他节点的上下文前情，避免浪费 Token 与身份串联
+      if (t.state === "working" && !String(summary).trim()) continue;
       history.push({
         task_id: t.id,
         to_agent_id: t.to_agent_id,
@@ -91,6 +146,7 @@ export class TaskService {
     inputText = "",
     params = {},
     attachments = [],
+    actor = null,
     model = "",
     priority = 5,
     contextId = "",
@@ -125,6 +181,7 @@ export class TaskService {
     const now = Date.now();
 
     return this.store.transaction(() => {
+      const { attachments: normalizedAttachments, fileIds } = this._resolveAttachments(attachments, { actor, fromNode });
       const created = [];
       for (const targetId of targets) {
         const agent = this.store.getAgent(targetId);
@@ -165,7 +222,7 @@ export class TaskService {
           taskTitle,
           String(inputText || ""),
           JSON.stringify(params && typeof params === "object" ? params : {}),
-          JSON.stringify(Array.isArray(attachments) ? attachments : []),
+          JSON.stringify(normalizedAttachments),
           chosenModel,
           initialState,
           safePriority,
@@ -190,9 +247,19 @@ export class TaskService {
             params: params && typeof params === "object" ? params : {},
             to_agent_id: agent.id,
           },
-          attachments: Array.isArray(attachments) ? attachments : [],
+          attachments: normalizedAttachments,
           created_at: now,
         });
+
+        for (const fid of fileIds) {
+          this.store.linkFileToTask({
+            fileId: fid,
+            taskId,
+            contextId: finalContextId,
+            messageId: dispatchMsg.id,
+            createdAt: now,
+          });
+        }
 
         let authRequestId = null;
         if (requirePreflight) {
@@ -466,7 +533,7 @@ export class TaskService {
     });
   }
 
-  complete(taskId, { actorId, summary = "", text = "", artifacts = [], data = {}, usage = null, attachments = [] } = {}) {
+  complete(taskId, { actorId, summary = "", text = "", artifacts = [], data = {}, usage = null, attachments = [], actor = null } = {}) {
     return this.store.transaction(() => {
       const task = this.store.getTask(taskId);
       if (!task) throw makeError("任务不存在", 404, "task_not_found");
@@ -475,10 +542,15 @@ export class TaskService {
       }
       const now = Date.now();
       const seq = this.store.nextSeq();
+      const { attachments: normalizedAttachments, fileIds } = this._resolveAttachments(attachments, {
+        actor,
+        fromNode: actorId || task.to_agent_id,
+      });
       const receipt = {
         summary: String(summary || text || "").slice(0, 600),
         text: String(text || summary || ""),
         artifacts: Array.isArray(artifacts) ? artifacts : [],
+        attachments: normalizedAttachments,
         data: data && typeof data === "object" ? data : {},
         usage: usage || null,
         completed_by: String(actorId || task.to_agent_id),
@@ -502,9 +574,19 @@ export class TaskService {
         kind: "receipt",
         body: receipt.text || receipt.summary,
         data: receipt,
-        attachments: Array.isArray(attachments) ? attachments : [],
+        attachments: normalizedAttachments,
         created_at: now,
       });
+
+      for (const fid of fileIds) {
+        this.store.linkFileToTask({
+          fileId: fid,
+          taskId: task.id,
+          contextId: task.context_id,
+          messageId: msg.id,
+          createdAt: now,
+        });
+      }
 
       this.store.emitChange({
         type: "task.completed",
@@ -606,7 +688,7 @@ export class TaskService {
     });
   }
 
-  reply(taskId, { fromNode = "owner", body = "", data = {}, attachments = [] } = {}) {
+  reply(taskId, { fromNode = "owner", body = "", data = {}, attachments = [], actor = null } = {}) {
     if (!String(body || "").trim() && !attachments?.length) {
       throw makeError("回复内容不能为空", 400, "missing_body");
     }
@@ -618,6 +700,7 @@ export class TaskService {
       }
       const now = Date.now();
       const seq = this.store.nextSeq();
+      const { attachments: normalizedAttachments, fileIds } = this._resolveAttachments(attachments, { actor, fromNode });
       this.store.db.prepare(`
         UPDATE tasks
         SET state = 'submitted', claimed_by = NULL, claimed_at = NULL, lease_until = NULL, updated_at = ?, changed_seq = ?
@@ -632,9 +715,19 @@ export class TaskService {
         kind: "answer",
         body: String(body || ""),
         data: data && typeof data === "object" ? data : {},
-        attachments: Array.isArray(attachments) ? attachments : [],
+        attachments: normalizedAttachments,
         created_at: now,
       });
+
+      for (const fid of fileIds) {
+        this.store.linkFileToTask({
+          fileId: fid,
+          taskId: task.id,
+          contextId: task.context_id,
+          messageId: msg.id,
+          createdAt: now,
+        });
+      }
 
       this.store.emitChange({
         type: "task.resumed",
@@ -866,6 +959,8 @@ export class TaskService {
             title: t.title,
             from_node: t.from_node,
             priority: t.priority,
+            attachments: t.attachments || [],
+            attachment_count: (t.attachments || []).length,
             created_at: t.created_at,
           }))
         : [],
@@ -883,7 +978,15 @@ export class TaskService {
     });
 
     const groups = new Map();
+    const visibleTaskIds = new Set();
+    const attKeyOf = (att) => {
+      if (!att) return "";
+      if (typeof att === "string") return att.trim();
+      return String(att.id || att.file_id || att.uri || att.url || att.name || "");
+    };
+
     for (const t of tasks) {
+      visibleTaskIds.add(t.id);
       let g = groups.get(t.context_id);
       if (!g) {
         g = {
@@ -896,6 +999,9 @@ export class TaskService {
           states: {},
           task_count: 0,
           pending_action_count: 0,
+          attachment_count: 0,
+          _attKeys: new Set(),
+          _fallbackAttCount: 0,
           ...(includeTasks ? { tasks: [] } : {}),
         };
         groups.set(t.context_id, g);
@@ -911,10 +1017,57 @@ export class TaskService {
       if (t.state === "input-required" || t.state === "auth-required") {
         g.pending_action_count += 1;
       }
+      if (Array.isArray(t.attachments) || Array.isArray(t.receipt?.attachments)) {
+        for (const att of [...(t.attachments || []), ...(t.receipt?.attachments || [])]) {
+          const k = attKeyOf(att);
+          if (k) g._attKeys.add(k);
+        }
+      } else if (Number(t.attachment_count || 0) > 0) {
+        g._fallbackAttCount += Number(t.attachment_count || 0);
+      }
       if (includeTasks) g.tasks.push(t);
     }
 
-    const list = [...groups.values()].sort((a, b) => b.updated_at - a.updated_at);
+    if (groups.size > 0) {
+      if (!includeTasks) {
+        const now = Date.now();
+        const linkRows = this.store.db.prepare(
+          `SELECT fl.task_id, fl.context_id, fl.file_id
+           FROM file_links fl
+           JOIN files f ON f.id = fl.file_id
+           WHERE (f.expires_at IS NULL OR f.expires_at > ?)`
+        ).all(now);
+        for (const row of linkRows) {
+          if (!visibleTaskIds.has(row.task_id)) continue;
+          const g = groups.get(row.context_id);
+          if (g && row.file_id) g._attKeys.add(String(row.file_id));
+        }
+      }
+      const answerRows = this.store.db.prepare(
+        "SELECT task_id, context_id, attachments_json FROM messages WHERE kind = 'answer' AND attachments_json != '[]'"
+      ).all();
+      for (const row of answerRows) {
+        if (!visibleTaskIds.has(row.task_id)) continue;
+        const g = groups.get(row.context_id);
+        if (!g) continue;
+        try {
+          const atts = JSON.parse(row.attachments_json || "[]");
+          for (const att of Array.isArray(atts) ? atts : []) {
+            const k = attKeyOf(att);
+            if (k) g._attKeys.add(k);
+          }
+        } catch {}
+      }
+    }
+
+    const list = [...groups.values()]
+      .map((g) => {
+        const attachment_count = g._attKeys.size > 0 ? g._attKeys.size : g._fallbackAttCount;
+        delete g._attKeys;
+        delete g._fallbackAttCount;
+        return { ...g, attachment_count };
+      })
+      .sort((a, b) => b.updated_at - a.updated_at);
     return list.slice(0, Math.min(Math.max(Number(limit || 60), 1), 300));
   }
 

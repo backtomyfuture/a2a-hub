@@ -141,3 +141,117 @@ test("Auth Matrix: Worker / Leader / Device 权限隔离与防冒充、审批严
     await srv.close();
   }
 });
+
+test("File Auth Matrix: 扇出多节点自动授权下载、回执与回复附件互访及越权引用拦截", async () => {
+  const srv = await startTestServer("owner_tok");
+  try {
+    const devA = srv.store.upsertDevice({ id: "dev-a", name: "Dev A", issueToken: true });
+    const devB = srv.store.upsertDevice({ id: "dev-b", name: "Dev B", issueToken: true });
+    srv.store.syncDeviceWorkers("dev-a", [{ key: "cli", name: "Dev A CLI" }]);
+    srv.store.syncDeviceWorkers("dev-b", [{ key: "cli", name: "Dev B CLI" }]);
+
+    const leader = srv.store.createAgent({ id: "muse", name: "Muse", role: "leader" });
+    const cloudWorker = srv.store.createAgent({ id: "grok-bot", name: "Grok", role: "worker" });
+    const bystander = srv.store.createAgent({ id: "bystander", name: "Other", role: "worker" });
+    const badLeader = srv.store.createAgent({ id: "evil-leader", name: "Evil", role: "leader" });
+
+    // 1) Leader 上传文件（task_id=null），随后扇出派给设备节点与云端节点
+    const upRes = await fetch(`${srv.baseUrl}/api/v1/files`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${leader.token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "hub-probe.txt", content: "CODE=MANGO-4729", mime: "text/plain" }),
+    });
+    assert.equal(upRes.status, 201);
+    const probeFile = (await upRes.json()).file;
+    assert.equal(probeFile.task_id, null);
+
+    // 越权窃取防护：第三方 Leader 不能在派单中引用别人的文件 ID
+    const stealResp = await fetch(`${srv.baseUrl}/api/v1/tasks`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${badLeader.token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        to: ["bystander"],
+        title: "越权引用",
+        input_text: "read",
+        attachments: [{ uri: probeFile.uri }],
+      }),
+    });
+    assert.equal(stealResp.status, 403);
+
+    // 正常扇出派单给 dev-a--cli 与 grok-bot
+    const dispResp = await fetch(`${srv.baseUrl}/api/v1/tasks`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${leader.token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        to: ["dev-a--cli", "grok-bot"],
+        title: "扇出读附件",
+        input_text: "读取附件并汇报验证码",
+        attachments: [{ uri: probeFile.uri }],
+      }),
+    });
+    assert.equal(dispResp.status, 201);
+    const dispJson = await dispResp.json();
+    assert.equal(dispJson.tasks.length, 2);
+    assert.equal(dispJson.tasks[0].attachments[0].size, 15);
+    assert.equal(dispJson.tasks[0].attachments[0].download_path, `/api/v1/files/${probeFile.id}`);
+
+    // 2) 设备节点 (dev-a) 与云端节点 (grok-bot) 均可下载原文件及元数据；未参与节点 (dev-b / bystander) 返回 403
+    for (const tok of [devA.token, cloudWorker.token, leader.token]) {
+      const dl = await fetch(`${srv.baseUrl}/api/v1/files/${probeFile.id}`, {
+        headers: { Authorization: `Bearer ${tok}` },
+      });
+      assert.equal(dl.status, 200);
+      assert.equal(await dl.text(), "CODE=MANGO-4729");
+
+      const meta = await fetch(`${srv.baseUrl}/api/v1/files/${probeFile.id}/meta`, {
+        headers: { Authorization: `Bearer ${tok}` },
+      });
+      assert.equal(meta.status, 200);
+    }
+
+    for (const tok of [devB.token, bystander.token, badLeader.token]) {
+      const denyDl = await fetch(`${srv.baseUrl}/api/v1/files/${probeFile.id}`, {
+        headers: { Authorization: `Bearer ${tok}` },
+      });
+      assert.equal(denyDl.status, 403);
+
+      const denyMeta = await fetch(`${srv.baseUrl}/api/v1/files/${probeFile.id}/meta`, {
+        headers: { Authorization: `Bearer ${tok}` },
+      });
+      assert.equal(denyMeta.status, 403);
+    }
+
+    // 3) Worker 上传回执文件并在 complete 时附带，Leader 可下载，bystander 仍为 403
+    const workerTask = dispJson.tasks.find((t) => t.to_agent_id === "grok-bot");
+    await fetch(`${srv.baseUrl}/api/v1/tasks/${workerTask.id}/claim`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${cloudWorker.token}`, "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const outUp = await fetch(`${srv.baseUrl}/api/v1/files`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${cloudWorker.token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "result.json", content: "{\"code\":\"MANGO-4729\"}", mime: "application/json" }),
+    });
+    const outFile = (await outUp.json()).file;
+    const compResp = await fetch(`${srv.baseUrl}/api/v1/tasks/${workerTask.id}/complete`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${cloudWorker.token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ summary: "OK", text: "已读取", attachments: [outFile.uri] }),
+    });
+    assert.equal(compResp.status, 200);
+
+    const leaderDlOut = await fetch(`${srv.baseUrl}/api/v1/files/${outFile.id}`, {
+      headers: { Authorization: `Bearer ${leader.token}` },
+    });
+    assert.equal(leaderDlOut.status, 200);
+    assert.equal(await leaderDlOut.text(), "{\"code\":\"MANGO-4729\"}");
+
+    const bystanderDlOut = await fetch(`${srv.baseUrl}/api/v1/files/${outFile.id}`, {
+      headers: { Authorization: `Bearer ${bystander.token}` },
+    });
+    assert.equal(bystanderDlOut.status, 403);
+  } finally {
+    await srv.close();
+  }
+});

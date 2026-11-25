@@ -7,6 +7,7 @@ export const MAX_LONGPOLL_SEC = 40;
 export class LongPollBroker {
   constructor(store) {
     this.store = store;
+    this._lastSeq = 0;
     this._waiters = new Set();
     // scopeKey -> count（当前正挂在 /poll 上的连接数）
     this._liveDevices = new Map();
@@ -14,7 +15,15 @@ export class LongPollBroker {
   }
 
   currentSeq() {
-    return this.store ? this.store.currentSeq() : 0;
+    try {
+      if (!this.store) return this._lastSeq;
+      const seq = this.store.currentSeq();
+      this._lastSeq = seq;
+      return seq;
+    } catch {
+      // 服务优雅关闭阶段 store 可能先于 socket close 回调关闭，此时回退最近已知 seq 避免未捕获异常
+      return this._lastSeq;
+    }
   }
 
   _incMap(map, key) {

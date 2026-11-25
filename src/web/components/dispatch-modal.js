@@ -1,6 +1,20 @@
 import { api } from "../api.js";
 import { setState, store } from "../state.js";
-import { agentSourceLabel, bindBackdropClose, escapeHtml, showToast } from "../utils.js";
+import { agentSourceLabel, bindBackdropClose, escapeHtml, formatBytes, showToast } from "../utils.js";
+
+let pendingFiles = [];
+
+export function resetDispatchModalState() {
+  pendingFiles = [];
+}
+
+function appendPendingFiles(fileList) {
+  for (const f of Array.from(fileList || [])) {
+    if (!f) continue;
+    const dup = pendingFiles.some((x) => x.name === f.name && x.size === f.size && x.lastModified === f.lastModified);
+    if (!dup) pendingFiles.push(f);
+  }
+}
 
 function groupEnabledAgents(agents, devices) {
   const devOrder = [...devices].sort((a, b) => {
@@ -156,6 +170,18 @@ export function renderDispatchModal(root, refreshFn) {
             <textarea name="input_text" rows="4" placeholder="描述你想让 Agent 完成的工作目标与验收标准..." required></textarea>
           </label>
 
+          <div class="field">
+            <span>任务附件（可选，扇出时自动授权给所有目标 Agent）</span>
+            <div class="attachment-dropzone" id="dispatch-dropzone">
+              <input type="file" id="dispatch-file-input" multiple class="hidden" />
+              <div class="row-between" style="flex-wrap:wrap;gap:8px">
+                <span class="muted" style="font-size:12px">拖拽文件到此区域，或点击右侧按钮选择本地文件</span>
+                <button type="button" class="btn btn-secondary btn-sm" id="dispatch-file-pick-btn">+ 选择文件</button>
+              </div>
+              <div id="dispatch-file-list" class="attachment-pending-list"></div>
+            </div>
+          </div>
+
           <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
             <label class="field">
               <span>线程 ID（留空新建）</span>
@@ -173,7 +199,7 @@ export function renderDispatchModal(root, refreshFn) {
 
           <div class="row-between">
             <span class="muted" style="font-size:12px">选择多个 Agent 时，将同时创建子任务并汇总在同一 Thread 内。</span>
-            <button type="submit" class="btn btn-primary" ${agents.length ? "" : "disabled"}>立即派发</button>
+            <button type="submit" id="dispatch-submit-btn" class="btn btn-primary" ${agents.length ? "" : "disabled"}>立即派发</button>
           </div>
         </form>
       </div>
@@ -181,10 +207,73 @@ export function renderDispatchModal(root, refreshFn) {
   `;
 
   bindBackdropClose(root.querySelector("[data-dispatch-backdrop]"), () => {
+    resetDispatchModalState();
     setState({ showDispatchModal: false, dispatchPreselect: [], dispatchContextId: "" });
   });
   root.querySelector("#dispatch-close")?.addEventListener("click", () => {
+    resetDispatchModalState();
     setState({ showDispatchModal: false, dispatchPreselect: [], dispatchContextId: "" });
+  });
+
+  const fileListEl = root.querySelector("#dispatch-file-list");
+  const fileInputEl = root.querySelector("#dispatch-file-input");
+  const dropzoneEl = root.querySelector("#dispatch-dropzone");
+  const renderPendingFiles = () => {
+    if (!fileListEl) return;
+    if (!pendingFiles.length) {
+      fileListEl.innerHTML = "";
+      return;
+    }
+    fileListEl.innerHTML = pendingFiles
+      .map(
+        (f, idx) => `
+      <span class="attachment-chip">
+        <span>📎</span>
+        <span class="attachment-name truncate">${escapeHtml(f.name)}</span>
+        <span class="attachment-size">${escapeHtml(formatBytes(f.size))}</span>
+        <button type="button" class="btn btn-ghost btn-sm attachment-action-btn" data-remove-dispatch-file="${idx}" title="移除">×</button>
+      </span>
+    `
+      )
+      .join("");
+    fileListEl.querySelectorAll("[data-remove-dispatch-file]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const idx = Number(btn.getAttribute("data-remove-dispatch-file"));
+        if (Number.isInteger(idx) && idx >= 0) {
+          pendingFiles.splice(idx, 1);
+          renderPendingFiles();
+        }
+      });
+    });
+  };
+  renderPendingFiles();
+
+  root.querySelector("#dispatch-file-pick-btn")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    fileInputEl?.click();
+  });
+  dropzoneEl?.addEventListener("click", (e) => {
+    if (e.target.closest("button") || e.target.closest("input")) return;
+    fileInputEl?.click();
+  });
+  fileInputEl?.addEventListener("change", () => {
+    appendPendingFiles(fileInputEl.files);
+    fileInputEl.value = "";
+    renderPendingFiles();
+  });
+  dropzoneEl?.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    dropzoneEl.classList.add("is-dragover");
+  });
+  dropzoneEl?.addEventListener("dragleave", () => {
+    dropzoneEl.classList.remove("is-dragover");
+  });
+  dropzoneEl?.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dropzoneEl.classList.remove("is-dragover");
+    appendPendingFiles(e.dataTransfer?.files);
+    renderPendingFiles();
   });
 
   // 使用 classList.toggle 原地过滤，避免重绘 DOM 导致已勾选状态与表单草稿丢失
@@ -216,7 +305,27 @@ export function renderDispatchModal(root, refreshFn) {
       showToast("请至少勾选一个目标 Agent", true);
       return;
     }
+    const submitBtn = root.querySelector("#dispatch-submit-btn");
+    const origBtnText = submitBtn?.textContent || "立即派发";
+    if (submitBtn) submitBtn.disabled = true;
+
     try {
+      const uploadedAttachments = [];
+      for (let i = 0; i < pendingFiles.length; i++) {
+        if (submitBtn) submitBtn.textContent = `正在上传附件 (${i + 1}/${pendingFiles.length})...`;
+        const up = await api.uploadFile(pendingFiles[i]);
+        const f = up.file;
+        uploadedAttachments.push({
+          id: f.id,
+          uri: f.uri,
+          name: f.name,
+          mime: f.mime,
+          size: f.size,
+          sha256: f.sha256,
+        });
+      }
+      if (submitBtn) submitBtn.textContent = "正在派发...";
+
       const res = await api.dispatchTask({
         to: targets,
         title: String(fd.get("title") || "").trim(),
@@ -224,7 +333,9 @@ export function renderDispatchModal(root, refreshFn) {
         context_id: String(fd.get("context_id") || "").trim() || undefined,
         model: String(fd.get("model") || "").trim() || undefined,
         priority: Number(fd.get("priority") || 5),
+        ...(uploadedAttachments.length ? { attachments: uploadedAttachments } : {}),
       });
+      resetDispatchModalState();
       showToast(`已派发 ${res.tasks.length} 个任务`);
       setState({
         showDispatchModal: false,
@@ -235,6 +346,10 @@ export function renderDispatchModal(root, refreshFn) {
       });
       await refreshFn();
     } catch (err) {
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = origBtnText;
+      }
       showToast(err.message, true);
     }
   });

@@ -1,6 +1,6 @@
 import { api } from "../api.js";
 import { setState, store } from "../state.js";
-import { escapeHtml, formatRelativeTime, showToast, stateLabel, stateTone } from "../utils.js";
+import { bindAttachmentPreview, escapeHtml, formatRelativeTime, renderAttachmentsBar, showToast, stateLabel, stateTone } from "../utils.js";
 
 function isActiveTaskState(state) {
   return state === "working" || state === "submitted" || state === "input-required" || state === "auth-required";
@@ -59,6 +59,7 @@ function renderActionCard(task) {
         <button type="button" class="btn btn-ghost btn-sm" data-view-thread="${escapeHtml(task.context_id)}">查看线程</button>
       </div>
       <div class="msg-body">${escapeHtml(promptText)}</div>
+      ${renderAttachmentsBar(task.attachments || [])}
       ${
         isAuth
           ? `<div class="row-between" style="flex-wrap:wrap">
@@ -91,6 +92,9 @@ function renderTaskFeed(tasks, agentMap) {
           const excerpt = cleanExcerpt(t.error_message || t.receipt?.summary || "");
           const canCancel = t.state === "working" || t.state === "submitted";
           const fromSuffix = t.from_node && t.from_node !== "owner" ? ` ← ${t.from_node}` : "";
+          const attCount = Number.isFinite(Number(t.attachment_count))
+            ? Number(t.attachment_count)
+            : (t.attachments?.length || 0) + (t.receipt?.attachments?.length || 0);
 
           return `
             <div class="task-feed-row ${isErr ? "is-err" : ""}" data-view-thread="${escapeHtml(t.context_id)}" title="${escapeHtml(stateLabel(t.state))}">
@@ -99,6 +103,7 @@ function renderTaskFeed(tasks, agentMap) {
                 <div class="task-feed-top">
                   <div class="task-feed-title">
                     <strong class="truncate">${escapeHtml(t.title)}</strong>
+                    ${attCount ? `<span class="attachment-tag" title="含 ${attCount} 个附件">📎 ${attCount}</span>` : ""}
                     <span class="task-feed-target">· ${escapeHtml(agentLabel)}${escapeHtml(fromSuffix)}</span>
                   </div>
                   <div class="task-feed-right">
@@ -418,7 +423,7 @@ export function renderHomeView(container, refreshFn) {
 function bindHomeEvents(container, refreshFn) {
   container.querySelectorAll("[data-view-thread]").forEach((el) => {
     el.addEventListener("click", (e) => {
-      if (e.target.closest("[data-cancel-task]")) return;
+      if (e.target.closest("[data-cancel-task]") || e.target.closest(".attachment-bar")) return;
       setState({ activeTab: "threads", selectedThreadId: el.getAttribute("data-view-thread"), selectedThreadDetail: null });
     });
   });
@@ -479,4 +484,6 @@ function bindHomeEvents(container, refreshFn) {
       }
     });
   });
+
+  bindAttachmentPreview(container);
 }

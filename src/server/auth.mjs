@@ -155,6 +155,26 @@ export function actorCanControlTaskAsSender(actor, task) {
   return false;
 }
 
+// 统一文件访问鉴权：兼容旧的 files.task_id 与多对多 file_links（扇出子任务/追问/回执）。
+export function actorCanAccessFile(actor, fileMeta, store) {
+  if (!actor || !fileMeta) return false;
+  if (actor.kind === "owner") return true;
+  if (fileMeta.owner_node && fileMeta.owner_node === actor.id) return true;
+  if (actor.kind === "device" && fileMeta.owner_node && deviceOwnsAgent(store, actor.id, fileMeta.owner_node)) {
+    return true;
+  }
+  if (fileMeta.task_id && actorCanSeeTask(actor, store.getTask(fileMeta.task_id), store)) {
+    return true;
+  }
+  if (typeof store.listFileLinkedTasks === "function") {
+    const linkedTasks = store.listFileLinkedTasks(fileMeta.id);
+    for (const t of linkedTasks) {
+      if (actorCanSeeTask(actor, t, store)) return true;
+    }
+  }
+  return false;
+}
+
 export function buildSetSessionCookieHeader(req, tokenValue, { clear = false } = {}) {
   const isHttps = req.socket?.encrypted || String(req.headers["x-forwarded-proto"] || "").toLowerCase() === "https";
   const parts = [

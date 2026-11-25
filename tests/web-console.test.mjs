@@ -238,7 +238,10 @@ test("Web Console UI & Templates: 主题变量切换规则、控件可读文字�
     homeSrc.includes("kpi-strip") &&
       homeSrc.includes("seg-control") &&
       homeSrc.includes("task-excerpt") &&
-      homeSrc.includes("mini-meter")
+      homeSrc.includes("mini-meter") &&
+      homeSrc.includes("renderAttachmentsBar") &&
+      homeSrc.includes("bindAttachmentPreview") &&
+      homeSrc.includes("attachment-tag")
   );
 
   const agentsSrc = fs.readFileSync(path.resolve("src", "web", "views", "agents.js"), "utf8");
@@ -250,7 +253,28 @@ test("Web Console UI & Templates: 主题变量切换规则、控件可读文字�
   );
 
   const dispatchSrc = fs.readFileSync(path.resolve("src", "web", "components", "dispatch-modal.js"), "utf8");
-  assert.ok(dispatchSrc.includes("dispatch-group") && dispatchSrc.includes("#dispatch-agent-search"));
+  assert.ok(
+    dispatchSrc.includes("dispatch-group") &&
+      dispatchSrc.includes("#dispatch-agent-search") &&
+      dispatchSrc.includes("#dispatch-file-input") &&
+      dispatchSrc.includes("#dispatch-dropzone") &&
+      dispatchSrc.includes("api.uploadFile")
+  );
+
+  const threadsSrc = fs.readFileSync(path.resolve("src", "web", "views", "threads.js"), "utf8");
+  assert.ok(
+    threadsSrc.includes("renderAttachmentsBar") &&
+      threadsSrc.includes("bindAttachmentPreview") &&
+      threadsSrc.includes("attachment_count") &&
+      threadsSrc.includes("data-reply-file-input")
+  );
+
+  const utilsSrc = fs.readFileSync(path.resolve("src", "web", "utils.js"), "utf8");
+  assert.ok(
+    utilsSrc.includes("renderAttachmentsBar") &&
+      utilsSrc.includes("bindAttachmentPreview") &&
+      utilsSrc.includes("openAttachmentPreviewModal")
+  );
 
   const addModalSrc = fs.readFileSync(path.resolve("src", "web", "components", "add-modal.js"), "utf8");
   assert.ok(addModalSrc.includes("data-join-plat") && addModalSrc.includes("Windows PowerShell"));

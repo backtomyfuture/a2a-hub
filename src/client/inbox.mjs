@@ -1,8 +1,44 @@
 // 本地 Agent 收件箱与人类接入辅助（`ah inbox` 与 `ah present`）。
 // 仅走 Hub REST API，不直接碰 SQLite。
 
+import fs from "node:fs";
+import path from "node:path";
 import { GatewayClient } from "./gateway-client.mjs";
 import { loadConfigJson, loadOwnerToken, readLiveHubUrl } from "../core/config.mjs";
+import { guessMimeByFilename } from "../store/files.mjs";
+
+export async function uploadLocalAttachments(client, rawAttach, { taskId = null } = {}) {
+  if (!rawAttach) return [];
+  const list = (Array.isArray(rawAttach) ? rawAttach : [rawAttach])
+    .flatMap((v) => String(v || "").split(","))
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const uploaded = [];
+  for (const filePath of list) {
+    const absPath = path.resolve(filePath);
+    if (!fs.existsSync(absPath)) {
+      throw new Error(`附件文件不存在: ${filePath}`);
+    }
+    const st = fs.statSync(absPath);
+    if (!st.isFile()) {
+      throw new Error(`附件路径不是普通文件: ${filePath}`);
+    }
+    const buf = fs.readFileSync(absPath);
+    const name = path.basename(absPath);
+    const mime = guessMimeByFilename(name);
+    const res = await client.uploadFile({ buffer: buf, name, mime, taskId });
+    const f = res.file;
+    uploaded.push({
+      id: f.id,
+      uri: f.uri,
+      name: f.name,
+      mime: f.mime,
+      size: f.size,
+      sha256: f.sha256,
+    });
+  }
+  return uploaded;
+}
 
 export function makeClientForConfig(configDir, { hubUrl, token } = {}) {
   const cfg = loadConfigJson(configDir);
@@ -69,10 +105,12 @@ export async function runInboxCommand(args, { configDir, io = console } = {}) {
 
   if (sub === "complete" || sub === "done") {
     const taskId = pos[0];
-    if (!taskId) throw new Error("用法: ah inbox done <task_id> [--summary ...] [--text ...]");
+    if (!taskId) throw new Error("用法: ah inbox done <task_id> [--summary ...] [--text ...] [--attach <file>]");
+    const attachments = await uploadLocalAttachments(client, flags.attach, { taskId });
     const r = await client.complete(taskId, {
       summary: flags.summary || flags.text || "完成",
       text: flags.text || flags.summary || "完成",
+      ...(attachments.length ? { attachments } : {}),
     });
     io.log(JSON.stringify(r.task, null, 2));
     return 0;
@@ -157,8 +195,11 @@ export async function runPresentCommand(args, { configDir, io = console } = {}) 
   if (sub === "reply") {
     const taskId = pos[0];
     const body = flags.body || flags.text || pos.slice(1).join(" ");
-    if (!taskId || !body) throw new Error("用法: ah present reply <task_id> <回复文本>");
-    const r = await client.replyTask(taskId, { body });
+    const attachments = await uploadLocalAttachments(client, flags.attach, { taskId });
+    if (!taskId || (!body && !attachments.length)) {
+      throw new Error("用法: ah present reply <task_id> <回复文本> [--attach <file>]");
+    }
+    const r = await client.replyTask(taskId, { body: body || "", attachments });
     io.log(`已回复任务 ${taskId} -> 状态 ${r.task.state}`);
     return 0;
   }
@@ -193,8 +234,18 @@ const BOOLEAN_FLAGS = new Set([
   "foreground",
 ]);
 
+const REPEATABLE_FLAGS = new Set(["attach"]);
+
 export function parseSimpleFlags(argv) {
   const out = { _: [] };
+  const assignFlag = (key, val) => {
+    if (REPEATABLE_FLAGS.has(key)) {
+      if (!Array.isArray(out[key])) out[key] = out[key] ? [out[key]] : [];
+      out[key].push(val);
+    } else {
+      out[key] = val;
+    }
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "-h") {
@@ -204,15 +255,15 @@ export function parseSimpleFlags(argv) {
     } else if (a.startsWith("--")) {
       const eq = a.indexOf("=");
       if (eq > 2) {
-        out[a.slice(2, eq)] = a.slice(eq + 1);
+        assignFlag(a.slice(2, eq), a.slice(eq + 1));
       } else {
         const key = a.slice(2);
         const next = argv[i + 1];
         if (!BOOLEAN_FLAGS.has(key) && next !== undefined && !next.startsWith("-")) {
-          out[key] = next;
+          assignFlag(key, next);
           i++;
         } else {
-          out[key] = true;
+          assignFlag(key, true);
         }
       }
     } else {

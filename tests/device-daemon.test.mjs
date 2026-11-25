@@ -405,3 +405,124 @@ test("DeviceDaemon: 空轮询与短队列不发起多余 POST /api/v1/tasks/clai
     fs.rmSync(devDir, { recursive: true, force: true });
   }
 });
+
+test("DeviceDaemon: 扇出附件下载与 Prompt 显式注入、下载失败报错记录及节点身份防串名", async () => {
+  const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "ah-test-dd-att-hub-"));
+  const devDir = fs.mkdtempSync(path.join(os.tmpdir(), "ah-test-dd-att-dev-"));
+  const rt = await startHubRuntime({
+    configDir: hubDir,
+    listen: "127.0.0.1:0",
+    env: { AH_API_TOKEN: "dd_att_owner" },
+    withDeviceDaemon: false,
+  });
+
+  try {
+    const owner = new GatewayClient(rt.url, { token: "dd_att_owner" });
+    const leader = await owner.post("/api/v1/agents", {
+      id: "muse",
+      platform: "muse",
+      name: "Muse",
+      role: "leader",
+    });
+    const leaderClient = new GatewayClient(rt.url, { token: leader.token });
+    const devReg = await owner.post("/api/v1/devices", { id: "mac-mini", name: "Mac mini", max_concurrent: 4 });
+
+    saveWorkersJson(devDir, [
+      { key: "droid", name: "Droid", command: "mock-droid {prompt_file}" },
+      { key: "agy", name: "Agy", command: "mock-agy {prompt_file}" },
+    ]);
+
+    const seenRuns = new Map();
+    const daemon = new DeviceDaemon({
+      configDir: devDir,
+      deviceId: "mac-mini",
+      hubUrl: rt.url,
+      token: devReg.token,
+      maxConcurrent: 4,
+      hubPublicKey: rt.publicKey,
+      pollTimeoutSec: 1,
+      runner: async (cmd, stdinText, timeoutSec, cwd, extraEnv) => {
+        const taskId = extraEnv.AH_TASK_ID;
+        const promptFile = path.join(extraEnv.AH_RUN_DIR, "prompt.txt");
+        const inputFile = path.join(extraEnv.AH_RUN_DIR, "input.json");
+        seenRuns.set(taskId, {
+          cmd,
+          extraEnv,
+          promptText: fs.readFileSync(promptFile, "utf8"),
+          inputJson: JSON.parse(fs.readFileSync(inputFile, "utf8")),
+        });
+        return { code: 0, stdout: JSON.stringify({ result: `done:${extraEnv.AH_AGENT_ID}` }), stderr: "" };
+      },
+    });
+    await daemon.syncNow();
+
+    // 1) Leader 以无 task_id 上传文件，然后扇出派给同一个设备上的 droid 与 agy
+    const probeContent = "MANGO-4729 verification payload for fan-out probe";
+    const up = await leaderClient.uploadFile({
+      buffer: Buffer.from(probeContent, "utf8"),
+      name: "hub-probe-20261125.txt",
+      mime: "text/plain",
+      taskId: null,
+    });
+
+    const fanout = await leaderClient.dispatchTask({
+      to: ["mac-mini--droid", "mac-mini--agy"],
+      title: "可用性与附件检查",
+      input_text: "请读取附件验证码并自报节点名",
+      attachments: [up.file.uri],
+    });
+    assert.equal(fanout.tasks.length, 2);
+
+    await daemon.runOnce();
+    await Promise.all([...daemon._activeTasks.values()]);
+
+    for (const t of fanout.tasks) {
+      const done = (await owner.getTask(t.id)).task;
+      assert.equal(done.state, "completed");
+      const runInfo = seenRuns.get(t.id);
+      assert.ok(runInfo, `应执行任务 ${t.id}`);
+      assert.equal(runInfo.extraEnv.AH_AGENT_ID, t.to_agent_id);
+      assert.equal(runInfo.extraEnv.AH_DEVICE_ID, "mac-mini");
+
+      // 身份显式注入，且不包含仍在 working 的兄弟空壳任务
+      assert.ok(runInfo.promptText.includes(`你的 Agent ID：${t.to_agent_id}`));
+      const otherAgent = t.to_agent_id === "mac-mini--droid" ? "mac-mini--agy" : "mac-mini--droid";
+      assert.equal(runInfo.promptText.includes(otherAgent), false, "同轮空壳兄弟任务不得写入另一节点的 prompt.txt");
+
+      // 附件已落盘并显式写入 prompt.txt 与 input.json
+      assert.equal(runInfo.inputJson.downloaded_files.length, 1);
+      assert.equal(runInfo.inputJson.failed_downloads.length, 0);
+      const localPath = runInfo.inputJson.downloaded_files[0].local_path;
+      assert.equal(fs.readFileSync(localPath, "utf8"), probeContent);
+      assert.ok(runInfo.promptText.includes("### 任务附件"));
+      assert.ok(runInfo.promptText.includes("hub-probe-20261125.txt"));
+      assert.ok(runInfo.promptText.includes(localPath));
+    }
+
+    // 2) 当下载失败时，不得静默吞异常：必须在 input.json.failed_downloads 与 prompt.txt 中显式记录
+    const origDownload = daemon.client.downloadFile.bind(daemon.client);
+    daemon.client.downloadFile = async () => {
+      throw new Error("HTTP 403 forbidden");
+    };
+    const failCase = await leaderClient.dispatchTask({
+      to: ["mac-mini--droid"],
+      title: "模拟下载失败",
+      input_text: "检查下载异常提示",
+      attachments: [up.file.uri],
+    });
+    await daemon.runOnce();
+    await Promise.all([...daemon._activeTasks.values()]);
+    daemon.client.downloadFile = origDownload;
+
+    const failRun = seenRuns.get(failCase.tasks[0].id);
+    assert.equal(failRun.inputJson.downloaded_files.length, 0);
+    assert.equal(failRun.inputJson.failed_downloads.length, 1);
+    assert.ok(failRun.inputJson.failed_downloads[0].error.includes("403"));
+    assert.ok(failRun.promptText.includes("[下载失败]"));
+    assert.ok(failRun.promptText.includes("403"));
+  } finally {
+    await rt.stop();
+    fs.rmSync(hubDir, { recursive: true, force: true });
+    fs.rmSync(devDir, { recursive: true, force: true });
+  }
+});

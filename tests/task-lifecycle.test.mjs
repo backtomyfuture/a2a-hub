@@ -80,6 +80,18 @@ test("TaskService: 扇出派单、幂等去重、控制字段拒收与 Thread �
     assert.equal(ctx.taskService.claimNext({ agentIds: ["leader-1"] }), null);
     assert.equal(txCalls, 0, "空队列 claimNext 不应进入 BEGIN IMMEDIATE 写事务");
     assert.equal(ctx.store.currentSeq(), seqBeforeClaim);
+
+    // 并发扇出同在 working 状态但尚无产出时，buildContextHistory 不得注入空壳兄弟任务
+    ctx.taskService.claimTaskById(r1.tasks[0].id, { claimant: "w1" });
+    ctx.taskService.claimTaskById(r1.tasks[1].id, { claimant: "w2" });
+    assert.deepEqual(ctx.taskService.buildContextHistory(r1.context_id, r1.tasks[0].id), []);
+    assert.deepEqual(ctx.taskService.buildContextHistory(r1.context_id, r1.tasks[1].id), []);
+
+    // 若其中一方已完成并有回执，才会进入续接上下文
+    ctx.taskService.complete(r1.tasks[0].id, { actorId: "w1", summary: "w1 完成", text: "w1 result" });
+    const histForW2 = ctx.taskService.buildContextHistory(r1.context_id, r1.tasks[1].id);
+    assert.equal(histForW2.length, 1);
+    assert.equal(histForW2[0].to_agent_id, "w1");
   } finally {
     ctx.cleanup();
   }

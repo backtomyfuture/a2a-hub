@@ -7,9 +7,41 @@ import path from "node:path";
 import { clampTimeoutSec, loadConfigJson, loadOwnerToken, sanitizeSlug } from "../core/config.mjs";
 import { runDetachedCommand } from "../core/proc.mjs";
 import { formatCliFailure, parseCliOutput, renderWorkerCommand } from "../core/receipt.mjs";
+import { extractHubFileId } from "../store/files.mjs";
 import { GatewayClient } from "./gateway-client.mjs";
 
 export const AGENT_RECONNECT_DELAYS_MS = [1000, 3000, 8000, 30_000];
+
+function collectTaskAttachments(task) {
+  const all = [];
+  if (Array.isArray(task?.attachments)) {
+    for (const att of task.attachments) {
+      if (att) all.push(att);
+    }
+  }
+  if (Array.isArray(task?.messages)) {
+    for (const m of task.messages) {
+      if (!Array.isArray(m?.attachments)) continue;
+      for (const att of m.attachments) {
+        if (att) all.push(att);
+      }
+    }
+  }
+  const seen = new Set();
+  const deduped = [];
+  for (const att of all) {
+    const fid = extractHubFileId(att);
+    const key = fid
+      ? `hub:${fid}`
+      : typeof att === "string"
+        ? `str:${att.trim()}`
+        : String(att?.uri || att?.url || JSON.stringify(att));
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(att);
+  }
+  return deduped;
+}
 
 export class AgentDaemon {
   constructor({
@@ -52,6 +84,155 @@ export class AgentDaemon {
     });
   }
 
+  _buildPrompt(task, { downloaded = [], failedDownloads = [], externalAttachments = [], inputPath = "" } = {}) {
+    const parts = [];
+    parts.push("### 当前执行节点身份");
+    parts.push(`- 你的 Agent ID：${task.to_agent_id || this.agentId}`);
+    parts.push(`- 任务 ID：${task.id}`);
+    parts.push(`- 线程 ID：${task.context_id}`);
+    parts.push(`- 发起方：${task.from_node}`);
+    parts.push("");
+
+    if (Array.isArray(task.context_history) && task.context_history.length > 0) {
+      parts.push("### 同线程其他/前序任务记录（仅供参考，非你本节点身份）");
+      for (const h of task.context_history) {
+        parts.push(`- [${h.to_agent_id} | ${h.state}] ${h.title}: ${h.summary || h.input_text}`);
+      }
+      parts.push("");
+    }
+
+    const msgs = Array.isArray(task.messages) ? task.messages : [];
+    const extraNotes = msgs.filter((m) => m.kind === "answer" || m.kind === "auth_decision");
+    parts.push("### 当前任务目标");
+    if (task.title) parts.push(`标题：${task.title}`);
+    if (task.input_text) {
+      parts.push(task.input_text);
+    } else if (!task.title) {
+      parts.push("(未提供具体任务文本)");
+    }
+
+    if (extraNotes.length > 0) {
+      parts.push("");
+      parts.push("### 机主/发起方最新补充说明");
+      for (const n of extraNotes) {
+        parts.push(`- [${n.kind}] ${n.body}`);
+      }
+    }
+
+    if (downloaded.length > 0 || failedDownloads.length > 0 || externalAttachments.length > 0) {
+      parts.push("");
+      parts.push("### 任务附件");
+      for (const d of downloaded) {
+        const sizePart = Number.isFinite(Number(d.size)) ? `${d.size} bytes` : "未知大小";
+        const mimePart = d.mime ? `, ${d.mime}` : "";
+        parts.push(`- [已下载] ${d.name} (${sizePart}${mimePart}) | URI: ${d.uri} | 本机绝对路径: ${d.local_path}`);
+      }
+      for (const f of failedDownloads) {
+        parts.push(`- [下载失败] ${f.name} | URI: ${f.uri} | 原因: ${f.error}（如任务依赖该附件，请在回执中如实说明读取失败及原因）`);
+      }
+      for (const ex of externalAttachments) {
+        parts.push(`- [外部附件] ${ex.name} | URL: ${ex.uri}`);
+      }
+      if (downloaded.length > 0) {
+        parts.push("提示：以上 [已下载] 附件已自动落盘到本机上述绝对路径，请直接使用本地文件读取工具查看内容。");
+      }
+      if (inputPath) {
+        parts.push(`完整任务输入元数据 JSON：${inputPath}`);
+      }
+    }
+
+    return parts.join("\n");
+  }
+
+  async _prepareRunDir(task) {
+    const runDir = path.join(this.configDir, "runs", sanitizeSlug(task.id, "task"));
+    fs.mkdirSync(runDir, { recursive: true, mode: 0o700 });
+
+    const downloaded = [];
+    const failedDownloads = [];
+    const externalAttachments = [];
+    const attachments = collectTaskAttachments(task);
+    if (attachments.length > 0) {
+      const filesDir = path.join(runDir, "files");
+      fs.mkdirSync(filesDir, { recursive: true });
+      const usedNames = new Set();
+      for (let idx = 0; idx < attachments.length; idx++) {
+        const att = attachments[idx];
+        const fileId = extractHubFileId(att);
+        if (fileId) {
+          const uri = (typeof att === "object" && att?.uri) || `hub://files/${fileId}`;
+          const displayName = path.basename(String((typeof att === "object" && att?.name) || `${fileId}.bin`)).slice(0, 200) || `${fileId}.bin`;
+          try {
+            const buf = await this.client.downloadFile(fileId);
+            const fname = usedNames.has(displayName) ? `${idx + 1}_${displayName}` : displayName;
+            usedNames.add(fname);
+            const dest = path.join(filesDir, fname);
+            fs.writeFileSync(dest, buf, { mode: 0o600 });
+            downloaded.push({
+              id: fileId,
+              uri,
+              name: displayName,
+              mime: (typeof att === "object" && att?.mime) || "",
+              size: buf.byteLength,
+              local_path: dest,
+            });
+          } catch (err) {
+            const errMsg = err?.message || String(err);
+            this.logger.warn?.(`[agent-daemon] 下载任务 ${task.id} 附件 ${fileId} 失败: ${errMsg}`);
+            failedDownloads.push({
+              id: fileId,
+              uri,
+              name: displayName,
+              error: errMsg,
+            });
+          }
+        } else {
+          const extUri = typeof att === "string" ? att.trim() : String(att?.uri || att?.url || "").trim();
+          if (extUri) {
+            externalAttachments.push({
+              uri: extUri,
+              name: (typeof att === "object" && att?.name) || extUri.split("/").pop() || "attachment",
+              ...(typeof att === "object" && att?.mime ? { mime: att.mime } : {}),
+              ...(typeof att === "object" && Number.isFinite(Number(att?.size)) ? { size: Number(att.size) } : {}),
+            });
+          }
+        }
+      }
+    }
+
+    const inputObj = {
+      task_id: task.id,
+      context_id: task.context_id,
+      from_node: task.from_node,
+      to_agent_id: task.to_agent_id || this.agentId,
+      run_dir: runDir,
+      title: task.title,
+      input_text: task.input_text,
+      params: task.params || {},
+      attachments,
+      downloaded_files: downloaded,
+      failed_downloads: failedDownloads,
+      external_attachments: externalAttachments,
+      context_history: task.context_history || [],
+      messages: task.messages || [],
+    };
+    const inputPath = path.join(runDir, "input.json");
+    fs.writeFileSync(inputPath, JSON.stringify(inputObj, null, 2), { mode: 0o600 });
+    try { fs.chmodSync(inputPath, 0o600); } catch {}
+
+    const promptText = this._buildPrompt(task, {
+      downloaded,
+      failedDownloads,
+      externalAttachments,
+      inputPath,
+    });
+    const promptPath = path.join(runDir, "prompt.txt");
+    fs.writeFileSync(promptPath, promptText, { mode: 0o600 });
+    try { fs.chmodSync(promptPath, 0o600); } catch {}
+
+    return { runDir, inputPath, promptPath, promptText };
+  }
+
   async runOnce() {
     const pollRes = await this.client.pollAgent(this.agentId, {
       since: this._seq,
@@ -78,11 +259,7 @@ export class AgentDaemon {
     }
     if (!claimed) return 0;
 
-    const runDir = path.join(this.configDir, "runs", sanitizeSlug(claimed.id, "task"));
-    fs.mkdirSync(runDir, { recursive: true, mode: 0o700 });
-    const promptPath = path.join(runDir, "prompt.txt");
-    const promptText = claimed.input_text || claimed.title || "";
-    fs.writeFileSync(promptPath, promptText, { mode: 0o600 });
+    const { runDir, promptPath, promptText } = await this._prepareRunDir(claimed);
 
     const usesPromptArg = /\{prompt(?:_file)?\}/.test(String(this.command || ""));
     const cmd = renderWorkerCommand({
@@ -92,7 +269,12 @@ export class AgentDaemon {
       model: claimed.model || "",
     });
     const timeoutSec = clampTimeoutSec(claimed.timeout_sec);
-    const res = await this.runner(cmd, usesPromptArg ? null : promptText, timeoutSec, this.cwd);
+    const res = await this.runner(cmd, usesPromptArg ? null : promptText, timeoutSec, this.cwd, {
+      AH_AGENT_ID: claimed.to_agent_id || this.agentId,
+      AH_TASK_ID: claimed.id,
+      AH_CONTEXT_ID: claimed.context_id,
+      AH_RUN_DIR: runDir,
+    });
     const parsed = parseCliOutput(res.stdout, res.stderr);
     if (res.code === 0 && !parsed.isError) {
       const text = parsed.text || "(完成)";

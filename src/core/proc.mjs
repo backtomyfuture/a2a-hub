@@ -170,10 +170,13 @@ export function buildProcEnv(baseEnv = process.env, platform = process.platform)
 
 // 独立进程组执行。超时先向整组发 SIGTERM，宽限后再 SIGKILL，并拆掉 stdio，
 // 避免 shell 死后孙进程继续占着管道，使 close 永远不来。
-export function runDetachedCommand(command, stdinText, timeoutSec, cwd) {
+export function runDetachedCommand(command, stdinText, timeoutSec, cwd, extraEnv = null) {
   return new Promise((resolve, reject) => {
     const isWin = process.platform === "win32";
-    const env = buildProcEnv(process.env, process.platform);
+    const env = buildProcEnv(
+      extraEnv && typeof extraEnv === "object" ? { ...process.env, ...extraEnv } : process.env,
+      process.platform
+    );
     const sec = Number(timeoutSec);
     const ms = Math.min(2_147_483_647, Math.max(0, Number.isFinite(sec) ? sec : 0) * 1000);
     let p;

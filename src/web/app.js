@@ -2,7 +2,7 @@ import { api } from "./api.js";
 import { renderAddModal, resetAddModalState } from "./components/add-modal.js";
 import { renderAddWorkerModal } from "./components/add-worker-modal.js";
 import { refreshAgentDrawerStatus, renderAgentDrawer } from "./components/agent-drawer.js";
-import { renderDispatchModal } from "./components/dispatch-modal.js";
+import { renderDispatchModal, resetDispatchModalState } from "./components/dispatch-modal.js";
 import { renderSettingsDrawer } from "./components/settings-drawer.js";
 import { setState, store, subscribe } from "./state.js";
 import { showToast } from "./utils.js";
@@ -197,6 +197,7 @@ document.getElementById("btn-open-add")?.addEventListener("click", () => {
 });
 
 document.getElementById("btn-open-dispatch")?.addEventListener("click", () => {
+  resetDispatchModalState();
   setState({ showDispatchModal: true, showAddModal: null, dispatchPreselect: [], dispatchContextId: "" });
 });
 
@@ -225,6 +226,7 @@ window.addEventListener("keydown", (e) => {
   if (e.key !== "Escape" || e.isComposing || e.keyCode === 229 || e.defaultPrevented) return;
   {
     if (store.showAddModal || store.showAddWorkerDeviceId || store.showDispatchModal) {
+      resetDispatchModalState();
       setState({
         showAddModal: null,
         showAddWorkerDeviceId: null,
