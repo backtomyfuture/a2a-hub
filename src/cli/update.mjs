@@ -217,10 +217,17 @@ export async function update(appDir, { check = false, skipSkill = false, configD
   ensureEntrySymlinks(appDir);
   refreshSkill(appDir, skipSkill, configDir);
 
-  // 更新成功后自动重启守护进程，省得用户再手动跑一条命令。
-  // 只在检测到守护进程确实在跑时才重启；没在跑就只打提示，不擅自拉起。
-  if (configDir && isDaemonRunning(configDir)) {
-    console.log(`更新完成：v${before} → v${after}。正在重启守护进程…`);
+  // 更新成功后自动刷新并重启守护进程：
+  // 1) 守护进程仍在运行；或 2) 本机此前已注册过该 configDir 的自启服务（即使因关机取消或异常退出暂时停着，也应同步刷新启动器并拉起）。
+  // 从未注册自启且进程未运行时仅打提示，不擅自安装开机服务。
+  const running = Boolean(configDir && isDaemonRunning(configDir));
+  const installed = Boolean(configDir && !running && hasInstalledService(configDir));
+  if (configDir && (running || installed)) {
+    console.log(
+      running
+        ? `更新完成：v${before} → v${after}。正在重启守护进程…`
+        : `更新完成：v${before} → v${after}。检测到已配置自启服务但当前未运行，正在刷新并拉起守护进程…`
+    );
     const rc = await service(configDir, {}, appDir);
     if (rc === 0) {
       console.log("守护进程已重启，新版本生效。");
@@ -235,14 +242,69 @@ export async function update(appDir, { check = false, skipSkill = false, configD
   return 0;
 }
 
-// 读 daemon.lock 判断守护进程是否存活（PID 存在且 process.kill(pid,0) 不抛错）。
+// 读 daemon.lock 判断守护进程是否存活（PID 存在且 process.kill(pid,0) 不抛错，且锁文件不早于开机时间）。
 function isDaemonRunning(configDir) {
   try {
-    const pid = Number(fs.readFileSync(path.join(configDir, "daemon.lock"), "utf8").trim());
+    const lockPath = path.join(configDir, "daemon.lock");
+    const st = fs.statSync(lockPath);
+    const bootTimeMs = Date.now() - os.uptime() * 1000;
+    if (st.mtimeMs > 0 && st.mtimeMs < bootTimeMs - 5000) return false;
+    const pid = Number(fs.readFileSync(lockPath, "utf8").trim());
     if (!Number.isSafeInteger(pid) || pid <= 0) return false;
     process.kill(pid, 0);
     return true;
   } catch {
     return false;
   }
+}
+
+// 判断本配置目录是否已经安装过后台自启服务（只读探测，不修改任何系统状态）。
+export function hasInstalledService(
+  configDir,
+  { platform = process.platform, homeDir = os.homedir(), fsImpl = fs } = {}
+) {
+  if (!configDir) return false;
+  if (platform === "win32") {
+    try {
+      const svcDir = path.join(configDir, "service");
+      const files = fsImpl.readdirSync(svcDir);
+      return files.some((f) => /^ah-(?:node|hub)\..+\.(?:mjs|vbs)$/i.test(String(f)));
+    } catch {
+      return false;
+    }
+  }
+  if (platform === "darwin") {
+    try {
+      const agentsDir = path.join(homeDir, "Library", "LaunchAgents");
+      const resolved = path.resolve(configDir);
+      for (const f of fsImpl.readdirSync(agentsDir)) {
+        if (!/^ah-(?:node|hub)\..+\.plist$/.test(String(f))) continue;
+        try {
+          const text = fsImpl.readFileSync(path.join(agentsDir, f), "utf8");
+          if (text.includes(`<string>${resolved}</string>`) || text.includes(`<string>${configDir}</string>`)) {
+            return true;
+          }
+        } catch {}
+      }
+    } catch {}
+    return false;
+  }
+  if (platform === "linux") {
+    if (fsImpl.existsSync(path.join(configDir, "service.env"))) return true;
+    const userUnitDir = path.join(homeDir, ".config", "systemd", "user");
+    const resolved = path.resolve(configDir);
+    for (const dir of [userUnitDir, "/etc/systemd/system"]) {
+      try {
+        for (const f of fsImpl.readdirSync(dir)) {
+          if (!/^ah-.*\.service$/.test(String(f))) continue;
+          try {
+            const text = fsImpl.readFileSync(path.join(dir, f), "utf8");
+            if (text.includes(resolved) || text.includes(configDir)) return true;
+          } catch {}
+        }
+      } catch {}
+    }
+    return false;
+  }
+  return false;
 }

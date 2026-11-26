@@ -44,6 +44,22 @@ function collectTaskAttachments(task) {
   return deduped;
 }
 
+function sleepAbortable(ms, signal) {
+  if (!ms || ms <= 0 || signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    if (typeof timer.unref === "function") timer.unref();
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export class AgentDaemon {
   constructor({
     configDir,
@@ -79,13 +95,19 @@ export class AgentDaemon {
     this.logger = logger;
     this._running = false;
     this._seq = 0;
+    this._pollAbort = new AbortController();
+    this._taskAbort = new AbortController();
+    this._activeTaskPromise = null;
   }
 
   async registerOnline() {
-    const res = await this.client.registerAgent({
-      id: this.agentId,
-      metadata: { host: os.hostname(), mode: "agent-daemon" },
-    });
+    const res = await this.client.registerAgent(
+      {
+        id: this.agentId,
+        metadata: { host: os.hostname(), mode: "agent-daemon" },
+      },
+      { signal: this._pollAbort.signal }
+    );
     // config.json 里固定的公钥优先；未固定时才采用注册响应下发的公钥。
     if (!this._pinnedHubPublicKey && res?.approval_public_key && isHubPublicKey(res.approval_public_key)) {
       this.hubPublicKey = res.approval_public_key;
@@ -246,6 +268,7 @@ export class AgentDaemon {
     const pollRes = await this.client.pollAgent(this.agentId, {
       since: this._seq,
       timeout: this.pollTimeoutSec,
+      signal: this._pollAbort.signal,
     });
     if (pollRes?.seq) this._seq = Math.max(this._seq, Number(pollRes.seq));
     if (pollRes?.paused || !pollRes?.tasks?.length) return 0;
@@ -253,7 +276,7 @@ export class AgentDaemon {
     // 收件箱保活模式（无 command，如 Muse VM）：仅长轮询维持在线，不抢单也不误标记 fail
     if (!this.command) {
       if (this.idleWaitMs > 0) {
-        await new Promise((r) => setTimeout(r, this.idleWaitMs));
+        await sleepAbortable(this.idleWaitMs, this._pollAbort.signal);
       }
       return 0;
     }
@@ -285,30 +308,47 @@ export class AgentDaemon {
       model: claimed.model || "",
     });
     const timeoutSec = clampTimeoutSec(claimed.timeout_sec);
-    const res = await this.runner(cmd, usesPromptArg ? null : promptText, timeoutSec, this.cwd, {
-      AH_AGENT_ID: claimed.to_agent_id || this.agentId,
-      AH_TASK_ID: claimed.id,
-      AH_CONTEXT_ID: claimed.context_id,
-      AH_RUN_DIR: runDir,
-    });
-    const parsed = parseCliOutput(res.stdout, res.stderr);
-    if (res.code === 0 && !parsed.isError) {
-      const text = parsed.text || "(完成)";
-      await this.client.complete(claimed.id, {
-        summary: text.slice(0, 240),
-        text,
-        usage: parsed.usage,
-      });
-    } else {
-      await this.client.fail(claimed.id, {
-        error: formatCliFailure(parsed, res.stderr, res.code),
-        retryable: false,
-      });
+    const taskPromise = (async () => {
+      const res = await this.runner(
+        cmd,
+        usesPromptArg ? null : promptText,
+        timeoutSec,
+        this.cwd,
+        {
+          AH_AGENT_ID: claimed.to_agent_id || this.agentId,
+          AH_TASK_ID: claimed.id,
+          AH_CONTEXT_ID: claimed.context_id,
+          AH_RUN_DIR: runDir,
+        },
+        { signal: this._taskAbort.signal }
+      );
+      const parsed = parseCliOutput(res.stdout, res.stderr);
+      if (res.code === 0 && !parsed.isError) {
+        const text = parsed.text || "(完成)";
+        await this.client.complete(claimed.id, {
+          summary: text.slice(0, 240),
+          text,
+          usage: parsed.usage,
+        });
+      } else {
+        await this.client.fail(claimed.id, {
+          error: formatCliFailure(parsed, res.stderr, res.code),
+          retryable: false,
+        });
+      }
+    })();
+    this._activeTaskPromise = taskPromise;
+    try {
+      await taskPromise;
+    } finally {
+      if (this._activeTaskPromise === taskPromise) this._activeTaskPromise = null;
     }
     return 1;
   }
 
   async start() {
+    if (this._pollAbort.signal.aborted) this._pollAbort = new AbortController();
+    if (this._taskAbort.signal.aborted) this._taskAbort = new AbortController();
     this._running = true;
     let delayIdx = 0;
     let needRegister = true;
@@ -321,16 +361,37 @@ export class AgentDaemon {
         await this.runOnce();
         delayIdx = 0;
       } catch (err) {
+        if (!this._running || this._pollAbort.signal.aborted) break;
         const waitMs = this.reconnectDelaysMs[Math.min(delayIdx, this.reconnectDelaysMs.length - 1)] || 3000;
         delayIdx = Math.min(delayIdx + 1, this.reconnectDelaysMs.length - 1);
         needRegister = true;
         this.logger.warn?.(`[agent-daemon] 轮询异常，${Math.round(waitMs / 1000)}s 后重试: ${err?.message || err}`);
-        await new Promise((r) => setTimeout(r, waitMs));
+        await sleepAbortable(waitMs, this._pollAbort.signal);
       }
     }
   }
 
-  stop() {
+  async stop({ graceMs = 3000 } = {}) {
     this._running = false;
+    this._pollAbort.abort();
+    const pending = this._activeTaskPromise;
+    if (!pending) return;
+
+    let timedOut = false;
+    if (!Number.isFinite(graceMs) || graceMs <= 0) {
+      this._taskAbort.abort();
+      await Promise.race([pending.catch(() => {}), sleepAbortable(500)]);
+      return;
+    }
+    await Promise.race([
+      pending.catch(() => {}),
+      sleepAbortable(graceMs).then(() => {
+        timedOut = true;
+      }),
+    ]);
+    if (timedOut && this._activeTaskPromise) {
+      this._taskAbort.abort();
+      await Promise.race([pending.catch(() => {}), sleepAbortable(500)]);
+    }
   }
 }
