@@ -4,9 +4,9 @@ import { escapeHtml } from "./utils.js";
 
 // 单色品牌图标在 <img> 内 currentColor 恒为黑色，打标记便于样式单独处理
 // 自带底板的应用图标需铺满头像，否则会在白底里缩成一个小方块
-const FULL_BLEED_BRANDS = new Set(["codex", "autoclaw", "todayai", "instinct", "factory", "aider"]);
+const FULL_BLEED_BRANDS = new Set(["codex", "doubao", "autoclaw", "todayai", "instinct", "factory", "aider"]);
 // 无矢量源的品牌用 128px 位图，其余默认 .svg
-const PNG_BRANDS = new Set(["autoclaw", "awsquick", "todayai", "instinct", "factory", "aider"]);
+const PNG_BRANDS = new Set(["autoclaw", "doubao", "awsquick", "todayai", "instinct", "factory", "aider"]);
 const MONO_BRANDS = new Set(["opencode", "goose", "grok", "cursor", "githubcopilot", "cline", "kilocode", "apple", "linux"]);
 
 // 本机 CLI Worker：按 platform 与 worker_key 识别（同名 key 指向 CLI 版本的图标）
@@ -47,6 +47,10 @@ const CLOUD_BRANDS = {
   qwen: "qwen",
   workbuddy: "workbuddy",
   "amazon-quick": "awsquick",
+  "aws-quick": "awsquick",
+  awsquick: "awsquick",
+  quick: "awsquick",
+  today: "todayai",
   lingguang: "antgroup",
   muse: "muse",
   autoclaw: "autoclaw",
@@ -78,7 +82,8 @@ const NAME_HINTS = [
   [/factory|droid/i, "factory"],
   [/aider/i, "aider"],
   [/autoclaw/i, "autoclaw"],
-  [/today\s*ai/i, "todayai"],
+  [/amazon\s*quick|aws\s*quick|^quick$/i, "awsquick"],
+  [/today[\s-]*ai/i, "todayai"],
   [/instinct/i, "instinct"],
 ];
 
@@ -144,7 +149,9 @@ export function resolveAgentBrand(agent = {}) {
   const isWorker = agent.kind === "device-worker";
 
   const brandTable = isWorker ? CLI_BRANDS : CLOUD_BRANDS;
-  for (const key of [platform, workerKey]) {
+  // 先看 id：灵光、Quick 等节点的 platform 是借用的 gemini / doubao，只有 id 才能区分
+  const idKey = isWorker ? "" : normKey(agent.id);
+  for (const key of [idKey, platform, workerKey]) {
     if (!key) continue;
     if (brandTable[key]) return { brand: brandTable[key] };
     if (MONOGRAMS[key]) return { mono: MONOGRAMS[key] };
