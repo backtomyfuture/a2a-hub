@@ -38,6 +38,17 @@ export function resolveFeishuAppConfig(env = {}) {
   };
 }
 
+// 手机号与 user_id 都可能是纯数字，这里只把 11~15 位（可带 +）的数字串当手机号
+function isMobile(id) {
+  return /^\+?\d{11,15}$/.test(id);
+}
+
+const SEND_HINTS = {
+  99992361: "审批人的 open_id 属于另一个飞书应用（open_id 按应用隔离）。请改填该用户的邮箱或手机号，Hub 会自动换成本应用下的 open_id；或用本应用拿到的 open_id。",
+  99991672: "应用缺少权限，请在飞书开放平台开通「以应用身份发消息」(im:message:send_as_bot) 并发布版本。",
+  230013: "审批人不在应用的可用范围内，请在开放平台把他加入应用可用范围。",
+};
+
 function receiveIdType(id) {
   if (id.startsWith("ou_")) return "open_id";
   if (id.startsWith("on_")) return "union_id";
@@ -144,6 +155,8 @@ export class FeishuApprovalChannel {
     this.cfg = resolveFeishuAppConfig({});
     this.conn = null;
     this._token = null;
+    this._resolved = new Map();
+    this._lastSend = null;
   }
 
   status() {
@@ -152,6 +165,7 @@ export class FeishuApprovalChannel {
       app_id: this.cfg.appId,
       approvers: this.cfg.approvers.length,
       chat_id: this.cfg.chatId,
+      last_send: this._lastSend,
       ...(this.conn ? this.conn.status() : { state: "disabled", last_error: "", connected_at: null }),
     };
   }
@@ -159,6 +173,8 @@ export class FeishuApprovalChannel {
   start() {
     this.cfg = resolveFeishuAppConfig(this.envResolver() || {});
     this._token = null;
+    this._resolved = new Map();
+    this._lastSend = null;
     if (!this.cfg.configured) return;
     this.conn = new FeishuLongConnection({
       appId: this.cfg.appId,
@@ -219,6 +235,26 @@ export class FeishuApprovalChannel {
     return this._token.value;
   }
 
+  // 邮箱 / 手机号换成本应用下的 open_id：发消息用它，卡片回调的白名单比对也靠它。
+  // 需要应用开通通讯录权限 contact:user.id:readonly；失败时邮箱仍可直接作为收件人，只是点击无法比对身份。
+  async _resolveApprovers() {
+    const pending = this.cfg.approvers.filter((id) => !this._resolved.has(id) && (id.includes("@") || isMobile(id)));
+    if (pending.length) {
+      const emails = pending.filter((id) => id.includes("@"));
+      const mobiles = pending.filter((id) => !id.includes("@"));
+      try {
+        const r = await this._api("POST", "/open-apis/contact/v3/users/batch_get_id?user_id_type=open_id", { emails, mobiles });
+        for (const u of r?.data?.user_list || []) {
+          const key = pending.find((id) => id === u.email || id === u.mobile || id.replace(/^\+86/, "") === String(u.mobile || "").replace(/^\+86/, ""));
+          if (key && u.user_id) this._resolved.set(key, u.user_id);
+        }
+      } catch (err) {
+        this.logger.warn?.(`[feishu-approval] 解析审批人邮箱/手机号失败: ${err?.message || err}`);
+      }
+    }
+    return this.cfg.approvers.map((raw) => ({ raw, openId: this._resolved.get(raw) || "" }));
+  }
+
   _loadCardRecord(taskId) {
     return this.store.getIdempotency(CARD_SCOPE, taskId);
   }
@@ -261,9 +297,10 @@ export class FeishuApprovalChannel {
     if (!view || view.task.state !== "auth-required") return [];
     const card = buildApprovalCard({ ...view, outcome: "pending", consoleLink: this._consoleLink(view.task) });
     const content = JSON.stringify(card);
-    const targets = [...this.cfg.approvers];
+    const targets = (await this._resolveApprovers()).map((a) => a.openId || a.raw);
     if (this.cfg.chatId) targets.push(this.cfg.chatId);
     const messageIds = [];
+    const errors = [];
     for (const id of targets) {
       try {
         const r = await this._api("POST", `/open-apis/im/v1/messages?receive_id_type=${receiveIdType(id)}`, {
@@ -273,9 +310,13 @@ export class FeishuApprovalChannel {
         });
         if (r?.data?.message_id) messageIds.push(r.data.message_id);
       } catch (err) {
-        this.logger.warn?.(`[feishu-approval] 发送给 ${id} 失败: ${err?.message || err}`);
+        const msg = String(err?.message || err);
+        const code = Number(/code=(\d+)/.exec(msg)?.[1]);
+        errors.push(`发送给 ${id} 失败: ${msg}${SEND_HINTS[code] ? `。${SEND_HINTS[code]}` : ""}`);
+        this.logger.warn?.(`[feishu-approval] 发送给 ${id} 失败: ${msg}`);
       }
     }
+    this._lastSend = { at: Date.now(), task_id: taskId, ok: messageIds.length, failed: errors.length, error: errors[0] || "" };
     // 同一任务可能多次申请审批：保留历史卡片 id，结束时一并刷新成最终状态
     const prev = this._loadCardRecord(taskId)?.message_ids || [];
     this.store.saveIdempotency(CARD_SCOPE, taskId, {
@@ -307,7 +348,8 @@ export class FeishuApprovalChannel {
 
   _isApprover(operator = {}) {
     const ids = [operator.open_id, operator.user_id, operator.union_id].filter(Boolean).map(String);
-    return ids.some((id) => this.cfg.approvers.includes(id));
+    const allowed = new Set([...this.cfg.approvers, ...this._resolved.values()]);
+    return ids.some((id) => allowed.has(id));
   }
 
   // 长连接收到的事件入口；返回值即卡片回调的响应体（toast + 替换后的卡片）。
@@ -320,6 +362,7 @@ export class FeishuApprovalChannel {
     if (value.ah !== "approval" || !value.task_id) return null;
 
     const toast = (type, content) => ({ toast: { type, content } });
+    await this._resolveApprovers();
     if (!this._isApprover(ev.operator)) {
       return toast("error", "你不在 a2a-hub 审批人白名单中，无权审批");
     }

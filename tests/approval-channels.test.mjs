@@ -335,6 +335,50 @@ async function waitFor(fn, ms = 1000) {
   }
 }
 
+test("Feishu 应用审批：邮箱解析成本应用 open_id、跨应用 open_id 报错可见", async () => {
+  const ctx = makeCtx();
+  const sent = [];
+  const fetchFn = async (url, opts = {}) => {
+    const body = opts.body ? JSON.parse(opts.body) : null;
+    if (url.endsWith("/callback/ws/endpoint")) return jsonRes({ code: 0, data: { URL: "wss://x.feishu.cn/ws/v2?service_id=1&ticket=t", ClientConfig: {} } });
+    if (url.endsWith("/tenant_access_token/internal")) return jsonRes({ code: 0, tenant_access_token: "t", expire: 7200 });
+    if (url.includes("/contact/v3/users/batch_get_id")) {
+      assert.deepEqual(body.emails, ["boss@corp.com"]);
+      return jsonRes({ code: 0, data: { user_list: [{ email: "boss@corp.com", user_id: "ou_mine" }] } });
+    }
+    if (url.includes("/im/v1/messages?receive_id_type=")) {
+      sent.push(body.receive_id);
+      if (body.receive_id === "ou_foreign") return jsonRes({ code: 99992361, msg: "open_id cross app" });
+      return jsonRes({ code: 0, data: { message_id: `om_${body.receive_id}` } });
+    }
+    return jsonRes({ code: 99, msg: "unexpected" });
+  };
+  const channel = new FeishuApprovalChannel({
+    store: ctx.store,
+    taskService: ctx.taskService,
+    envResolver: () => ({ AH_FEISHU_APP_ID: "cli_x", AH_FEISHU_APP_SECRET: "s", AH_FEISHU_APPROVERS: "boss@corp.com, ou_foreign" }),
+    fetchFn,
+    WebSocketImpl: FakeWebSocket,
+    logger: { warn() {}, error() {}, log() {} },
+  });
+  ctx.store.setChangeHook((ev) => channel.handleEvent(ev));
+  try {
+    channel.start();
+    ctx.store.createAgent({ id: "prod", name: "Prod", approval_policy: "always" });
+    ctx.taskService.dispatchTasks({ to: "prod", title: "上线", inputText: "ship" });
+    const st = await waitFor(() => channel.status().last_send && channel.status());
+    assert.deepEqual(sent.sort(), ["ou_foreign", "ou_mine"]);
+    assert.equal(st.last_send.ok, 1);
+    assert.equal(st.last_send.failed, 1);
+    assert.ok(st.last_send.error.includes("邮箱或手机号"));
+    assert.equal(channel._isApprover({ open_id: "ou_mine" }), true);
+    assert.equal(channel._isApprover({ open_id: "ou_other" }), false);
+  } finally {
+    await channel.stop();
+    ctx.cleanup();
+  }
+});
+
 test("Feishu 应用审批：长连接卡片回调签名放行、白名单拦截、结束后刷新卡片", async () => {
   const ctx = makeCtx();
   const calls = [];

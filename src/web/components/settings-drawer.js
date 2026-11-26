@@ -151,13 +151,14 @@ export function renderSettingsDrawer(root) {
               </label>
             </div>
             <label class="field">
-              <span>审批人（open_id / user_id，逗号分隔；只有他们的点击有效，并会收到私聊卡片）</span>
-              <input type="text" name="feishu_approvers" value="${escapeHtml(fa.approvers || "")}" placeholder="ou_xxx, ou_yyy" />
+              <span>审批人（邮箱 / 手机号 / 本应用的 open_id，逗号分隔；只有他们的点击有效，并会收到私聊卡片）</span>
+              <input type="text" name="feishu_approvers" value="${escapeHtml(fa.approvers || "")}" placeholder="you@company.com, 13800000000" />
             </label>
             <label class="field">
               <span>额外推送到群（chat_id，可选）</span>
               <input type="text" name="feishu_chat_id" value="${escapeHtml(fa.chat_id || "")}" placeholder="oc_xxx" />
             </label>
+            ${fa.status?.last_send?.error ? `<div class="muted" style="font-size:12px;color:var(--danger)">最近一次推送卡片失败：${escapeHtml(fa.status.last_send.error)}</div>` : ""}
             ${fa.status?.last_error ? `<div class="muted" style="font-size:12px;color:var(--danger)">最近错误：${escapeHtml(fa.status.last_error)}</div>` : ""}
             <div class="row-between">
               <span></span>
