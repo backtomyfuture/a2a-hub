@@ -4,6 +4,12 @@
 
 ## 未发布
 
+- **一次性审批链接**：开启 `AH_APPROVAL_LINKS=1`（或控制台「审批渠道」勾选）后，`auth-required` 通知（Bark / 飞书群机器人 / Telegram / 通用 Webhook）附带 `/approve/<令牌>` 链接，Bark 点击直接打开确认页。令牌用 Hub 私钥派生的密钥做 HMAC，绑定任务、审批请求与过期时间（`AH_APPROVAL_LINK_TTL_MIN`，默认 30 分钟），只能用一次。GET 只展示确认页，点「签名并放行 / 拒绝」后 POST 才生效，聊天软件预抓取链接不会误批。放行签名仍由 Hub 私钥完成。拿到链接的人都能审批，多人可见的渠道请谨慎开启。
+- **审批超时**：`auth-required` 超过 `AH_APPROVAL_TIMEOUT_MIN` 分钟（默认 1440，`0` 关闭）未处理时自动拒绝，`auth_decision` 的 `from_node` 为 `hub-approval-timeout`。
+- **只认最新审批请求**：`decideApproval` 带了 `request_id` 但不是最新一条时返回 409 `stale_request`，旧链接、旧卡片不会签出执行端验不过的决定。`auth_decision.data` 增加 `channel`（`console` / `cli` / `link` / `feishu` / `timeout`）与 `operator`。
+- **AgentDaemon 验签**：独立 Agent 守护进程执行前与 DeviceDaemon 一样校验 Hub 签名，进入过审批但没有有效批准的任务直接失败。验签公钥优先取 `config.json` 的 `hubPublicKey`，未固定时用 `register` 响应新增的 `approval_public_key`。
+- **飞书应用审批（长连接）**：配置 `AH_FEISHU_APP_ID`、`AH_FEISHU_APP_SECRET`、`AH_FEISHU_APPROVERS`（可选 `AH_FEISHU_CHAT_ID`、`AH_FEISHU_DOMAIN`）后，Hub 通过飞书长连接接收 `card.action.trigger` 卡片回调，不需要公网回调地址。任务进入审批时给每位审批人私聊推送互动卡片（配置了群则同时发群），只有白名单内用户的点击会被采纳；审批在任意渠道结束后，已发出的卡片都会刷新成最终状态。长连接帧协议零依赖实现，编码与 protobufjs 逐字节一致。
+- **Telegram 通知改为纯文本**：不再使用 Markdown 解析，避免令牌或标题里的 `_` 截断链接。
 - **Herdr 启动等待 shell**：新建窗格后不再立刻 `agent.start`。Herdr 返回 `agent_pane_busy`（窗格还不是可用 shell）或 `agent_pane_unavailable`（终端还没起来）时，在启动时限内隔一小段再试。其他启动错误仍马上失败并关掉空壳 Tab。
 - **Herdr 改走 Socket API**：`context=herdr` 不再拉起 `herdr` CLI 做终端文本交接。守护进程通过本机 Herdr Socket（协议 22）开 Pane、启动 Agent、订阅事件。派发只带不超过 300 字节的指针，上游上下文和验收在文件信封里。交卷必须原子写入 `result.json`，且 `attempt_id` 匹配当前尝试。Agent 还停在发指针之前的 idle、没有进入 working，不算交卷，也不消耗修复次数。`session.json` 同时保存对话 id 和 Herdr 绑定。
 - **WorkBuddy 令牌留在提示词里**：云端定时任务每次都是新沙箱，没有可保留的凭据文件。接入提示词把 Bearer 令牌写在【每次运行】的请求头里，全文只出现一次；创建定时任务时这段原样成为任务指令。不再要求另存文件。401/403 才停轮并提醒机主更换令牌。

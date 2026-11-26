@@ -4,6 +4,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { ApprovalLinkService, resolveApprovalSettings } from "./approval-links.mjs";
 import { loadOrCreateHubKey } from "./approval-sign.mjs";
 import { LongPollBroker } from "./broker.mjs";
 import {
@@ -17,6 +18,7 @@ import {
   sanitizeSlug,
   writeJsonAtomic,
 } from "./config.mjs";
+import { FeishuApprovalChannel } from "./feishu-approval.mjs";
 import { ExternalNotifier } from "./notifier.mjs";
 import { ScheduleService } from "./schedules.mjs";
 import { TaskService } from "./task-service.mjs";
@@ -65,13 +67,32 @@ export async function startHubRuntime({
 
   const taskService = new TaskService(store, { approvalPrivateKey: privateKey });
   const webhooks = new WebhookDispatcher(store, { hubUrlResolver: resolvePublicUrl });
-  const notifier = new ExternalNotifier(appEnv, { hubUrlResolver: resolvePublicUrl });
+  // 审批相关开关在控制台可改（写 app.env），每次使用时重读，无需重启
+  const resolveEnv = () => ({ ...loadAppEnv(configDir), ...env });
+  const approvalLinks = new ApprovalLinkService({
+    store,
+    privateKey,
+    hubUrlResolver: resolvePublicUrl,
+    envResolver: resolveEnv,
+  });
+  const notifier = new ExternalNotifier(appEnv, {
+    hubUrlResolver: resolvePublicUrl,
+    approvalLinkResolver: (event) => (approvalLinks.isEnabled() ? approvalLinks.issueForTask(event.taskId)?.url || "" : ""),
+  });
+  const feishuApproval = new FeishuApprovalChannel({
+    store,
+    taskService,
+    envResolver: resolveEnv,
+    hubUrlResolver: resolvePublicUrl,
+    logger,
+  });
   const schedules = new ScheduleService(store, taskService);
 
   store.setChangeHook((event) => {
     broker.publish(event);
     webhooks.handleEvent(event);
     notifier.handleEvent(event);
+    feishuApproval.handleEvent(event);
   });
 
   const deviceId = sanitizeSlug(cfg.deviceId || os.hostname(), "hub-local");
@@ -108,6 +129,8 @@ export async function startHubRuntime({
     webhooks,
     notifier,
     schedules,
+    approvalLinks,
+    feishuApproval,
     approvalPublicKey: publicKey,
     approvalPrivateKey: privateKey,
     ownerToken: getToken,
@@ -147,9 +170,13 @@ export async function startHubRuntime({
   }, 0o600);
 
   fileRetention.start();
+  feishuApproval.start();
   const staleTimer = setInterval(() => {
     try {
       taskService.reclaimStale();
+    } catch {}
+    try {
+      taskService.expireApprovals(resolveApprovalSettings(resolveEnv()).timeoutMin);
     } catch {}
   }, 60_000);
   if (typeof staleTimer.unref === "function") staleTimer.unref();
@@ -185,6 +212,7 @@ export async function startHubRuntime({
     clearInterval(staleTimer);
     clearInterval(maintenanceTimer);
     fileRetention.stop();
+    await feishuApproval.stop();
     if (deviceDaemon) {
       await deviceDaemon.stop();
     }
@@ -213,6 +241,8 @@ export async function startHubRuntime({
     webhooks,
     notifier,
     schedules,
+    approvalLinks,
+    feishuApproval,
     server,
     deviceDaemon,
     deviceLoopPromise,

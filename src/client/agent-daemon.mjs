@@ -4,6 +4,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { isHubPublicKey, verifyTaskApproval } from "../core/approval-sign.mjs";
 import { clampTimeoutSec, loadConfigJson, loadOwnerToken, sanitizeSlug } from "../core/config.mjs";
 import { runDetachedCommand } from "../core/proc.mjs";
 import { formatCliFailure, parseCliOutput, renderWorkerCommand } from "../core/receipt.mjs";
@@ -51,6 +52,7 @@ export class AgentDaemon {
     token = "",
     command = "",
     cwd = "",
+    hubPublicKey = "",
     client = null,
     runner = runDetachedCommand,
     pollTimeoutSec = 35,
@@ -65,6 +67,8 @@ export class AgentDaemon {
     this.token = token || loadOwnerToken(configDir) || cfg.agentToken || cfg.apiToken || "";
     this.command = command || cfg.command || "";
     this.cwd = cwd || cfg.cwd || os.homedir();
+    this._pinnedHubPublicKey = isHubPublicKey(hubPublicKey || cfg.hubPublicKey || "");
+    this.hubPublicKey = hubPublicKey || cfg.hubPublicKey || "";
     this.client = client || new GatewayClient(this.hubUrl, { token: this.token });
     this.runner = runner;
     this.pollTimeoutSec = pollTimeoutSec;
@@ -78,10 +82,15 @@ export class AgentDaemon {
   }
 
   async registerOnline() {
-    return this.client.registerAgent({
+    const res = await this.client.registerAgent({
       id: this.agentId,
       metadata: { host: os.hostname(), mode: "agent-daemon" },
     });
+    // config.json 里固定的公钥优先；未固定时才采用注册响应下发的公钥。
+    if (!this._pinnedHubPublicKey && res?.approval_public_key && isHubPublicKey(res.approval_public_key)) {
+      this.hubPublicKey = res.approval_public_key;
+    }
+    return res;
   }
 
   _buildPrompt(task, { downloaded = [], failedDownloads = [], externalAttachments = [], inputPath = "" } = {}) {
@@ -258,6 +267,13 @@ export class AgentDaemon {
       return 0;
     }
     if (!claimed) return 0;
+
+    // 与 DeviceDaemon 同一条边界：进入过 auth-required 的任务，没有 Hub 签名的批准就不执行。
+    const verdict = verifyTaskApproval(claimed, this.hubPublicKey);
+    if (!verdict.ok) {
+      await this.client.fail(claimed.id, { error: verdict.error, retryable: false });
+      return 1;
+    }
 
     const { runDir, promptPath, promptText } = await this._prepareRunDir(claimed);
 

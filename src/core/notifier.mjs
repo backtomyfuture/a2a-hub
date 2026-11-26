@@ -5,10 +5,12 @@ import { validateWebhookUrl } from "./webhooks.mjs";
 import { BROWSER_USER_AGENT } from "./config.mjs";
 
 export class ExternalNotifier {
-  constructor(env = {}, { fetchFn = globalThis.fetch, hubUrlResolver = null } = {}) {
+  constructor(env = {}, { fetchFn = globalThis.fetch, hubUrlResolver = null, approvalLinkResolver = null } = {}) {
     this.env = env;
     this.fetchFn = fetchFn;
     this.hubUrlResolver = hubUrlResolver;
+    // (event) => 一次性审批链接 URL 或空串；未开启审批链接时返回空串
+    this.approvalLinkResolver = approvalLinkResolver;
     this._dedupe = new Map();
   }
 
@@ -48,10 +50,13 @@ export class ExternalNotifier {
     };
   }
 
-  async sendAlert({ title, body, link = "", event = {} } = {}) {
+  async sendAlert({ title, body, link = "", approvalUrl = "", event = {} } = {}) {
     const e = this.env;
     const tasks = [];
-    const fullText = link ? `${body}\n处理链接：${link}` : body;
+    const textLines = [body];
+    if (approvalUrl) textLines.push(`一键审批：${approvalUrl}`);
+    if (link) textLines.push(`处理链接：${link}`);
+    const fullText = textLines.join("\n");
 
     if (e.AH_FEISHU_WEBHOOK) {
       const v = validateWebhookUrl(e.AH_FEISHU_WEBHOOK);
@@ -67,10 +72,12 @@ export class ExternalNotifier {
       const v = validateWebhookUrl(e.AH_BARK_URL);
       if (v.ok) {
         const url = v.url.replace(/\/+$/, "");
+        // 手机上点通知直接打开审批确认页
+        const tapUrl = approvalUrl || link;
         tasks.push(this._postJson(url, {
           title,
           body: fullText,
-          ...(link ? { url: link } : {}),
+          ...(tapUrl ? { url: tapUrl } : {}),
         }));
       }
     }
@@ -79,8 +86,8 @@ export class ExternalNotifier {
       const tgUrl = `https://api.telegram.org/bot${e.AH_TELEGRAM_BOT_TOKEN}/sendMessage`;
       tasks.push(this._postJson(tgUrl, {
         chat_id: e.AH_TELEGRAM_CHAT_ID,
-        text: `*${title}*\n${fullText}`,
-        parse_mode: "Markdown",
+        // 不用 Markdown 解析：令牌里的 "_" 和任务标题会被当成格式符，导致链接被截断或发送失败
+        text: `${title}\n${fullText}`,
       }));
     }
 
@@ -91,6 +98,7 @@ export class ExternalNotifier {
           title,
           body,
           link,
+          ...(approvalUrl ? { approval_url: approvalUrl } : {}),
           event,
           timestamp: Date.now(),
         }));
@@ -146,6 +154,12 @@ export class ExternalNotifier {
     const detail = event.prompt || event.reason || event.error || event.summary || event.title || event.taskId;
     const body = `Agent: ${event.agentId || "-"}\n任务: ${event.title || event.taskId}\n详情: ${detail}`;
     const link = this._deepLink(event);
-    void this.sendAlert({ title, body, link, event }).catch(() => {});
+    let approvalUrl = "";
+    if (event.type === "task.auth_required" && typeof this.approvalLinkResolver === "function") {
+      try {
+        approvalUrl = String(this.approvalLinkResolver(event) || "");
+      } catch {}
+    }
+    void this.sendAlert({ title, body, link, approvalUrl, event }).catch(() => {});
   }
 }

@@ -221,11 +221,12 @@ export class GatewayClient {
     return this.post(`/api/v1/tasks/${encodeURIComponent(taskId)}/cancel`, { reason });
   }
 
-  decideApproval(taskId, { decision, note = "", requestId = "" } = {}) {
+  decideApproval(taskId, { decision, note = "", requestId = "", channel = "" } = {}) {
     return this.post(`/api/v1/approvals/${encodeURIComponent(taskId)}/decide`, {
       decision,
       note,
       request_id: requestId,
+      ...(channel ? { channel } : {}),
     });
   }
 

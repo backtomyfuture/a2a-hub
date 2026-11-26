@@ -14,7 +14,12 @@ import {
   loadWorkersJson,
   sanitizeSlug,
 } from "../core/config.mjs";
-import { isHubPublicKey, pickSignedDecision } from "../core/approval-sign.mjs";
+import {
+  extractLastAuthRequest,
+  extractSignedDecisions,
+  isHubPublicKey,
+  pickSignedDecision,
+} from "../core/approval-sign.mjs";
 import { runDetachedCommand } from "../core/proc.mjs";
 import { formatCliFailure, parseCliOutput, renderWorkerCommand } from "../core/receipt.mjs";
 import { SessionStore } from "../core/session-store.mjs";
@@ -59,24 +64,6 @@ function collectTaskAttachments(task) {
   return deduped;
 }
 
-function extractLastAuthRequest(task) {
-  const msgs = Array.isArray(task?.messages) ? task.messages : [];
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    if (msgs[i].kind === "auth_request") return msgs[i];
-  }
-  return null;
-}
-
-function extractSignedDecisions(task) {
-  const msgs = Array.isArray(task?.messages) ? task.messages : [];
-  return msgs
-    .filter((m) => m.kind === "auth_decision")
-    .reverse()
-    .map((m) => ({
-      decision: m.data?.decision || m.body,
-      sig: m.signature || m.data?.signature || "",
-    }));
-}
 
 export class DeviceDaemon {
   constructor({

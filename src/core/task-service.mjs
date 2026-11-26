@@ -745,7 +745,7 @@ export class TaskService {
     });
   }
 
-  decideApproval(taskId, { fromNode = "owner", decision, note = "", requestId = "" } = {}) {
+  decideApproval(taskId, { fromNode = "owner", decision, note = "", requestId = "", channel = "console", operator = "" } = {}) {
     const raw = String(decision || "").trim().toLowerCase();
     const normalized = ["approve", "approved", "allow", "yes"].includes(raw)
       ? "approved"
@@ -768,7 +768,12 @@ export class TaskService {
 
       const msgs = this.store.listMessages(task.id);
       const lastAuthReq = [...msgs].reverse().find((m) => m.kind === "auth_request");
-      const finalReqId = String(requestId || lastAuthReq?.data?.request_id || "default");
+      const latestReqId = String(lastAuthReq?.data?.request_id || "default");
+      // 外部渠道（链接、飞书卡片）可能拿着旧请求来点：只认最新一条审批请求，避免签出执行端验不过的决定。
+      if (requestId && String(requestId) !== latestReqId) {
+        throw makeError("该审批请求已过期，请处理最新的审批", 409, "stale_request");
+      }
+      const finalReqId = latestReqId;
       const signature = signDecision(this.approvalPrivateKey, {
         taskId: task.id,
         requestId: finalReqId,
@@ -806,6 +811,8 @@ export class TaskService {
           request_id: finalReqId,
           decision: normalized,
           note: String(note || ""),
+          channel: String(channel || "console"),
+          ...(operator ? { operator: String(operator) } : {}),
           signature,
         },
         signature,
@@ -892,6 +899,28 @@ export class TaskService {
       reclaimed.push(updated);
     }
     return reclaimed;
+  }
+
+  // 审批挂起超过 timeoutMin 分钟自动拒绝，防止无人处理的任务一直占着线程。timeoutMin<=0 表示关闭。
+  expireApprovals(timeoutMin, now = Date.now()) {
+    const minutes = Number(timeoutMin);
+    if (!Number.isFinite(minutes) || minutes <= 0) return [];
+    const cutoff = now - minutes * 60_000;
+    const rows = this.store.db.prepare(
+      "SELECT id FROM tasks WHERE state = 'auth-required' AND updated_at < ?"
+    ).all(cutoff);
+    const expired = [];
+    for (const row of rows) {
+      try {
+        expired.push(this.decideApproval(row.id, {
+          fromNode: "hub-approval-timeout",
+          decision: "deny",
+          note: `审批超时（${minutes} 分钟未处理），已自动拒绝`,
+          channel: "timeout",
+        }));
+      } catch {}
+    }
+    return expired;
   }
 
   // ---- Leader 增量拉取与 Agent 只读 Check ----

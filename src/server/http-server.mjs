@@ -19,6 +19,7 @@ import {
   saveWorkersJson,
   writeLockedAppEnvVars,
 } from "../core/config.mjs";
+import { resolveApprovalSettings } from "../core/approval-links.mjs";
 import { shellQuote } from "../core/receipt.mjs";
 import {
   MCP_PROTOCOL_VERSION,
@@ -45,6 +46,7 @@ import {
   resolveRequestActor,
   timingSafeEqualStr,
 } from "./auth.mjs";
+import { handleApprovalLinkRequest } from "./approval-page.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
@@ -188,6 +190,8 @@ export function startHubHttpServer({
   webhooks,
   notifier,
   schedules,
+  approvalLinks = null,
+  feishuApproval = null,
   approvalPublicKey = "",
   approvalPrivateKey = null,
   ownerToken = "",
@@ -580,6 +584,21 @@ export function startHubHttpServer({
           notify_webhook: appEnv.AH_NOTIFY_WEBHOOK || "",
           notify_on: appEnv.AH_NOTIFY_ON || "action",
         },
+        approval: (() => {
+          const a = resolveApprovalSettings(appEnv);
+          return {
+            links_enabled: a.linksEnabled,
+            link_ttl_min: a.linkTtlMin,
+            timeout_min: a.timeoutMin,
+          };
+        })(),
+        feishu_app: {
+          app_id: appEnv.AH_FEISHU_APP_ID || "",
+          app_secret_set: Boolean(appEnv.AH_FEISHU_APP_SECRET),
+          approvers: appEnv.AH_FEISHU_APPROVERS || "",
+          chat_id: appEnv.AH_FEISHU_CHAT_ID || "",
+          status: feishuApproval ? feishuApproval.status() : { configured: false, state: "disabled" },
+        },
       });
     }
 
@@ -596,6 +615,21 @@ export function startHubHttpServer({
       if (body.notify_webhook !== undefined) updates.AH_NOTIFY_WEBHOOK = String(body.notify_webhook || "").trim();
       if (body.notify_on !== undefined) updates.AH_NOTIFY_ON = body.notify_on === "all" ? "all" : "action";
       if (body.public_url !== undefined) updates.AH_PUBLIC_URL = String(body.public_url || "").trim().replace(/\/+$/, "");
+      if (body.approval_links !== undefined) updates.AH_APPROVAL_LINKS = body.approval_links ? "1" : "0";
+      if (body.approval_link_ttl_min !== undefined) {
+        updates.AH_APPROVAL_LINK_TTL_MIN = String(resolveApprovalSettings({ AH_APPROVAL_LINK_TTL_MIN: body.approval_link_ttl_min }).linkTtlMin);
+      }
+      if (body.approval_timeout_min !== undefined) {
+        updates.AH_APPROVAL_TIMEOUT_MIN = String(resolveApprovalSettings({ AH_APPROVAL_TIMEOUT_MIN: body.approval_timeout_min }).timeoutMin);
+      }
+      const feishuKeys = [];
+      if (body.feishu_app_id !== undefined) feishuKeys.push(["AH_FEISHU_APP_ID", String(body.feishu_app_id || "").trim()]);
+      if (body.feishu_app_secret !== undefined && body.feishu_app_secret !== "") {
+        feishuKeys.push(["AH_FEISHU_APP_SECRET", String(body.feishu_app_secret).trim()]);
+      }
+      if (body.feishu_approvers !== undefined) feishuKeys.push(["AH_FEISHU_APPROVERS", String(body.feishu_approvers || "").trim()]);
+      if (body.feishu_chat_id !== undefined) feishuKeys.push(["AH_FEISHU_CHAT_ID", String(body.feishu_chat_id || "").trim()]);
+      for (const [k, v] of feishuKeys) updates[k] = v;
 
       for (const k of ["AH_FEISHU_WEBHOOK", "AH_BARK_URL", "AH_NOTIFY_WEBHOOK", "AH_PUBLIC_URL"]) {
         if (updates[k]) {
@@ -606,6 +640,7 @@ export function startHubHttpServer({
 
       writeLockedAppEnvVars(configDir, updates);
       if (notifier) notifier.updateEnv(updates);
+      if (feishuApproval && feishuKeys.length) await feishuApproval.reload();
       return sendJson(res, 200, { ok: true, notifier: notifier ? notifier.configuredChannels() : {} });
     }
 
@@ -1024,7 +1059,7 @@ export function startHubHttpServer({
         const seq = store.nextSeq();
         store.emitChange({ type: "agent.updated", seq, agentId: targetId, deviceId: existing.device_id });
       }
-      return sendJson(res, 200, { ok: true, agent: store.getAgent(updated.id) });
+      return sendJson(res, 200, { ok: true, agent: store.getAgent(updated.id), approval_public_key: approvalPublicKey });
     }
 
     m = /^\/api\/v1\/agents\/([A-Za-z0-9._-]+)$/.exec(pathname);
@@ -1429,6 +1464,7 @@ export function startHubHttpServer({
         decision: body.decision,
         note: body.note || "",
         requestId: body.request_id || "",
+        channel: body.channel === "cli" ? "cli" : "console",
       });
       return sendJson(res, 200, { ok: true, task });
     }
@@ -1581,6 +1617,13 @@ export function startHubHttpServer({
           return;
         }
         return serveStaticFile(res, WEB_ROOT, "index.html");
+      }
+
+      // 一次性审批链接：令牌本身就是凭据，不走机主鉴权
+      const approveMatch = /^\/approve\/([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/.exec(pathname);
+      if (approveMatch) {
+        await handleApprovalLinkRequest(req, res, approveMatch[1], { approvalLinks, taskService, store });
+        return;
       }
 
       if (pathname.startsWith("/api/") || pathname === "/.well-known/agent.json") {

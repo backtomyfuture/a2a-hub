@@ -187,6 +187,7 @@ export async function runPresentCommand(args, { configDir, io = console } = {}) 
     const r = await client.decideApproval(taskId, {
       decision: sub === "approve" ? "approve" : "deny",
       note: flags.note || "",
+      channel: "cli",
     });
     io.log(`已${sub === "approve" ? "签名批准" : "拒绝"}任务 ${taskId} -> 状态 ${r.task.state}`);
     return 0;

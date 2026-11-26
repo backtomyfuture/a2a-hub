@@ -81,3 +81,40 @@ export function isHubPublicKey(text) {
     return false;
   }
 }
+
+// 任务消息里最后一条审批请求；签名与它的 request_id 绑定，旧请求上的决定对新请求无效。
+export function extractLastAuthRequest(task) {
+  const msgs = Array.isArray(task?.messages) ? task.messages : [];
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i]?.kind === "auth_request") return msgs[i];
+  }
+  return null;
+}
+
+// 最新优先，与 pickSignedDecision 的候选顺序约定一致。
+export function extractSignedDecisions(task) {
+  const msgs = Array.isArray(task?.messages) ? task.messages : [];
+  return msgs
+    .filter((m) => m?.kind === "auth_decision")
+    .reverse()
+    .map((m) => ({
+      decision: m.data?.decision || m.body,
+      sig: m.signature || m.data?.signature || "",
+    }));
+}
+
+// 执行端统一验签入口：任务带过审批请求时，必须有一条 Hub 签名的 approved 决定才放行。
+// 返回 { needed, ok, error }；needed=false 表示该任务从未进入过审批，无需验签。
+export function verifyTaskApproval(task, publicKeyText) {
+  const authReq = extractLastAuthRequest(task);
+  if (!authReq) return { needed: false, ok: true, error: "" };
+  if (!isHubPublicKey(publicKeyText)) {
+    return { needed: true, ok: false, error: "缺少有效 Hub 审批验签公钥 (hubPublicKey)" };
+  }
+  const reqId = String(authReq.data?.request_id || "default");
+  const decision = pickSignedDecision(publicKeyText, task.id, reqId, extractSignedDecisions(task));
+  if (decision !== "approved") {
+    return { needed: true, ok: false, error: "审批签名无效或未批准" };
+  }
+  return { needed: true, ok: true, error: "" };
+}
