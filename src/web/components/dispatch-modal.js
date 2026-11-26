@@ -1,4 +1,5 @@
 import { api } from "../api.js";
+import { agentAvatar, agentStatusOf, deviceAvatar, uiIcon } from "../icons.js";
 import { setState, store } from "../state.js";
 import { agentSourceLabel, bindBackdropClose, escapeHtml, formatBytes, showToast } from "../utils.js";
 
@@ -35,6 +36,7 @@ function groupEnabledAgents(agents, devices) {
       title: d.name || d.id,
       subtitle: d.id,
       isLocal: Boolean(d.is_local),
+      device: d,
       items,
     });
   }
@@ -49,6 +51,7 @@ function groupEnabledAgents(agents, devices) {
       title: d?.name || a.device_name || a.device_id,
       subtitle: a.device_id,
       isLocal: Boolean(d?.is_local),
+      device: d || { id: a.device_id },
       items,
     });
   }
@@ -82,7 +85,6 @@ function renderDispatchOption(agent, preselect) {
     .join(" ")
     .toLowerCase();
 
-  const dotCls = agent.online ? "dot-online" : "dot-offline";
   const sub = agent.summary || agent.worker_key || agentSourceLabel(agent);
 
   return `
@@ -94,7 +96,7 @@ function renderDispatchOption(agent, preselect) {
       <input type="checkbox" name="targets" value="${escapeHtml(agent.id)}" ${preselect.has(agent.id) ? "checked" : ""} style="margin-top:3px" />
       <div style="min-width:0;flex:1">
         <div class="row" style="gap:6px">
-          <span class="dot ${dotCls}"></span>
+          ${agentAvatar(agent, { size: "sm", status: agentStatusOf(agent) })}
           <span style="font-weight:600;font-size:13px" class="truncate">${escapeHtml(agent.name)}</span>
           ${agent.default_model ? `<span class="chip chip-model">${escapeHtml(agent.default_model)}</span>` : ""}
         </div>
@@ -142,6 +144,7 @@ export function renderDispatchModal(root, refreshFn) {
                         (g) => `
                       <div class="dispatch-group" data-dispatch-group>
                         <div class="dispatch-group-title">
+                          ${g.device ? deviceAvatar(g.device, { size: "xs" }) : `<span class="avatar avatar-xs avatar-glyph">${uiIcon("sparkles", 10)}</span>`}
                           <span>${escapeHtml(g.title)}</span>
                           ${g.isLocal ? `<span class="pill pill-primary">本机</span>` : ""}
                           ${g.subtitle ? `<span class="muted mono">${escapeHtml(g.subtitle)}</span>` : ""}

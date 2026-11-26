@@ -1,4 +1,5 @@
 import { api } from "../api.js";
+import { agentAvatar, agentStatusOf, deviceAvatar, deviceStatusOf, uiIcon } from "../icons.js";
 import { setState, store } from "../state.js";
 import { bindAttachmentPreview, escapeHtml, formatRelativeTime, renderAttachmentsBar, showToast, stateLabel, stateTone } from "../utils.js";
 
@@ -42,36 +43,39 @@ function cleanExcerpt(raw) {
     .trim();
 }
 
-function renderActionCard(task) {
+function renderActionCard(task, agentMap) {
   const isAuth = task.state === "auth-required";
+  const ag = agentMap.get(task.to_agent_id);
+  const agentLabel = ag?.device_name ? `${ag.device_name} / ${ag.name}` : ag?.name || task.to_agent_id;
   const msgs = task.messages || [];
   const lastMsg = [...msgs].reverse().find((m) => m.kind === (isAuth ? "auth_request" : "question"));
   const promptText = lastMsg?.body || task.title;
 
   return `
     <div class="action-card ${isAuth ? "is-auth" : ""}">
-      <div class="row-between">
-        <div class="row" style="flex-wrap:wrap">
-          <span class="pill ${stateTone(task.state)}">${stateLabel(task.state)}</span>
-          <strong>${escapeHtml(task.title)}</strong>
-          <span class="muted">· 指派给 ${escapeHtml(task.to_agent_id)}</span>
+      <div class="action-card-head">
+        ${agentAvatar(ag || { id: task.to_agent_id }, { size: "lg", status: ag ? agentStatusOf(ag) : "" })}
+        <div class="action-card-title">
+          <div class="row" style="gap:8px;min-width:0">
+            <span class="pill ${stateTone(task.state)}">${stateLabel(task.state)}</span>
+            <strong class="truncate">${escapeHtml(task.title)}</strong>
+          </div>
+          <div class="muted truncate action-card-sub">指派给 ${escapeHtml(agentLabel)} · ${formatRelativeTime(task.updated_at)}</div>
         </div>
-        <button type="button" class="btn btn-ghost btn-sm" data-view-thread="${escapeHtml(task.context_id)}">查看线程</button>
+        <button type="button" class="btn btn-ghost btn-sm" data-view-thread="${escapeHtml(task.context_id)}">查看线程 ${uiIcon("arrow-right", 12)}</button>
       </div>
-      <div class="msg-body">${escapeHtml(promptText)}</div>
+      <div class="action-prompt">${escapeHtml(promptText)}</div>
       ${renderAttachmentsBar(task.attachments || [])}
       ${
         isAuth
-          ? `<div class="row-between" style="flex-wrap:wrap">
-              <input type="text" placeholder="可选审批备注..." data-auth-note="${escapeHtml(task.id)}" style="max-width:340px" />
-              <div class="row">
-                <button type="button" class="btn btn-sm btn-danger" data-decide-deny="${escapeHtml(task.id)}">拒绝</button>
-                <button type="button" class="btn btn-sm btn-primary" data-decide-approve="${escapeHtml(task.id)}">签名并放行</button>
-              </div>
+          ? `<div class="action-reply-row">
+              <input type="text" placeholder="可选审批备注..." data-auth-note="${escapeHtml(task.id)}" />
+              <button type="button" class="btn btn-sm btn-danger" data-decide-deny="${escapeHtml(task.id)}">${uiIcon("x", 12)} 拒绝</button>
+              <button type="button" class="btn btn-sm btn-primary" data-decide-approve="${escapeHtml(task.id)}">${uiIcon("shield", 12)} 签名并放行</button>
             </div>`
-          : `<form class="row" data-reply-form="${escapeHtml(task.id)}">
+          : `<form class="action-reply-row" data-reply-form="${escapeHtml(task.id)}">
               <input type="text" name="reply" placeholder="输入补充说明并恢复执行..." required />
-              <button type="submit" class="btn btn-sm btn-primary" style="white-space:nowrap">发送回复</button>
+              <button type="submit" class="btn btn-sm btn-primary">${uiIcon("send", 12)} 发送回复</button>
             </form>`
       }
     </div>
@@ -96,31 +100,27 @@ function renderTaskFeed(tasks, agentMap) {
             ? Number(t.attachment_count)
             : (t.attachments?.length || 0) + (t.receipt?.attachments?.length || 0);
 
+          // 固定列网格：状态 / 时间 / 操作三列定宽，避免有无「取消」按钮时时间列左右跳动
           return `
-            <div class="task-feed-row ${isErr ? "is-err" : ""}" data-view-thread="${escapeHtml(t.context_id)}" title="${escapeHtml(stateLabel(t.state))}">
-              <span class="status-dot ${taskStatusDotClass(t.state)}"></span>
+            <div class="task-feed-row ${isFailedTaskState(t.state) ? "is-err" : ""}" data-view-thread="${escapeHtml(t.context_id)}">
+              ${agentAvatar(ag || { id: t.to_agent_id }, { size: "md" })}
               <div class="task-feed-body">
-                <div class="task-feed-top">
-                  <div class="task-feed-title">
-                    <strong class="truncate">${escapeHtml(t.title)}</strong>
-                    ${attCount ? `<span class="attachment-tag" title="含 ${attCount} 个附件">📎 ${attCount}</span>` : ""}
-                    <span class="task-feed-target">· ${escapeHtml(agentLabel)}${escapeHtml(fromSuffix)}</span>
-                  </div>
-                  <div class="task-feed-right">
-                    <span>${formatRelativeTime(t.updated_at)}</span>
-                    ${
-                      canCancel
-                        ? `<button type="button" class="btn btn-ghost btn-sm" data-cancel-task="${escapeHtml(t.id)}">取消</button>`
-                        : ""
-                    }
-                  </div>
+                <div class="task-feed-title">
+                  <strong class="truncate">${escapeHtml(t.title)}</strong>
+                  ${attCount ? `<span class="attachment-tag" title="含 ${attCount} 个附件">📎 ${attCount}</span>` : ""}
                 </div>
-                ${
-                  excerpt
-                    ? `<div class="task-excerpt ${isErr ? "is-err" : ""}">${escapeHtml(excerpt)}</div>`
-                    : ""
-                }
+                <div class="task-feed-sub">
+                  <span class="task-feed-target">${escapeHtml(agentLabel)}${escapeHtml(fromSuffix)}</span>
+                  ${excerpt ? `<span class="task-excerpt ${isErr ? "is-err" : ""}">${escapeHtml(excerpt)}</span>` : ""}
+                </div>
               </div>
+              <span class="task-state is-${taskStatusDotClass(t.state).slice(3)}"><span class="status-dot ${taskStatusDotClass(t.state)}"></span>${escapeHtml(stateLabel(t.state))}</span>
+              <span class="task-time" title="${escapeHtml(formatRelativeTime(t.updated_at))}">${formatRelativeTime(t.updated_at)}</span>
+              <span class="task-action">${
+                canCancel
+                  ? `<button type="button" class="btn btn-ghost btn-sm btn-icon" data-cancel-task="${escapeHtml(t.id)}" title="取消任务" aria-label="取消任务">${uiIcon("x", 13)}</button>`
+                  : ""
+              }</span>
             </div>
           `;
         })
@@ -141,7 +141,7 @@ function renderNodeCapacityPanel(devices, agents) {
   return `
     <section class="panel">
       <div class="panel-head">
-        <h3 class="panel-title">节点负载</h3>
+        <h3 class="panel-title">${uiIcon("cpu", 14)} 节点负载</h3>
         <button type="button" class="btn btn-ghost btn-sm" id="home-goto-agents">管理全部 →</button>
       </div>
       ${
@@ -155,20 +155,25 @@ function renderNodeCapacityPanel(devices, agents) {
                   const used = Number(d.active_count || 0);
                   const cap = Math.max(Number(d.max_concurrent || 1), 1);
                   const pct = Math.min(100, Math.round((used / cap) * 100));
-                  const dotCls = !d.enabled ? "dot-paused" : d.online ? "dot-online" : "dot-offline";
                   return `
                     <div class="host-row" data-focus-device="${escapeHtml(d.id)}">
-                      <div class="row-between">
-                        <div class="row" style="min-width:0;gap:7px">
-                          <span class="dot ${dotCls}"></span>
-                          <strong class="truncate" style="font-size:13px">${escapeHtml(d.name || d.id)}</strong>
+                      ${deviceAvatar(d, { size: "lg", status: deviceStatusOf(d) })}
+                      <div class="host-main">
+                        <div class="row" style="min-width:0;gap:6px">
+                          <strong class="truncate host-name">${escapeHtml(d.name || d.id)}</strong>
                           ${d.is_local ? `<span class="tag-subtle">本机</span>` : ""}
                         </div>
-                        <span class="muted mono">${used}/${cap}</span>
+                        <div class="host-sub">
+                          <span class="host-workers">${devWorkers
+                            .slice(0, 5)
+                            .map((w) => agentAvatar(w, { size: "xs", title: w.name }))
+                            .join("")}</span>
+                          <span>在线 ${devOnline}/${devWorkers.length} · ${formatRelativeTime(d.last_seen_at)}</span>
+                        </div>
                       </div>
-                      <div class="row-between" style="gap:10px">
-                        <span class="muted" style="font-size:11px">在线 ${devOnline}/${devWorkers.length} · ${formatRelativeTime(d.last_seen_at)}</span>
-                        <div class="mini-meter" title="并发槽位 ${used}/${cap}">
+                      <div class="host-load" title="并发槽位 ${used}/${cap}">
+                        <span class="mono">${used}/${cap}</span>
+                        <div class="mini-meter">
                           <div class="mini-meter-fill ${pct >= 80 ? "is-warn" : used > 0 ? "is-busy" : ""}" style="width:${pct}%"></div>
                         </div>
                       </div>
@@ -179,9 +184,20 @@ function renderNodeCapacityPanel(devices, agents) {
               ${
                 cloudAgents.length
                   ? `<div class="host-row" id="home-goto-cloud">
-                      <div class="row-between">
-                        <span style="font-size:13px;font-weight:500">独立 / 云端 Agent</span>
-                        <span class="muted mono">${cloudOnline}/${cloudAgents.length} 在线</span>
+                      <span class="avatar avatar-lg avatar-glyph">${uiIcon("sparkles", 18)}</span>
+                      <div class="host-main">
+                        <strong class="truncate host-name">独立 / 云端 Agent</strong>
+                        <div class="host-sub">
+                          <span class="host-workers">${cloudAgents
+                            .slice(0, 5)
+                            .map((a) => agentAvatar(a, { size: "xs", title: a.name }))
+                            .join("")}</span>
+                          <span>${cloudAgents.length} 个</span>
+                        </div>
+                      </div>
+                      <div class="host-load">
+                        <span class="mono">${cloudOnline}/${cloudAgents.length}</span>
+                        <span class="muted" style="font-size:11px">在线</span>
                       </div>
                     </div>`
                   : ""
@@ -205,7 +221,7 @@ function renderScheduleSummaryPanel(schedules, agentMap) {
   return `
     <section class="panel">
       <div class="panel-head">
-        <h3 class="panel-title">定时巡检</h3>
+        <h3 class="panel-title">${uiIcon("clock", 14)} 定时巡检</h3>
         <button type="button" class="btn btn-ghost btn-sm" id="home-goto-schedules">查看全部 →</button>
       </div>
       ${
@@ -219,16 +235,15 @@ function renderScheduleSummaryPanel(schedules, agentMap) {
                     : `data-goto-schedules="1"`;
                   return `
                     <div class="schedule-mini-row" ${targetAttr}>
-                      <div class="row" style="min-width:0;flex:1;gap:8px">
-                        <span class="status-dot ${scheduleStatusDotClass(sch)}"></span>
-                        <div style="min-width:0;flex:1">
-                          <div class="truncate" style="font-size:13px;font-weight:550">${escapeHtml(sch.name)}</div>
-                          <div class="muted truncate" style="font-size:11px">${escapeHtml(ag?.name || sch.agent_id)}</div>
-                        </div>
+                      ${agentAvatar(ag || { id: sch.agent_id }, { size: "lg" })}
+                      <div class="host-main">
+                        <div class="truncate host-name">${escapeHtml(sch.name)}</div>
+                        <div class="host-sub truncate">${escapeHtml(ag?.name || sch.agent_id)}</div>
                       </div>
-                      <span class="muted" style="font-size:11px;flex-shrink:0">
-                        ${sch.last_run_at ? formatRelativeTime(sch.last_run_at) : "待首报"}
-                      </span>
+                      <div class="host-load">
+                        <span class="status-dot ${scheduleStatusDotClass(sch)}"></span>
+                        <span class="muted" style="font-size:11px">${sch.last_run_at ? formatRelativeTime(sch.last_run_at) : "待首报"}</span>
+                      </div>
                     </div>
                   `;
                 })
@@ -289,7 +304,7 @@ export function renderHomeView(container, refreshFn) {
     <section class="kpi-strip">
       <div class="kpi-cell" id="kpi-actions">
         <div class="kpi-cell-head">
-          <span>待我处理</span>
+          <span class="kpi-label-text">${uiIcon("inbox", 13)} 待我处理</span>
           <span class="status-dot ${actions.length ? "is-fail" : "is-ok"}"></span>
         </div>
         <div class="kpi-num ${actions.length ? "is-alert" : ""}">${actions.length}</div>
@@ -298,7 +313,7 @@ export function renderHomeView(container, refreshFn) {
 
       <div class="kpi-cell" id="kpi-tasks">
         <div class="kpi-cell-head">
-          <span>任务队列</span>
+          <span class="kpi-label-text">${uiIcon("activity", 13)} 任务队列</span>
           <span class="status-dot ${activeTasks.length ? "is-run" : "is-idle"}"></span>
         </div>
         <div class="kpi-num">${activeTasks.length} <span class="kpi-num-unit">执行中</span></div>
@@ -307,7 +322,7 @@ export function renderHomeView(container, refreshFn) {
 
       <div class="kpi-cell" id="kpi-nodes">
         <div class="kpi-cell-head">
-          <span>节点与算力</span>
+          <span class="kpi-label-text">${uiIcon("cpu", 13)} 节点与算力</span>
           <span class="status-dot ${onlineDevices ? "is-ok" : "is-idle"}"></span>
         </div>
         <div class="kpi-num">${onlineDevices}/${devices.length} <span class="kpi-num-unit">台在线</span></div>
@@ -316,7 +331,7 @@ export function renderHomeView(container, refreshFn) {
 
       <div class="kpi-cell" id="kpi-schedules">
         <div class="kpi-cell-head">
-          <span>定时巡检</span>
+          <span class="kpi-label-text">${uiIcon("clock", 13)} 定时巡检</span>
           <span class="status-dot ${abnormalCount ? "is-fail" : schedules.length ? "is-ok" : "is-idle"}"></span>
         </div>
         <div class="kpi-num ${abnormalCount ? "is-alert" : ""}">
@@ -340,9 +355,9 @@ export function renderHomeView(container, refreshFn) {
       actions.length
         ? `<section id="home-actions-section" style="margin-bottom:18px">
             <div class="section-header" style="margin-top:0">
-              <h2 class="section-title">待我处理 (${actions.length})</h2>
+              <h2 class="section-title">待我处理 <span class="section-count">${actions.length}</span></h2>
             </div>
-            <div class="action-list">${actions.map(renderActionCard).join("")}</div>
+            <div class="action-list">${actions.map((t) => renderActionCard(t, agentMap)).join("")}</div>
           </section>`
         : ""
     }
@@ -352,7 +367,7 @@ export function renderHomeView(container, refreshFn) {
         <section class="panel">
           <div class="panel-head">
             <div class="row" style="gap:10px;flex-wrap:wrap">
-              <h2 class="panel-title">任务动态</h2>
+              <h2 class="panel-title">${uiIcon("activity", 14)} 任务动态</h2>
               <div class="seg-control">
                 ${TASK_FILTERS.map(
                   (item) => `

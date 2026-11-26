@@ -5,6 +5,7 @@ import { refreshAgentDrawerStatus, renderAgentDrawer } from "./components/agent-
 import { renderDispatchModal, resetDispatchModalState } from "./components/dispatch-modal.js";
 import { renderSettingsDrawer } from "./components/settings-drawer.js";
 import { setState, store, subscribe } from "./state.js";
+import { uiIcon } from "./icons.js";
 import { showToast } from "./utils.js";
 import { renderAgentsView } from "./views/agents.js";
 import { renderHomeView } from "./views/home.js";
@@ -31,7 +32,7 @@ function effectiveTheme() {
 function syncThemeButton() {
   if (!themeBtn) return;
   const dark = effectiveTheme() === "dark";
-  themeBtn.textContent = dark ? "☀ 浅色" : "☾ 深色";
+  themeBtn.innerHTML = dark ? `${uiIcon("sun")}<span class="btn-label">浅色</span>` : `${uiIcon("moon")}<span class="btn-label">深色</span>`;
 }
 
 function toggleTheme() {
@@ -73,9 +74,9 @@ function renderAll() {
   actionBadge.classList.toggle("hidden", actionCount === 0);
 
   if (store.pollConnected) {
-    livePill.innerHTML = `<span class="dot dot-online"></span> 实时同步`;
+    livePill.innerHTML = `<span class="dot dot-online"></span><span class="btn-label">实时同步</span>`;
   } else {
-    livePill.innerHTML = `<span class="dot dot-paused"></span> 重连中...`;
+    livePill.innerHTML = `<span class="dot dot-paused"></span><span class="btn-label">重连中...</span>`;
   }
 
   if (!store.state) return;
