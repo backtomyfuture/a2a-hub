@@ -24,7 +24,10 @@ jobs:
         run: if [ -f package-lock.json ]; then npm ci --omit=dev; fi
       - name: syntax
         run: |
-          for f in bin/*.mjs src/*.mjs src/*/*.mjs schema/*.mjs; do
+          shopt -s nullglob
+          files=(bin/*.mjs src/*.mjs src/*/*.mjs tests/*.mjs)
+          test "${#files[@]}" -gt 0 || { echo "No .mjs files found"; exit 1; }
+          for f in "${files[@]}"; do
             node --check "$f" || exit 1
           done
       - name: test

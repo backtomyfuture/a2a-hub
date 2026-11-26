@@ -459,7 +459,7 @@ test("Muse VM Keepalive & Inbox Flow: ah join --agent --token-file --no-daemon�
     assert.equal(museCfg.mode, "agent");
     assert.equal(museCfg.agentId, "muse");
     assert.equal(museCfg.agentRole, "leader");
-    assert.equal(museCfg.tokenFile, fs.realpathSync(tokenFile).includes(museDir) ? fs.realpathSync(tokenFile) : path.resolve(tokenFile));
+    assert.equal(fs.realpathSync(museCfg.tokenFile), fs.realpathSync(tokenFile));
     assert.equal(fs.existsSync(path.join(museDir, "app.env")), false, "使用 --token-file 时不应额外在 app.env 复制明文 Token");
 
     // 派发任务给 Muse，验证无 command 的保活守护不会把任务误标为 failed
