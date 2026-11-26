@@ -1,8 +1,10 @@
 // 通用进程工具：独立进程组执行、输出头尾截断捕获。kernel 的直跑路径与 direct 在途账本共用。
 
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execSync, spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { whichBinary } from "./config.mjs";
 
 // direct 在途账本的超时收口用同一个宽限，避免两处各写一个数。
 export const KILL_GRACE_MS = 2500;
@@ -72,7 +74,11 @@ function killProcessGroup(child, sig) {
   if (!child?.pid) return;
   if (process.platform === "win32") {
     try {
-      execSync(`taskkill /pid ${child.pid} /T /F`, { stdio: "ignore" });
+      // 直接调用 taskkill 并隐藏窗口，避免 execSync 额外拉起 cmd.exe 闪黑框
+      execFileSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
     } catch {
       try { child.kill(sig); } catch { /* 已退出 */ }
     }
@@ -168,48 +174,178 @@ export function buildProcEnv(baseEnv = process.env, platform = process.platform)
   return env;
 }
 
-// 独立进程组执行。超时先向整组发 SIGTERM，宽限后再 SIGKILL，并拆掉 stdio，
+// 识别 npm / pnpm / yarn 生成的标准 Node .cmd shim（不含自定义环境脚本），
+// 绕过 cmd.exe 直接用 node 执行目标入口，既根除黑框闪窗又避免 cmd.exe 截断多行参数。
+export function resolveNpmCmdShim(
+  binPath,
+  { fsImpl = fs, execPath = process.execPath } = {}
+) {
+  const rawBin = String(binPath || "").trim();
+  if (!/\.cmd$/i.test(rawBin)) return null;
+  let stat;
+  try {
+    stat = fsImpl.statSync(rawBin);
+  } catch {
+    return null;
+  }
+  if (!stat?.isFile?.() || stat.size <= 0 || stat.size > 4096) return null;
+
+  let text = "";
+  try {
+    text = String(fsImpl.readFileSync(rawBin, "utf8") || "");
+  } catch {
+    return null;
+  }
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  for (const line of lines) {
+    if (/^SET\s+/i.test(line)) {
+      const isStandardSet =
+        /^SET\s+dp0=%~dp0$/i.test(line) ||
+        /^SET\s+"?_prog=/i.test(line) ||
+        /^SET\s+PATHEXT=/i.test(line);
+      if (!isStandardSet) return null;
+    }
+  }
+
+  const m = text.match(
+    /"%_prog%"\s+((?:--[A-Za-z0-9._=-]+\s+)*)"%dp0%\\([^"\r\n]+\.(?:[cm]?js))"\s+%\*/i
+  );
+  if (!m) return null;
+
+  const isWinStyle = /^[A-Za-z]:[\\/]/.test(rawBin) || rawBin.includes("\\");
+  const pApi = isWinStyle ? path.win32 : path.posix;
+  const dir = pApi.dirname(rawBin);
+  const relScript = isWinStyle ? m[2] : m[2].replaceAll("\\", "/");
+  const scriptPath = pApi.resolve(dir, relScript);
+  const relBack = pApi.relative(dir, scriptPath);
+  if (!relBack || relBack.startsWith("..") || pApi.isAbsolute(relBack)) {
+    return null;
+  }
+  try {
+    if (!fsImpl.existsSync(scriptPath)) return null;
+  } catch {
+    return null;
+  }
+
+  const nodeFlags = m[1] ? m[1].trim().split(/\s+/).filter(Boolean) : [];
+  const bundledNode = pApi.join(dir, "node.exe");
+  let nodeBin = execPath;
+  try {
+    if (fsImpl.existsSync(bundledNode)) nodeBin = bundledNode;
+  } catch {}
+  return {
+    node: nodeBin,
+    args: [...nodeFlags, scriptPath],
+  };
+}
+
+// 构造跨平台 spawn 参数：
+// - Windows 严禁与 windowsHide 混用 detached:true（libuv 会叠加 DETACHED_PROCESS 导致脱离隐藏控制台或弹黑框），
+//   统一 detached:false + windowsHide:true + pipe stdio，让 libuv 精确传递 CREATE_NO_WINDOW | SW_HIDE 并加入全局 Job Object。
+// - POSIX 保持 detached:true 以便按负 PID 一次性清理整组子进程。
+export function buildSpawnSpec(
+  command,
+  {
+    cwd = os.homedir(),
+    env = process.env,
+    platform = process.platform,
+    fsImpl = fs,
+    execPath = process.execPath,
+    whichFn = null,
+  } = {}
+) {
+  const effectiveCwd = cwd || os.homedir();
+  if (platform === "win32") {
+    const parts = splitCommandLine(command);
+    let bin = parts[0] || "";
+    const args = parts.slice(1);
+    const hasDirSep = bin.includes("\\") || bin.includes("/");
+    const hasExt = /\.[A-Za-z0-9]+$/.test(bin);
+    const resolver = whichFn || (process.platform === "win32" ? whichBinary : null);
+    if (bin && !hasDirSep && !hasExt && typeof resolver === "function") {
+      try {
+        const hit = resolver(bin, { env });
+        if (hit) bin = hit;
+      } catch {}
+    }
+
+    const isBatch = /\.(?:bat|cmd)$/i.test(bin);
+    if (isBatch) {
+      const shim = resolveNpmCmdShim(bin, { fsImpl, execPath });
+      if (shim) {
+        return {
+          file: shim.node,
+          args: [...shim.args, ...args],
+          options: {
+            shell: false,
+            cwd: effectiveCwd,
+            env,
+            detached: false,
+            windowsHide: true,
+            stdio: ["pipe", "pipe", "pipe"],
+          },
+        };
+      }
+      return {
+        file: bin,
+        args,
+        options: {
+          shell: true,
+          cwd: effectiveCwd,
+          env,
+          detached: false,
+          windowsHide: true,
+          stdio: ["pipe", "pipe", "pipe"],
+        },
+      };
+    }
+
+    return {
+      file: bin,
+      args,
+      options: {
+        shell: false,
+        cwd: effectiveCwd,
+        env,
+        detached: false,
+        windowsHide: true,
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    };
+  }
+
+  return {
+    file: command,
+    args: null,
+    options: {
+      shell: true,
+      cwd: effectiveCwd,
+      env,
+      detached: true,
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  };
+}
+
+// 独立进程组执行。超时或外部中止先向整组发 SIGTERM，宽限后再 SIGKILL，并拆掉 stdio，
 // 避免 shell 死后孙进程继续占着管道，使 close 永远不来。
-export function runDetachedCommand(command, stdinText, timeoutSec, cwd, extraEnv = null) {
+export function runDetachedCommand(command, stdinText, timeoutSec, cwd, extraEnv = null, opts = null) {
   return new Promise((resolve, reject) => {
-    const isWin = process.platform === "win32";
     const env = buildProcEnv(
       extraEnv && typeof extraEnv === "object" ? { ...process.env, ...extraEnv } : process.env,
       process.platform
     );
     const sec = Number(timeoutSec);
     const ms = Math.min(2_147_483_647, Math.max(0, Number.isFinite(sec) ? sec : 0) * 1000);
+    const signal = opts?.signal || null;
+    if (signal?.aborted) {
+      resolve({ code: null, signal: "SIGTERM", stdout: "", stderr: "" });
+      return;
+    }
     let p;
     try {
-      if (isWin) {
-        const parts = splitCommandLine(command);
-        const bin = parts[0] || "";
-        const args = parts.slice(1);
-        const isBatch = /\.(?:bat|cmd)$/i.test(bin);
-        p = isBatch
-          ? spawn(bin, args, {
-              shell: true,
-              cwd: cwd || os.homedir(),
-              env,
-              detached: true,
-              stdio: ["pipe", "pipe", "pipe"],
-            })
-          : spawn(bin, args, {
-              shell: false,
-              cwd: cwd || os.homedir(),
-              env,
-              detached: true,
-              stdio: ["pipe", "pipe", "pipe"],
-            });
-      } else {
-        p = spawn(command, {
-          shell: true,
-          cwd: cwd || os.homedir(),
-          env,
-          detached: true,
-          stdio: ["pipe", "pipe", "pipe"],
-        });
-      }
+      const spec = buildSpawnSpec(command, { cwd: cwd || os.homedir(), env, platform: process.platform });
+      p = spec.args === null ? spawn(spec.file, spec.options) : spawn(spec.file, spec.args, spec.options);
     } catch (e) {
       reject(e);
       return;
@@ -217,6 +353,7 @@ export function runDetachedCommand(command, stdinText, timeoutSec, cwd, extraEnv
     const outCap = createBoundedCapture();
     const errCap = createBoundedCapture();
     let settled = false;
+    let terminating = false;
     let timer = null;
     let killTimer = null;
     const clearTimers = () => {
@@ -225,27 +362,14 @@ export function runDetachedCommand(command, stdinText, timeoutSec, cwd, extraEnv
       timer = null;
       killTimer = null;
     };
-    const finish = (fn, value) => {
-      if (settled) return;
-      settled = true;
-      clearTimers();
-      fn(value);
-    };
     const dropStdio = () => {
       for (const s of [p.stdin, p.stdout, p.stderr]) {
         try { s?.destroy(); } catch { /* 已关 */ }
       }
     };
-    p.stdout?.on("data", (d) => { outCap.push(d); });
-    p.stderr?.on("data", (d) => { errCap.push(d); });
-    p.on("error", (e) => finish(reject, e));
-    // EPIPE 表示对端已经退出，交给 close 收口，不能把守护进程打崩。
-    p.stdin?.on("error", (e) => {
-      if (e?.code === "EPIPE" || e?.code === "ERR_STREAM_DESTROYED") return;
-      finish(reject, e);
-    });
-    p.on("close", (code, signal) => finish(resolve, { code, signal, stdout: outCap.text(), stderr: errCap.text() }));
-    timer = setTimeout(() => {
+    const terminateProcess = () => {
+      if (settled || terminating) return;
+      terminating = true;
       killProcessGroup(p, "SIGTERM");
       if (settled) return;
       killTimer = setTimeout(() => {
@@ -257,7 +381,28 @@ export function runDetachedCommand(command, stdinText, timeoutSec, cwd, extraEnv
           finish(resolve, { code: null, signal: "SIGKILL", stdout: outCap.text(), stderr: errCap.text() });
         }, 500);
       }, KILL_GRACE_MS);
-    }, ms);
+    };
+    const onAbort = () => terminateProcess();
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimers();
+      if (signal) signal.removeEventListener("abort", onAbort);
+      fn(value);
+    };
+    if (signal) {
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+    p.stdout?.on("data", (d) => { outCap.push(d); });
+    p.stderr?.on("data", (d) => { errCap.push(d); });
+    p.on("error", (e) => finish(reject, e));
+    // EPIPE 表示对端已经退出，交给 close 收口，不能把守护进程打崩。
+    p.stdin?.on("error", (e) => {
+      if (e?.code === "EPIPE" || e?.code === "ERR_STREAM_DESTROYED") return;
+      finish(reject, e);
+    });
+    p.on("close", (code, sig) => finish(resolve, { code, signal: sig, stdout: outCap.text(), stderr: errCap.text() }));
+    timer = setTimeout(terminateProcess, ms);
     try {
       if (stdinText != null) p.stdin.write(stdinText);
       p.stdin.end();

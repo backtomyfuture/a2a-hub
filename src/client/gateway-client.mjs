@@ -10,7 +10,7 @@ export class GatewayClient {
     this.defaultTimeoutMs = defaultTimeoutMs;
   }
 
-  async request(method, path, { body = null, rawBuffer = null, headers = {}, timeoutMs } = {}) {
+  async request(method, path, { body = null, rawBuffer = null, headers = {}, timeoutMs, signal = null } = {}) {
     const url = `${this.baseUrl}${path.startsWith("/") ? path : `/${path}`}`;
     const reqHeaders = {
       "User-Agent": BROWSER_USER_AGENT,
@@ -32,13 +32,21 @@ export class GatewayClient {
     const waitMs = Number(timeoutMs || this.defaultTimeoutMs);
     const timer = setTimeout(() => controller.abort(), waitMs);
     if (typeof timer.unref === "function") timer.unref();
+    const combinedSignal = signal
+      ? (typeof AbortSignal.any === "function" ? AbortSignal.any([controller.signal, signal]) : controller.signal)
+      : controller.signal;
+    const onExternalAbort = () => controller.abort();
+    if (signal && typeof AbortSignal.any !== "function") {
+      if (signal.aborted) controller.abort();
+      else signal.addEventListener("abort", onExternalAbort, { once: true });
+    }
 
     try {
       const resp = await this.fetchFn(url, {
         method,
         headers: reqHeaders,
         body: payload,
-        signal: controller.signal,
+        signal: combinedSignal,
       });
       const ct = String(resp.headers?.get?.("content-type") || "").toLowerCase();
       if (!resp.ok) {
@@ -60,6 +68,9 @@ export class GatewayClient {
       return await resp.text();
     } finally {
       clearTimeout(timer);
+      if (signal && typeof AbortSignal.any !== "function") {
+        signal.removeEventListener("abort", onExternalAbort);
+      }
     }
   }
 
@@ -93,17 +104,18 @@ export class GatewayClient {
 
   // ---- Device 接口 ----
 
-  syncDevice(deviceId, workers, deviceMeta = {}) {
+  syncDevice(deviceId, workers, deviceMeta = {}, opts = {}) {
     return this.post(`/api/v1/devices/${encodeURIComponent(deviceId)}/sync`, {
       workers,
       ...deviceMeta,
-    });
+    }, opts);
   }
 
-  pollDevice(deviceId, { since = 0, timeout = 35 } = {}) {
+  pollDevice(deviceId, { since = 0, timeout = 35, signal = null } = {}) {
     const qs = new URLSearchParams({ since: String(since), timeout: String(timeout) });
     return this.get(`/api/v1/devices/${encodeURIComponent(deviceId)}/poll?${qs}`, {
       timeoutMs: (timeout + 15) * 1000,
+      signal,
     });
   }
 
@@ -113,18 +125,19 @@ export class GatewayClient {
     return this.get("/api/v1/agents");
   }
 
-  registerAgent(payload) {
-    return this.post("/api/v1/agents/register", payload);
+  registerAgent(payload, opts = {}) {
+    return this.post("/api/v1/agents/register", payload, opts);
   }
 
   checkAgent(agentId) {
     return this.get(`/api/v1/agents/${encodeURIComponent(agentId)}/check`);
   }
 
-  pollAgent(agentId, { since = 0, timeout = 35 } = {}) {
+  pollAgent(agentId, { since = 0, timeout = 35, signal = null } = {}) {
     const qs = new URLSearchParams({ since: String(since), timeout: String(timeout) });
     return this.get(`/api/v1/agents/${encodeURIComponent(agentId)}/poll?${qs}`, {
       timeoutMs: (timeout + 15) * 1000,
+      signal,
     });
   }
 

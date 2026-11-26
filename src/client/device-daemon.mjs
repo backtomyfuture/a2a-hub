@@ -65,6 +65,22 @@ function collectTaskAttachments(task) {
 }
 
 
+function sleepAbortable(ms, signal) {
+  if (!ms || ms <= 0 || signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    if (typeof timer.unref === "function") timer.unref();
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export class DeviceDaemon {
   constructor({
     configDir,
@@ -97,6 +113,8 @@ export class DeviceDaemon {
     this._contextTail = new Map(); // `${context_id}::${worker_key}` -> Promise
     this._running = false;
     this._seq = 0;
+    this._pollAbort = new AbortController();
+    this._taskAbort = new AbortController();
   }
 
   _loadWorkersIfChanged() {
@@ -132,12 +150,17 @@ export class DeviceDaemon {
         enabled: w.enabled !== false,
       }));
 
-    const res = await this.client.syncDevice(this.deviceId, payload, {
-      platform: os.platform(),
-      os_info: `${os.type()} ${os.release()} (${os.arch()})`,
-      transport: "longpoll",
-      max_concurrent: this.maxConcurrent,
-    });
+    const res = await this.client.syncDevice(
+      this.deviceId,
+      payload,
+      {
+        platform: os.platform(),
+        os_info: `${os.type()} ${os.release()} (${os.arch()})`,
+        transport: "longpoll",
+        max_concurrent: this.maxConcurrent,
+      },
+      { signal: this._pollAbort.signal }
+    );
     if (res?.approval_public_key && isHubPublicKey(res.approval_public_key)) {
       this.hubPublicKey = res.approval_public_key;
     }
@@ -363,14 +386,21 @@ export class DeviceDaemon {
     if (typeof hbTimer.unref === "function") hbTimer.unref();
 
     try {
-      const res = await this.runner(cmd, usesPromptArg ? null : promptText, timeoutSec, cwd, {
-        AH_AGENT_ID: task.to_agent_id,
-        AH_DEVICE_ID: this.deviceId,
-        AH_WORKER_KEY: worker.key,
-        AH_TASK_ID: task.id,
-        AH_CONTEXT_ID: task.context_id,
-        AH_RUN_DIR: runDir,
-      });
+      const res = await this.runner(
+        cmd,
+        usesPromptArg ? null : promptText,
+        timeoutSec,
+        cwd,
+        {
+          AH_AGENT_ID: task.to_agent_id,
+          AH_DEVICE_ID: this.deviceId,
+          AH_WORKER_KEY: worker.key,
+          AH_TASK_ID: task.id,
+          AH_CONTEXT_ID: task.context_id,
+          AH_RUN_DIR: runDir,
+        },
+        { signal: this._taskAbort.signal }
+      );
       const parsed = parseCliOutput(res.stdout, res.stderr);
       if (parsed.sessionId) {
         this.sessionStore.save(task.context_id, worker.key, {
@@ -479,6 +509,7 @@ export class DeviceDaemon {
     const pollRes = await this.client.pollDevice(this.deviceId, {
       since: this._seq,
       timeout: this.pollTimeoutSec,
+      signal: this._pollAbort.signal,
     });
     if (pollRes?.seq) this._seq = Math.max(this._seq, Number(pollRes.seq));
     if (pollRes?.paused) return 0;
@@ -487,6 +518,8 @@ export class DeviceDaemon {
 
   async start() {
     if (this._running) return;
+    if (this._pollAbort.signal.aborted) this._pollAbort = new AbortController();
+    if (this._taskAbort.signal.aborted) this._taskAbort = new AbortController();
     this._running = true;
 
     // 启动期等待 Hub 就绪并完成首次名片同步（不因暂时连不上而崩溃退出）
@@ -495,9 +528,9 @@ export class DeviceDaemon {
         await this.syncNow();
         break;
       } catch (err) {
-        if (!this._running) break;
+        if (!this._running || this._pollAbort.signal.aborted) break;
         this.logger.warn?.(`[device-daemon] 同步失败，3s 后重试: ${err?.message || err}`);
-        await new Promise((r) => setTimeout(r, 3000));
+        await sleepAbortable(3000, this._pollAbort.signal);
       }
     }
 
@@ -505,15 +538,37 @@ export class DeviceDaemon {
       try {
         await this.runOnce();
       } catch (err) {
-        if (!this._running) break;
+        if (!this._running || this._pollAbort.signal.aborted) break;
         this.logger.warn?.(`[device-daemon] 轮询异常，3s 后重试: ${err?.message || err}`);
-        await new Promise((r) => setTimeout(r, 3000));
+        await sleepAbortable(3000, this._pollAbort.signal);
       }
     }
   }
 
-  async stop() {
+  async stop({ graceMs = 3000 } = {}) {
     this._running = false;
-    await Promise.allSettled([...this._activeTasks.values()]);
+    // 立刻中止挂起中的长轮询和重试退避，避免系统关机或服务重启卡死 35 秒。
+    this._pollAbort.abort();
+    const pending = [...this._activeTasks.values()];
+    if (pending.length === 0) return;
+
+    const allDone = Promise.allSettled(pending);
+    if (!Number.isFinite(graceMs) || graceMs <= 0) {
+      this._taskAbort.abort();
+      await Promise.race([allDone, sleepAbortable(500)]);
+      return;
+    }
+
+    let timedOut = false;
+    await Promise.race([
+      allDone,
+      sleepAbortable(graceMs).then(() => {
+        timedOut = true;
+      }),
+    ]);
+    if (timedOut && this._activeTasks.size > 0) {
+      this._taskAbort.abort();
+      await Promise.race([allDone, sleepAbortable(500)]);
+    }
   }
 }
