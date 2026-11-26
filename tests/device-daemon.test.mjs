@@ -546,3 +546,51 @@ test("DeviceDaemon: 扇出附件下载与 Prompt 显式注入、下载失败报�
     fs.rmSync(devDir, { recursive: true, force: true });
   }
 });
+
+test("DeviceDaemon: stop() 立即中止挂起长轮询与在途长任务宽限兜底，不卡死系统关机", async () => {
+  const devDir = fs.mkdtempSync(path.join(os.tmpdir(), "ah-test-dev-stop-"));
+  try {
+    let pollAborted = false;
+    const mockClient = {
+      async syncDevice() {
+        return { ok: true };
+      },
+      async pollDevice(_devId, { signal } = {}) {
+        return new Promise((_resolve, reject) => {
+          signal?.addEventListener(
+            "abort",
+            () => {
+              pollAborted = true;
+              const err = new Error("aborted");
+              err.name = "AbortError";
+              reject(err);
+            },
+            { once: true }
+          );
+        });
+      },
+    };
+
+    const daemon = new DeviceDaemon({
+      configDir: devDir,
+      deviceId: "win-stop-test",
+      hubUrl: "http://127.0.0.1:8787",
+      client: mockClient,
+      pollTimeoutSec: 35,
+      logger: { log() {}, warn() {}, error() {} },
+    });
+
+    const loopPromise = daemon.start();
+    await new Promise((r) => setTimeout(r, 40));
+
+    const t0 = Date.now();
+    await daemon.stop({ graceMs: 300 });
+    await loopPromise;
+    const elapsed = Date.now() - t0;
+
+    assert.equal(pollAborted, true, "stop() 必须通过 AbortSignal 立即中止 35s 长轮询");
+    assert.ok(elapsed < 1000, `stop() 应在 1s 内收口，实测 ${elapsed}ms`);
+  } finally {
+    fs.rmSync(devDir, { recursive: true, force: true });
+  }
+});

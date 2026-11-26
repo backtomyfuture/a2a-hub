@@ -2,6 +2,7 @@
 // 检查配置完整性、密钥文件权限、SQLite 数据库与 Hub 连通性，绝不修改任何状态。
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import {
   BROWSER_USER_AGENT,
@@ -20,6 +21,34 @@ function isMode0600(filePath) {
     return (mode & 0o077) === 0;
   } catch {
     return true;
+  }
+}
+
+function inspectDaemonLock(configDir) {
+  const lockPath = path.join(configDir, "daemon.lock");
+  if (!fs.existsSync(lockPath)) {
+    return { status: "missing", pid: null, lockPath };
+  }
+  let mtimeMs = 0;
+  let pid = null;
+  try {
+    mtimeMs = fs.statSync(lockPath).mtimeMs;
+    const n = Number(fs.readFileSync(lockPath, "utf8").trim());
+    if (Number.isSafeInteger(n) && n > 0) pid = n;
+  } catch {
+    return { status: "stale", pid: null, lockPath };
+  }
+  if (!pid) return { status: "stale", pid: null, lockPath };
+  const bootTimeMs = Date.now() - os.uptime() * 1000;
+  if (mtimeMs > 0 && mtimeMs < bootTimeMs - 5000) {
+    return { status: "stale", pid, lockPath };
+  }
+  try {
+    process.kill(pid, 0);
+    return { status: "running", pid, lockPath };
+  } catch (err) {
+    if (err?.code === "EPERM") return { status: "running", pid, lockPath };
+    return { status: "stale", pid, lockPath };
   }
 }
 
@@ -74,6 +103,15 @@ export async function runDoctor({ configDir, fetchFn = globalThis.fetch, io = co
     const workers = loadWorkersJson(configDir);
     const enabledCount = workers.filter((w) => w.enabled !== false).length;
     push("OK", `workers.json 共配置 ${workers.length} 个本地 Agent（启用 ${enabledCount} 个）`);
+  }
+
+  const lockState = inspectDaemonLock(configDir);
+  if (lockState.status === "running") {
+    push("OK", `本地守护进程运行中 (pid=${lockState.pid})`);
+  } else if (lockState.status === "stale") {
+    push("WARN", `检测到陈旧锁文件 daemon.lock (pid=${lockState.pid ?? "?"})，本机守护进程未运行；请运行 ah service --ensure 恢复`);
+  } else {
+    push("INFO", "本地守护进程当前未运行（如需后台常驻，请运行 ah service 或 ah daemon）");
   }
 
   const rt = readJsonIfExists(path.join(configDir, "hub_runtime.json"), null);

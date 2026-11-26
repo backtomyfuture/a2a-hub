@@ -65,18 +65,62 @@ function isPidAlive(pid) {
   }
 }
 
+function readDaemonLockState(configDir) {
+  const lockPath = path.join(configDir, "daemon.lock");
+  let raw = "";
+  let mtimeMs = 0;
+  try {
+    const st = fs.statSync(lockPath);
+    mtimeMs = st.mtimeMs;
+    raw = fs.readFileSync(lockPath, "utf8").trim();
+  } catch {
+    return { lockPath, exists: false, pid: null, mtimeMs: 0, staleByBoot: false };
+  }
+  const pid = Number(raw);
+  const bootTimeMs = Date.now() - os.uptime() * 1000;
+  // 锁文件早于本次系统开机时间：说明是上次开机/断电遗留的陈旧锁，即使 PID 被复用也不能拦截启动。
+  const staleByBoot = mtimeMs > 0 && mtimeMs < bootTimeMs - 5000;
+  return {
+    lockPath,
+    exists: true,
+    pid: Number.isSafeInteger(pid) && pid > 0 ? pid : null,
+    mtimeMs,
+    staleByBoot,
+  };
+}
+
 function acquireDaemonLock(configDir) {
   fs.mkdirSync(configDir, { recursive: true });
   const lockPath = path.join(configDir, "daemon.lock");
-  if (fs.existsSync(lockPath)) {
-    const oldPid = Number(fs.readFileSync(lockPath, "utf8").trim());
-    if (oldPid && oldPid !== process.pid && isPidAlive(oldPid)) {
-      throw new Error(`守护进程已在运行中 (pid=${oldPid}, lock=${lockPath})`);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      fs.writeFileSync(lockPath, String(process.pid), { mode: 0o600, flag: "wx" });
+      break;
+    } catch (err) {
+      if (err?.code !== "EEXIST") throw err;
+      const state = readDaemonLockState(configDir);
+      if (state.exists && state.pid && state.pid !== process.pid && !state.staleByBoot && isPidAlive(state.pid)) {
+        throw new Error(`守护进程已在运行中 (pid=${state.pid}, lock=${lockPath})`);
+      }
+      try { fs.unlinkSync(lockPath); } catch {}
+      if (attempt === 1) {
+        fs.writeFileSync(lockPath, String(process.pid), { mode: 0o600 });
+      }
     }
-    try { fs.unlinkSync(lockPath); } catch {}
   }
-  fs.writeFileSync(lockPath, String(process.pid), { mode: 0o600 });
+  // 每 60s 轻触刷新 daemon.lock mtime，供 Windows 周期保活巡检 0 子进程确认守护进程健康存活。
+  const heartbeatTimer = setInterval(() => {
+    try {
+      if (Number(fs.readFileSync(lockPath, "utf8").trim()) === process.pid) {
+        const now = new Date();
+        fs.utimesSync(lockPath, now, now);
+      }
+    } catch {}
+  }, 60_000);
+  if (typeof heartbeatTimer.unref === "function") heartbeatTimer.unref();
+
   return () => {
+    clearInterval(heartbeatTimer);
     try {
       if (Number(fs.readFileSync(lockPath, "utf8").trim()) === process.pid) {
         fs.unlinkSync(lockPath);
@@ -124,16 +168,31 @@ async function runDaemon({ configDir, flags = {} }) {
   const releaseLock = acquireDaemonLock(configDir);
 
   let cleanupFn = null;
+  let shuttingDown = false;
   const onSignal = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    // 强兜底超时（小于 Windows 5s 关机强杀阈值），防止在途请求拖慢关机或遗留 daemon.lock。
+    const forceExitTimer = setTimeout(() => {
+      releaseLock();
+      process.exit(0);
+    }, 4000);
+    if (typeof forceExitTimer.unref === "function") forceExitTimer.unref();
     try {
       if (cleanupFn) await cleanupFn();
+    } catch {
+      /* 退出清理异常不影响立即收口 */
     } finally {
+      clearTimeout(forceExitTimer);
       releaseLock();
       process.exit(0);
     }
   };
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);
+  // Windows 控制台关闭/中断事件分别映射为 SIGHUP / SIGBREAK
+  process.once("SIGHUP", onSignal);
+  process.once("SIGBREAK", onSignal);
 
   try {
     if (mode === "hub") {
