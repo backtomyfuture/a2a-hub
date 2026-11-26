@@ -1632,6 +1632,8 @@ export function startHubHttpServer({
       }
 
       if ((req.method || "GET") === "GET") {
+        // 部分浏览器固定请求 /favicon.ico，不跟随 <link rel="icon">，复用 PNG 避免 404
+        if (pathname === "/favicon.ico") return serveStaticFile(res, WEB_ROOT, "favicon-32.png");
         return serveStaticFile(res, WEB_ROOT, pathname);
       }
 
