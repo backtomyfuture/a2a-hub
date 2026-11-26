@@ -671,6 +671,22 @@ test("Muse VM Keepalive & Inbox Flow: ah join --agent --token-file --no-daemon�
     const doneTask = (await owner.getTask(taskId)).task;
     assert.equal(doneTask.state, "completed");
     assert.equal(doneTask.receipt.text, "已通过 ah inbox 完成");
+
+    // 验证 ah task list 输出 context_id，且支持 --json
+    const { stdout: listText } = await execFileAsync(
+      process.execPath,
+      [path.resolve("bin/ah.mjs"), "task", "list", "--config", museDir],
+      { encoding: "utf8" }
+    );
+    assert.ok(listText.includes(taskId) && listText.includes(doneTask.context_id), "ah task list 应输出 context_id");
+
+    const { stdout: listJsonRaw } = await execFileAsync(
+      process.execPath,
+      [path.resolve("bin/ah.mjs"), "task", "list", "--config", museDir, "--json"],
+      { encoding: "utf8" }
+    );
+    const listJson = JSON.parse(listJsonRaw.trim());
+    assert.ok(Array.isArray(listJson) && listJson.some((t) => t.id === taskId && t.context_id === doneTask.context_id));
   } finally {
     await rt.stop();
     fs.rmSync(hubDir, { recursive: true, force: true });

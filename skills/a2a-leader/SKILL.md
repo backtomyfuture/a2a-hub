@@ -41,7 +41,9 @@ Content-Type: application/json
   "priority": 7
 }
 ```
-- `to` 传多个 Agent ID 时，Hub 会在同一个 `context_id` 下原子创建多条子任务并各自追踪状态。
+- `to` 传多个 Agent ID 时，Hub 会在同一个 `context_id` 下原子创建多条子任务并各自追踪状态；多目标列表中若含任一已暂停（`enabled: false`）节点，整笔请求会被 `409` 拒绝。
+- **同事项续线程**：对同一执行方的追问、补充或复测，若属于同一事项，原任务处于 `input-required` 时走 `POST /api/v1/tasks/<task_id>/reply` 补答恢复；其余情况（原任务已终态或需追加新指示）必须携带原 `context_id` 续派（使同设备 CLI Worker 自动 `--resume` 续接会话并保持线程完整），只有真正的新事项才留空新建线程。
+- **主机级任务每机单派**：主机更新、安装、配置或巡检类任务每台设备仅派给一个在线 Worker，避免同机多 CLI 并发冲突。
 - 严禁在 `params` 中传递 `command`、`cwd`、`env` 等执行控制字段（会被 400 拒绝）。
 
 ## 4. 增量拉取子任务进度与回执（水位推进）
@@ -49,6 +51,7 @@ Content-Type: application/json
 - 支持常驻循环的节点可用 `GET /api/v1/agents/<your_agent_id>/poll?since=<seq>&timeout=35` 实时等待子任务回执与直派任务；不支持常驻循环的云端节点应配置定时轮询 `/check` -> `/updates?new=1`
 - 拉取增量更新并自动推进服务端水位：`GET /api/v1/agents/<your_agent_id>/updates?new=1`
 - 查看整条协作对话线程历史：`GET /api/v1/threads/<context_id>`
+- **按回执正文判结果**：跟踪每笔派单至终态（含 `completed` / `failed` / `canceled` / `rejected`），汇报前核对 `receipt.text` / `summary`，空输出或 `(执行完成，无输出文本)` 占位回执视为未验证。
 
 ## 5. 处理阻塞态
 - 若子任务进入 `input-required`，可查看提问后代答恢复（可附带 `attachments`）：

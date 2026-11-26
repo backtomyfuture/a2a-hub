@@ -169,6 +169,11 @@ test("MCP Server (Streamable HTTP & Token Identity Binding): 按 Token 角色动
       leaderToolsRes.result.tools.find((t) => t.name === "a2a_check_updates")?.annotations?.readOnlyHint,
       true
     );
+    const dispatchTool = leaderToolsRes.result.tools.find((t) => t.name === "a2a_dispatch_task");
+    assert.ok(
+      dispatchTool?.inputSchema?.properties?.context_id?.description?.includes("同事项续线程"),
+      "a2a_dispatch_task 的 context_id 描述应包含同事项续线程口径"
+    );
 
     // 4) 零参数签到与防冒充校验
     const regWorker = await workerMcp.post("/api/v1/mcp", {

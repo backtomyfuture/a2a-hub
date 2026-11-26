@@ -171,7 +171,8 @@ const LEADER_TOOLS = [
         input_text: { type: "string", description: "完整的任务指令、背景上下文与期望交付格式" },
         context_id: {
           type: "string",
-          description: "沿用已有对话线程 context_id 以共享跨轮次历史上下文；留空自动新建线程",
+          description:
+            "同事项续线程必填：对同一执行方的追问、补充或复测若属同一事项（非 input-required 补答），必须传原 context_id 以续接会话与历史；仅真正的新事项留空自动新建线程",
         },
         priority: { type: "number", description: "优先级 1-10，默认 5" },
         model: { type: "string", description: "可选指定目标节点使用的模型" },
