@@ -881,11 +881,16 @@ export class TaskService {
     });
   }
 
+  // 有明确租约的任务只看租约：慢速 Agent（如邮件驱动）无法频繁心跳，不能被 updated_at 兜底误回收后重复派发；
+  // 仅无租约的 working 任务才用 STALE_MIN 兜底。
   reclaimStale(now = Date.now()) {
     const staleCutoff = now - STALE_MIN * 60_000;
     const staleRows = this.store.db.prepare(`
       SELECT * FROM tasks
-      WHERE state = 'working' AND ((lease_until IS NOT NULL AND lease_until < ?) OR updated_at < ?)
+      WHERE state = 'working' AND (
+        (lease_until IS NOT NULL AND lease_until < ?)
+        OR (lease_until IS NULL AND updated_at < ?)
+      )
     `).all(now, staleCutoff);
 
     const reclaimed = [];

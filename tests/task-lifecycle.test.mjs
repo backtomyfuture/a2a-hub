@@ -169,6 +169,20 @@ test("TaskService: 八态完整流转 (ask -> reply, auth -> sign approve/deny, 
     assert.equal(reclaimed.length, 1);
     assert.equal(reclaimed[0].state, "failed");
     assert.equal(reclaimed[0].error_message, "task_lease_expired");
+
+    // 长租约任务：即使超过 STALE_MIN(20 分钟) 未更新，只要租约未到期就不应被回收（租约上限 1 小时，这里取 50 分钟）
+    const { tasks: longTasks } = ctx.taskService.dispatchTasks({
+      fromNode: "leader",
+      to: "worker",
+      title: "长租约",
+      inputText: "slow",
+      maxRetries: 0,
+    });
+    ctx.taskService.claimTaskById(longTasks[0].id, { claimant: "worker", leaseSec: 50 * 60 });
+    const keep = ctx.taskService.reclaimStale(Date.now() + 40 * 60_000);
+    assert.equal(keep.length, 0);
+    const expired = ctx.taskService.reclaimStale(Date.now() + 2 * 3600_000);
+    assert.equal(expired.length, 1);
   } finally {
     ctx.cleanup();
   }
