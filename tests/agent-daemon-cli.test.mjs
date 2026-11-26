@@ -19,7 +19,7 @@ import {
   systemdUnitName,
   unitTextTargetsConfig,
 } from "../src/cli/service.mjs";
-import { hasInstalledService } from "../src/cli/update.mjs";
+import { hasInstalledService, runFreshService, update } from "../src/cli/update.mjs";
 import { parseJoinHubUrl, resolveSkillsForHost, runDeviceJoin, runHubSetup } from "../src/cli/setup.mjs";
 import { AgentDaemon } from "../src/client/agent-daemon.mjs";
 import { GatewayClient } from "../src/client/gateway-client.mjs";
@@ -328,6 +328,170 @@ test("Windows Service Install, Update Recovery & Doctor Lock Diagnostics", async
     );
   } finally {
     fs.rmSync(tmpHome, { recursive: true, force: true });
+  }
+});
+
+test("Update Self-Bootstrap & Stopped-Service Recovery", async () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ah-test-update-boot-"));
+  const fakeAppDir = path.join(tmpRoot, "app");
+  const fakeBin = path.join(fakeAppDir, "bin", "ah.mjs");
+  const fakeCfgDir = path.join(tmpRoot, "cfg");
+  fs.mkdirSync(path.join(fakeAppDir, ".git"), { recursive: true });
+  fs.mkdirSync(path.join(fakeAppDir, "bin"), { recursive: true });
+  fs.mkdirSync(fakeCfgDir, { recursive: true });
+  fs.writeFileSync(path.join(fakeAppDir, "package.json"), JSON.stringify({ name: "a2a-hub", version: "2.0.1", dependencies: {} }));
+  fs.writeFileSync(fakeBin, "#!/usr/bin/env node\n", "utf8");
+
+  try {
+    // 1. runFreshService 正确组装新版 bin/ah.mjs service 子进程参数并清理 post-pull 标记
+    const freshCalls = [];
+    const rcFresh = runFreshService(fakeAppDir, fakeCfgDir, {
+      execPath: "/opt/node/bin/node",
+      env: { FOO: "bar", __AH_UPDATE_POST_PULL: "1", __AH_UPDATE_FROM: "2.0.0" },
+      spawnSyncFn: (cmd, args, opts) => {
+        freshCalls.push({ cmd, args, opts });
+        return { status: 0 };
+      },
+    });
+    assert.equal(rcFresh, 0);
+    assert.equal(freshCalls.length, 1);
+    assert.equal(freshCalls[0].cmd, "/opt/node/bin/node");
+    assert.deepEqual(freshCalls[0].args, [fakeBin, "service", "--config", fakeCfgDir]);
+    assert.equal(freshCalls[0].opts.stdio, "inherit");
+    assert.equal(freshCalls[0].opts.windowsHide, true);
+    assert.equal(freshCalls[0].opts.env.__AH_UPDATE_POST_PULL, undefined);
+    assert.equal(freshCalls[0].opts.env.__AH_UPDATE_FROM, undefined);
+    assert.equal(freshCalls[0].opts.env.FOO, "bar");
+
+    // 2. behind > 0 且 merge 成功后，应拉起磁盘最新 bin/ah.mjs update 子进程，而不是直接调用旧内存 service
+    const postPullSpawns = [];
+    let staleServiceCalled = 0;
+    const rcUpdate = await update(
+      fakeAppDir,
+      { skipSkill: true, configDir: fakeCfgDir },
+      {
+        execPath: "/opt/node/bin/node",
+        env: { FOO: "baz" },
+        captureFn: (cmd, args) => {
+          if (args[0] === "rev-parse") return "main";
+          if (args[0] === "rev-list") return "2";
+          return "";
+        },
+        runFn: () => {},
+        spawnSyncFn: (cmd, args, opts) => {
+          postPullSpawns.push({ cmd, args, opts });
+          return { status: 0 };
+        },
+        runServiceFn: async () => {
+          staleServiceCalled++;
+          return 0;
+        },
+      }
+    );
+    assert.equal(rcUpdate, 0);
+    assert.equal(staleServiceCalled, 0, "merge 后不得在旧内存模块里直接执行 service");
+    assert.equal(postPullSpawns.length, 1);
+    assert.deepEqual(postPullSpawns[0].args, [fakeBin, "update", "--skip-skill", "--config", fakeCfgDir]);
+    assert.equal(postPullSpawns[0].opts.windowsHide, true);
+    assert.equal(postPullSpawns[0].opts.env.__AH_UPDATE_POST_PULL, "1");
+    assert.equal(postPullSpawns[0].opts.env.__AH_UPDATE_FROM, "2.0.1");
+
+    // 3. postPull 阶段跳过 git fetch/merge，对已配置自启但未运行的节点调用 runServiceFn
+    let gitTouchedInPostPull = 0;
+    const postSvcCalls = [];
+    const rcPost = await update(
+      fakeAppDir,
+      { skipSkill: true, configDir: fakeCfgDir, postPull: true, fromVersion: "2.0.0" },
+      {
+        captureFn: () => {
+          gitTouchedInPostPull++;
+          return "";
+        },
+        runFn: () => {
+          gitTouchedInPostPull++;
+        },
+        isDaemonRunningFn: () => false,
+        hasInstalledServiceFn: () => true,
+        runServiceFn: async (dir, cfg) => {
+          postSvcCalls.push({ dir, cfg });
+          return 0;
+        },
+      }
+    );
+    assert.equal(rcPost, 0);
+    assert.equal(gitTouchedInPostPull, 0, "post-pull 阶段不应重复执行 git 操作");
+    assert.deepEqual(postSvcCalls, [{ dir: fakeAppDir, cfg: fakeCfgDir }]);
+
+    // 4. behind === 0 且 check: false：已安装自启但停机时应自愈拉起；在运行或未安装时不触发
+    const recoverCalls = [];
+    const rcRecover = await update(
+      fakeAppDir,
+      { skipSkill: true, configDir: fakeCfgDir },
+      {
+        captureFn: (cmd, args) => (args[0] === "rev-parse" ? "main" : "0"),
+        runFn: () => {},
+        isDaemonRunningFn: () => false,
+        hasInstalledServiceFn: () => true,
+        runServiceFn: async (dir, cfg) => {
+          recoverCalls.push({ dir, cfg });
+          return 0;
+        },
+      }
+    );
+    assert.equal(rcRecover, 0);
+    assert.equal(recoverCalls.length, 1, "behind === 0 但已注册服务停机时应自动拉起");
+
+    let runningOrMissingCalls = 0;
+    await update(
+      fakeAppDir,
+      { skipSkill: true, configDir: fakeCfgDir },
+      {
+        captureFn: (cmd, args) => (args[0] === "rev-parse" ? "main" : "0"),
+        runFn: () => {},
+        isDaemonRunningFn: () => true,
+        hasInstalledServiceFn: () => true,
+        runServiceFn: async () => {
+          runningOrMissingCalls++;
+          return 0;
+        },
+      }
+    );
+    await update(
+      fakeAppDir,
+      { skipSkill: true, configDir: fakeCfgDir },
+      {
+        captureFn: (cmd, args) => (args[0] === "rev-parse" ? "main" : "0"),
+        runFn: () => {},
+        isDaemonRunningFn: () => false,
+        hasInstalledServiceFn: () => false,
+        runServiceFn: async () => {
+          runningOrMissingCalls++;
+          return 0;
+        },
+      }
+    );
+    assert.equal(runningOrMissingCalls, 0, "守护进程仍在运行或未配置自启时 behind === 0 不应重装服务");
+
+    // 5. check: true（--check）必须保持纯只读，即使服务停机也绝不触发拉起
+    let checkSvcCalls = 0;
+    const rcCheck = await update(
+      fakeAppDir,
+      { check: true, skipSkill: true, configDir: fakeCfgDir },
+      {
+        captureFn: (cmd, args) => (args[0] === "rev-parse" ? "main" : "0"),
+        runFn: () => {},
+        isDaemonRunningFn: () => false,
+        hasInstalledServiceFn: () => true,
+        runServiceFn: async () => {
+          checkSvcCalls++;
+          return 0;
+        },
+      }
+    );
+    assert.equal(rcCheck, 0);
+    assert.equal(checkSvcCalls, 0, "--check 必须保持只读");
+  } finally {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
   }
 });
 

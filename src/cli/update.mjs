@@ -6,9 +6,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { resolveSkillsForHost } from "./setup.mjs";
-import { service } from "./service.mjs";
 
 // git / npm 输出直接透传：npm ci 可能要几分钟，静默会像卡死。
 function run(cmd, args, cwd) {
@@ -135,72 +134,52 @@ function daemonHint(configDir) {
   }
 }
 
-export async function update(appDir, { check = false, skipSkill = false, configDir = "" } = {}) {
-  if (!fs.existsSync(path.join(appDir, ".git"))) {
-    const installer = process.platform === "win32" ? "install.ps1" : "install.sh";
-    console.error(`当前程序不是 git 检出（${appDir}），无法自动更新；请重跑 ${installer}。`);
+// 通过独立子进程执行磁盘上最新的 bin/ah.mjs service，避免更新前已加载进内存的旧模块逻辑生效。
+export function runFreshService(
+  appDir,
+  configDir = "",
+  { execPath = process.execPath, spawnSyncFn = spawnSync, env = process.env } = {}
+) {
+  const appBin = path.join(appDir, "bin", "ah.mjs");
+  const args = [appBin, "service", ...(configDir ? ["--config", configDir] : [])];
+  const childEnv = { ...env };
+  delete childEnv.__AH_UPDATE_POST_PULL;
+  delete childEnv.__AH_UPDATE_FROM;
+  const res = spawnSyncFn(execPath, args, {
+    stdio: "inherit",
+    windowsHide: true,
+    env: childEnv,
+  });
+  if (res?.error) {
+    console.error(`拉起新版 ah service 失败：${res.error.message}`);
     return 1;
   }
+  return typeof res?.status === "number" ? res.status : 1;
+}
 
-  const before = readAppVersion(appDir);
-
-  // 跟当前分支走：install.sh 装的是 main，仓库检出可能停在别的分支，不写死。
-  let branch;
-  try {
-    branch = capture("git", ["rev-parse", "--abbrev-ref", "HEAD"], appDir);
-  } catch (e) {
-    console.error("git 不可用或目录损坏：" + e.message);
-    return 1;
-  }
-  if (!branch || branch === "HEAD") {
-    console.error(`程序目录处于 detached HEAD，请先 git checkout 回分支再更新：${appDir}`);
-    return 1;
-  }
-
-  try {
-    run("git", ["fetch", "origin", branch], appDir);
-  } catch (e) {
-    console.error("git fetch 失败：" + e.message);
-    return 1;
-  }
-
-  let behind = 0;
-  try {
-    behind = Number(capture("git", ["rev-list", "--count", "HEAD..FETCH_HEAD"], appDir)) || 0;
-  } catch { /* 数不出来就按有更新处理，交给 pull 兜底 */ behind = 1; }
-
-  if (check) {
-    console.log(behind > 0
-      ? `当前 v${before}，远端 ${branch} 有 ${behind} 个新提交。运行 ah update 升级。`
-      : `已是最新（v${before}，分支 ${branch}）。`);
-    return 0;
-  }
-
-  if (behind === 0) {
-    console.log(`已是最新（v${before}，分支 ${branch}）。`);
-    return 0;
-  }
-
-  console.log(`更新 ${branch}：${behind} 个新提交（v${before} → …）`);
-  try {
-    run("git", ["merge", "--ff-only", "FETCH_HEAD"], appDir);
-  } catch (e) {
-    console.error("git 合并失败（本地有改动时会拒绝快进）：" + e.message);
-    return 1;
-  }
-
+async function finishUpdate({
+  appDir,
+  before,
+  skipSkill = false,
+  configDir = "",
+  runFn = run,
+  fsImpl = fs,
+  isDaemonRunningFn = isDaemonRunning,
+  hasInstalledServiceFn = hasInstalledService,
+  runServiceFn = (dir, cfg) => runFreshService(dir, cfg),
+}) {
   const after = readAppVersion(appDir);
   let hasDeps = false;
   try {
-    const pkg = JSON.parse(fs.readFileSync(path.join(appDir, "package.json"), "utf8"));
+    const pkg = JSON.parse(fsImpl.readFileSync(path.join(appDir, "package.json"), "utf8"));
     hasDeps = Object.keys(pkg.dependencies || {}).length > 0;
   } catch {}
   if (hasDeps) {
     try {
-      if (fs.existsSync(path.join(appDir, "package-lock.json"))) {
-        run("npm", ["ci", "--omit=dev", "--no-audit", "--no-fund"], appDir);
+      if (fsImpl.existsSync(path.join(appDir, "package-lock.json"))) {
+        runFn("npm", ["ci", "--omit=dev", "--no-audit", "--no-fund"], appDir);
       } else {
-        run("npm", ["install", "--omit=dev", "--no-audit", "--no-fund"], appDir);
+        runFn("npm", ["install", "--omit=dev", "--no-audit", "--no-fund"], appDir);
       }
     } catch (e) {
       console.error("依赖安装失败：" + e.message);
@@ -209,7 +188,7 @@ export async function update(appDir, { check = false, skipSkill = false, configD
   }
 
   try {
-    fs.chmodSync(path.join(appDir, "bin", "ah.mjs"), 0o755);
+    fsImpl.chmodSync(path.join(appDir, "bin", "ah.mjs"), 0o755);
   } catch (e) {
     console.log("  · bin 可执行位跳过：" + e.message);
   }
@@ -220,15 +199,15 @@ export async function update(appDir, { check = false, skipSkill = false, configD
   // 更新成功后自动刷新并重启守护进程：
   // 1) 守护进程仍在运行；或 2) 本机此前已注册过该 configDir 的自启服务（即使因关机取消或异常退出暂时停着，也应同步刷新启动器并拉起）。
   // 从未注册自启且进程未运行时仅打提示，不擅自安装开机服务。
-  const running = Boolean(configDir && isDaemonRunning(configDir));
-  const installed = Boolean(configDir && !running && hasInstalledService(configDir));
+  const running = Boolean(configDir && isDaemonRunningFn(configDir));
+  const installed = Boolean(configDir && !running && hasInstalledServiceFn(configDir));
   if (configDir && (running || installed)) {
     console.log(
       running
         ? `更新完成：v${before} → v${after}。正在重启守护进程…`
         : `更新完成：v${before} → v${after}。检测到已配置自启服务但当前未运行，正在刷新并拉起守护进程…`
     );
-    const rc = await service(configDir, {}, appDir);
+    const rc = await runServiceFn(appDir, configDir);
     if (rc === 0) {
       console.log("守护进程已重启，新版本生效。");
     } else {
@@ -240,6 +219,146 @@ export async function update(appDir, { check = false, skipSkill = false, configD
     console.log(`更新完成：v${before} → v${after}。重启 ah daemon 后生效。`);
   }
   return 0;
+}
+
+export async function update(
+  appDir,
+  { check = false, skipSkill = false, configDir = "", postPull = false, fromVersion = "" } = {},
+  _deps = {}
+) {
+  const runFn = _deps.runFn ?? run;
+  const captureFn = _deps.captureFn ?? capture;
+  const spawnSyncFn = _deps.spawnSyncFn ?? spawnSync;
+  const execPath = _deps.execPath ?? process.execPath;
+  const env = _deps.env ?? process.env;
+  const fsImpl = _deps.fsImpl ?? fs;
+  const isDaemonRunningFn = _deps.isDaemonRunningFn ?? isDaemonRunning;
+  const hasInstalledServiceFn = _deps.hasInstalledServiceFn ?? hasInstalledService;
+  const runServiceFn =
+    _deps.runServiceFn ??
+    ((dir, cfg) => runFreshService(dir, cfg, { execPath, spawnSyncFn, env }));
+
+  // 由 git merge 后拉起的第二阶段子进程：跳过 fetch/merge，直接从磁盘全新加载的模块执行收尾与 ah service。
+  if (postPull || env.__AH_UPDATE_POST_PULL === "1") {
+    const before = String(fromVersion || env.__AH_UPDATE_FROM || readAppVersion(appDir));
+    return await finishUpdate({
+      appDir,
+      before,
+      skipSkill,
+      configDir,
+      runFn,
+      fsImpl,
+      isDaemonRunningFn,
+      hasInstalledServiceFn,
+      runServiceFn,
+    });
+  }
+
+  if (!fsImpl.existsSync(path.join(appDir, ".git"))) {
+    const installer = process.platform === "win32" ? "install.ps1" : "install.sh";
+    console.error(`当前程序不是 git 检出（${appDir}），无法自动更新；请重跑 ${installer}。`);
+    return 1;
+  }
+
+  const before = readAppVersion(appDir);
+
+  // 跟当前分支走：install.sh 装的是 main，仓库检出可能停在别的分支，不写死。
+  let branch;
+  try {
+    branch = captureFn("git", ["rev-parse", "--abbrev-ref", "HEAD"], appDir);
+  } catch (e) {
+    console.error("git 不可用或目录损坏：" + e.message);
+    return 1;
+  }
+  if (!branch || branch === "HEAD") {
+    console.error(`程序目录处于 detached HEAD，请先 git checkout 回分支再更新：${appDir}`);
+    return 1;
+  }
+
+  try {
+    runFn("git", ["fetch", "origin", branch], appDir);
+  } catch (e) {
+    console.error("git fetch 失败：" + e.message);
+    return 1;
+  }
+
+  let behind = 0;
+  try {
+    behind = Number(captureFn("git", ["rev-list", "--count", "HEAD..FETCH_HEAD"], appDir)) || 0;
+  } catch { /* 数不出来就按有更新处理，交给 pull 兜底 */ behind = 1; }
+
+  if (check) {
+    console.log(behind > 0
+      ? `当前 v${before}，远端 ${branch} 有 ${behind} 个新提交。运行 ah update 升级。`
+      : `已是最新（v${before}，分支 ${branch}）。`);
+    return 0;
+  }
+
+  if (behind === 0) {
+    const running = Boolean(configDir && isDaemonRunningFn(configDir));
+    const installed = Boolean(configDir && !running && hasInstalledServiceFn(configDir));
+    if (installed) {
+      console.log(`已是最新（v${before}，分支 ${branch}）。检测到已配置自启服务但当前未运行，正在刷新并拉起守护进程…`);
+      const rc = await runServiceFn(appDir, configDir);
+      if (rc === 0) {
+        console.log("守护进程已拉起，当前版本生效。");
+      } else {
+        console.error(`守护进程拉起失败（exit ${rc}），请手动运行 ah service --config ${configDir}`);
+      }
+      return rc;
+    }
+    console.log(`已是最新（v${before}，分支 ${branch}）。`);
+    return 0;
+  }
+
+  console.log(`更新 ${branch}：${behind} 个新提交（v${before} → …）`);
+  try {
+    runFn("git", ["merge", "--ff-only", "FETCH_HEAD"], appDir);
+  } catch (e) {
+    console.error("git 合并失败（本地有改动时会拒绝快进）：" + e.message);
+    return 1;
+  }
+
+  // merge 后硬盘已更新，拉起磁盘上最新 bin/ah.mjs update 执行收尾，确保新版本 update/service 逻辑立即生效。
+  const appBin = path.join(appDir, "bin", "ah.mjs");
+  if (_deps.reexecPostPullFn || fsImpl.existsSync(appBin)) {
+    const args = [
+      appBin,
+      "update",
+      ...(skipSkill ? ["--skip-skill"] : []),
+      ...(configDir ? ["--config", configDir] : []),
+    ];
+    const childEnv = {
+      ...env,
+      __AH_UPDATE_POST_PULL: "1",
+      __AH_UPDATE_FROM: String(before),
+    };
+    if (_deps.reexecPostPullFn) {
+      return await _deps.reexecPostPullFn({ appDir, appBin, args, env: childEnv, skipSkill, configDir, fromVersion: before });
+    }
+    const res = spawnSyncFn(execPath, args, {
+      stdio: "inherit",
+      windowsHide: true,
+      env: childEnv,
+    });
+    if (res?.error) {
+      console.error(`拉起新版更新收尾进程失败，回退当前进程继续：${res.error.message}`);
+    } else {
+      return typeof res?.status === "number" ? res.status : 1;
+    }
+  }
+
+  return await finishUpdate({
+    appDir,
+    before,
+    skipSkill,
+    configDir,
+    runFn,
+    fsImpl,
+    isDaemonRunningFn,
+    hasInstalledServiceFn,
+    runServiceFn,
+  });
 }
 
 // 读 daemon.lock 判断守护进程是否存活（PID 存在且 process.kill(pid,0) 不抛错，且锁文件不早于开机时间）。
