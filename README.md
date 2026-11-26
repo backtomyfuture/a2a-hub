@@ -20,7 +20,7 @@
   <img src="https://img.shields.io/badge/Node.js-%3E%3D24-339933.svg" alt="Node.js >= 24" />
   <img src="https://img.shields.io/badge/Dependencies-0%20runtime-10b981.svg" alt="Zero Runtime Dependencies" />
   <img src="https://img.shields.io/badge/Local%20CLIs-26%2B%20Auto--Discovery-6366f1.svg" alt="26+ CLIs" />
-  <img src="https://img.shields.io/badge/Cloud%20Templates-10%20Presets-0ea5e9.svg" alt="10 Cloud Templates" />
+  <img src="https://img.shields.io/badge/Cloud%20Templates-11%20Presets-0ea5e9.svg" alt="11 Cloud Templates" />
   <img src="https://img.shields.io/badge/Protocol-A2A%208--State-f59e0b.svg" alt="A2A 8-State" />
 </p>
 
@@ -37,7 +37,7 @@
 - **真正的一行启动，无需 `git clone`**：无需预先准备仓库或数据库。Mac / Linux / Windows 一行脚本自动安装官方 Node 24 LTS、`ah` 命令、生成机主凭据与 Ed25519 密钥对，并直接打开 Web 控制台。
 - **零前置跨电脑融合挂载**：目标电脑什么都没装？控制台生成**一条融合了「安装 Node 24 + 安装 `ah` + 绑定设备 + 自动扫描 CLI + 注册自启」的一行命令**，复制运行（或直接发给对方机器上的 AI 助手）即可上线，纯出站连接，**不需要任何入站端口**。
 - **26 种本机 CLI 自动发现 + 多路真并发池**：自动识别 `claude`、`codex`、`opencode`、`amp`、`droid`、`agy`、`grok`、`cursor-agent`、`codebuddy`、`copilot`、`qwen`、`kimi` 等 **26 种编程/终端 CLI**。单台设备默认 `maxConcurrent = 4` 并行调度，同一 `(context_id, worker_key)` 自动串行加锁并 `--resume` 续接上下文。
-- **10 套云端与桌面端 Agent 预设**：内置 **Muse、AutoClaw（Leader 主协调）**、Gemini 桌面端、Amazon Quick、Grok Bot、WorkBuddy、豆包、灵光、千问与通用模板，创建即生成包含专属 Token 与巡检节奏的自包含接入提示词。
+- **11 套云端与桌面端 Agent 预设**：内置 **Muse、AutoClaw（Leader 主协调）**、Gemini 桌面端、Amazon Quick、Grok Bot、WorkBuddy、豆包、灵光、千问、Today AI 与通用模板，创建即生成包含专属 Token 与巡检节奏的自包含接入提示词。
 - **原生 MCP 接入**：Hub 自带零依赖 MCP 服务（Streamable HTTP `/api/v1/mcp` 与本机 stdio `ah mcp`），Gemini 桌面端、Amazon Quick、Claude Desktop、Cursor 等 MCP 客户端可直接注册、派单、取单和回执，不必手写 REST 请求。
 - **任务附件全链路**：派单、回复、追问与回执都能挂文件（`hub://files/<id>`）。多节点扇出时每个目标节点自动获得下载授权；电脑节点执行前会把附件下载到本地运行目录，并把文件名和路径写进给 CLI 的提示词。
 - **严格安全边界与指令数据分离**：任务请求参数严禁夹带 `command` / `cwd` / `env` 等控制键；高危任务经 `auth-required` 由机主使用 Hub 私钥产出 **Ed25519 密码学签名**，远端执行器本地验签通过才允许执行。
@@ -155,7 +155,7 @@ node bin/ah.mjs up      # 初始化并前台启动 Hub（加 --service 注册开
 
 ### 2. 接入独立 / 云端 Agent（Muse、AutoClaw、WorkBuddy、豆包、千问、Webhook 等）
 
-在控制台点击 **「+ 接入 Agent / 电脑」 → 「接入独立 Agent」**，从 10 套预设模板中选择平台（或选「通用（自定义参数）」自由组合 Poll / Longpoll / Webhook），创建后控制台会签发独立的分 Agent Token 并生成一份**自包含接入提示词**，发给目标 Agent 即可完成在线注册并接单。
+在控制台点击 **「+ 接入 Agent / 电脑」 → 「接入独立 Agent」**，从 11 套预设模板中选择平台（或选「通用（自定义参数）」自由组合 Poll / Longpoll / Webhook），创建后控制台会签发独立的分 Agent Token 并生成一份**自包含接入提示词**，发给目标 Agent 即可完成在线注册并接单。
 
 ### 3. 通过 MCP 接入（Gemini 桌面端、Amazon Quick、Claude Desktop、Cursor 等）
 
@@ -206,7 +206,7 @@ Gemini 与 Amazon Quick 模板生成的接入提示词默认就走 MCP。
 ## 内置兼容生态一览
 
 <details>
-<summary><strong>点击展开：26 种自动发现本机 CLI Agent + 10 套云端 / 桌面端预设模板</strong></summary>
+<summary><strong>点击展开：26 种自动发现本机 CLI Agent + 11 套云端 / 桌面端预设模板</strong></summary>
 
 ### 自动发现的 26 种本机 CLI Agent（[`src/core/config.mjs`](src/core/config.mjs)）
 
@@ -239,7 +239,7 @@ Gemini 与 Amazon Quick 模板生成的接入提示词默认就走 MCP。
 | `iflow` | iFlow CLI | `iflow` | `-p {prompt} --yolo` |
 | `qoder` | Qoder CLI | `qodercli` / `qoder` | `-p {prompt} --output-format json --yolo` |
 
-### 10 套独立 / 云端 Agent 接入模板（[`src/core/templates.mjs`](src/core/templates.mjs)）
+### 11 套独立 / 云端 Agent 接入模板（[`src/core/templates.mjs`](src/core/templates.mjs)）
 
 | 模板 ID | 预设名称 | 角色 | 接入方式 | 默认节奏 | 典型定位 |
 | --- | --- | --- | --- | --- | --- |
@@ -253,6 +253,7 @@ Gemini 与 Amazon Quick 模板生成的接入提示词默认就走 MCP。
 | `doubao` | 豆包（云端定时） | `worker` | HTTP 定时检查 | 60 分钟 | 中文长文写作、资料总结与创意策划 |
 | `lingguang` | 灵光（蚂蚁 Agent） | `worker` | HTTP 定时检查 | 5 分钟 | 中文资料整理与结构化总结 |
 | `qwen` | 千问 Go（小时级定时） | `worker` | HTTP 定时检查 | 60 分钟 | 结构化数据分析、文档翻译与代码辅助 |
+| `today` | Today AI（云端定时） | `worker` | HTTP 定时检查 | 15 分钟 | 纯 curl 直连精简巡检，异常按任务隔离 |
 
 > 老版本 Hub 的配置目录里若已有 `agent_templates.json`，升级时会保留你自定义的模板，并自动补上新增的内置模板。
 
