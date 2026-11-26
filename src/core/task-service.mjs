@@ -1036,6 +1036,11 @@ export class TaskService {
         groups.set(t.context_id, g);
       }
       g.task_count += 1;
+      // 线程标题取最早的任务，与 getThread 详情一致
+      if (t.created_at <= g.created_at && t.title) {
+        g.title = t.title;
+        g.from_node = t.from_node;
+      }
       g.created_at = Math.min(g.created_at, t.created_at);
       if (t.updated_at >= g.updated_at) {
         g.updated_at = t.updated_at;

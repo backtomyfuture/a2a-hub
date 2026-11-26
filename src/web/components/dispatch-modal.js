@@ -1,7 +1,7 @@
 import { api } from "../api.js";
 import { agentAvatar, agentStatusOf, deviceAvatar, uiIcon } from "../icons.js";
 import { setState, store } from "../state.js";
-import { agentSourceLabel, bindBackdropClose, escapeHtml, formatBytes, showToast } from "../utils.js";
+import { agentSourceLabel, bindBackdropClose, escapeHtml, formatBytes, showToast, sortAgentsForDisplay, sortDevicesForDisplay } from "../utils.js";
 
 let pendingFiles = [];
 
@@ -17,12 +17,9 @@ function appendPendingFiles(fileList) {
   }
 }
 
-function groupEnabledAgents(agents, devices) {
-  const devOrder = [...devices].sort((a, b) => {
-    if (Boolean(a.is_local) !== Boolean(b.is_local)) return a.is_local ? -1 : 1;
-    if (Boolean(a.online) !== Boolean(b.online)) return a.online ? -1 : 1;
-    return String(a.name || a.id).localeCompare(String(b.name || b.id), "zh-CN");
-  });
+function groupEnabledAgents(rawAgents, devices) {
+  const agents = sortAgentsForDisplay(rawAgents);
+  const devOrder = sortDevicesForDisplay(devices);
   const devMap = new Map(devices.map((d) => [d.id, d]));
   const groups = [];
   const handledDeviceIds = new Set();

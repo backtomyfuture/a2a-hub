@@ -17,6 +17,10 @@ export const store = {
   showSettingsDrawer: false,
   selectedThreadId: null,
   selectedThreadDetail: null,
+  threadFilter: "all",
+  threadSearch: "",
+  threadPage: 1,
+  threadTaskVisible: {},
   showAddModal: null, // null | 'agent' | 'device'
   showAddWorkerDeviceId: null,
   showDispatchModal: false,

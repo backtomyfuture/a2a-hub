@@ -4,7 +4,9 @@ import { escapeHtml } from "./utils.js";
 
 // 单色品牌图标在 <img> 内 currentColor 恒为黑色，打标记便于样式单独处理
 // 自带底板的应用图标需铺满头像，否则会在白底里缩成一个小方块
-const FULL_BLEED_BRANDS = new Set(["codex"]);
+const FULL_BLEED_BRANDS = new Set(["codex", "autoclaw", "todayai", "instinct", "factory", "aider"]);
+// 无矢量源的品牌用 128px 位图，其余默认 .svg
+const PNG_BRANDS = new Set(["autoclaw", "awsquick", "todayai", "instinct", "factory", "aider"]);
 const MONO_BRANDS = new Set(["opencode", "goose", "grok", "cursor", "githubcopilot", "cline", "kilocode", "apple", "linux"]);
 
 // 本机 CLI Worker：按 platform 与 worker_key 识别（同名 key 指向 CLI 版本的图标）
@@ -33,6 +35,8 @@ const CLI_BRANDS = {
   devin: "devin",
   openhands: "openhands",
   qoder: "qoder",
+  aider: "aider",
+  droid: "factory",
 };
 
 // 独立 / 云端 Agent：按平台模板 id 识别
@@ -42,20 +46,21 @@ const CLOUD_BRANDS = {
   doubao: "doubao",
   qwen: "qwen",
   workbuddy: "workbuddy",
-  "amazon-quick": "aws",
+  "amazon-quick": "awsquick",
   lingguang: "antgroup",
+  muse: "muse",
+  autoclaw: "autoclaw",
+  todayai: "todayai",
+  "today-ai": "todayai",
+  instinct: "instinct",
 };
 
 // 暂无官方矢量图标的平台，用品牌色字母徽标兜底，保证视觉节奏一致
 const MONOGRAMS = {
-  aider: { text: "Ai", bg: "#14B8A6" },
-  droid: { text: "F", bg: "#F97316" },
   auggie: { text: "A", bg: "#16A34A" },
   crush: { text: "C", bg: "#E0559B" },
   pi: { text: "π", bg: "#334155" },
   iflow: { text: "iF", bg: "#2563EB" },
-  muse: { text: "M", bg: "#8B5CF6" },
-  autoclaw: { text: "AC", bg: "#DC2626" },
 };
 
 const NAME_HINTS = [
@@ -70,6 +75,11 @@ const NAME_HINTS = [
   [/豆包|doubao/i, "doubao"],
   [/devin/i, "devin"],
   [/mistral/i, "mistral"],
+  [/factory|droid/i, "factory"],
+  [/aider/i, "aider"],
+  [/autoclaw/i, "autoclaw"],
+  [/today\s*ai/i, "todayai"],
+  [/instinct/i, "instinct"],
 ];
 
 const UI_ICONS = {
@@ -112,6 +122,10 @@ export function listMappedBrands() {
     "windows",
     "linux",
   ]);
+}
+
+export function brandFile(brand) {
+  return `${brand}.${PNG_BRANDS.has(brand) ? "png" : "svg"}`;
 }
 
 export function uiIcon(name, size = 14, extraClass = "") {
@@ -164,7 +178,7 @@ function renderAvatar(resolved, { size = "md", status = "", title = "" } = {}) {
   const t = title ? ` title="${escapeHtml(title)}"` : "";
   if (resolved.brand) {
     const monoCls = (MONO_BRANDS.has(resolved.brand) ? " is-mono" : "") + (FULL_BLEED_BRANDS.has(resolved.brand) ? " is-full" : "");
-    return `<span class="avatar avatar-${size}"${t}><img class="avatar-img${monoCls}" src="/icons/brands/${resolved.brand}.svg" alt="" loading="lazy" decoding="async" draggable="false" />${statusDot(status)}</span>`;
+    return `<span class="avatar avatar-${size}"${t}><img class="avatar-img${monoCls}" src="/icons/brands/${brandFile(resolved.brand)}" alt="" loading="lazy" decoding="async" draggable="false" />${statusDot(status)}</span>`;
   }
   if (resolved.mono) {
     return `<span class="avatar avatar-${size} avatar-monogram" style="--mono-bg:${resolved.mono.bg}"${t}><span class="avatar-letter">${escapeHtml(resolved.mono.text)}</span>${statusDot(status)}</span>`;

@@ -1,7 +1,17 @@
 import { api } from "../api.js";
 import { agentAvatar, agentStatusOf, deviceAvatar, deviceStatusOf, uiIcon } from "../icons.js";
 import { setState, store } from "../state.js";
-import { bindAttachmentPreview, escapeHtml, formatRelativeTime, renderAttachmentsBar, showToast, stateLabel, stateTone } from "../utils.js";
+import {
+  bindAttachmentPreview,
+  escapeHtml,
+  formatRelativeTime,
+  renderAttachmentsBar,
+  showToast,
+  sortAgentsForDisplay,
+  sortDevicesForDisplay,
+  stateLabel,
+  stateTone,
+} from "../utils.js";
 
 function isActiveTaskState(state) {
   return state === "working" || state === "submitted" || state === "input-required" || state === "auth-required";
@@ -82,10 +92,37 @@ function renderActionCard(task, agentMap) {
   `;
 }
 
-function renderTaskFeed(tasks, agentMap) {
-  if (!tasks.length) {
-    return `<div class="panel-empty">当前筛选条件下暂无任务记录。</div>`;
+function shortDuration(ms) {
+  const sec = Math.max(0, Math.round(Number(ms || 0) / 1000));
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m`;
+  const hr = Math.floor(min / 60);
+  return min % 60 ? `${hr}h ${min % 60}m` : `${hr}h`;
+}
+
+function taskRunMs(t) {
+  const start = Number(t.claimed_at || t.created_at || 0);
+  const end = Number(t.completed_at || t.updated_at || 0);
+  return start && end >= start ? end - start : null;
+}
+
+// 看板关注「此刻」：进行中显示已运行时长，完成显示耗时，失败显示发生时间
+function taskTimeCell(t, now) {
+  if (t.state === "working") return { text: `已运行 ${shortDuration(now - Number(t.claimed_at || t.created_at))}`, title: "开始执行至今" };
+  if (t.state === "submitted") return { text: `排队 ${shortDuration(now - Number(t.created_at))}`, title: "进入队列至今" };
+  if (t.state === "completed") {
+    const ms = taskRunMs(t);
+    return { text: ms === null ? formatRelativeTime(t.updated_at) : `耗时 ${shortDuration(ms)}`, title: `完成于 ${formatRelativeTime(t.completed_at || t.updated_at)}` };
   }
+  return { text: formatRelativeTime(t.updated_at), title: formatRelativeTime(t.updated_at) };
+}
+
+function renderTaskFeed(tasks, agentMap, emptyText) {
+  if (!tasks.length) {
+    return `<div class="panel-empty board-empty">${uiIcon("check", 16)}<span>${escapeHtml(emptyText)}</span></div>`;
+  }
+  const now = Date.now();
   return `
     <div class="task-feed">
       ${tasks
@@ -99,6 +136,7 @@ function renderTaskFeed(tasks, agentMap) {
           const attCount = Number.isFinite(Number(t.attachment_count))
             ? Number(t.attachment_count)
             : (t.attachments?.length || 0) + (t.receipt?.attachments?.length || 0);
+          const time = taskTimeCell(t, now);
 
           // 固定列网格：状态 / 时间 / 操作三列定宽，避免有无「取消」按钮时时间列左右跳动
           return `
@@ -115,7 +153,7 @@ function renderTaskFeed(tasks, agentMap) {
                 </div>
               </div>
               <span class="task-state is-${taskStatusDotClass(t.state).slice(3)}"><span class="status-dot ${taskStatusDotClass(t.state)}"></span>${escapeHtml(stateLabel(t.state))}</span>
-              <span class="task-time" title="${escapeHtml(formatRelativeTime(t.updated_at))}">${formatRelativeTime(t.updated_at)}</span>
+              <span class="task-time" title="${escapeHtml(time.title)}">${escapeHtml(time.text)}</span>
               <span class="task-action">${
                 canCancel
                   ? `<button type="button" class="btn btn-ghost btn-sm btn-icon" data-cancel-task="${escapeHtml(t.id)}" title="取消任务" aria-label="取消任务">${uiIcon("x", 13)}</button>`
@@ -129,14 +167,100 @@ function renderTaskFeed(tasks, agentMap) {
   `;
 }
 
-function renderNodeCapacityPanel(devices, agents) {
+function renderThroughputPanel(tasks, agentMap) {
+  const now = Date.now();
+  const HOUR = 3_600_000;
+  const endHour = Math.floor(now / HOUR) * HOUR + HOUR;
+  const startMs = endHour - 24 * HOUR;
+  const buckets = Array.from({ length: 24 }, () => ({ ok: 0, fail: 0 }));
+  const perAgent = new Map();
+  const durations = [];
+  let ok = 0;
+  let fail = 0;
+
+  for (const t of tasks) {
+    const isOk = t.state === "completed";
+    const isFail = isFailedTaskState(t.state);
+    if (!isOk && !isFail) continue;
+    const at = Number(t.completed_at || t.updated_at || 0);
+    if (at < startMs) continue;
+    const idx = Math.min(23, Math.floor((at - startMs) / HOUR));
+    if (isOk) {
+      ok += 1;
+      buckets[idx].ok += 1;
+      const ms = taskRunMs(t);
+      if (ms !== null) durations.push(ms);
+    } else {
+      fail += 1;
+      buckets[idx].fail += 1;
+    }
+    const rec = perAgent.get(t.to_agent_id) || { ok: 0, fail: 0 };
+    rec[isOk ? "ok" : "fail"] += 1;
+    perAgent.set(t.to_agent_id, rec);
+  }
+
+  const total = ok + fail;
+  const max = Math.max(1, ...buckets.map((b) => b.ok + b.fail));
+  durations.sort((a, b) => a - b);
+  const median = durations.length ? durations[Math.floor(durations.length / 2)] : null;
+  const topAgents = [...perAgent.entries()].sort((a, b) => b[1].ok + b[1].fail - (a[1].ok + a[1].fail)).slice(0, 3);
+  const hourLabel = (i) => String(new Date(startMs + i * HOUR).getHours()).padStart(2, "0") + ":00";
+
+  return `
+    <section class="panel">
+      <div class="panel-head">
+        <h3 class="panel-title">${uiIcon("activity", 14)} 近 24 小时</h3>
+        <div class="tp-metrics">
+          <span><strong>${ok}</strong> 完成</span>
+          <span class="${fail ? "is-fail" : ""}"><strong>${fail}</strong> 失败</span>
+          <span><strong>${total ? Math.round((ok / total) * 100) : "-"}${total ? "%" : ""}</strong> 成功率</span>
+          <span><strong>${median === null ? "-" : shortDuration(median)}</strong> 中位耗时</span>
+        </div>
+      </div>
+      ${
+        total
+          ? `<div class="tp-body">
+              <div class="tp-chart">
+                <div class="tp-bars">
+                  ${buckets
+                    .map((b, i) => {
+                      const n = b.ok + b.fail;
+                      const h = n ? Math.max(8, Math.round((n / max) * 100)) : 0;
+                      return `<div class="tp-col" title="${hourLabel(i)} · 完成 ${b.ok} · 失败 ${b.fail}">
+                        <div class="tp-stack" style="height:${h}%">
+                          ${b.fail ? `<span class="tp-fail" style="flex:${b.fail}"></span>` : ""}
+                          ${b.ok ? `<span class="tp-ok" style="flex:${b.ok}"></span>` : ""}
+                        </div>
+                      </div>`;
+                    })
+                    .join("")}
+                </div>
+                <div class="tp-axis"><span>${hourLabel(0)}</span><span>${hourLabel(8)}</span><span>${hourLabel(16)}</span><span>现在</span></div>
+              </div>
+              <div class="tp-top">
+                <div class="tp-top-title">最活跃</div>
+                ${topAgents
+                  .map(([id, rec]) => {
+                    const ag = agentMap.get(id);
+                    return `<div class="tp-top-row" title="完成 ${rec.ok} · 失败 ${rec.fail}">
+                      ${agentAvatar(ag || { id }, { size: "sm" })}
+                      <span class="truncate">${escapeHtml(ag?.name || id)}</span>
+                      <span class="tp-top-num">${rec.ok + rec.fail}${rec.fail ? `<span class="is-fail"> · ${rec.fail}✕</span>` : ""}</span>
+                    </div>`;
+                  })
+                  .join("")}
+              </div>
+            </div>`
+          : `<div class="panel-empty">近 24 小时还没有结束的任务</div>`
+      }
+    </section>
+  `;
+}
+function renderNodeCapacityPanel(devices, allAgents) {
+  const agents = sortAgentsForDisplay(allAgents);
   const cloudAgents = agents.filter((a) => a.kind !== "device-worker");
   const cloudOnline = cloudAgents.filter((a) => a.online && a.enabled).length;
-  const sortedDevices = [...devices].sort((a, b) => {
-    if (Boolean(a.is_local) !== Boolean(b.is_local)) return a.is_local ? -1 : 1;
-    if (Boolean(a.online) !== Boolean(b.online)) return a.online ? -1 : 1;
-    return String(a.name || a.id).localeCompare(String(b.name || b.id), "zh-CN");
-  });
+  const sortedDevices = sortDevicesForDisplay(devices);
 
   return `
     <section class="panel">
@@ -271,7 +395,6 @@ export function renderHomeView(container, refreshFn) {
   const inputCount = actions.length - authCount;
   const activeTasks = tasks.filter((t) => isActiveTaskState(t.state));
   const failedTasks = tasks.filter((t) => isFailedTaskState(t.state));
-  const completedTasks = tasks.filter((t) => t.state === "completed" || t.state === "canceled");
 
   const done24h = tasks.filter((t) => t.state === "completed" && Number(t.updated_at || t.created_at || 0) >= cutoff24h).length;
   const fail24h = tasks.filter((t) => isFailedTaskState(t.state) && Number(t.updated_at || t.created_at || 0) >= cutoff24h).length;
@@ -285,21 +408,20 @@ export function renderHomeView(container, refreshFn) {
   const healthyCount = schedules.filter((sch) => sch.health === "healthy").length;
   const runningSchCount = schedules.filter((sch) => sch.health === "running").length;
 
-  const taskFilter = store.homeTaskFilter || "all";
-  const filteredTasks = tasks.filter((t) => {
-    if (taskFilter === "active") return isActiveTaskState(t.state);
-    if (taskFilter === "failed") return isFailedTaskState(t.state);
-    if (taskFilter === "completed") return t.state === "completed" || t.state === "canceled";
-    return true;
-  });
+  // 首页只回答「此刻要关注什么」；按线程翻历史交给「对话线程」页。待我处理的任务已在上方卡片展示，看板不再重复
+  const runningTasks = tasks.filter((t) => t.state === "working" || t.state === "submitted");
+  const recentFailed = failedTasks.filter((t) => Number(t.updated_at || 0) >= cutoff24h);
+  const recentDone = tasks
+    .filter((t) => t.state === "completed" && Number(t.completed_at || t.updated_at || 0) >= cutoff24h)
+    .sort((a, b) => Number(b.completed_at || b.updated_at) - Number(a.completed_at || a.updated_at));
 
-  const TASK_FILTERS = [
-    { id: "all", label: `全部 ${tasks.length}` },
-    { id: "active", label: `进行中 ${activeTasks.length}` },
-    { id: "failed", label: `失败`, errCount: failedTasks.length },
-    { id: "completed", label: `已完成 ${completedTasks.length}` },
+  const BOARD_FILTERS = [
+    { id: "running", label: `进行中 ${runningTasks.length}`, items: runningTasks, empty: "没有正在执行或排队的任务" },
+    { id: "failed", label: `失败`, errCount: recentFailed.length, items: recentFailed, empty: "近 24 小时没有失败的任务" },
+    { id: "done", label: `最近完成 ${recentDone.length}`, items: recentDone, empty: "近 24 小时还没有完成的任务" },
   ];
-
+  const boardFilter = BOARD_FILTERS.find((f) => f.id === store.homeTaskFilter) || (runningTasks.length ? BOARD_FILTERS[0] : recentFailed.length ? BOARD_FILTERS[1] : BOARD_FILTERS[2]);
+  const BOARD_LIMIT = 8;
   container.innerHTML = `
     <section class="kpi-strip">
       <div class="kpi-cell" id="kpi-actions">
@@ -364,23 +486,29 @@ export function renderHomeView(container, refreshFn) {
 
     <div class="dashboard-grid">
       <div class="dashboard-main">
+        ${renderThroughputPanel(tasks, agentMap)}
         <section class="panel">
           <div class="panel-head">
-            <div class="row" style="gap:10px;flex-wrap:wrap">
-              <h2 class="panel-title">${uiIcon("activity", 14)} 任务动态</h2>
+            <div class="row" style="gap:10px;flex-wrap:nowrap;min-width:0">
+              <h2 class="panel-title">${uiIcon("cpu", 14)} 执行看板</h2>
               <div class="seg-control">
-                ${TASK_FILTERS.map(
+                ${BOARD_FILTERS.map(
                   (item) => `
-                  <button type="button" class="seg-btn ${taskFilter === item.id ? "active" : ""}" data-home-task-filter="${item.id}">
+                  <button type="button" class="seg-btn ${boardFilter.id === item.id ? "active" : ""}" data-home-task-filter="${item.id}">
                     ${escapeHtml(item.label)}${item.errCount ? `<span class="seg-err-count">${item.errCount}</span>` : ""}
                   </button>
                 `
                 ).join("")}
               </div>
             </div>
-            <button type="button" class="btn btn-ghost btn-sm" id="home-goto-threads">全部线程 →</button>
+            <button type="button" class="btn btn-ghost btn-sm" id="home-goto-threads">历史线程 →</button>
           </div>
-          ${renderTaskFeed(filteredTasks.slice(0, 12), agentMap)}
+          ${renderTaskFeed(boardFilter.items.slice(0, BOARD_LIMIT), agentMap, boardFilter.empty)}
+          ${
+            boardFilter.items.length > BOARD_LIMIT
+              ? `<button type="button" class="board-more" id="home-board-more">还有 ${boardFilter.items.length - BOARD_LIMIT} 个，去对话线程查看 →</button>`
+              : ""
+          }
         </section>
       </div>
 
@@ -403,6 +531,10 @@ export function renderHomeView(container, refreshFn) {
   });
 
   container.querySelector("#home-goto-threads")?.addEventListener("click", () => setState({ activeTab: "threads" }));
+  container.querySelector("#home-board-more")?.addEventListener("click", () => {
+    const threadFilter = boardFilter.id === "running" ? "active" : boardFilter.id === "failed" ? "failed" : "all";
+    setState({ activeTab: "threads", threadFilter, threadPage: 1 });
+  });
   container.querySelector("#home-goto-agents")?.addEventListener("click", () => setState({ activeTab: "agents" }));
   container.querySelector("#home-goto-cloud")?.addEventListener("click", () => {
     setState({ activeTab: "agents", agentFilter: "cloud" });

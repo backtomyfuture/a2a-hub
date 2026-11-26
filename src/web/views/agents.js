@@ -4,7 +4,7 @@ import { resetAddModalState } from "../components/add-modal.js";
 import { resetAddWorkerModalState } from "../components/add-worker-modal.js";
 import { deviceAvatar, deviceStatusOf, uiIcon } from "../icons.js";
 import { setState, store } from "../state.js";
-import { copyText, escapeHtml, formatRelativeTime, showToast } from "../utils.js";
+import { copyText, escapeHtml, formatRelativeTime, showToast, sortAgentsForDisplay, sortDevicesForDisplay } from "../utils.js";
 
 function matchesStatus(agent, filterId) {
   if (filterId === "online") return Boolean(agent.online && agent.enabled);
@@ -36,14 +36,6 @@ function matchesDeviceQuery(dev, qLower) {
   if (!qLower) return true;
   const parts = [dev.name, dev.id, dev.os_info, dev.platform, dev.summary];
   return parts.filter(Boolean).join(" ").toLowerCase().includes(qLower);
-}
-
-function sortDevices(devices) {
-  return [...devices].sort((a, b) => {
-    if (Boolean(a.is_local) !== Boolean(b.is_local)) return a.is_local ? -1 : 1;
-    if (Boolean(a.online) !== Boolean(b.online)) return a.online ? -1 : 1;
-    return String(a.name || a.id).localeCompare(String(b.name || b.id), "zh-CN");
-  });
 }
 
 function renderDeviceNodeSection(d, allDevWorkers, matchedWorkers, tasks, options) {
@@ -117,8 +109,8 @@ export function renderAgentsView(container, refreshFn) {
   const s = store.state;
   if (!s) return;
 
-  const agents = s.agents || [];
-  const devices = sortDevices(s.devices || []);
+  const agents = sortAgentsForDisplay(s.agents || []);
+  const devices = sortDevicesForDisplay(s.devices || []);
   const tasks = s.tasks || [];
   const f = store.agentFilter || "all";
   const qRaw = String(store.agentSearch || "");

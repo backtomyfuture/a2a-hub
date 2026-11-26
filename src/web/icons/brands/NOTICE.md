@@ -2,6 +2,7 @@
 
 - apple.svg、linux.svg：来自 Simple Icons（https://github.com/simple-icons/simple-icons），CC0-1.0。
 - windows.svg：本项目自绘的四窗格标识。
+- aider.png、autoclaw.png、awsquick.png、factory.png、instinct.png、todayai.png、muse.svg：由项目维护者收集的各产品官方图标（位图已缩放至 128px）。
 - 其余图标：来自 LobeHub Icons（https://github.com/lobehub/lobe-icons，@lobehub/icons-static-svg），MIT License，
   Copyright (c) 2023 LobeHub。
 

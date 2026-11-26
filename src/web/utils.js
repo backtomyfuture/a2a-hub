@@ -356,3 +356,32 @@ export function bindAttachmentPreview(container) {
   });
 }
 
+// 展示排序：Leader 置顶；其余在线 → 连不上 → 已暂停，同组按名称，保证各视图顺序一致
+function presenceRank(item) {
+  if (!item.enabled) return 2;
+  return item.online ? 0 : 1;
+}
+
+function byName(a, b) {
+  return String(a.name || a.id).localeCompare(String(b.name || b.id), "zh-CN");
+}
+
+export function sortAgentsForDisplay(agents = []) {
+  return [...agents].sort((a, b) => {
+    const la = a.role === "leader" ? 0 : 1;
+    const lb = b.role === "leader" ? 0 : 1;
+    if (la !== lb) return la - lb;
+    const pr = presenceRank(a) - presenceRank(b);
+    if (pr) return pr;
+    return byName(a, b);
+  });
+}
+
+export function sortDevicesForDisplay(devices = []) {
+  return [...devices].sort((a, b) => {
+    const pr = presenceRank(a) - presenceRank(b);
+    if (pr) return pr;
+    if (Boolean(a.is_local) !== Boolean(b.is_local)) return a.is_local ? -1 : 1;
+    return byName(a, b);
+  });
+}

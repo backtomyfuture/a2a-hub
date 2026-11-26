@@ -77,6 +77,63 @@ function updateReplyPendingList(container, taskId) {
   });
 }
 
+const THREAD_PAGE_SIZE = 12;
+const THREAD_TASK_STEP = 5;
+
+const THREAD_FILTERS = [
+  { id: "all", label: "全部", match: () => true },
+  { id: "pending", label: "待处理", match: (th) => th.pending_action_count > 0 },
+  { id: "active", label: "进行中", match: (th) => Boolean(th.states?.working || th.states?.submitted) },
+  { id: "failed", label: "有失败", match: (th) => Boolean(th.states?.failed || th.states?.rejected) },
+];
+
+function threadMatchesSearch(th, q, agentName) {
+  if (!q) return true;
+  const hay = [th.title, th.context_id, th.from_node, ...(th.agents || []).map(agentName)].join(" ").toLowerCase();
+  return hay.includes(q);
+}
+
+function renderThreadStateSummary(states = {}) {
+  const parts = [
+    ["working", "is-run", (states.working || 0) + (states.submitted || 0), "进行中"],
+    ["pending", "is-warn", (states["input-required"] || 0) + (states["auth-required"] || 0), "待处理"],
+    ["failed", "is-fail", (states.failed || 0) + (states.rejected || 0), "失败"],
+    ["completed", "is-ok", states.completed || 0, "完成"],
+  ].filter(([, , n]) => n > 0);
+  return parts
+    .map(([, cls, n, label]) => `<span class="thread-state-chip" title="${label} ${n}"><span class="status-dot ${cls}"></span>${n}</span>`)
+    .join("");
+}
+
+function renderThreadItems(pageThreads, activeContextId, agentMap, agentName) {
+  if (!pageThreads.length) return `<div class="panel-empty">没有符合条件的线程</div>`;
+  return pageThreads
+    .map(
+      (th) => `
+    <div class="thread-item ${th.context_id === activeContextId ? "active" : ""}" data-select-thread="${escapeHtml(th.context_id)}">
+      <div class="thread-item-head">
+        <strong class="truncate">${escapeHtml(th.title || th.context_id)}</strong>
+        <span class="thread-item-time">${formatRelativeTime(th.updated_at)}</span>
+      </div>
+      <div class="thread-agents">
+        <span class="avatar-stack">${(th.agents || [])
+          .slice(0, 4)
+          .map((id) => agentAvatar(agentMap.get(id) || { id }, { size: "xs", title: agentName(id) }))
+          .join("")}</span>
+        <span class="muted truncate">${(th.agents || []).map((id) => escapeHtml(agentName(id))).join(" · ")}</span>
+      </div>
+      <div class="thread-item-foot">
+        <span class="thread-state-summary">${renderThreadStateSummary(th.states)}</span>
+        <span class="muted">${th.task_count} 个任务${th.attachment_count ? ` · 📎 ${th.attachment_count}` : ""}${
+          th.pending_action_count ? ` · <span class="thread-pending">${th.pending_action_count} 待处理</span>` : ""
+        }</span>
+      </div>
+    </div>
+  `
+    )
+    .join("");
+}
+
 export function renderThreadsView(container, refreshFn) {
   const s = store.state;
   if (!s) return;
@@ -86,7 +143,12 @@ export function renderThreadsView(container, refreshFn) {
     return;
   }
 
-  const activeContextId = store.selectedThreadId || threads[0].context_id;
+  const agentMap = new Map((s.agents || []).map((a) => [a.id, a]));
+  const agentName = (id) => agentMap.get(id)?.name || id;
+  const filterId = THREAD_FILTERS.some((f) => f.id === store.threadFilter) ? store.threadFilter : "all";
+  const byFilter = threads.filter(THREAD_FILTERS.find((f) => f.id === filterId).match);
+
+  const activeContextId = store.selectedThreadId || byFilter[0]?.context_id || threads[0].context_id;
   if (store.selectedThreadDetail?.context_id !== activeContextId && loadingContextId !== activeContextId) {
     loadingContextId = activeContextId;
     void api.getThread(activeContextId).then((res) => {
@@ -96,40 +158,31 @@ export function renderThreadsView(container, refreshFn) {
       loadingContextId = "";
     });
   }
-
   const detail = store.selectedThreadDetail?.context_id === activeContextId ? store.selectedThreadDetail : null;
-  const agentMap = new Map((s.agents || []).map((a) => [a.id, a]));
-  const agentName = (id) => agentMap.get(id)?.name || id;
+
+  const counts = Object.fromEntries(THREAD_FILTERS.map((f) => [f.id, threads.filter(f.match).length]));
 
   container.innerHTML = `
     <div class="thread-layout">
-      <div class="thread-list">
-        ${threads
-          .map(
-            (th) => `
-          <div class="thread-item ${th.context_id === activeContextId ? "active" : ""}" data-select-thread="${escapeHtml(th.context_id)}">
-            <div class="row-between">
-              <strong class="truncate">${escapeHtml(th.title || th.context_id)}</strong>
-              ${th.pending_action_count ? `<span class="pill pill-danger">${th.pending_action_count} 待处理</span>` : ""}
-            </div>
-            <div class="thread-agents">
-              <span class="avatar-stack">${th.agents
-                .slice(0, 4)
-                .map((id) => agentAvatar(agentMap.get(id) || { id }, { size: "xs", title: agentName(id) }))
-                .join("")}</span>
-              <span class="muted truncate">${th.agents.map((id) => escapeHtml(agentName(id))).join(" · ")}</span>
-            </div>
-            <div class="row-between muted" style="font-size:11px;margin-top:4px">
-              <span>${th.task_count} 个任务${th.attachment_count ? ` · <span class="attachment-tag">📎 ${th.attachment_count}</span>` : ""}</span>
-              <span>${formatRelativeTime(th.updated_at)}</span>
-            </div>
+      <aside class="thread-sidebar">
+        <div class="thread-toolbar">
+          <label class="thread-search">
+            ${uiIcon("search", 14)}
+            <input type="search" id="thread-search" placeholder="搜索标题、Agent 或 Context ID" value="${escapeHtml(store.threadSearch || "")}" />
+          </label>
+          <div class="seg-control thread-filter">
+            ${THREAD_FILTERS.map(
+              (f) => `<button type="button" class="seg-btn ${filterId === f.id ? "active" : ""}" data-thread-filter="${f.id}">${f.label}${
+                f.id === "all" || counts[f.id] ? ` <span class="${f.id === "failed" || f.id === "pending" ? "seg-err-count" : ""}">${counts[f.id]}</span>` : ""
+              }</button>`
+            ).join("")}
           </div>
-        `
-          )
-          .join("")}
-      </div>
+        </div>
+        <div class="thread-list" id="thread-list"></div>
+        <div class="thread-pager" id="thread-pager"></div>
+      </aside>
 
-      <div class="card">
+      <div class="card thread-detail">
         ${
           detail
             ? renderThreadDetail(detail, agentMap)
@@ -139,31 +192,103 @@ export function renderThreadsView(container, refreshFn) {
     </div>
   `;
 
-  container.querySelectorAll("[data-select-thread]").forEach((el) => {
-    el.addEventListener("click", () => {
-      const cid = el.getAttribute("data-select-thread");
-      setState({ selectedThreadId: cid, selectedThreadDetail: null });
+  const listEl = container.querySelector("#thread-list");
+  const pagerEl = container.querySelector("#thread-pager");
+
+  // 搜索框聚焦时主区域整体重绘会被暂停（防止丢草稿），因此列表与分页需要能独立局部刷新
+  const renderListRegion = () => {
+    const q = String(store.threadSearch || "").trim().toLowerCase();
+    const matched = byFilter.filter((th) => threadMatchesSearch(th, q, agentName));
+    const pageCount = Math.max(1, Math.ceil(matched.length / THREAD_PAGE_SIZE));
+    const page = Math.min(Math.max(Number(store.threadPage) || 1, 1), pageCount);
+    store.threadPage = page;
+    const start = (page - 1) * THREAD_PAGE_SIZE;
+    listEl.innerHTML = renderThreadItems(matched.slice(start, start + THREAD_PAGE_SIZE), activeContextId, agentMap, agentName);
+    pagerEl.innerHTML =
+      matched.length > THREAD_PAGE_SIZE
+        ? `<button type="button" class="btn btn-ghost btn-sm btn-icon" data-thread-page="${page - 1}" ${page <= 1 ? "disabled" : ""} aria-label="上一页">${uiIcon("chevron-right", 14, "is-flipped")}</button>
+           <span class="thread-pager-text">第 <strong>${page}</strong> / ${pageCount} 页 · 共 ${matched.length} 个线程</span>
+           <button type="button" class="btn btn-ghost btn-sm btn-icon" data-thread-page="${page + 1}" ${page >= pageCount ? "disabled" : ""} aria-label="下一页">${uiIcon("chevron-right", 14)}</button>`
+        : matched.length
+          ? `<span class="thread-pager-text">共 ${matched.length} 个线程</span>`
+          : "";
+
+    listEl.querySelectorAll("[data-select-thread]").forEach((el) => {
+      el.addEventListener("click", () => {
+        const cid = el.getAttribute("data-select-thread");
+        setState({ selectedThreadId: cid, selectedThreadDetail: null });
+      });
     });
+    pagerEl.querySelectorAll("[data-thread-page]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        store.threadPage = Number(btn.getAttribute("data-thread-page"));
+        renderListRegion();
+        listEl.scrollIntoView({ block: "nearest" });
+      });
+    });
+  };
+  renderListRegion();
+
+  container.querySelector("#thread-search")?.addEventListener("input", (e) => {
+    store.threadSearch = e.target.value;
+    store.threadPage = 1;
+    renderListRegion();
+  });
+  container.querySelectorAll("[data-thread-filter]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      setState({ threadFilter: btn.getAttribute("data-thread-filter"), threadPage: 1 });
+    });
+  });
+
+  container.querySelector("[data-thread-more]")?.addEventListener("click", (e) => {
+    const cid = e.currentTarget.getAttribute("data-thread-more");
+    store.threadTaskVisible = { ...(store.threadTaskVisible || {}), [cid]: visibleTaskCount(cid) + THREAD_TASK_STEP };
+    setState({});
   });
 
   bindThreadActions(container, refreshFn);
 }
 
+function visibleTaskCount(contextId) {
+  return Number(store.threadTaskVisible?.[contextId]) || THREAD_TASK_STEP;
+}
+
 function renderThreadDetail(detail, agentMap = new Map()) {
+  const total = detail.tasks.length;
+  const visible = Math.min(total, visibleTaskCount(detail.context_id));
+  const hidden = total - visible;
+  // 最新的任务在最下方，与对话阅读顺序一致；更早的任务按需展开，避免长线程一次铺满整屏
+  const shownTasks = detail.tasks.slice(total - visible);
+  const doneCount = detail.tasks.filter((t) => t.state === "completed").length;
   return `
-    <div class="row-between" style="padding-bottom:12px;border-bottom:1px solid var(--border);margin-bottom:14px">
+    <div class="thread-detail-head">
       <div style="min-width:0">
-        <h2 style="margin:0;font-size:17px">${escapeHtml(detail.title)}</h2>
-        <div class="muted mono">Context ID: ${escapeHtml(detail.context_id)} · 发起方: ${escapeHtml(detail.from_node)}</div>
+        <h2 class="thread-detail-title">${escapeHtml(detail.title)}</h2>
+        <div class="thread-detail-meta">
+          <span class="avatar-stack">${detail.agents
+            .slice(0, 6)
+            .map((id) => agentAvatar(agentMap.get(id) || { id }, { size: "xs", title: agentMap.get(id)?.name || id }))
+            .join("")}</span>
+          <span>${total} 个任务 · 完成 ${doneCount}</span>
+          <span>发起方 ${escapeHtml(detail.from_node)}</span>
+          <span class="mono truncate" title="Context ID">${escapeHtml(detail.context_id)}</span>
+        </div>
       </div>
       <button class="btn btn-primary btn-sm" id="thread-continue-btn" data-ctx="${escapeHtml(detail.context_id)}" data-agents="${escapeHtml(detail.agents.join(","))}">
         ${uiIcon("plus", 12)} 在此线程继续派单
       </button>
     </div>
 
+    ${
+      hidden > 0
+        ? `<button type="button" class="thread-more-btn" data-thread-more="${escapeHtml(detail.context_id)}">
+            ${uiIcon("chevron-down", 13, "is-flipped-v")} 显示更早的 ${Math.min(hidden, THREAD_TASK_STEP)} 个任务 <span class="muted">（还有 ${hidden} 个）</span>
+          </button>`
+        : ""
+    }
+
     <div class="stack-md">
-      ${detail.tasks
-        .map((t) => {
+      ${shownTasks        .map((t) => {
           const taskAttCount = countTaskUniqueAttachments(t);
           const orphanAtts = getOrphanTaskAttachments(t);
           return `

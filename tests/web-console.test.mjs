@@ -238,7 +238,7 @@ test("Web Console UI & Templates: 主题变量切换规则、控件可读文字�
   assert.equal(homeSrc.includes("home-dispatch-btn"), false, "概览页不得再包含重复的派发按钮");
   assert.equal(homeSrc.includes("可用 Agent 能力总览"), false, "概览页不得再重复平铺 Agent 能力卡片");
   assert.equal(homeSrc.includes("all-clear-bar"), false, "零待办时不得渲染占位大绿条打断左右栏顶对齐");
-  assert.ok(homeSrc.includes("节点负载") && homeSrc.includes("定时巡检") && homeSrc.includes("任务动态"));
+  assert.ok(homeSrc.includes("节点负载") && homeSrc.includes("定时巡检") && homeSrc.includes("执行看板") && homeSrc.includes("近 24 小时"));
   assert.ok(
     homeSrc.includes("kpi-strip") &&
       homeSrc.includes("seg-control") &&
@@ -536,7 +536,7 @@ test("Web Console: 浮层防误触关闭 (bindBackdropClose) 与 Drawer 稳定�
 });
 
 test("Web Console Icons: 站点图标、平台品牌图标映射与文件完整性", async () => {
-  const { resolveAgentBrand, resolveDeviceBrand, agentAvatar, deviceAvatar, listMappedBrands } = await import("../src/web/icons.js");
+  const { resolveAgentBrand, resolveDeviceBrand, agentAvatar, deviceAvatar, listMappedBrands, brandFile } = await import("../src/web/icons.js");
   const html = fs.readFileSync(path.resolve("src", "web", "index.html"), "utf8");
   assert.ok(html.includes('rel="icon"') && html.includes("/favicon.svg") && html.includes("apple-touch-icon"));
   for (const f of ["favicon.svg", "favicon-32.png", "apple-touch-icon.png"]) {
@@ -547,7 +547,13 @@ test("Web Console Icons: 站点图标、平台品牌图标映射与文件完整�
   assert.equal(resolveAgentBrand({ kind: "device-worker", platform: "cli", worker_key: "gemini" }).brand, "geminicli");
   assert.equal(resolveAgentBrand({ kind: "agent", platform: "gemini" }).brand, "gemini");
   assert.equal(resolveAgentBrand({ kind: "agent", platform: "doubao" }).brand, "doubao");
-  assert.ok(resolveAgentBrand({ kind: "device-worker", platform: "aider" }).mono, "无官方图标的平台应退回字母徽标");
+  assert.equal(resolveAgentBrand({ kind: "device-worker", platform: "aider" }).brand, "aider");
+  assert.equal(resolveAgentBrand({ kind: "device-worker", platform: "droid" }).brand, "factory");
+  assert.equal(resolveAgentBrand({ kind: "agent", platform: "amazon-quick" }).brand, "awsquick");
+  assert.equal(resolveAgentBrand({ kind: "agent", platform: "muse" }).brand, "muse");
+  assert.equal(resolveAgentBrand({ kind: "agent", platform: "generic", name: "Today AI 助手" }).brand, "todayai");
+  assert.ok(resolveAgentBrand({ kind: "device-worker", platform: "crush" }).mono, "无官方图标的平台应退回字母徽标");
+  assert.ok(agentAvatar({ kind: "agent", platform: "autoclaw" }).includes("/icons/brands/autoclaw.png"));
   assert.equal(resolveAgentBrand({ kind: "device-worker", platform: "cli", worker_key: "my-tool" }).glyph, "terminal");
   assert.equal(resolveAgentBrand({ kind: "agent", platform: "generic", role: "leader", name: "x" }).glyph, "sparkles");
   assert.equal(resolveDeviceBrand({ platform: "darwin" }).brand, "apple");
@@ -558,13 +564,32 @@ test("Web Console Icons: 站点图标、平台品牌图标映射与文件完整�
   // 映射到的每个品牌图标文件都必须真实存在，否则卡片会出现裂图
   const brandNames = listMappedBrands();
   const brandDir = path.resolve("src", "web", "icons", "brands");
-  const available = new Set(fs.readdirSync(brandDir).filter((n) => n.endsWith(".svg")).map((n) => n.slice(0, -4)));
+  const available = new Set(fs.readdirSync(brandDir));
   assert.ok(brandNames.size > 20);
   for (const b of brandNames) {
-    assert.ok(available.has(b), `缺少品牌图标文件 ${b}.svg`);
+    assert.ok(available.has(brandFile(b)), `缺少品牌图标文件 ${brandFile(b)}`);
   }
 
   const xss = agentAvatar({ kind: "agent", platform: "generic", name: "x" }, { title: `"><img src=x onerror=alert(1)>` });
   assert.ok(!xss.includes("<img src=x"), "头像 title 必须转义");
   assert.ok(deviceAvatar({ platform: "win32", enabled: true, online: true }, { status: "online" }).includes("/icons/brands/windows.svg"));
+});
+
+test("Web Console 排序: Leader 置顶，其余在线 → 连不上 → 已暂停", async () => {
+  const { sortAgentsForDisplay, sortDevicesForDisplay } = await import("../src/web/utils.js");
+  const agents = [
+    { id: "p", name: "暂停", enabled: false, online: true },
+    { id: "off", name: "离线", enabled: true, online: false },
+    { id: "b", name: "B 在线", enabled: true, online: true },
+    { id: "lead", name: "Z Leader", role: "leader", enabled: true, online: false },
+    { id: "a", name: "A 在线", enabled: true, online: true },
+  ];
+  assert.deepEqual(sortAgentsForDisplay(agents).map((a) => a.id), ["lead", "a", "b", "off", "p"]);
+  const devices = [
+    { id: "paused", name: "a", enabled: false, online: true, is_local: true },
+    { id: "offline", name: "b", enabled: true, online: false },
+    { id: "remote", name: "c", enabled: true, online: true },
+    { id: "local", name: "d", enabled: true, online: true, is_local: true },
+  ];
+  assert.deepEqual(sortDevicesForDisplay(devices).map((d) => d.id), ["local", "remote", "offline", "paused"]);
 });
