@@ -34,7 +34,7 @@ export function renderSettingsDrawer(root) {
 
   const n = loadedSettings?.notifier || {};
   const channels = [
-    { label: "飞书", on: Boolean(n.feishu_webhook || s.notifier?.feishu) },
+    { label: "飞书群机器人", on: Boolean(n.feishu_webhook || s.notifier?.feishu) },
     { label: "Bark", on: Boolean(n.bark_url || s.notifier?.bark) },
     { label: "Telegram", on: Boolean(n.telegram_bot_token_set || s.notifier?.telegram) },
     { label: "Webhook", on: Boolean(n.notify_webhook || s.notifier?.webhook) },

@@ -38,9 +38,13 @@ export function resolveFeishuAppConfig(env = {}) {
   };
 }
 
-// 手机号与 user_id 都可能是纯数字，这里只把 11~15 位（可带 +）的数字串当手机号
-function isMobile(id) {
-  return /^\+?\d{11,15}$/.test(id);
+// 手机号与 user_id 都可能是纯数字，这里只把 11~15 位（可带 +）的数字串当手机号。
+// 通讯录里常见 "+86-181xxxxxxxx" 写法，去掉分隔符；大陆号码按飞书接口习惯去掉 +86 区号，其他地区保留 + 区号。
+function normalizeMobile(id) {
+  const s = String(id).replace(/[\s\-()]/g, "");
+  if (!/^\+?\d{11,15}$/.test(s)) return "";
+  const cn = /^\+?86(1\d{10})$/.exec(s);
+  return cn ? cn[1] : s;
 }
 
 const SEND_HINTS = {
@@ -238,15 +242,18 @@ export class FeishuApprovalChannel {
   // 邮箱 / 手机号换成本应用下的 open_id：发消息用它，卡片回调的白名单比对也靠它。
   // 需要应用开通通讯录权限 contact:user.id:readonly；失败时邮箱仍可直接作为收件人，只是点击无法比对身份。
   async _resolveApprovers() {
-    const pending = this.cfg.approvers.filter((id) => !this._resolved.has(id) && (id.includes("@") || isMobile(id)));
+    const pending = this.cfg.approvers.filter((id) => !this._resolved.has(id) && (id.includes("@") || normalizeMobile(id)));
     if (pending.length) {
       const emails = pending.filter((id) => id.includes("@"));
-      const mobiles = pending.filter((id) => !id.includes("@"));
+      const mobiles = [...new Set(pending.filter((id) => !id.includes("@")).map(normalizeMobile))];
       try {
         const r = await this._api("POST", "/open-apis/contact/v3/users/batch_get_id?user_id_type=open_id", { emails, mobiles });
         for (const u of r?.data?.user_list || []) {
-          const key = pending.find((id) => id === u.email || id === u.mobile || id.replace(/^\+86/, "") === String(u.mobile || "").replace(/^\+86/, ""));
-          if (key && u.user_id) this._resolved.set(key, u.user_id);
+          const um = normalizeMobile(u.mobile || "");
+          if (!u.user_id) continue;
+          for (const id of pending) {
+            if ((u.email && id === u.email) || (um && normalizeMobile(id) === um)) this._resolved.set(id, u.user_id);
+          }
         }
       } catch (err) {
         this.logger.warn?.(`[feishu-approval] 解析审批人邮箱/手机号失败: ${err?.message || err}`);
