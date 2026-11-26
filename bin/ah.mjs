@@ -48,6 +48,7 @@ function maybeReexecWithProxy() {
   if (!hasProxy) return;
   const res = spawnSync(process.execPath, process.argv.slice(1), {
     stdio: "inherit",
+    windowsHide: true,
     env: { ...process.env, NODE_USE_ENV_PROXY: "1", __AH_PROXY_REEXEC: "1" },
   });
   process.exit(res.status ?? 1);
