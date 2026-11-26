@@ -1,4 +1,5 @@
 import { api } from "../api.js";
+import { agentAvatar } from "../icons.js";
 import { getAgentById, setState, store } from "../state.js";
 import {
   agentSourceLabel,
@@ -44,9 +45,12 @@ export function renderAgentDrawer(root, refreshFn) {
     <div class="drawer-backdrop" data-drawer-backdrop>
       <aside class="drawer-panel">
         <div class="row-between" style="margin-bottom:14px">
-          <div style="min-width:0">
-            <h2 style="margin:0;font-size:18px" class="truncate">${escapeHtml(agent.name)}</h2>
-            <div class="muted mono">${escapeHtml(agent.id)} · ${escapeHtml(agentSourceLabel(agent))}</div>
+          <div class="row" style="min-width:0;gap:12px">
+            ${agentAvatar(agent, { size: "xl" })}
+            <div style="min-width:0">
+              <h2 style="margin:0;font-size:18px" class="truncate">${escapeHtml(agent.name)}</h2>
+              <div class="muted mono truncate">${escapeHtml(agent.id)} · ${escapeHtml(agentSourceLabel(agent))}</div>
+            </div>
           </div>
           <button class="btn btn-ghost btn-sm" id="drawer-close-btn">关闭</button>
         </div>

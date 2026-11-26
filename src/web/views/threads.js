@@ -1,4 +1,5 @@
 import { api } from "../api.js";
+import { agentAvatar, uiIcon } from "../icons.js";
 import { setState, store } from "../state.js";
 import {
   attachmentUniqueKey,
@@ -97,6 +98,8 @@ export function renderThreadsView(container, refreshFn) {
   }
 
   const detail = store.selectedThreadDetail?.context_id === activeContextId ? store.selectedThreadDetail : null;
+  const agentMap = new Map((s.agents || []).map((a) => [a.id, a]));
+  const agentName = (id) => agentMap.get(id)?.name || id;
 
   container.innerHTML = `
     <div class="thread-layout">
@@ -109,8 +112,12 @@ export function renderThreadsView(container, refreshFn) {
               <strong class="truncate">${escapeHtml(th.title || th.context_id)}</strong>
               ${th.pending_action_count ? `<span class="pill pill-danger">${th.pending_action_count} 待处理</span>` : ""}
             </div>
-            <div class="muted" style="font-size:12px;margin-top:4px">
-              ${th.agents.map((a) => escapeHtml(a)).join(" · ")}
+            <div class="thread-agents">
+              <span class="avatar-stack">${th.agents
+                .slice(0, 4)
+                .map((id) => agentAvatar(agentMap.get(id) || { id }, { size: "xs", title: agentName(id) }))
+                .join("")}</span>
+              <span class="muted truncate">${th.agents.map((id) => escapeHtml(agentName(id))).join(" · ")}</span>
             </div>
             <div class="row-between muted" style="font-size:11px;margin-top:4px">
               <span>${th.task_count} 个任务${th.attachment_count ? ` · <span class="attachment-tag">📎 ${th.attachment_count}</span>` : ""}</span>
@@ -125,7 +132,7 @@ export function renderThreadsView(container, refreshFn) {
       <div class="card">
         ${
           detail
-            ? renderThreadDetail(detail)
+            ? renderThreadDetail(detail, agentMap)
             : `<div class="muted" style="padding:30px;text-align:center">正在加载线程详情...</div>`
         }
       </div>
@@ -142,7 +149,7 @@ export function renderThreadsView(container, refreshFn) {
   bindThreadActions(container, refreshFn);
 }
 
-function renderThreadDetail(detail) {
+function renderThreadDetail(detail, agentMap = new Map()) {
   return `
     <div class="row-between" style="padding-bottom:12px;border-bottom:1px solid var(--border);margin-bottom:14px">
       <div style="min-width:0">
@@ -150,7 +157,7 @@ function renderThreadDetail(detail) {
         <div class="muted mono">Context ID: ${escapeHtml(detail.context_id)} · 发起方: ${escapeHtml(detail.from_node)}</div>
       </div>
       <button class="btn btn-primary btn-sm" id="thread-continue-btn" data-ctx="${escapeHtml(detail.context_id)}" data-agents="${escapeHtml(detail.agents.join(","))}">
-        + 在此线程继续派单
+        ${uiIcon("plus", 12)} 在此线程继续派单
       </button>
     </div>
 
@@ -165,7 +172,7 @@ function renderThreadDetail(detail) {
             <div class="row" style="flex-wrap:wrap">
               <span class="pill ${stateTone(t.state)}">${stateLabel(t.state)}</span>
               <strong>${escapeHtml(t.title)}</strong>
-              <span class="muted">→ ${escapeHtml(t.to_agent_id)}</span>
+              <span class="thread-task-target">${uiIcon("arrow-right", 12)}${agentAvatar(agentMap.get(t.to_agent_id) || { id: t.to_agent_id }, { size: "xs" })}<span>${escapeHtml(agentMap.get(t.to_agent_id)?.name || t.to_agent_id)}</span></span>
               ${t.model ? `<span class="chip chip-model">${escapeHtml(t.model)}</span>` : ""}
               ${taskAttCount ? `<span class="attachment-tag">📎 ${taskAttCount}</span>` : ""}
             </div>

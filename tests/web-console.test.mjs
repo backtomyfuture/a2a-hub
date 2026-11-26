@@ -35,6 +35,11 @@ test("Web Console: 静态资源托管完整性、登录鉴权与 /api/v1/state �
       "/views/agents.js",
       "/views/threads.js",
       "/views/schedules.js",
+      "/icons.js",
+      "/favicon.svg",
+      "/apple-touch-icon.png",
+      "/icons/brands/claudecode.svg",
+      "/icons/brands/windows.svg",
     ]) {
       const resp = await fetch(`${rt.url}${asset}`);
       assert.equal(resp.status, 200, `${asset} 应返回 200`);
@@ -528,4 +533,38 @@ test("Web Console: 浮层防误触关闭 (bindBackdropClose) 与 Drawer 稳定�
   assert.equal(nodes.title.textContent, "当前已暂停接单");
   assert.equal(nodes.btn.textContent, "恢复启用");
   assert.ok(store.selectedAgentId === "a1");
+});
+
+test("Web Console Icons: 站点图标、平台品牌图标映射与文件完整性", async () => {
+  const { resolveAgentBrand, resolveDeviceBrand, agentAvatar, deviceAvatar, listMappedBrands } = await import("../src/web/icons.js");
+  const html = fs.readFileSync(path.resolve("src", "web", "index.html"), "utf8");
+  assert.ok(html.includes('rel="icon"') && html.includes("/favicon.svg") && html.includes("apple-touch-icon"));
+  for (const f of ["favicon.svg", "favicon-32.png", "apple-touch-icon.png"]) {
+    assert.ok(fs.existsSync(path.resolve("src", "web", f)), `缺少 ${f}`);
+  }
+
+  assert.equal(resolveAgentBrand({ kind: "device-worker", platform: "claude-code", worker_key: "claude" }).brand, "claudecode");
+  assert.equal(resolveAgentBrand({ kind: "device-worker", platform: "cli", worker_key: "gemini" }).brand, "geminicli");
+  assert.equal(resolveAgentBrand({ kind: "agent", platform: "gemini" }).brand, "gemini");
+  assert.equal(resolveAgentBrand({ kind: "agent", platform: "doubao" }).brand, "doubao");
+  assert.ok(resolveAgentBrand({ kind: "device-worker", platform: "aider" }).mono, "无官方图标的平台应退回字母徽标");
+  assert.equal(resolveAgentBrand({ kind: "device-worker", platform: "cli", worker_key: "my-tool" }).glyph, "terminal");
+  assert.equal(resolveAgentBrand({ kind: "agent", platform: "generic", role: "leader", name: "x" }).glyph, "sparkles");
+  assert.equal(resolveDeviceBrand({ platform: "darwin" }).brand, "apple");
+  assert.equal(resolveDeviceBrand({ platform: "win32" }).brand, "windows");
+  assert.equal(resolveDeviceBrand({ platform: "", os_info: "Linux 6.8.0 (x64)" }).brand, "linux");
+  assert.equal(resolveDeviceBrand({}).glyph, "monitor");
+
+  // 映射到的每个品牌图标文件都必须真实存在，否则卡片会出现裂图
+  const brandNames = listMappedBrands();
+  const brandDir = path.resolve("src", "web", "icons", "brands");
+  const available = new Set(fs.readdirSync(brandDir).filter((n) => n.endsWith(".svg")).map((n) => n.slice(0, -4)));
+  assert.ok(brandNames.size > 20);
+  for (const b of brandNames) {
+    assert.ok(available.has(b), `缺少品牌图标文件 ${b}.svg`);
+  }
+
+  const xss = agentAvatar({ kind: "agent", platform: "generic", name: "x" }, { title: `"><img src=x onerror=alert(1)>` });
+  assert.ok(!xss.includes("<img src=x"), "头像 title 必须转义");
+  assert.ok(deviceAvatar({ platform: "win32", enabled: true, online: true }, { status: "online" }).includes("/icons/brands/windows.svg"));
 });

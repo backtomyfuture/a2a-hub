@@ -4,6 +4,10 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>a2a-hub · 个人多 Agent 编排中台</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="theme-color" content="#4f46e5" />
     <script>
       try {
         var t = localStorage.getItem("ah_theme");
@@ -17,7 +21,7 @@
       <header class="topbar">
         <div class="topbar-inner">
           <div class="brand">
-            <span class="brand-mark">A2A</span>
+            <img class="brand-mark" src="/favicon.svg" alt="" width="28" height="28" />
             <div class="brand-title">a2a-hub</div>
           </div>
 
@@ -32,13 +36,14 @@
 
           <div class="topbar-actions">
             <span class="live-pill" id="live-pill" title="实时长轮询连接状态">
-              <span class="dot dot-online"></span> 实时同步
+              <span class="dot dot-online"></span><span class="btn-label">实时同步</span>
             </span>
             <button class="btn btn-ghost btn-sm" id="btn-theme-toggle" type="button" title="切换浅色 / 深色主题"></button>
-            <button class="btn btn-ghost btn-sm" id="btn-open-settings" type="button" title="系统通知与安全设置">⚙ 设置</button>
-            <button class="btn btn-secondary btn-sm" id="btn-open-add">+ 接入 Agent / 电脑</button>
-            <button class="btn btn-primary btn-sm" id="btn-open-dispatch">+ 派发任务</button>
-            <button class="btn btn-ghost btn-sm hidden" id="btn-logout" title="退出登录">退出</button>
+            <button class="btn btn-ghost btn-sm" id="btn-open-settings" type="button" title="系统通知与安全设置"><svg class="ui-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg><span class="btn-label">设置</span></button>
+            <span class="topbar-sep" aria-hidden="true"></span>
+            <button class="btn btn-secondary btn-sm" id="btn-open-add" title="接入 Agent / 电脑"><svg class="ui-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span class="btn-label">接入 Agent / 电脑</span></button>
+            <button class="btn btn-primary btn-sm" id="btn-open-dispatch" title="派发任务"><svg class="ui-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg><span class="btn-label">派发任务</span></button>
+            <button class="btn btn-ghost btn-sm btn-icon hidden" id="btn-logout" title="退出登录" aria-label="退出登录"><svg class="ui-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></svg></button>
           </div>
         </div>
       </header>
@@ -49,7 +54,8 @@
     </div>
 
     <div id="login-overlay" class="modal-backdrop hidden">
-      <div class="modal-card modal-sm">
+      <div class="modal-card modal-sm login-card">
+        <img class="login-logo" src="/favicon.svg" alt="" width="44" height="44" />
         <h2>登录 a2a-hub 控制台</h2>
         <p class="muted">请输入机主访问令牌（配置目录 app.env 中的 AH_API_TOKEN）。</p>
         <form id="login-form" class="stack-md">

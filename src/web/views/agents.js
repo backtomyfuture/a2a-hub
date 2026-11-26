@@ -2,6 +2,7 @@ import { api } from "../api.js";
 import { renderAgentCard } from "../components/agent-card.js";
 import { resetAddModalState } from "../components/add-modal.js";
 import { resetAddWorkerModalState } from "../components/add-worker-modal.js";
+import { deviceAvatar, deviceStatusOf, uiIcon } from "../icons.js";
 import { setState, store } from "../state.js";
 import { copyText, escapeHtml, formatRelativeTime, showToast } from "../utils.js";
 
@@ -62,11 +63,11 @@ function renderDeviceNodeSection(d, allDevWorkers, matchedWorkers, tasks, option
           aria-expanded="${isCollapsed ? "false" : "true"}"
           data-toggle-device-collapse="${escapeHtml(d.id)}"
         >
-          <span class="device-chevron">${isCollapsed ? "▸" : "▾"}</span>
+          <span class="device-chevron ${isCollapsed ? "" : "is-open"}">${uiIcon("chevron-right", 14)}</span>
+          ${deviceAvatar(d, { size: "xl", status: deviceStatusOf(d) })}
           <div style="min-width:0;flex:1">
             <div class="row" style="flex-wrap:wrap;gap:8px">
-              <span class="dot ${!d.enabled ? "dot-paused" : d.online ? "dot-online" : "dot-offline"}"></span>
-              <strong style="font-size:15px">${escapeHtml(d.name || d.id)}</strong>
+              <strong class="device-name">${escapeHtml(d.name || d.id)}</strong>
               ${d.is_local ? `<span class="pill pill-primary">本机</span>` : ""}
               <span class="muted mono">${escapeHtml(d.id)}</span>
               <span class="pill">在线 ${onlineCount}/${allDevWorkers.length}</span>
@@ -77,7 +78,7 @@ function renderDeviceNodeSection(d, allDevWorkers, matchedWorkers, tasks, option
                   : ""
               }
             </div>
-            <div class="muted" style="font-size:12px;margin-top:4px">
+            <div class="muted device-sub">
               ${escapeHtml(d.os_info || d.platform || "等待上线")} · 最后心跳 ${formatRelativeTime(d.last_seen_at)}
               ${d.summary ? ` · ${escapeHtml(d.summary)}` : ""}
             </div>
@@ -85,13 +86,13 @@ function renderDeviceNodeSection(d, allDevWorkers, matchedWorkers, tasks, option
         </div>
 
         <div class="row device-node-actions">
-          <button type="button" class="btn btn-sm btn-primary" data-dev-add-worker="${escapeHtml(d.id)}">+ 添加 Worker</button>
-          <button type="button" class="btn btn-sm btn-secondary" data-dev-scan-workers="${escapeHtml(d.id)}">扫描 CLI</button>
+          <button type="button" class="btn btn-sm btn-primary" data-dev-add-worker="${escapeHtml(d.id)}">${uiIcon("plus", 12)} 添加 Worker</button>
+          <button type="button" class="btn btn-sm btn-secondary" data-dev-scan-workers="${escapeHtml(d.id)}">${uiIcon("scan", 12)} 扫描 CLI</button>
           <button type="button" class="btn btn-sm btn-secondary" data-dev-toggle="${escapeHtml(d.id)}" data-dev-enabled="${d.enabled ? "1" : "0"}">
-            ${d.enabled ? "暂停整机" : "恢复整机"}
+            ${d.enabled ? `${uiIcon("pause", 12)} 暂停整机` : `${uiIcon("play", 12)} 恢复整机`}
           </button>
-          <button type="button" class="btn btn-sm btn-secondary" data-dev-rotate="${escapeHtml(d.id)}" title="重置 Device Token 并复制新挂载命令">挂载命令</button>
-          <button type="button" class="btn btn-sm btn-danger" data-dev-delete="${escapeHtml(d.id)}">移除</button>
+          <button type="button" class="btn btn-sm btn-secondary" data-dev-rotate="${escapeHtml(d.id)}" title="重置 Device Token 并复制新挂载命令">${uiIcon("link", 12)} 挂载命令</button>
+          <button type="button" class="btn btn-sm btn-ghost btn-icon btn-danger-ghost" data-dev-delete="${escapeHtml(d.id)}" title="移除设备" aria-label="移除设备">${uiIcon("trash", 13)}</button>
         </div>
       </div>
 

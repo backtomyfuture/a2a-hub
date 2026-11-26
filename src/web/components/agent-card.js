@@ -1,20 +1,17 @@
+import { agentAvatar, agentStatusOf, uiIcon } from "../icons.js";
 import { agentSourceLabel, escapeHtml, formatRelativeTime } from "../utils.js";
 
 export function renderAgentCard(agent, tasks = [], options = {}) {
   const compactInDevice = Boolean(options?.compactInDevice);
-  const dotClass = !agent.enabled ? "dot-paused" : agent.online ? "dot-online" : "dot-offline";
   const statusText = !agent.enabled ? "已暂停" : agent.online ? "在线" : "离线";
   const roleBadge = agent.role === "leader"
-    ? `<span class="pill pill-primary">Leader 协调</span>`
-    : `<span class="pill">Worker 执行</span>`;
+    ? `<span class="pill pill-primary">Leader</span>`
+    : `<span class="pill">Worker</span>`;
 
   const subId = compactInDevice ? (agent.worker_key || agent.id) : agent.id;
-  const footText = compactInDevice
-    ? `${statusText}${agent.approval_policy && agent.approval_policy !== "never" ? " · 需审批" : ""}`
-    : `${agentSourceLabel(agent)} · ${statusText}`;
-  const footTitle = compactInDevice
-    ? `${footText} · ${formatRelativeTime(agent.last_seen_at)}`
-    : `${agentSourceLabel(agent)} · ${formatRelativeTime(agent.last_seen_at)}`;
+  const needsApproval = Boolean(agent.approval_policy && agent.approval_policy !== "never");
+  const footMeta = compactInDevice ? (needsApproval ? "需审批" : "") : agentSourceLabel(agent);
+  const footTitle = [statusText, footMeta, formatRelativeTime(agent.last_seen_at)].filter(Boolean).join(" · ");
 
   const summary = agent.summary || "未填写定位描述 — 点击卡片补充该 Agent 擅长的任务边界";
   const tags = [
@@ -32,7 +29,7 @@ export function renderAgentCard(agent, tasks = [], options = {}) {
     <article class="agent-card ${compactInDevice ? "is-in-device" : ""} ${agent.enabled ? "" : "is-paused"}" data-open-agent="${escapeHtml(agent.id)}">
       <div class="agent-card-head">
         <div class="agent-name-wrap">
-          <span class="dot ${dotClass}" title="${statusText}"></span>
+          ${agentAvatar(agent, { size: "lg", status: agentStatusOf(agent), title: statusText })}
           <div style="min-width:0">
             <div class="agent-name truncate">${escapeHtml(agent.name)}</div>
             <div class="muted mono truncate">${escapeHtml(subId)}</div>
@@ -51,13 +48,15 @@ export function renderAgentCard(agent, tasks = [], options = {}) {
 
       ${
         activeTask
-          ? `<div class="pill pill-primary truncate">执行中：${escapeHtml(activeTask.title)}</div>`
+          ? `<div class="agent-running truncate"><span class="status-dot is-run"></span>执行中：${escapeHtml(activeTask.title)}</div>`
           : ""
       }
 
       <div class="agent-card-foot">
-        <span class="muted truncate" title="${escapeHtml(footTitle)}">
-          ${escapeHtml(footText)}
+        <span class="agent-foot-meta truncate" title="${escapeHtml(footTitle)}">
+          <span class="agent-status-text is-${agentStatusOf(agent)}">${escapeHtml(statusText)}</span>${
+            footMeta ? `<span class="muted"> · ${escapeHtml(footMeta)}</span>` : ""
+          }
         </span>
         <button
           class="btn btn-sm btn-secondary"
@@ -65,7 +64,7 @@ export function renderAgentCard(agent, tasks = [], options = {}) {
           data-quick-dispatch="${escapeHtml(agent.id)}"
           ${agent.enabled ? "" : "disabled"}
         >
-          派任务
+          ${uiIcon("send", 12)} 派任务
         </button>
       </div>
     </article>
