@@ -20,7 +20,7 @@ Unify cloud chatbots & Leader agents with local coding CLIs across your computer
   <img src="https://img.shields.io/badge/Node.js-%3E%3D24-339933.svg" alt="Node.js >= 24" />
   <img src="https://img.shields.io/badge/Dependencies-0%20runtime-10b981.svg" alt="Zero Runtime Dependencies" />
   <img src="https://img.shields.io/badge/Local%20CLIs-26%2B%20Auto--Discovery-6366f1.svg" alt="26+ CLIs" />
-  <img src="https://img.shields.io/badge/Cloud%20Templates-10%20Presets-0ea5e9.svg" alt="10 Cloud Templates" />
+  <img src="https://img.shields.io/badge/Cloud%20Templates-11%20Presets-0ea5e9.svg" alt="11 Cloud Templates" />
   <img src="https://img.shields.io/badge/Protocol-A2A%208--State-f59e0b.svg" alt="A2A 8-State" />
 </p>
 
@@ -34,7 +34,7 @@ flowchart TB
     HUB <-->|"ah up (Built-in DeviceDaemon)"| M1["Mac mini (Local Host)\nclaude · codex · amp · droid · agy · grok · cursor · codebuddy"]
     HUB <-->|"install.sh --join (Outbound Only)"| M2["Linux / GPU Workstation\nqwen · kimi · cline · kilo · openhands · opencode"]
     HUB <-->|"install.ps1 AH_JOIN (Outbound Only)"| M3["Windows / Work PC\ncopilot · gemini · devin · custom scripts"]
-    HUB <-->|"10 Onboarding Presets\n(Poll / Long-Poll / Webhook / MCP)"| C1["Cloud & Desktop Agents\nMuse · AutoClaw · Gemini · Amazon Quick · Grok Bot · WorkBuddy · Doubao · Qwen"]
+    HUB <-->|"11 Onboarding Presets\n(Poll / Long-Poll / Webhook / MCP)"| C1["Cloud & Desktop Agents\nMuse · AutoClaw · Gemini · Amazon Quick · Grok Bot · WorkBuddy · Doubao · Qwen · Today AI"]
 ```
 
 ---
@@ -44,7 +44,7 @@ flowchart TB
 - **One-Line Start Without `git clone`**: Zero external npm dependencies (`dependencies: {}`). A single installer bootstraps Node.js 24 LTS (if missing, SHA-256 verified into `~/.local/node`), installs `ah`, initializes SQLite + Ed25519 keys, and prints a one-click login console URL.
 - **Zero-Prerequisite Machine Onboarding**: Adding a fresh Mac, Linux box, or Windows PC doesn't require pre-installing `ah` or Node. The Web UI generates a **single unified command** that installs Node 24 + `ah`, connects with embedded credentials, scans 26 local CLI tools, and registers a background service — purely outbound, zero open inbound ports.
 - **26+ Auto-Discovered CLI Workers & True Concurrency**: Automatically discovers local CLIs (Claude Code, Codex, OpenCode, Amp, Droid, Agy, Grok, Cursor Agent, CodeBuddy, Copilot, Qwen, Kimi, Kiro, Cline, Kilo, Auggie, Vibe, Crush, Pi, Devin, OpenHands, iFlow, Qoder, Gemini, Aider, Goose). Each host executes up to `maxConcurrent = 4` tasks in parallel while serializing per `(context_id, worker_key)` to protect native CLI `--resume` sessions.
-- **10 Cloud & Desktop Agent Presets**: Ready-to-use onboarding prompts with scoped per-agent tokens for **Muse / AutoClaw (Leaders)**, Gemini Desktop, Amazon Quick, Grok Bot, WorkBuddy, Doubao, Lingguang, Qwen, and a generic template.
+- **11 Cloud & Desktop Agent Presets**: Ready-to-use onboarding prompts with scoped per-agent tokens for **Muse / AutoClaw (Leaders)**, Gemini Desktop, Amazon Quick, Grok Bot, WorkBuddy, Doubao, Lingguang, Qwen, Today AI, and a generic template.
 - **Native MCP Gateway**: A built-in zero-dependency MCP server (Streamable HTTP at `/api/v1/mcp`, plus local stdio via `ah mcp`) lets MCP clients such as Gemini Desktop, Amazon Quick, Claude Desktop, and Cursor register, dispatch, claim, and submit receipts without hand-written REST calls.
 - **End-to-End Task Attachments**: Dispatches, replies, questions, and receipts can carry files (`hub://files/<id>`). Fan-out grants download access to every target node, and device hosts download attachments into the run directory and list their names and paths in the CLI prompt.
 - **Strict Execution Isolation & Ed25519 Signed Approvals**: Task payloads can never inject `command`, `cwd`, or `env` keys (`HTTP 400`). Risk-gated `auth-required` tasks can only be unlocked by the owner's Ed25519 signature, verified locally on the worker host via `hubPublicKey`.
@@ -160,7 +160,7 @@ New CLIs installed later can be added anytime without overwriting existing custo
 
 ### 2. Onboard Cloud / Standalone Agents
 
-In **"+ 接入 Agent / 电脑" → "接入独立 Agent"**, pick any of the **10 presets** (`generic`, `muse`, `autoclaw`, `gemini`, `amazon-quick`, `grok-bot`, `workbuddy`, `doubao`, `lingguang`, `qwen`). Submitting generates a scoped per-agent token and a ready-to-paste onboarding prompt with exact endpoints. Existing `agent_templates.json` files keep your custom templates and gain new built-ins on upgrade.
+In **"+ 接入 Agent / 电脑" → "接入独立 Agent"**, pick any of the **11 presets** (`generic`, `muse`, `autoclaw`, `gemini`, `amazon-quick`, `grok-bot`, `workbuddy`, `doubao`, `lingguang`, `qwen`, `today`). Submitting generates a scoped per-agent token and a ready-to-paste onboarding prompt with exact endpoints. Existing `agent_templates.json` files keep your custom templates and gain new built-ins on upgrade.
 
 ### 3. Connect via MCP (Gemini Desktop, Amazon Quick, Claude Desktop, Cursor, …)
 
@@ -199,7 +199,7 @@ flowchart LR
     U["Web Console / ah CLI / Leader"] -->|POST /tasks| GW["Hub HTTP Gateway\nLongPollBroker (40s) + Ed25519"]
     GW <-->|BEGIN IMMEDIATE| DB[("SQLite WAL\nhub.db\ndevices · agents · tasks · messages · schedules · files")]
     GW <-->|Outbound Long-Poll| DEV["DeviceDaemon Pool (maxConcurrent=4)\n26+ Auto-Discovered CLIs + --resume"]
-    GW <-->|Poll / Webhook / MCP| CLD["Cloud & Standalone Agents\n10 Built-in Presets"]
+    GW <-->|Poll / Webhook / MCP| CLD["Cloud & Standalone Agents\n11 Built-in Presets"]
     GW -.->|Alerts| NTF["Feishu / Bark / Telegram / Webhook"]
 ```
 
@@ -226,10 +226,10 @@ stateDiagram-v2
 ## Supported Ecosystem
 
 <details>
-<summary><strong>Click to expand: 26 Auto-Discovered Local CLIs + 10 Cloud / Desktop Agent Presets</strong></summary>
+<summary><strong>Click to expand: 26 Auto-Discovered Local CLIs + 11 Cloud / Desktop Agent Presets</strong></summary>
 
 - **Local CLIs ([`src/core/config.mjs`](src/core/config.mjs))**: `claude` (Claude Code), `codex` (Codex CLI), `opencode` (OpenCode), `gemini` (Gemini CLI), `aider` (Aider), `goose` (Goose), `amp` (Amp CLI), `droid` (Factory Droid), `agy` (Antigravity CLI), `grok` (Grok CLI), `cursor` (`cursor-agent`), `codebuddy` (`codebuddy`/`cbc`), `copilot` (GitHub Copilot CLI), `qwen` (Qwen Code), `kimi` (Kimi Code CLI), `kiro` (`kiro-cli`), `cline` (Cline CLI), `kilo` (`kilo`/`kilocode`), `auggie` (Augment Auggie), `vibe` (Mistral Vibe), `crush` (Charm Crush), `pi` (Pi Coding Agent), `devin` (Devin CLI), `openhands` (OpenHands CLI), `iflow` (iFlow CLI), `qoder` (`qodercli`/`qoder`).
-- **Cloud & Desktop Templates ([`src/core/templates.mjs`](src/core/templates.mjs))**: `generic` (HTTP poll, 5 min), `muse` (Leader, long-poll, 2 min), `autoclaw` (Leader, HTTP poll, 5 min), `gemini` (MCP, 60 min), `amazon-quick` (MCP, 15 min), `grok-bot` (Webhook, 30 min fallback), `workbuddy` (HTTP poll, 30 min), `doubao` (HTTP poll, 60 min), `lingguang` (HTTP poll, 5 min), `qwen` (HTTP poll, 60 min).
+- **Cloud & Desktop Templates ([`src/core/templates.mjs`](src/core/templates.mjs))**: `generic` (HTTP poll, 5 min), `muse` (Leader, long-poll, 2 min), `autoclaw` (Leader, HTTP poll, 5 min), `gemini` (MCP, 60 min), `amazon-quick` (MCP, 15 min), `grok-bot` (Webhook, 30 min fallback), `workbuddy` (HTTP poll, 30 min), `doubao` (HTTP poll, 60 min), `lingguang` (HTTP poll, 5 min), `qwen` (HTTP poll, 60 min), `today` (HTTP poll, 15 min).
 
 </details>
 

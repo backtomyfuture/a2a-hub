@@ -515,6 +515,7 @@ test("Templates Preferred Connect: Gemini 桌面端与 Amazon Quick 默认推荐
     "doubao",
     "lingguang",
     "qwen",
+    "today",
   ]) {
     const tpl = DEFAULT_AGENT_TEMPLATES.find((t) => t.id === httpId);
     assert.ok(tpl, `模板应包含 ${httpId}`);
@@ -580,6 +581,15 @@ test("Templates Preferred Connect: Gemini 桌面端与 Amazon Quick 默认推荐
   assert.equal(autoClawBundle.preferred_connect, "http");
   assert.ok(autoClawBundle.http_json.includes("Bearer ag_secret_654321"));
   assert.ok(autoClawBundle.http_json.includes("?token=ag_secret_654321"));
+
+  const todayBundle = buildAgentMcpOnboarding({
+    hubUrl: "http://127.0.0.1:8787",
+    agent: { id: "today", name: "Today AI", role: "worker", platform: "today" },
+    token: "ag_secret_today",
+  });
+  assert.equal(todayBundle.preferred_connect, "http");
+  assert.ok(todayBundle.mcp_prompt.includes("Today AI"));
+  assert.ok(todayBundle.mcp_prompt.includes("15 分钟"));
 
   // 未知/自定义模板与 webhook 模式均默认回落到 http，且 Leader MCP 提示词包含轮询兜底与脱敏约束
   const customBundle = buildAgentMcpOnboarding({

@@ -14,7 +14,7 @@ a2a-hub：自托管个人版多 Agent 编排中台（基于 A2A 八态数据模�
 - `src/core/approval-sign.mjs`：Ed25519 审批签名与验签（私钥存于 `<configDir>/approval_key.pem`），以及执行端统一验签入口 `verifyTaskApproval`。
 - `src/core/approval-links.mjs` / `src/server/approval-page.mjs`：一次性审批链接（HMAC 令牌、限时、单次使用）与 `/approve/<令牌>` 确认页；审批超时等设置解析。
 - `src/core/feishu-ws.mjs` / `src/core/feishu-approval.mjs`：零依赖飞书长连接（pbbp2 帧协议）与飞书应用审批卡片渠道（审批人白名单）。
-- `src/core/templates.mjs`：10 套内置平台模板（`DEFAULT_AGENT_TEMPLATES`，写入配置目录 `agent_templates.json` 并增量合并）及一键接入提示词/设备挂载命令生成器。
+- `src/core/templates.mjs`：11 套内置平台模板（`DEFAULT_AGENT_TEMPLATES`，写入配置目录 `agent_templates.json` 并增量合并）及一键接入提示词/设备挂载命令生成器。
 - `src/core/webhooks.mjs` / `src/core/notifier.mjs` / `src/core/schedules.mjs`：HMAC-SHA256 签名 Webhook 门铃（`redirect: "manual"` 防 SSRF 重定向）、飞书/Bark/Telegram/通用 Webhook 机主实时推送、定时任务自报观测。
 - `src/core/receipt.mjs` / `src/core/session-store.mjs` / `src/core/proc.mjs`：CLI 命令安全渲染、`stdout` JSON/JSONL 解析与 `(context_id, worker_key)` 会话续接。
 - `src/core/hub-runtime.mjs`：单进程拉起 Hub（SQLite + HTTP 网关 + 本机 `DeviceDaemon`）。
