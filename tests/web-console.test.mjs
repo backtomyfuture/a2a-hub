@@ -316,6 +316,20 @@ test("Web Console UI & Templates: 主题变量切换规则、控件可读文字�
   assert.ok(musePrompt.includes("每 5 秒"));
   assert.ok(musePrompt.includes("ah inbox --config ~/.a2a-hub-muse --pop --json"));
   assert.ok(musePrompt.includes("ah task create --config ~/.a2a-hub-muse"));
+  assert.ok(musePrompt.includes("--context <原ctx_id>"));
+  assert.ok(musePrompt.includes("仅用于回复 input-required"));
+
+  // 验证官方 ah / a2a-leader Skill 均包含「同事项续线程」与 reply 仅限 input-required 口径
+  const ahSkillSrc = fs.readFileSync(path.resolve("skills", "ah", "SKILL.md"), "utf8");
+  assert.ok(ahSkillSrc.includes("同事项续线程"), "skills/ah/SKILL.md 应包含同事项续线程判断规则");
+  assert.ok(ahSkillSrc.includes("input-required") && ahSkillSrc.includes("ah task reply"));
+  assert.ok(ahSkillSrc.includes("--context <原 ctx_id>"));
+  assert.ok(ahSkillSrc.includes("按回执正文判结果"));
+
+  const leaderSkillSrc = fs.readFileSync(path.resolve("skills", "a2a-leader", "SKILL.md"), "utf8");
+  assert.ok(leaderSkillSrc.includes("同事项续线程"), "skills/a2a-leader/SKILL.md 应包含同事项续线程判断规则");
+  assert.ok(leaderSkillSrc.includes("input-required") && leaderSkillSrc.includes("/reply"));
+  assert.ok(leaderSkillSrc.includes("按回执正文判结果"));
 
   const wbPrompt = buildAgentOnboardingPrompt({
     hubUrl: "https://hub.example.test",

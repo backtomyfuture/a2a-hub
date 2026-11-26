@@ -493,8 +493,12 @@ async function main() {
     });
     if (sub === "list") {
       const r = await client.listTasks({ state: flags.state || "", agent: flags.agent || "", summary: 1 });
+      if (flags.json) {
+        console.log(JSON.stringify(r.tasks || [], null, 2));
+        return 0;
+      }
       for (const t of r.tasks || []) {
-        console.log(`${t.id}  [${t.state.padEnd(14)}]  -> ${t.to_agent_id}  | ${t.title}`);
+        console.log(`${t.id}  [${t.state.padEnd(14)}]  ${t.context_id || "-"}  -> ${t.to_agent_id}  | ${t.title}`);
       }
       return 0;
     }
