@@ -5,6 +5,7 @@
 ## 未发布
 
 - **控制台视觉升级**：新增站点图标（`favicon.svg` / `favicon-32.png` / `apple-touch-icon.png`），顶栏品牌标识与按钮改用线性图标。Agent、CLI Worker 与电脑节点按平台显示品牌图标（Claude Code、Codex、Gemini、Cursor、Copilot、Qwen、Kimi、豆包等，macOS / Windows / Linux），没有官方图标的平台用品牌色字母徽标，在线状态以角标呈现。待办概览的任务动态改为定宽列网格，状态、时间与取消按钮逐行对齐，左右两栏顶边与底边对齐；待处理卡片的回复与审批输入行统一布局。品牌图标来源与许可见 `src/web/icons/brands/NOTICE.md`。
+- **控制台信息分工**：待办概览只看「此刻」：新增「近 24 小时」面板（逐小时完成 / 失败柱状图、成功率、中位耗时、最活跃 Agent）；「任务动态」改为「执行看板」，分进行中 / 失败 / 最近完成三栏，分别显示已运行时长、发生时间和耗时，待处理任务只在上方卡片出现。对话线程页负责翻历史：线程列表支持搜索、按状态筛选（待处理 / 进行中 / 有失败）和每页 12 条分页，线程详情默认展开最近 5 个任务，更早的按需加载；`/api/v1/state` 返回的线程上限由 80 提到 200。Agent 与设备页（以及首页节点负载、派单弹窗）统一排序：Leader 置顶，其余按在线、连不上、已暂停排列。Aider、Factory Droid、AutoClaw、Muse、Amazon Quick、Today AI、Instinct 换成官方图标。
 
 - **一次性审批链接**：开启 `AH_APPROVAL_LINKS=1`（或控制台「审批渠道」勾选）后，`auth-required` 通知（Bark / 飞书群机器人 / Telegram / 通用 Webhook）附带 `/approve/<令牌>` 链接，Bark 点击直接打开确认页。令牌用 Hub 私钥派生的密钥做 HMAC，绑定任务、审批请求与过期时间（`AH_APPROVAL_LINK_TTL_MIN`，默认 30 分钟），只能用一次。GET 只展示确认页，点「签名并放行 / 拒绝」后 POST 才生效，聊天软件预抓取链接不会误批。放行签名仍由 Hub 私钥完成。拿到链接的人都能审批，多人可见的渠道请谨慎开启。
 - **审批超时**：`auth-required` 超过 `AH_APPROVAL_TIMEOUT_MIN` 分钟（默认 1440，`0` 关闭）未处理时自动拒绝，`auth_decision` 的 `from_node` 为 `hub-approval-timeout`。

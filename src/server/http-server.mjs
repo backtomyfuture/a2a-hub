@@ -251,7 +251,7 @@ export function startHubHttpServer({
     });
 
     const tasks = store.listTasks({ limit: 300, summaryOnly: true });
-    const threads = taskService.listThreads({ limit: 80, includeTasks: false });
+    const threads = taskService.listThreads({ limit: 200, includeTasks: false });
     const pendingActions = tasks.filter((t) => t.state === "auth-required" || t.state === "input-required").map((t) => {
       const full = store.getTask(t.id);
       return {
