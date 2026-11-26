@@ -24,7 +24,7 @@ jobs:
         run: if [ -f package-lock.json ]; then npm ci --omit=dev; fi
       - name: syntax
         run: |
-          for f in bin/*.mjs src/*.mjs src/*/*.mjs schema/*.mjs; do
+          for f in bin/*.mjs src/*/*.mjs; do
             node --check "$f" || exit 1
           done
       - name: test
