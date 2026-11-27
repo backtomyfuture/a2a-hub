@@ -9,7 +9,7 @@ import { uiIcon } from "./icons.js";
 import { showToast } from "./utils.js";
 import { renderAgentsView } from "./views/agents.js";
 import { renderHomeView } from "./views/home.js";
-import { renderSchedulesView } from "./views/schedules.js";
+import { isSchedulePanelOpen, renderSchedulesView } from "./views/schedules.js";
 import { renderThreadsView } from "./views/threads.js";
 
 const mainEl = document.getElementById("main-view");
@@ -50,6 +50,7 @@ window.matchMedia?.("(prefers-color-scheme: dark)")?.addEventListener?.("change"
 
 let pollSeq = 0;
 let pollingStarted = false;
+let lastRenderedMainTab = "";
 let lastRenderedModalKey = "";
 let lastRenderedDrawerKey = "";
 
@@ -81,12 +82,15 @@ function renderAll() {
 
   if (!store.state) return;
 
-  // 若用户正在页面内输入框输入回复，暂缓重绘主区域以免丢失草稿；仅在切换 Tab/选中项时立刻渲染
+  // 若用户正在页面内输入框输入回复，或正在定时面板中填写表单，暂缓重绘主区域以免丢失草稿；切换 Tab 时立刻渲染
   const activeTag = document.activeElement?.tagName;
   const editingInMain =
     mainEl.contains(document.activeElement) && (activeTag === "INPUT" || activeTag === "TEXTAREA" || activeTag === "SELECT");
+  const tabChanged = store.activeTab !== lastRenderedMainTab;
+  const editingInSchedulePanel = store.activeTab === "schedules" && isSchedulePanelOpen() && !tabChanged;
 
-  if (!editingInMain) {
+  if (tabChanged || (!editingInMain && !editingInSchedulePanel)) {
+    lastRenderedMainTab = store.activeTab;
     if (store.activeTab === "home") renderHomeView(mainEl, refreshState);
     else if (store.activeTab === "agents") renderAgentsView(mainEl, refreshState);
     else if (store.activeTab === "threads") renderThreadsView(mainEl, refreshState);

@@ -71,6 +71,7 @@ export async function runInboxCommand(args, { configDir, io = console } = {}) {
   if (sub === "pop") {
     const r = await client.claimNext({
       agentIds: targetAgent ? [targetAgent] : null,
+      ...(flags.lease ? { leaseSec: Number(flags.lease) } : {}),
     });
     if (r?.task) {
       io.log(JSON.stringify(r.task, null, 2));

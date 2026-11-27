@@ -154,7 +154,18 @@ export class ExternalNotifier {
       if (!this._remember(dedupeKey)) return;
       const base = typeof this.hubUrlResolver === "function" ? String(this.hubUrlResolver() || "").replace(/\/+$/, "") : "";
       const title = "a2a-hub · 定时任务超时未报";
-      const body = `Agent: ${event.agentName || event.agentId || "-"}\n定时: ${event.scheduleName || event.scheduleId || "-"}\n详情: ${event.reason || "超过预期调度窗口仍未打卡或执行"}`;
+      const detail = sanitizeAlertDetail(event.reason || "超过预期调度窗口仍未打卡或执行", 160);
+      const body = `Agent: ${event.agentName || event.agentId || "-"}\n定时: ${event.scheduleName || event.scheduleId || "-"}\n详情: ${detail}`;
+      void this.sendAlert({ title, body, link: base ? `${base}/` : "", event }).catch(() => {});
+      return;
+    }
+    if (event.type === "schedule.failed") {
+      const dedupeKey = `schedule.failed:${event.agentId || ""}:${event.scheduleId || ""}:${event.seq || 0}`;
+      if (!this._remember(dedupeKey)) return;
+      const base = typeof this.hubUrlResolver === "function" ? String(this.hubUrlResolver() || "").replace(/\/+$/, "") : "";
+      const title = "a2a-hub · 定时任务派发失败";
+      const detail = sanitizeAlertDetail(event.reason || event.error || "定时派发异常", 160);
+      const body = `Agent: ${event.agentName || event.agentId || "-"}\n定时: ${event.scheduleName || event.scheduleId || "-"}\n详情: ${detail}`;
       void this.sendAlert({ title, body, link: base ? `${base}/` : "", event }).catch(() => {});
       return;
     }

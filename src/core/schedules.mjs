@@ -15,6 +15,7 @@ import {
   parseCronExpr,
   parseEveryToMinutes,
 } from "./cron.mjs";
+import { sanitizeAlertDetail } from "./notifier.mjs";
 
 const TERMINAL_OK_STATES = new Set(["completed"]);
 const TERMINAL_FAIL_STATES = new Set(["failed", "rejected", "canceled"]);
@@ -59,10 +60,15 @@ function computeNextRunTimestamp({ cronExpr, intervalMin, timezone, afterMs, pre
 }
 
 export class ScheduleService {
-  constructor(store, taskService, { envResolver = null } = {}) {
+  constructor(store, taskService, { envResolver = null, logger = console } = {}) {
     this.store = store;
     this.taskService = taskService;
     this.envResolver = envResolver;
+    this.logger = logger;
+  }
+
+  defaultTimezone() {
+    return this._defaultTimezone();
   }
 
   _defaultTimezone() {
@@ -102,7 +108,7 @@ export class ScheduleService {
     if (!schedules.length) return [];
     const devices = new Map(this.store.listDevices().map((d) => [d.id, d]));
     const agents = new Map(this.store.listAgents().map((a) => [a.id, a]));
-    const rows = this.store.listRecentScheduleTasks(agentId, 500);
+    const rows = this.store.listRecentScheduleTasks(agentId, 15);
 
     const runsByKey = new Map();
     const taskById = new Map();
@@ -167,6 +173,7 @@ export class ScheduleService {
       const tickEntries = (Array.isArray(sch.recent_ticks) ? sch.recent_ticks : []).map((tk) => {
         const st = tk.outcome || "noop";
         const noteText = String(tk.summary ?? tk.note ?? "").slice(0, 300);
+        const isFailTick = st === "failed";
         return {
           id: null,
           context_id: null,
@@ -175,11 +182,15 @@ export class ScheduleService {
           title:
             st === "skipped_overlap"
               ? "上轮未结束，跳过重入"
-              : st === "completed"
-                ? sch.name
-                : "静默打卡（无新动作）",
-          summary: noteText,
-          error_message: "",
+              : st === "skipped_paused"
+                ? "目标已暂停，跳过本轮"
+                : isFailTick
+                  ? "定时派发失败"
+                  : st === "completed"
+                    ? sch.name
+                    : "静默打卡（无新动作）",
+          summary: isFailTick ? "" : noteText,
+          error_message: isFailTick ? noteText : "",
           created_at: Number(tk.at || 0),
           completed_at: Number(tk.at || 0),
           duration_ms: tk.duration_ms ?? null,
@@ -193,7 +204,7 @@ export class ScheduleService {
       const mergedTimeline = mergedChronological.slice(-10);
       const substantiveNewestFirst = [...mergedChronological]
         .reverse()
-        .filter((x) => x.state !== "noop" && x.state !== "skipped_overlap");
+        .filter((x) => x.state !== "noop" && x.state !== "skipped_overlap" && x.state !== "skipped_paused");
 
       const lastRun = substantiveNewestFirst[0] || null;
       const latestTaskRun = taskRunsNewestFirst[0] || null;
@@ -206,10 +217,17 @@ export class ScheduleService {
       const activeTaskState = latestTaskRun && ACTIVE_STATES.has(latestTaskRun.state) ? latestTaskRun.state : null;
       const isCurrentlyActive = Boolean(activeTaskState);
 
+      const hubFailedCurrentTick = Boolean(
+        sch.driver === "hub" &&
+        sch.last_outcome === "failed" &&
+        sch.next_run_at &&
+        Number(sch.last_tick_at || 0) >= Number(sch.next_run_at)
+      );
       const canCheckMissed = Boolean(
         sch.enabled &&
         nextExpectedAt &&
         !isCurrentlyActive &&
+        !hubFailedCurrentTick &&
         (lastTickAt || sch.driver === "hub" || now > Number(nextExpectedAt) + graceMs)
       );
       const missed = Boolean(canCheckMissed && now > Number(nextExpectedAt) + graceMs);
@@ -316,6 +334,19 @@ export class ScheduleService {
       throw makeScheduleError("中台定时任务请填写有效的 5 段 Cron 表达式或周期（every / interval_min）", 400, "missing_schedule_time");
     }
 
+    const effectiveTemplate = body.task_template !== undefined ? body.task_template : existing?.task_template;
+    if (driver === "hub" && effectiveTemplate && typeof effectiveTemplate === "object" && effectiveTemplate.to !== undefined) {
+      const toList = [...new Set(
+        (Array.isArray(effectiveTemplate.to) ? effectiveTemplate.to : [effectiveTemplate.to])
+          .map((x) => String(x || "").trim())
+          .filter(Boolean)
+      )];
+      const missing = toList.filter((id) => !this.store.getAgent(id));
+      if (missing.length) {
+        throw makeScheduleError(`目标 Agent 不存在: ${missing.join(", ")}`, 400, "invalid_target");
+      }
+    }
+
     const enabled = body.enabled !== undefined ? Boolean(body.enabled) : (existing ? existing.enabled : true);
     const recordRun = Boolean(body.run);
 
@@ -364,6 +395,16 @@ export class ScheduleService {
           afterMs: effectiveAnchor,
           preferInterval,
         });
+        // 缩短或修改已有外部自管条目周期时若按旧锚点已过期，改按当前时刻推算，防止保存瞬间误炸超时告警
+        if (existing && timingChanged && explicitLastRun === undefined && !resumedFromPaused && nextRunAt <= now) {
+          nextRunAt = computeNextRunTimestamp({
+            cronExpr: parsedCron,
+            intervalMin,
+            timezone,
+            afterMs: now,
+            preferInterval,
+          });
+        }
       }
     } else {
       nextRunAt = null;
@@ -407,7 +448,7 @@ export class ScheduleService {
       last_tick_at: explicitLastRun !== undefined ? explicitLastRun : undefined,
       last_run_at: explicitLastRun,
       last_task_id: body.last_task_id,
-      alerted_missed_at: !enabled || resumedFromPaused || explicitLastRun !== undefined ? null : undefined,
+      alerted_missed_at: !enabled || resumedFromPaused || explicitLastRun !== undefined || (existing && timingChanged) ? null : undefined,
       enabled,
       now,
     });
@@ -451,6 +492,7 @@ export class ScheduleService {
     inputText = "",
     contextId = "",
     idempotencyKey = "",
+    targetsOverride = null,
     actor = null,
     advanceNextRunAt = null,
     now = Date.now(),
@@ -463,7 +505,12 @@ export class ScheduleService {
       }
 
       const tpl = sch.task_template && typeof sch.task_template === "object" ? sch.task_template : {};
-      const rawTargets = sch.driver === "hub" && tpl.to ? tpl.to : [agentId];
+      const overrideList = Array.isArray(targetsOverride)
+        ? targetsOverride.map((x) => String(x || "").trim()).filter(Boolean)
+        : [];
+      const rawTargets = overrideList.length
+        ? overrideList
+        : (sch.driver === "hub" && tpl.to ? tpl.to : [agentId]);
       const targets = (Array.isArray(rawTargets) ? rawTargets : [rawTargets]).map((x) => String(x || "").trim()).filter(Boolean);
 
       const finalContextId =
@@ -700,17 +747,103 @@ export class ScheduleService {
     });
   }
 
+  _recordHubDispatchFailure(sch, agents, { dueAt, nextFutureAt = null, graceMs = 60_000, err, now = Date.now(), failedOut = null } = {}) {
+    const reason = sanitizeAlertDetail(err?.message || String(err || "定时派发异常"), 160);
+    const prevTicks = Array.isArray(sch.recent_ticks) ? [...sch.recent_ticks] : [];
+    const lastTk = prevTicks.length ? prevTicks[prevTicks.length - 1] : null;
+    const sameDue = Boolean(lastTk && lastTk.outcome === "failed" && Number(lastTk.due_at || 0) === Number(dueAt || 0));
+
+    if (sameDue && now - Number(lastTk.at || 0) < 60_000) {
+      return;
+    }
+
+    const attempts = sameDue ? Number(lastTk.attempts || 1) + 1 : 1;
+    const exhausted = Boolean(
+      attempts >= 3 ||
+      (nextFutureAt !== null && nextFutureAt !== undefined && now >= nextFutureAt) ||
+      (dueAt && (now - dueAt) > Math.max(graceMs, 300_000))
+    );
+
+    const summary = exhausted
+      ? `派发失败(已重试${attempts}次，跳过本轮): ${reason}`
+      : `派发失败(第${attempts}次，待重试): ${reason}`;
+    const tickEntry = {
+      at: now,
+      outcome: "failed",
+      due_at: dueAt || now,
+      attempts,
+      duration_ms: 0,
+      summary,
+    };
+    const nextTicks = sameDue
+      ? [...prevTicks.slice(0, -1), tickEntry].slice(-20)
+      : [...prevTicks, tickEntry].slice(-20);
+
+    const nextRunPatch = exhausted && nextFutureAt !== null && nextFutureAt !== undefined
+      ? nextFutureAt
+      : (sch.next_run_at ?? (dueAt || null));
+
+    const ag = agents.get(sch.agent_id);
+    this.logger?.error?.(
+      `[a2a-hub] schedule dispatch failed (${sch.agent_id}/${sch.id}, attempt=${attempts}${exhausted ? ", exhausted" : ""}): ${reason}`
+    );
+
+    try {
+      this.store.upsertSchedule(
+        {
+          id: sch.id,
+          agent_id: sch.agent_id,
+          last_tick_at: now,
+          last_outcome: "failed",
+          next_run_at: nextRunPatch,
+          recent_ticks: nextTicks,
+          now,
+        },
+        {
+          eventType: attempts === 1 ? "schedule.failed" : "schedule.ticked",
+          includeActorScope: false,
+          ...(attempts === 1
+            ? {
+                eventExtra: {
+                  agentId: sch.agent_id,
+                  agentName: ag?.name || sch.agent_id,
+                  scheduleName: sch.name,
+                  reason,
+                  attempts,
+                },
+              }
+            : {}),
+        }
+      );
+    } catch (persistErr) {
+      this.logger?.error?.(
+        `[a2a-hub] persist schedule failure state error (${sch.agent_id}/${sch.id}): ${persistErr?.message || persistErr}`
+      );
+    }
+
+    if (Array.isArray(failedOut)) {
+      failedOut.push({
+        agent_id: sch.agent_id,
+        id: sch.id,
+        error: reason,
+        attempts,
+        exhausted,
+      });
+    }
+  }
+
   // 中台周期心跳入口：
   // 1) 扫描到期的 driver='hub' 任务自动派单（默认 misfire_policy='fire_once' 合并补跑一次，overlap_policy='skip' 防重入）；
   // 2) 扫描超过 next_expected_at + grace_sec 仍未报备的外部条目推送单次 schedule.missed 告警。
   tick(now = Date.now()) {
     const dispatched = [];
     const skipped = [];
+    const failed = [];
     const missedAlerts = [];
 
     const allSchedules = this.store.listSchedules();
     if (!allSchedules.length) {
-      return { dispatched, skipped, missed_alerts: missedAlerts };
+      return { dispatched, skipped, failed, missed_alerts: missedAlerts };
     }
 
     const agents = new Map(this.store.listAgents().map((a) => [a.id, a]));
@@ -719,153 +852,186 @@ export class ScheduleService {
     for (const sch of allSchedules) {
       if (!sch.enabled) continue;
 
-      if (sch.driver === "hub") {
-        const parsedCron = sch.cron_expr ? parseCronExpr(sch.cron_expr) : null;
-        if (!sch.next_run_at) {
-          const initNext = computeNextRunTimestamp({
+      try {
+        if (sch.driver === "hub") {
+          const parsedCron = sch.cron_expr ? parseCronExpr(sch.cron_expr) : null;
+          if (!sch.next_run_at) {
+            const initNext = computeNextRunTimestamp({
+              cronExpr: parsedCron,
+              intervalMin: sch.interval_min,
+              timezone: sch.timezone || this._defaultTimezone(),
+              afterMs: now,
+            });
+            this.store.upsertSchedule(
+              { id: sch.id, agent_id: sch.agent_id, next_run_at: initNext, now },
+              { eventType: null }
+            );
+            continue;
+          }
+
+          if (now < Number(sch.next_run_at)) continue;
+
+          const dueAt = Number(sch.next_run_at);
+          const nextFutureAt = computeNextRunTimestamp({
             cronExpr: parsedCron,
             intervalMin: sch.interval_min,
             timezone: sch.timezone || this._defaultTimezone(),
             afterMs: now,
           });
-          this.store.upsertSchedule(
-            { id: sch.id, agent_id: sch.agent_id, next_run_at: initNext, now },
-            { eventType: null }
-          );
-          continue;
-        }
+          const graceMs = this._effectiveGraceSec(sch) * 1000;
 
-        if (now < Number(sch.next_run_at)) continue;
-
-        const dueAt = Number(sch.next_run_at);
-        const nextFutureAt = computeNextRunTimestamp({
-          cronExpr: parsedCron,
-          intervalMin: sch.interval_min,
-          timezone: sch.timezone || this._defaultTimezone(),
-          afterMs: now,
-        });
-        const graceMs = this._effectiveGraceSec(sch) * 1000;
-
-        if (sch.misfire_policy === "skip" && now - dueAt > Math.max(graceMs, 60_000)) {
-          this.store.upsertSchedule(
-            { id: sch.id, agent_id: sch.agent_id, next_run_at: nextFutureAt, now },
-            { eventType: "schedule.ticked", includeActorScope: false }
-          );
-          skipped.push({ agent_id: sch.agent_id, id: sch.id, reason: "misfire_skipped" });
-          continue;
-        }
-
-        if (sch.overlap_policy !== "allow" && sch.last_task_id) {
-          const prevTask = this.store.getTask(sch.last_task_id);
-          let activeTask = prevTask && ACTIVE_STATES.has(prevTask.state) ? prevTask : null;
-          if (!activeTask && prevTask) {
-            activeTask = this.store.hasActiveScheduleSiblingTask(sch.id, prevTask.context_id);
-          }
-          if (activeTask) {
-            const nextTicks = [
-              ...(Array.isArray(sch.recent_ticks) ? sch.recent_ticks : []),
-              { at: now, outcome: "skipped_overlap", duration_ms: 0, summary: `上轮任务 ${activeTask.id} 仍在 ${activeTask.state}` },
-            ].slice(-20);
+          if (sch.misfire_policy === "skip" && now - dueAt > Math.max(graceMs, 60_000)) {
             this.store.upsertSchedule(
-              {
-                id: sch.id,
-                agent_id: sch.agent_id,
-                next_run_at: nextFutureAt,
-                recent_ticks: nextTicks,
-                now,
-              },
+              { id: sch.id, agent_id: sch.agent_id, next_run_at: nextFutureAt, now },
               { eventType: "schedule.ticked", includeActorScope: false }
             );
-            skipped.push({ agent_id: sch.agent_id, id: sch.id, reason: "overlap_skipped" });
+            skipped.push({ agent_id: sch.agent_id, id: sch.id, reason: "misfire_skipped" });
             continue;
           }
-        }
 
-        const tpl = sch.task_template && typeof sch.task_template === "object" ? sch.task_template : {};
-        const rawTargets = tpl.to ? (Array.isArray(tpl.to) ? tpl.to : [tpl.to]) : [sch.agent_id];
-        const validTargets = rawTargets
-          .map((id) => String(id || "").trim())
-          .filter((id) => {
-            const a = agents.get(id);
-            if (!a || !a.enabled) return false;
-            if (a.device_id) {
-              const d = devices.get(a.device_id);
-              if (d && !d.enabled) return false;
+          // 同一到期窗口失败重试冷却期（60s）内不重复拉起派发
+          const recentTicks = Array.isArray(sch.recent_ticks) ? sch.recent_ticks : [];
+          const lastTk = recentTicks.length ? recentTicks[recentTicks.length - 1] : null;
+          if (
+            lastTk &&
+            lastTk.outcome === "failed" &&
+            Number(lastTk.due_at || 0) === dueAt &&
+            now - Number(lastTk.at || 0) < 60_000
+          ) {
+            skipped.push({ agent_id: sch.agent_id, id: sch.id, reason: "failure_cooldown" });
+            continue;
+          }
+
+          if (sch.overlap_policy !== "allow" && sch.last_task_id) {
+            const prevTask = this.store.getTask(sch.last_task_id);
+            let activeTask = prevTask && ACTIVE_STATES.has(prevTask.state) ? prevTask : null;
+            if (!activeTask && prevTask) {
+              activeTask = this.store.hasActiveScheduleSiblingTask(sch.id, prevTask.context_id);
             }
-            return true;
-          });
+            if (activeTask) {
+              const nextTicks = [
+                ...recentTicks,
+                { at: now, outcome: "skipped_overlap", duration_ms: 0, summary: `上轮任务 ${activeTask.id} 仍在 ${activeTask.state}` },
+              ].slice(-20);
+              this.store.upsertSchedule(
+                {
+                  id: sch.id,
+                  agent_id: sch.agent_id,
+                  next_run_at: nextFutureAt,
+                  recent_ticks: nextTicks,
+                  now,
+                },
+                { eventType: "schedule.ticked", includeActorScope: false }
+              );
+              skipped.push({ agent_id: sch.agent_id, id: sch.id, reason: "overlap_skipped" });
+              continue;
+            }
+          }
 
-        if (!validTargets.length) {
-          this.store.upsertSchedule(
-            { id: sch.id, agent_id: sch.agent_id, next_run_at: nextFutureAt, now },
-            { eventType: null }
-          );
-          skipped.push({ agent_id: sch.agent_id, id: sch.id, reason: "target_paused" });
+          const tpl = sch.task_template && typeof sch.task_template === "object" ? sch.task_template : {};
+          const rawTargets = tpl.to ? (Array.isArray(tpl.to) ? tpl.to : [tpl.to]) : [sch.agent_id];
+          const validTargets = rawTargets
+            .map((id) => String(id || "").trim())
+            .filter((id) => {
+              const a = agents.get(id);
+              if (!a || !a.enabled) return false;
+              if (a.device_id) {
+                const d = devices.get(a.device_id);
+                if (d && !d.enabled) return false;
+              }
+              return true;
+            });
+
+          if (!validTargets.length) {
+            const nextTicks = [
+              ...recentTicks,
+              { at: now, outcome: "skipped_paused", duration_ms: 0, summary: "目标 Agent 或设备已暂停，本轮跳过" },
+            ].slice(-20);
+            this.store.upsertSchedule(
+              { id: sch.id, agent_id: sch.agent_id, next_run_at: nextFutureAt, recent_ticks: nextTicks, now },
+              { eventType: "schedule.ticked", includeActorScope: false }
+            );
+            skipped.push({ agent_id: sch.agent_id, id: sch.id, reason: "target_paused" });
+            continue;
+          }
+
+          const winKey = `hub_cron:${sch.agent_id}:${sch.id}:${formatScheduleWindowKey(dueAt, sch.timezone || this._defaultTimezone())}`;
+          try {
+            const runRes = this.triggerNow(sch.agent_id, sch.id, {
+              fromNode: "hub:cron",
+              source: "hub_cron",
+              idempotencyKey: winKey,
+              targetsOverride: validTargets,
+              advanceNextRunAt: nextFutureAt,
+              now,
+            });
+            dispatched.push({
+              agent_id: sch.agent_id,
+              id: sch.id,
+              context_id: runRes.context_id,
+              task_ids: (runRes.tasks || []).map((t) => t.id),
+            });
+          } catch (err) {
+            this._recordHubDispatchFailure(sch, agents, {
+              dueAt,
+              nextFutureAt,
+              graceMs,
+              err,
+              now,
+              failedOut: failed,
+            });
+          }
           continue;
         }
 
-        const winKey = `hub_cron:${sch.agent_id}:${sch.id}:${formatScheduleWindowKey(dueAt, sch.timezone || this._defaultTimezone())}`;
-        try {
-          const runRes = this.triggerNow(sch.agent_id, sch.id, {
-            fromNode: "hub:cron",
-            source: "hub_cron",
-            idempotencyKey: winKey,
-            advanceNextRunAt: nextFutureAt,
-            now,
-          });
-          dispatched.push({
-            agent_id: sch.agent_id,
+        // Edge 任务超时未报检测（expectedAt 已包含 last_duration_ms 耗时补偿）
+        const expectedAt = this._resolveExpectedNextAt(sch);
+        if (!expectedAt) continue;
+        const graceMs = this._effectiveGraceSec(sch) * 1000;
+        if (now <= expectedAt + graceMs) continue;
+        if (sch.alerted_missed_at) continue;
+
+        if (sch.last_task_id) {
+          const lastTask = this.store.getTask(sch.last_task_id);
+          if (lastTask && ACTIVE_STATES.has(lastTask.state)) continue;
+        }
+
+        const ag = agents.get(sch.agent_id);
+        const overdueMin = Math.max(1, Math.round((now - expectedAt) / 60_000));
+        const reason = `已超过预期完成窗口 ${overdueMin} 分钟未收到状态上报（排期: ${sch.cron_expr || `每 ${sch.interval_min} 分钟`}）`;
+        this.store.upsertSchedule(
+          {
             id: sch.id,
-            context_id: runRes.context_id,
-            task_ids: (runRes.tasks || []).map((t) => t.id),
-          });
-        } catch {
-          this.store.upsertSchedule(
-            { id: sch.id, agent_id: sch.agent_id, next_run_at: nextFutureAt, now },
-            { eventType: null }
-          );
-        }
-        continue;
-      }
-
-      // Edge 任务超时未报检测（expectedAt 已包含 last_duration_ms 耗时补偿）
-      const expectedAt = this._resolveExpectedNextAt(sch);
-      if (!expectedAt) continue;
-      const graceMs = this._effectiveGraceSec(sch) * 1000;
-      if (now <= expectedAt + graceMs) continue;
-      if (sch.alerted_missed_at) continue;
-
-      if (sch.last_task_id) {
-        const lastTask = this.store.getTask(sch.last_task_id);
-        if (lastTask && ACTIVE_STATES.has(lastTask.state)) continue;
-      }
-
-      const ag = agents.get(sch.agent_id);
-      const overdueMin = Math.max(1, Math.round((now - expectedAt) / 60_000));
-      const reason = `已超过预期完成窗口 ${overdueMin} 分钟未收到状态上报（排期: ${sch.cron_expr || `每 ${sch.interval_min} 分钟`}）`;
-      this.store.upsertSchedule(
-        {
-          id: sch.id,
-          agent_id: sch.agent_id,
-          alerted_missed_at: now,
-          now,
-        },
-        {
-          eventType: "schedule.missed",
-          includeActorScope: false,
-          eventExtra: {
-            agentId: sch.agent_id,
-            agentName: ag?.name || sch.agent_id,
-            scheduleName: sch.name,
-            overdueMs: now - expectedAt,
-            reason,
+            agent_id: sch.agent_id,
+            alerted_missed_at: now,
+            now,
           },
-        }
-      );
-      missedAlerts.push({ agent_id: sch.agent_id, id: sch.id, overdue_min: overdueMin });
+          {
+            eventType: "schedule.missed",
+            includeActorScope: false,
+            eventExtra: {
+              agentId: sch.agent_id,
+              agentName: ag?.name || sch.agent_id,
+              scheduleName: sch.name,
+              overdueMs: now - expectedAt,
+              reason,
+            },
+          }
+        );
+        missedAlerts.push({ agent_id: sch.agent_id, id: sch.id, overdue_min: overdueMin });
+      } catch (err) {
+        this._recordHubDispatchFailure(sch, agents, {
+          dueAt: Number(sch.next_run_at || now),
+          nextFutureAt: null,
+          graceMs: this._effectiveGraceSec(sch) * 1000,
+          err,
+          now,
+          failedOut: failed,
+        });
+      }
     }
 
-    return { dispatched, skipped, missed_alerts: missedAlerts };
+    return { dispatched, skipped, failed, missed_alerts: missedAlerts };
   }
 
   deleteForAgent(agentId, scheduleId, { actor = null } = {}) {

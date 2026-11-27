@@ -285,6 +285,7 @@ export class TaskService {
             taskId,
             touchRunAt: true,
             clearAlert: true,
+            contextId: finalContextId,
             now,
           });
         }
@@ -571,14 +572,22 @@ export class TaskService {
 
       if (task.schedule_id) {
         const durationMs = task.created_at ? Math.max(0, now - Number(task.created_at)) : undefined;
-        this.store.recordScheduleTaskActivity(task.to_agent_id, task.schedule_id, {
-          taskId: task.id,
-          outcome: "completed",
-          durationMs,
-          touchRunAt: true,
-          clearAlert: true,
-          now,
-        });
+        const failedSibling = this.store.hasFailedScheduleSiblingTask(task.schedule_id, task.context_id);
+        this.store.recordScheduleTaskActivity(
+          task.to_agent_id,
+          task.schedule_id,
+          failedSibling
+            ? { touchRunAt: true, clearAlert: true, contextId: task.context_id, now }
+            : {
+                taskId: task.id,
+                outcome: "completed",
+                durationMs,
+                touchRunAt: true,
+                clearAlert: true,
+                contextId: task.context_id,
+                now,
+              }
+        );
       }
 
       const ag = this.store.getAgent(task.to_agent_id);
@@ -812,6 +821,7 @@ export class TaskService {
         this.store.recordScheduleTaskActivity(task.to_agent_id, task.schedule_id, {
           taskId: task.id,
           outcome: "failed",
+          contextId: task.context_id,
           now,
         });
       }

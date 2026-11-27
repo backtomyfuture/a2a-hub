@@ -86,7 +86,7 @@ export async function startHubRuntime({
     hubUrlResolver: resolvePublicUrl,
     logger,
   });
-  const schedules = new ScheduleService(store, taskService, { envResolver: resolveEnv });
+  const schedules = new ScheduleService(store, taskService, { envResolver: resolveEnv, logger });
 
   store.setChangeHook((event) => {
     broker.publish(event);
@@ -174,7 +174,9 @@ export async function startHubRuntime({
   const scheduleTimer = setInterval(() => {
     try {
       schedules.tick();
-    } catch {}
+    } catch (err) {
+      logger?.error?.(`[a2a-hub] schedule tick failed: ${err?.message || err}`);
+    }
   }, 15_000);
   if (typeof scheduleTimer.unref === "function") scheduleTimer.unref();
 

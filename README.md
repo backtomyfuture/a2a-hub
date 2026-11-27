@@ -41,7 +41,7 @@
 - **原生 MCP 接入**：Hub 自带零依赖 MCP 服务（Streamable HTTP `/api/v1/mcp` 与本机 stdio `ah mcp`），Gemini 桌面端、Amazon Quick、Claude Desktop、Cursor 等 MCP 客户端可直接注册、派单、取单和回执，不必手写 REST 请求。
 - **任务附件全链路**：派单、回复、追问与回执都能挂文件（`hub://files/<id>`）。多节点扇出时每个目标节点自动获得下载授权；电脑节点执行前会把附件下载到本地运行目录，并把文件名和路径写进给 CLI 的提示词。
 - **严格安全边界与指令数据分离**：任务请求参数严禁夹带 `command` / `cwd` / `env` 等控制键；高危任务经 `auth-required` 由机主使用 Hub 私钥产出 **Ed25519 密码学签名**，远端执行器本地验签通过才允许执行。
-- **零构建极简 Web 控制台**：内置浅色 / 深色主题切换、高密度双栏概览、按设备节点折叠收敛的「Agent 与设备」视图、按设备分组的并发扇出派单、`Context_ID` 对话线程时间线，以及 Worker 定时巡检健康看板。
+- **零构建极简 Web 控制台**：内置浅色 / 深色主题切换、高密度双栏概览、按设备节点折叠收敛的「Agent 与设备」视图、按设备分组的并发扇出派单、`Context_ID` 对话线程时间线，以及双模式定时任务（中台按时派发 + 外部自管零介入打卡与漏报告警）。
 
 ---
 
@@ -187,6 +187,19 @@ Gemini 与 Amazon Quick 模板生成的接入提示词默认就走 MCP。
 
 ---
 
+## 定时任务（中台派发 & 外部打卡）
+
+1. **中台定时派发（最简路径）**：打开控制台 **「定时任务」 → 「+ 添加定时」**，三步即可开启：选执行 Agent → 选时间预设（如「每天早上 09:00」）→ 写下要做的任务，默认按 `Asia/Shanghai` 触发（可通过 `AH_TIMEZONE` 覆盖）。
+2. **外部自管定时打卡（零介入省 Token）**：对于已经按自身节奏运行的云端 Bot，只需在每次跑完时发一行 `POST /api/v1/schedules/<schedule_id>/runs`（首次上报自动建档，成功与空转不刷屏对话线程，仅失败或超时未报才告警）：
+   ```sh
+   curl -X POST https://<HUB_HOST>/api/v1/schedules/daily-job/runs \
+     -H "Authorization: Bearer <AGENT_TOKEN>" -H "Content-Type: application/json" \
+     -d '{"name":"每日巡检","every":"1d","summary":"一切正常"}'
+   ```
+3. **包裹本机脚本（0 Token）**：`ah schedule run <schedule_id> --every 6d -- <原命令与参数...>`。
+
+---
+
 ## 架构、协作与 A2A 状态机
 
 ### 1. 系统核心架构
@@ -287,6 +300,7 @@ Gemini 与 Amazon Quick 模板生成的接入提示词默认就走 MCP。
 | | `ah agents [list \| pause <id> \| resume <id>]` | 列出在线能力目录或启停某个 Agent |
 | | `ah update [--check]` | 拉取最新代码、刷新 Skill 并热重启后台服务 |
 | **派单、呈递与收件箱** | `ah task <create \| list \| show \| reply \| cancel>` | 派单（支持多目标扇出、`context_id` 续接与 `--attach` 附件）与状态查询 |
+| | `ah schedule <run <id> [--every 6d] -- <cmd...> \| ok \| fail \| noop \| list>` | 零 Token 包裹本地命令或上报外部自管定时状态、查看定时任务 |
 | | `ah present [list \| approve <id> \| deny <id> \| reply <id>]` | 机主命令行处理 Ed25519 审批与追问回复 |
 | | `ah inbox <check \| list \| pop \| show \| claim \| done \| fail \| ask \| auth \| updates>` | 供无守护进程的独立终端 Agent 读写收件箱 |
 | **附件与 MCP** | `ah file <upload <path> \| download <id\|uri> [--out <path>]>` | 上传或下载 `hub://files/<id>` 附件 |

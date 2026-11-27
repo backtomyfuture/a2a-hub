@@ -37,12 +37,8 @@ const EDGE_EVERY_PRESETS = [
   { id: "7d", min: 10080, label: "每周一次" },
 ];
 
-function detectLocalTimezone() {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai";
-  } catch {
-    return "Asia/Shanghai";
-  }
+function resolveHubTimezone() {
+  return store.state?.hub_timezone || "Asia/Shanghai";
 }
 
 export function slugifyScheduleId(rawName, fallback = "job") {
@@ -82,6 +78,10 @@ export function resetSchedulePanelState(patch = {}) {
   };
 }
 
+export function isSchedulePanelOpen() {
+  return Boolean(panelState.open);
+}
+
 function healthBadge(sch) {
   const h = sch.health || "idle";
   if (h === "paused") {
@@ -111,13 +111,14 @@ function runBarClass(state) {
   if (state === "failed" || state === "rejected" || state === "canceled") return "is-fail";
   if (state === "input-required" || state === "auth-required") return "is-warn";
   if (state === "working" || state === "submitted") return "is-run";
-  if (state === "noop" || state === "skipped_overlap") return "is-noop";
+  if (state === "noop" || state === "skipped_overlap" || state === "skipped_paused") return "is-noop";
   return "is-empty";
 }
 
 function runStateLabel(state) {
   if (state === "noop") return "静默打卡（无新动作）";
   if (state === "skipped_overlap") return "上轮未完跳过";
+  if (state === "skipped_paused") return "目标暂停跳过";
   return stateLabel(state);
 }
 
@@ -257,7 +258,7 @@ function renderSchedulePanel(agents, schedules, hubUrl) {
 
   const driver = editing ? editing.driver : panelState.driver;
   const isHub = driver === "hub";
-  const defaultTz = editing?.timezone || detectLocalTimezone();
+  const defaultTz = editing?.timezone || resolveHubTimezone();
 
   if (isHub) {
     const existingCron = editing?.cron_expr || "";
@@ -480,24 +481,8 @@ function renderSchedulePanel(agents, schedules, hubUrl) {
   `;
 }
 
-export function renderSchedulesView(container, refreshFn) {
-  const s = store.state;
-  if (!s) return;
-
-  const schedules = s.schedules || [];
-  const agents = s.agents || [];
-  const agentMap = new Map(agents.map((a) => [a.id, a]));
-
-  const totalCount = schedules.length;
-  const hubCount = schedules.filter((x) => x.driver === "hub").length;
-  const edgeCount = totalCount - hubCount;
-  const healthyCount = schedules.filter((x) => x.health === "healthy" || x.health === "running").length;
-  const abnormalCount = schedules.filter((x) => isAbnormal(x)).length;
-  const pausedOrIdleCount = schedules.filter((x) => x.health === "paused" || x.health === "idle").length;
-
-  const filter = store.scheduleFilter || "all";
-  const query = String(store.scheduleSearch || "").trim().toLowerCase();
-
+function buildScheduleGroups(schedules, agentMap, filter, rawQuery) {
+  const query = String(rawQuery || "").trim().toLowerCase();
   const filtered = schedules.filter((sch) => {
     if (filter === "abnormal" && !isAbnormal(sch)) return false;
     if (filter === "hub" && sch.driver !== "hub") return false;
@@ -530,7 +515,148 @@ export function renderSchedulesView(container, refreshFn) {
     if (isAbnormal(sch)) g.abnormal_count += 1;
     g.items.push(sch);
   }
-  const groups = [...groupMap.values()].sort((a, b) => b.abnormal_count - a.abnormal_count || a.agent_name.localeCompare(b.agent_name));
+  return [...groupMap.values()].sort((a, b) => b.abnormal_count - a.abnormal_count || a.agent_name.localeCompare(b.agent_name));
+}
+
+function renderScheduleGroupsHtml(groups, totalCount) {
+  if (!groups.length) {
+    return `<div class="empty-box">
+      <div style="font-weight:600;margin-bottom:6px">${totalCount ? "当前筛选下暂无条目" : "还没有定时任务"}</div>
+      <div style="font-size:12px;margin-bottom:14px">
+        本机 CLI 可直接点下方创建定时派发；Grok Bot / Muse / Instinct 等外部自管定时任务点进去复制一句话即可自动上报状态。
+      </div>
+      ${!totalCount ? `<button type="button" class="btn btn-primary btn-sm" id="btn-empty-new-sch">+ 添加定时</button>` : ""}
+    </div>`;
+  }
+  return `<div class="stack-md">
+    ${groups
+      .map(
+        (g) => `
+      <section class="card schedule-group" style="padding:0;overflow:hidden">
+        <header class="schedule-group-head row-between">
+          <div class="row" style="min-width:0;flex-wrap:wrap">
+            <span class="dot ${!g.enabled ? "dot-paused" : g.online ? "dot-online" : "dot-offline"}"></span>
+            <button type="button" class="btn btn-ghost btn-sm" style="padding:2px 6px;font-weight:700;font-size:14px;color:var(--text)" data-open-agent="${escapeHtml(g.agent_id)}">
+              ${escapeHtml(g.agent_name)}
+            </button>
+            <span class="muted mono">${escapeHtml(g.agent_id)}</span>
+            <span class="pill">${escapeHtml(g.source)}</span>
+          </div>
+          <div class="row">
+            ${g.abnormal_count ? `<span class="pill pill-danger">${g.abnormal_count} 项异常</span>` : `<span class="pill pill-success">全正常</span>`}
+            <span class="muted" style="font-size:12px">${g.items.length} 项</span>
+          </div>
+        </header>
+        <div class="schedule-group-body">
+          ${g.items.map(renderScheduleRow).join("")}
+        </div>
+      </section>
+    `
+      )
+      .join("")}
+  </div>`;
+}
+
+function bindScheduleListEvents(listRoot, schedules, container, refreshFn, syncListRegion) {
+  if (!listRoot || typeof listRoot.querySelectorAll !== "function") return;
+
+  listRoot.querySelector("#btn-empty-new-sch")?.addEventListener("click", () => {
+    panelState = { ...panelState, open: true, editingKey: null };
+    renderSchedulesView(container, refreshFn);
+  });
+
+  listRoot.querySelectorAll("[data-sch-edit]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const key = btn.getAttribute("data-sch-edit");
+      const [aid, sid] = key.split(":::");
+      const curSchedules = store.state?.schedules || schedules;
+      const target = curSchedules.find((x) => x.agent_id === aid && x.id === sid);
+      panelState = { ...panelState, open: true, editingKey: key, driver: target?.driver || "edge" };
+      renderSchedulesView(container, refreshFn);
+    });
+  });
+
+  listRoot.querySelectorAll("[data-open-agent]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      setState({ selectedAgentId: btn.getAttribute("data-open-agent"), showSettingsDrawer: false });
+    });
+  });
+
+  listRoot.querySelectorAll("[data-jump-thread]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      setState({ activeTab: "threads", selectedThreadId: btn.getAttribute("data-jump-thread"), selectedThreadDetail: null });
+    });
+  });
+
+  listRoot.querySelectorAll("[data-sch-run]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const [agentId, schId] = btn.getAttribute("data-sch-run").split(":::");
+      const curSchedules = store.state?.schedules || schedules;
+      const target = curSchedules.find((x) => x.agent_id === agentId && x.id === schId);
+      if (!target) return;
+      try {
+        await api.triggerSchedule(agentId, schId);
+        showToast(`已触发「${target.name}」`);
+        await refreshFn();
+        if (isSchedulePanelOpen()) syncListRegion?.();
+      } catch (err) {
+        showToast(err.message, true);
+      }
+    });
+  });
+
+  listRoot.querySelectorAll("[data-sch-toggle]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const [agentId, schId] = btn.getAttribute("data-sch-toggle").split(":::");
+      const cur = btn.getAttribute("data-sch-enabled") === "1";
+      const curSchedules = store.state?.schedules || schedules;
+      const target = curSchedules.find((x) => x.agent_id === agentId && x.id === schId);
+      if (!target) return;
+      const isEdge = target.driver !== "hub";
+      try {
+        await api.upsertSchedule(agentId, schId, { enabled: !cur });
+        showToast(cur ? (isEdge ? "已静默告警" : "已暂停") : (isEdge ? "已恢复告警" : "已启用"));
+        await refreshFn();
+        if (isSchedulePanelOpen()) syncListRegion?.();
+      } catch (err) {
+        showToast(err.message, true);
+      }
+    });
+  });
+
+  listRoot.querySelectorAll("[data-sch-del]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const [agentId, schId] = btn.getAttribute("data-sch-del").split(":::");
+      if (!confirm(`确认移除「${schId}」吗？`)) return;
+      try {
+        await api.deleteSchedule(agentId, schId);
+        showToast("已移除");
+        await refreshFn();
+        if (isSchedulePanelOpen()) syncListRegion?.();
+      } catch (err) {
+        showToast(err.message, true);
+      }
+    });
+  });
+}
+
+export function renderSchedulesView(container, refreshFn) {
+  const s = store.state;
+  if (!s) return;
+
+  const schedules = s.schedules || [];
+  const agents = s.agents || [];
+  const agentMap = new Map(agents.map((a) => [a.id, a]));
+
+  const totalCount = schedules.length;
+  const hubCount = schedules.filter((x) => x.driver === "hub").length;
+  const edgeCount = totalCount - hubCount;
+  const healthyCount = schedules.filter((x) => x.health === "healthy" || x.health === "running").length;
+  const abnormalCount = schedules.filter((x) => isAbnormal(x)).length;
+  const pausedOrIdleCount = schedules.filter((x) => x.health === "paused" || x.health === "idle").length;
+
+  const filter = store.scheduleFilter || "all";
+  const groups = buildScheduleGroups(schedules, agentMap, filter, store.scheduleSearch || "");
 
   container.innerHTML = `
     <section class="kpi-grid">
@@ -568,58 +694,42 @@ export function renderSchedulesView(container, refreshFn) {
 
     ${renderSchedulePanel(agents, schedules, s.hub_url)}
 
-    ${
-      groups.length
-        ? `<div class="stack-md">
-            ${groups
-              .map(
-                (g) => `
-              <section class="card schedule-group" style="padding:0;overflow:hidden">
-                <header class="schedule-group-head row-between">
-                  <div class="row" style="min-width:0;flex-wrap:wrap">
-                    <span class="dot ${!g.enabled ? "dot-paused" : g.online ? "dot-online" : "dot-offline"}"></span>
-                    <button type="button" class="btn btn-ghost btn-sm" style="padding:2px 6px;font-weight:700;font-size:14px;color:var(--text)" data-open-agent="${escapeHtml(g.agent_id)}">
-                      ${escapeHtml(g.agent_name)}
-                    </button>
-                    <span class="muted mono">${escapeHtml(g.agent_id)}</span>
-                    <span class="pill">${escapeHtml(g.source)}</span>
-                  </div>
-                  <div class="row">
-                    ${g.abnormal_count ? `<span class="pill pill-danger">${g.abnormal_count} 项异常</span>` : `<span class="pill pill-success">全正常</span>`}
-                    <span class="muted" style="font-size:12px">${g.items.length} 项</span>
-                  </div>
-                </header>
-                <div class="schedule-group-body">
-                  ${g.items.map(renderScheduleRow).join("")}
-                </div>
-              </section>
-            `
-              )
-              .join("")}
-          </div>`
-        : `<div class="empty-box">
-            <div style="font-weight:600;margin-bottom:6px">${schedules.length ? "当前筛选下暂无条目" : "还没有定时任务"}</div>
-            <div style="font-size:12px;margin-bottom:14px">
-              本机 CLI 可直接点下方创建定时派发；Grok Bot / Muse / Instinct 等外部自管定时任务点进去复制一句话即可自动上报状态。
-            </div>
-            ${!schedules.length ? `<button type="button" class="btn btn-primary btn-sm" id="btn-empty-new-sch">+ 添加定时</button>` : ""}
-          </div>`
-    }
+    <div id="schedules-list-region">
+      ${renderScheduleGroupsHtml(groups, totalCount)}
+    </div>
   `;
 
+  const syncListRegion = () => {
+    const listRegion = container.querySelector("#schedules-list-region");
+    if (!listRegion) return;
+    const curState = store.state || s;
+    const curSchedules = curState.schedules || [];
+    const curAgentMap = new Map((curState.agents || []).map((a) => [a.id, a]));
+    const nextGroups = buildScheduleGroups(curSchedules, curAgentMap, store.scheduleFilter || "all", store.scheduleSearch || "");
+    listRegion.innerHTML = renderScheduleGroupsHtml(nextGroups, curSchedules.length);
+    bindScheduleListEvents(listRegion, curSchedules, container, refreshFn, syncListRegion);
+  };
+
   container.querySelectorAll("[data-sch-filter]").forEach((btn) => {
-    btn.addEventListener("click", () => setState({ scheduleFilter: btn.getAttribute("data-sch-filter") }));
+    btn.addEventListener("click", () => {
+      const nextFilter = btn.getAttribute("data-sch-filter");
+      if (isSchedulePanelOpen()) {
+        store.scheduleFilter = nextFilter;
+        container.querySelectorAll("[data-sch-filter]").forEach((b) => {
+          b.classList.toggle("active", b.getAttribute("data-sch-filter") === nextFilter);
+        });
+        syncListRegion();
+      } else {
+        setState({ scheduleFilter: nextFilter });
+      }
+    });
   });
 
+  // 搜索仅局部重绘列表区域，确保正在填写的新建/编辑面板草稿绝不被清空
   const searchInput = container.querySelector("#sch-search-input");
   searchInput?.addEventListener("input", (e) => {
     store.scheduleSearch = e.target.value;
-    renderSchedulesView(container, refreshFn);
-    const nextInput = container.querySelector("#sch-search-input");
-    if (nextInput) {
-      nextInput.focus();
-      nextInput.setSelectionRange(nextInput.value.length, nextInput.value.length);
-    }
+    syncListRegion();
   });
 
   container.querySelectorAll("[data-driver-switch]").forEach((btn) => {
@@ -683,23 +793,9 @@ export function renderSchedulesView(container, refreshFn) {
     panelState = { ...panelState, open: !panelState.open || Boolean(panelState.editingKey), editingKey: null };
     renderSchedulesView(container, refreshFn);
   });
-  container.querySelector("#btn-empty-new-sch")?.addEventListener("click", () => {
-    panelState = { ...panelState, open: true, editingKey: null };
-    renderSchedulesView(container, refreshFn);
-  });
   container.querySelector("#btn-close-new-sch")?.addEventListener("click", () => {
     panelState = { ...panelState, open: false, editingKey: null };
     renderSchedulesView(container, refreshFn);
-  });
-
-  container.querySelectorAll("[data-sch-edit]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const key = btn.getAttribute("data-sch-edit");
-      const [aid, sid] = key.split(":::");
-      const target = schedules.find((x) => x.agent_id === aid && x.id === sid);
-      panelState = { ...panelState, open: true, editingKey: key, driver: target?.driver || "edge" };
-      renderSchedulesView(container, refreshFn);
-    });
   });
 
   container.querySelector("#form-create-schedule")?.addEventListener("submit", async (e) => {
@@ -722,7 +818,7 @@ export function renderSchedulesView(container, refreshFn) {
 
     if (driver === "hub") {
       const cronExpr = String(fd.get("cron_expr") || "").trim();
-      const timezone = String(fd.get("timezone") || detectLocalTimezone()).trim();
+      const timezone = String(fd.get("timezone") || resolveHubTimezone()).trim();
       const extraRaw = String(fd.get("extra_to") || "")
         .split(",")
         .map((x) => x.trim())
@@ -759,61 +855,12 @@ export function renderSchedulesView(container, refreshFn) {
     }
   });
 
-  container.querySelectorAll("[data-open-agent]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      setState({ selectedAgentId: btn.getAttribute("data-open-agent"), showSettingsDrawer: false });
-    });
-  });
-
-  container.querySelectorAll("[data-jump-thread]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      setState({ activeTab: "threads", selectedThreadId: btn.getAttribute("data-jump-thread"), selectedThreadDetail: null });
-    });
-  });
-
-  container.querySelectorAll("[data-sch-run]").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      const [agentId, schId] = btn.getAttribute("data-sch-run").split(":::");
-      const target = schedules.find((x) => x.agent_id === agentId && x.id === schId);
-      if (!target) return;
-      try {
-        await api.triggerSchedule(agentId, schId);
-        showToast(`已触发「${target.name}」`);
-        await refreshFn();
-      } catch (err) {
-        showToast(err.message, true);
-      }
-    });
-  });
-
-  container.querySelectorAll("[data-sch-toggle]").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      const [agentId, schId] = btn.getAttribute("data-sch-toggle").split(":::");
-      const cur = btn.getAttribute("data-sch-enabled") === "1";
-      const target = schedules.find((x) => x.agent_id === agentId && x.id === schId);
-      if (!target) return;
-      const isEdge = target.driver !== "hub";
-      try {
-        await api.upsertSchedule(agentId, schId, { enabled: !cur });
-        showToast(cur ? (isEdge ? "已静默告警" : "已暂停") : (isEdge ? "已恢复告警" : "已启用"));
-        await refreshFn();
-      } catch (err) {
-        showToast(err.message, true);
-      }
-    });
-  });
-
-  container.querySelectorAll("[data-sch-del]").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      const [agentId, schId] = btn.getAttribute("data-sch-del").split(":::");
-      if (!confirm(`确认移除「${schId}」吗？`)) return;
-      try {
-        await api.deleteSchedule(agentId, schId);
-        showToast("已移除");
-        await refreshFn();
-      } catch (err) {
-        showToast(err.message, true);
-      }
-    });
-  });
+  const initialListRegion = container.querySelector("#schedules-list-region");
+  bindScheduleListEvents(
+    initialListRegion && typeof initialListRegion.querySelectorAll === "function" ? initialListRegion : container,
+    schedules,
+    container,
+    refreshFn,
+    syncListRegion
+  );
 }

@@ -194,7 +194,7 @@ CREATE TABLE IF NOT EXISTS schedules (
   pinned_context_id   TEXT,
   overlap_policy      TEXT NOT NULL DEFAULT 'skip',
   misfire_policy      TEXT NOT NULL DEFAULT 'fire_once',
-  triggerable         INTEGER NOT NULL DEFAULT 1,
+  triggerable         INTEGER NOT NULL DEFAULT 0,
   next_run_at         INTEGER,
   last_tick_at        INTEGER,
   last_run_at         INTEGER,
@@ -422,11 +422,12 @@ export function serializeMessage(row) {
 
 export function serializeSchedule(row) {
   if (!row) return null;
+  const driver = row.driver === "hub" ? "hub" : "edge";
   return {
     id: row.id,
     agent_id: row.agent_id,
     name: row.name,
-    driver: row.driver === "hub" ? "hub" : "edge",
+    driver,
     cron_expr: row.cron_expr || "",
     interval_min: Number(row.interval_min ?? 60),
     timezone: row.timezone || DEFAULT_TIMEZONE,
@@ -437,7 +438,7 @@ export function serializeSchedule(row) {
     pinned_context_id: row.pinned_context_id || null,
     overlap_policy: row.overlap_policy === "allow" ? "allow" : "skip",
     misfire_policy: row.misfire_policy === "skip" ? "skip" : "fire_once",
-    triggerable: row.triggerable === undefined || row.triggerable === null ? true : Boolean(row.triggerable),
+    triggerable: row.triggerable === undefined || row.triggerable === null ? driver === "hub" : Boolean(row.triggerable),
     next_run_at: row.next_run_at ?? null,
     last_tick_at: row.last_tick_at ?? null,
     last_run_at: row.last_run_at ?? null,
@@ -461,7 +462,7 @@ const SCHEDULE_MIGRATION_COLUMNS = [
   ["pinned_context_id", "TEXT"],
   ["overlap_policy", "TEXT NOT NULL DEFAULT 'skip'"],
   ["misfire_policy", "TEXT NOT NULL DEFAULT 'fire_once'"],
-  ["triggerable", "INTEGER NOT NULL DEFAULT 1"],
+  ["triggerable", "INTEGER NOT NULL DEFAULT 0"],
   ["next_run_at", "INTEGER"],
   ["last_tick_at", "INTEGER"],
   ["last_duration_ms", "INTEGER"],
@@ -1393,7 +1394,7 @@ export class HubStore {
           ? input.triggerable
           : existing?.triggerable !== undefined && existing?.triggerable !== null
             ? existing.triggerable
-            : true
+            : nextDriver === "hub"
       );
       const nextRunAt = pickNullableInt(input.next_run_at, existing?.next_run_at);
       const nextLastTickAt = pickNullableInt(input.last_tick_at, existing?.last_tick_at);
@@ -1421,7 +1422,7 @@ export class HubStore {
           nextPinnedCtx === (existing.pinned_context_id ?? null) &&
           nextOverlap === (existing.overlap_policy || "skip") &&
           nextMisfire === (existing.misfire_policy || "fire_once") &&
-          nextTriggerable === Number(existing.triggerable ?? 1) &&
+          nextTriggerable === Number(existing.triggerable ?? (nextDriver === "hub" ? 1 : 0)) &&
           nextEnabled === Number(existing.enabled);
         if (unchanged) {
           return serializeSchedule(existing);
@@ -1523,25 +1524,30 @@ export class HubStore {
     return rows.map((r) => String(r.id));
   }
 
-  listRecentScheduleTasks(agentId = null, limit = 500) {
-    const safeLimit = Math.min(Math.max(sqlInt(limit, 500), 1), 2000);
+  listRecentScheduleTasks(agentId = null, perScheduleLimit = 15) {
+    const safeLimit = Math.min(Math.max(sqlInt(perScheduleLimit, 15), 1), 100);
     const taskCols = `id, context_id, from_node, to_agent_id, source, schedule_id, state, title,
       CASE WHEN receipt_json IS NOT NULL AND json_valid(receipt_json) THEN json_extract(receipt_json, '$.summary') ELSE NULL END AS receipt_summary,
       CASE WHEN receipt_json IS NOT NULL AND json_valid(receipt_json) THEN substr(json_extract(receipt_json, '$.text'), 1, 300) ELSE NULL END AS receipt_text_head,
       error_message, created_at, completed_at`;
+    const where = agentId
+      ? "WHERE schedule_id IS NOT NULL AND to_agent_id = ?"
+      : "WHERE schedule_id IS NOT NULL";
+    const sql = `
+      SELECT id, context_id, from_node, to_agent_id, source, schedule_id, state, title,
+             receipt_summary, receipt_text_head, error_message, created_at, completed_at
+      FROM (
+        SELECT ${taskCols},
+               ROW_NUMBER() OVER (PARTITION BY to_agent_id, schedule_id ORDER BY created_at DESC) AS rn
+        FROM tasks
+        ${where}
+      )
+      WHERE rn <= ?
+      ORDER BY created_at DESC
+    `;
     return agentId
-      ? this.db.prepare(`
-          SELECT ${taskCols} FROM tasks
-          WHERE schedule_id IS NOT NULL AND to_agent_id = ?
-          ORDER BY created_at DESC
-          LIMIT ?
-        `).all(String(agentId), safeLimit)
-      : this.db.prepare(`
-          SELECT ${taskCols} FROM tasks
-          WHERE schedule_id IS NOT NULL
-          ORDER BY created_at DESC
-          LIMIT ?
-        `).all(safeLimit);
+      ? this.db.prepare(sql).all(String(agentId), safeLimit)
+      : this.db.prepare(sql).all(safeLimit);
   }
 
   hasActiveScheduleSiblingTask(scheduleId, contextId) {
@@ -1554,11 +1560,58 @@ export class HubStore {
     return row || null;
   }
 
+  hasFailedScheduleSiblingTask(scheduleId, contextId) {
+    const row = this.db.prepare(`
+      SELECT id, state FROM tasks
+      WHERE schedule_id = ? AND context_id = ?
+        AND state IN ('failed', 'rejected', 'canceled')
+      LIMIT 1
+    `).get(String(scheduleId), String(contextId));
+    return row || null;
+  }
+
   recordScheduleTaskActivity(
     agentId,
     scheduleId,
-    { taskId = null, outcome = undefined, durationMs = undefined, touchRunAt = false, clearAlert = false, now = Date.now() } = {}
+    { taskId = null, outcome = undefined, durationMs = undefined, touchRunAt = false, clearAlert = false, contextId = null, now = Date.now() } = {}
   ) {
+    const sid = String(scheduleId);
+    const targetAid = String(agentId);
+    let ownerAgentId = null;
+
+    const directRow = this.db
+      .prepare("SELECT agent_id FROM schedules WHERE agent_id = ? AND id = ?")
+      .get(targetAid, sid);
+    if (directRow) {
+      ownerAgentId = directRow.agent_id;
+    } else if (contextId) {
+      const siblingRow = this.db.prepare(`
+        SELECT s.agent_id
+        FROM schedules s
+        JOIN tasks t ON t.id = s.last_task_id
+        WHERE s.id = ? AND t.context_id = ?
+        LIMIT 1
+      `).get(sid, String(contextId));
+      if (siblingRow) ownerAgentId = siblingRow.agent_id;
+    }
+
+    if (!ownerAgentId) {
+      const hubRows = this.db
+        .prepare("SELECT agent_id, task_template_json FROM schedules WHERE id = ? AND driver = 'hub'")
+        .all(sid);
+      const matches = hubRows.filter((r) => {
+        const tpl = parseJson(r.task_template_json, {});
+        const toRaw = tpl?.to;
+        const list = (Array.isArray(toRaw) ? toRaw : toRaw ? [toRaw] : []).map((x) => String(x || "").trim());
+        return list.includes(targetAid);
+      });
+      if (matches.length === 1) {
+        ownerAgentId = matches[0].agent_id;
+      }
+    }
+
+    if (!ownerAgentId) return;
+
     const sets = [];
     const vals = [];
     if (touchRunAt) {
@@ -1582,7 +1635,7 @@ export class HubStore {
     }
     if (!sets.length) return;
     sets.push("updated_at = ?");
-    vals.push(sqlInt(now), String(agentId), String(scheduleId));
+    vals.push(sqlInt(now), String(ownerAgentId), sid);
     this.db
       .prepare(`UPDATE schedules SET ${sets.join(", ")} WHERE agent_id = ? AND id = ?`)
       .run(...vals);

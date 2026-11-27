@@ -20,6 +20,7 @@ import {
   writeLockedAppEnvVars,
 } from "../core/config.mjs";
 import { resolveApprovalSettings } from "../core/approval-links.mjs";
+import { DEFAULT_TIMEZONE } from "../core/cron.mjs";
 import { shellQuote } from "../core/receipt.mjs";
 import {
   MCP_PROTOCOL_VERSION,
@@ -267,6 +268,7 @@ export function startHubHttpServer({
       version: DAEMON_VERSION,
       hub_url: getHubUrl(),
       hub_device_id: hubDeviceId,
+      hub_timezone: schedules ? schedules.defaultTimezone() : DEFAULT_TIMEZONE,
       public_key: approvalPublicKey,
       auth_required: Boolean(getOwnerToken()),
       notifier: notifier ? notifier.configuredChannels() : {},

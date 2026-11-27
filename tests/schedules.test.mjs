@@ -6,7 +6,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { GatewayClient } from "../src/client/gateway-client.mjs";
-import { runScheduleCommand } from "../src/client/inbox.mjs";
+import { runInboxCommand, runScheduleCommand } from "../src/client/inbox.mjs";
 import {
   DEFAULT_TIMEZONE,
   defaultHubTimezone,
@@ -18,6 +18,8 @@ import {
   parseEveryToMinutes,
 } from "../src/core/cron.mjs";
 import { startHubRuntime } from "../src/core/hub-runtime.mjs";
+import { ScheduleService } from "../src/core/schedules.mjs";
+import { TaskService } from "../src/core/task-service.mjs";
 import { HubStore } from "../src/store/db.mjs";
 
 // 守护红线：5 段 Cron、宏、闰年 2/29 与 23 小时夏令时拨快日计算精确；
@@ -110,6 +112,13 @@ test("store migration: legacy 9-column schedules table upgrades cleanly without 
     assert.equal(migrated.interval_min, 1440);
     assert.equal(migrated.last_run_at, 1700000000000);
     assert.equal(migrated.last_duration_ms, null);
+    assert.equal(migrated.triggerable, false, "存量旧表迁移后外部条目 triggerable 默认必须为 false");
+    const taskSvc = new TaskService(store);
+    const schSvc = new ScheduleService(store, taskSvc);
+    assert.throws(
+      () => schSvc.triggerNow("grok-bot", "legacy-job"),
+      (err) => err.statusCode === 409 && err.code === "not_triggerable"
+    );
     store.close();
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -772,5 +781,449 @@ test("Web Console schedules view: no */6 preset, preset switch keeps draft, edit
     api.upsertSchedule = origUpsert;
     globalThis.document = origDoc;
     resetSchedulePanelState();
+  }
+});
+
+// 守护红线：
+// 1) tick()/triggerNow() 失败严禁静默吞错或立即跳过本期，应记日志、发脱敏 schedule.failed 告警、保持 next_run_at 等待冷却后重试，并在连续失败 3 次后推进；
+// 2) 单条坏 Cron 记录严禁连坐阻断队列中排在后面的健康定时任务。
+test("tick failure observability, retry retention, exhaustion advance, and corrupt-row isolation", async () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "a2a-tick-fail-"));
+  const ownerToken = "ah_tick_fail_owner";
+  const alerts = [];
+  const loggedErrors = [];
+
+  const rt = await startHubRuntime({
+    configDir,
+    listen: "127.0.0.1:0",
+    withDeviceDaemon: false,
+    env: {
+      AH_API_TOKEN: ownerToken,
+      AH_BARK_URL: "https://bark.example.test/push",
+    },
+    logger: {
+      log: () => {},
+      warn: () => {},
+      error: (msg) => loggedErrors.push(String(msg)),
+    },
+  });
+  rt.notifier.fetchFn = async (_url, init) => {
+    alerts.push(JSON.parse(init.body));
+    return { ok: true, status: 200 };
+  };
+
+  try {
+    const owner = new GatewayClient(rt.url, { token: ownerToken });
+    await owner.post("/api/v1/agents", { id: "worker-ok", name: "Worker OK", role: "worker", platform: "generic" });
+    await owner.post("/api/v1/agents", { id: "worker-good2", name: "Worker Good2", role: "worker", platform: "generic" });
+
+    const baseT = Date.parse("2026-11-26T00:10:00Z");
+    const due1 = Date.parse("2026-11-26T01:00:00Z");
+    const due2 = Date.parse("2026-11-26T02:00:00Z");
+
+    rt.schedules.upsertForAgent(
+      "worker-ok",
+      "retry-job",
+      {
+        name: "可重试巡检",
+        driver: "hub",
+        cron_expr: "0 * * * *",
+        timezone: "UTC",
+        grace_sec: 600,
+        task_template: { to: ["worker-ok"], input_text: "巡检" },
+      },
+      { now: baseT }
+    );
+    assert.equal(rt.store.getSchedule("worker-ok", "retry-job").next_run_at, due1);
+
+    const origDispatch = rt.taskService.dispatchTasks.bind(rt.taskService);
+    let failDispatch = true;
+    let dispatchCalls = 0;
+    rt.taskService.dispatchTasks = (...args) => {
+      dispatchCalls += 1;
+      if (failDispatch) {
+        throw new Error("模拟派单异常 Bearer sk_test_secret_999");
+      }
+      return origDispatch(...args);
+    };
+
+    // 第 1 次失败：记录日志、发一次脱敏告警、保留 next_run_at=due1 等待重试
+    const r1 = rt.schedules.tick(due1 + 5_000);
+    assert.equal(r1.failed.length, 1);
+    assert.equal(r1.failed[0].attempts, 1);
+    assert.equal(r1.failed[0].exhausted, false);
+    assert.equal(dispatchCalls, 1);
+    assert.ok(loggedErrors.some((m) => m.includes("retry-job") && m.includes("[REDACTED]")));
+    assert.equal(rt.store.getSchedule("worker-ok", "retry-job").next_run_at, due1, "首次失败不得提前推进 next_run_at");
+
+    await new Promise((r) => setTimeout(r, 25));
+    assert.equal(alerts.length, 1);
+    assert.match(alerts[0].title, /派发失败/);
+    assert.equal(alerts[0].body.includes("sk_test_secret_999"), false, "告警详情必须脱敏");
+    assert.ok(alerts[0].body.includes("[REDACTED]"));
+
+    const view1 = rt.schedules.listWithStatus("worker-ok", due1 + 10_000).find((s) => s.id === "retry-job");
+    assert.equal(view1.health, "failing");
+    assert.equal(view1.missed, false);
+    assert.match(view1.last_run.error_message, /派发失败.*\[REDACTED\]/);
+
+    // 60 秒冷却内再次 tick：不重打 dispatchTasks，不发重复告警
+    const rCooldown = rt.schedules.tick(due1 + 20_000);
+    assert.equal(dispatchCalls, 1);
+    assert.ok(rCooldown.skipped.some((s) => s.id === "retry-job" && s.reason === "failure_cooldown"));
+    assert.equal(alerts.length, 1);
+
+    // 过冷却后仍失败（第 2 次）：attempts=2，仍保留 due1，且不再重复推告警
+    const r2 = rt.schedules.tick(due1 + 70_000);
+    assert.equal(r2.failed.length, 1);
+    assert.equal(r2.failed[0].attempts, 2);
+    assert.equal(dispatchCalls, 2);
+    assert.equal(rt.store.getSchedule("worker-ok", "retry-job").next_run_at, due1);
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(alerts.length, 1);
+
+    // 恢复正常后重试成功：正常派发并将 next_run_at 推进到 due2
+    failDispatch = false;
+    const rRecover = rt.schedules.tick(due1 + 140_000);
+    assert.equal(rRecover.dispatched.length, 1);
+    assert.equal(rt.store.getSchedule("worker-ok", "retry-job").next_run_at, due2);
+
+    // 连续 3 次失败后耗尽重试并推进到下一周期
+    failDispatch = true;
+    rt.schedules.upsertForAgent(
+      "worker-ok",
+      "exhaust-job",
+      {
+        name: "耗尽测试",
+        driver: "hub",
+        cron_expr: "0 * * * *",
+        timezone: "UTC",
+        grace_sec: 600,
+        task_template: { to: ["worker-ok"], input_text: "test" },
+      },
+      { now: baseT }
+    );
+    const e1 = rt.schedules.tick(due1 + 10_000);
+    const e2 = rt.schedules.tick(due1 + 75_000);
+    const e3 = rt.schedules.tick(due1 + 140_000);
+    assert.equal(e1.failed.find((x) => x.id === "exhaust-job")?.attempts, 1);
+    assert.equal(e2.failed.find((x) => x.id === "exhaust-job")?.attempts, 2);
+    const ex3 = e3.failed.find((x) => x.id === "exhaust-job");
+    assert.equal(ex3?.attempts, 3);
+    assert.equal(ex3?.exhausted, true);
+    assert.equal(rt.store.getSchedule("worker-ok", "exhaust-job").next_run_at, due2);
+
+    // 单条损坏隔离：在 SQLite 直接插入一条排在前面的坏 Cron，不能影响排在后面的健康条目派发
+    failDispatch = false;
+    rt.taskService.dispatchTasks = origDispatch;
+    rt.store.db.prepare(`
+      INSERT INTO schedules (id, agent_id, name, driver, cron_expr, interval_min, timezone, next_run_at, enabled)
+      VALUES ('aaa-corrupt', 'worker-ok', '损坏条目', 'hub', 'bad-cron-expr', 60, 'UTC', ?, 1)
+    `).run(due2);
+    rt.schedules.upsertForAgent(
+      "worker-good2",
+      "zzz-healthy",
+      {
+        name: "后续健康任务",
+        driver: "hub",
+        cron_expr: "0 * * * *",
+        timezone: "UTC",
+        task_template: { to: ["worker-good2"], input_text: "ok" },
+      },
+      { now: due1 + 60_000 }
+    );
+    const isoRes = rt.schedules.tick(due2 + 10_000);
+    assert.ok(isoRes.failed.some((f) => f.id === "aaa-corrupt"), "损坏记录应被单独记录失败");
+    assert.ok(isoRes.dispatched.some((d) => d.id === "zzz-healthy"), "损坏记录后的健康定时任务必须正常派发");
+  } finally {
+    await rt.stop();
+    fs.rmSync(configDir, { recursive: true, force: true });
+  }
+});
+
+// 守护红线：
+// 1) 扇出定时任务中有部分目标暂停时，其余启用目标必须正常派发而不被 409 连坐跳过；
+// 2) 扇出副目标失败必须回写主 schedule 为 failing，且不能被先/后完成的主目标成功状态覆盖。
+test("fanout partial pause does not block healthy targets and peer failure sticks on owner schedule", async () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "a2a-fanout-fix-"));
+  const ownerToken = "ah_fanout_owner";
+
+  const rt = await startHubRuntime({
+    configDir,
+    listen: "127.0.0.1:0",
+    withDeviceDaemon: false,
+    env: { AH_API_TOKEN: ownerToken },
+  });
+
+  try {
+    const owner = new GatewayClient(rt.url, { token: ownerToken });
+    const aCreated = await owner.post("/api/v1/agents", { id: "agent-a", name: "Agent A", role: "worker", platform: "generic" });
+    const bCreated = await owner.post("/api/v1/agents", { id: "agent-b", name: "Agent B", role: "worker", platform: "generic" });
+    const cliA = new GatewayClient(rt.url, { token: aCreated.token });
+    const cliB = new GatewayClient(rt.url, { token: bCreated.token });
+
+    const baseT = Date.parse("2026-11-26T00:10:00Z");
+    const t1 = Date.parse("2026-11-26T01:05:00Z");
+    const t2 = Date.parse("2026-11-26T02:05:00Z");
+    const t3 = Date.parse("2026-11-26T03:05:00Z");
+
+    rt.schedules.upsertForAgent(
+      "agent-a",
+      "fanout-job",
+      {
+        name: "双节点扇出",
+        driver: "hub",
+        cron_expr: "0 * * * *",
+        timezone: "UTC",
+        overlap_policy: "skip",
+        task_template: { to: ["agent-a", "agent-b"], input_text: "测试扇出" },
+      },
+      { now: baseT }
+    );
+
+    // 暂停 agent-b 后 tick：agent-a 必须照常派发
+    rt.store.updateAgent("agent-b", { enabled: false });
+    const tickPartial = rt.schedules.tick(t1);
+    assert.equal(tickPartial.dispatched.length, 1);
+    assert.equal(tickPartial.dispatched[0].task_ids.length, 1);
+    const partialTid = tickPartial.dispatched[0].task_ids[0];
+    assert.equal(rt.store.getTask(partialTid).to_agent_id, "agent-a");
+    await cliA.claimTask(partialTid);
+    await cliA.complete(partialTid, { summary: "仅 A 完成" });
+
+    // 恢复 agent-b：A 先完成，B 后失败 -> 主 schedule 必须为 failing
+    rt.store.updateAgent("agent-b", { enabled: true });
+    const tickRun1 = rt.schedules.tick(t2);
+    assert.equal(tickRun1.dispatched[0].task_ids.length, 2);
+    const [a1, b1] = tickRun1.dispatched[0].task_ids;
+    await cliA.claimTask(a1);
+    await cliA.complete(a1, { summary: "A 完成" });
+    await cliB.claimTask(b1);
+    await cliB.fail(b1, { error: "B 执行失败" });
+    const afterBfail = rt.schedules.listWithStatus("agent-a", t2 + 10_000).find((s) => s.id === "fanout-job");
+    assert.equal(afterBfail.health, "failing");
+
+    // 下一轮：B 先失败，A 后完成 -> 主 schedule 仍必须保持 failing，不得被 A 完成覆盖
+    const tickRun2 = rt.schedules.tick(t3);
+    assert.equal(tickRun2.dispatched[0].task_ids.length, 2);
+    const [a2, b2] = tickRun2.dispatched[0].task_ids;
+    await cliB.claimTask(b2);
+    await cliB.fail(b2, { error: "B 再次失败" });
+    await cliA.claimTask(a2);
+    await cliA.complete(a2, { summary: "A 完成" });
+    const afterAlate = rt.schedules.listWithStatus("agent-a", t3 + 10_000).find((s) => s.id === "fanout-job");
+    assert.equal(afterAlate.health, "failing", "主目标后完成不得覆盖同轮副目标的失败状态");
+  } finally {
+    await rt.stop();
+    fs.rmSync(configDir, { recursive: true, force: true });
+  }
+});
+
+// 守护红线：
+// 1) 新建 hub 定时若 task_template.to 含不存在的目标返回 400 invalid_target；
+// 2) 缩短已有 edge 定时周期不因旧 last_tick_at 立即误炸超时告警；
+// 3) listRecentScheduleTasks 窗口函数防止高频任务挤爆低频任务历史；
+// 4) 恢复 `ah inbox pop --lease` 传参；
+// 5) Web 前端使用 hub_timezone、搜索/面板打开保护草稿以及 home.js 正确展示 noop 打卡与 running 状态。
+test("target validation, edge period shrink safety, per-schedule window query, inbox pop --lease, and web view fixes", async () => {
+  const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "a2a-misc-hub-"));
+  const cliDir = fs.mkdtempSync(path.join(os.tmpdir(), "a2a-misc-cli-"));
+  const ownerToken = "ah_misc_owner_tok";
+
+  const rt = await startHubRuntime({
+    configDir: hubDir,
+    listen: "127.0.0.1:0",
+    withDeviceDaemon: false,
+    env: { AH_API_TOKEN: ownerToken, AH_TIMEZONE: "Asia/Tokyo" },
+  });
+
+  try {
+    const owner = new GatewayClient(rt.url, { token: ownerToken });
+    const workerCreated = await owner.post("/api/v1/agents", { id: "worker-1", name: "Worker 1", role: "worker", platform: "generic" });
+    const workerClient = new GatewayClient(rt.url, { token: workerCreated.token });
+
+    // 1) 校验 task_template.to 存在性
+    await assert.rejects(
+      () =>
+        owner.upsertSchedule("worker-1", "bad-target", {
+          driver: "hub",
+          cron_expr: "0 9 * * *",
+          task_template: { to: ["worker-1", "ghost-agent"], input_text: "hi" },
+        }),
+      (err) => err.status === 400 && err.code === "invalid_target"
+    );
+
+    // 验证 /api/v1/state 输出 hub_timezone
+    const stateRes = await owner.get("/api/v1/state");
+    assert.equal(stateRes.hub_timezone, "Asia/Tokyo");
+
+    // 2) 已有 5 天前跑过的 edge 任务把周期从 7d 改为 15m，不得立刻炸出 missed 告警
+    const now = Date.now();
+    rt.schedules.recordEdgeRun(
+      "worker-1",
+      "shrink-edge",
+      { every: "7d", summary: "五天前跑过" },
+      { actor: { kind: "agent", id: "worker-1", role: "worker" }, now: now - 5 * 86_400_000 }
+    );
+    const shrunk = rt.schedules.upsertForAgent("worker-1", "shrink-edge", { every: "15m" }, { now }).schedule;
+    assert.ok(shrunk.next_run_at > now, "缩短周期后 next_run_at 必须以当前时刻重新推算至未来");
+    const tickAfterShrink = rt.schedules.tick(now + 1_000);
+    assert.equal(tickAfterShrink.missed_alerts.some((a) => a.id === "shrink-edge"), false);
+
+    // 3) 窗口函数防挤占：先写 3 条低频历史，再写 30 条高频更新记录，低频 3 条仍须完整保留
+    rt.schedules.upsertForAgent("worker-1", "low-freq", { name: "低频任务", driver: "edge", every: "7d" }, { now });
+    rt.schedules.upsertForAgent("worker-1", "high-freq", { name: "高频任务", driver: "edge", every: "5m" }, { now });
+    for (let i = 0; i < 3; i++) {
+      rt.taskService.ingestScheduleTask({
+        agentId: "worker-1",
+        scheduleId: "low-freq",
+        outcome: "completed",
+        summary: `低频第 ${i + 1} 次`,
+        now: now - 100_000 + i * 1000,
+      });
+    }
+    for (let i = 0; i < 30; i++) {
+      rt.taskService.ingestScheduleTask({
+        agentId: "worker-1",
+        scheduleId: "high-freq",
+        outcome: "completed",
+        summary: `高频第 ${i + 1} 次`,
+        now: now - 50_000 + i * 1000,
+      });
+    }
+    const lowView = rt.schedules.listWithStatus(null, now).find((s) => s.id === "low-freq");
+    assert.equal(lowView.recent_runs.length, 3, "高频任务不得挤爆低频任务的 recent_runs 统计窗口");
+    assert.equal(lowView.success_rate, 100);
+
+    // 4) 恢复 `ah inbox pop --lease` 传参
+    fs.writeFileSync(
+      path.join(cliDir, "config.json"),
+      JSON.stringify({ mode: "agent", agentId: "worker-1", hubUrl: rt.url, agentToken: workerCreated.token }),
+      { mode: 0o600 }
+    );
+    const dispatched = await owner.post("/api/v1/tasks", { to: "worker-1", title: "租约测试", input_text: "test" });
+    const tid = dispatched.tasks[0].id;
+    const silentIo = { log: () => {}, error: () => {} };
+    await runInboxCommand(["pop", "--lease", "180"], { configDir: cliDir, io: silentIo });
+    const claimedTask = rt.store.getTask(tid);
+    assert.equal(claimedTask.state, "working");
+    const actualLeaseMs = claimedTask.lease_until - claimedTask.claimed_at;
+    assert.ok(actualLeaseMs >= 175_000 && actualLeaseMs <= 185_000, `期望 lease 约 180s，实际为 ${actualLeaseMs}ms`);
+    await workerClient.complete(tid, { summary: "done" });
+
+    // 5) Web 前端：hub_timezone 生效、isSchedulePanelOpen 与搜索局部重绘不毁草稿、home.js 状态与时间口径一致
+    const {
+      isSchedulePanelOpen,
+      renderSchedulesView,
+      resetSchedulePanelState,
+    } = await import("../src/web/views/schedules.js");
+    const { renderHomeView } = await import("../src/web/views/home.js");
+    const { setState } = await import("../src/web/state.js");
+
+    function makeRichMockContainer() {
+      const listeners = new Map();
+      const elements = new Map();
+      return {
+        innerHTML: "",
+        elements,
+        querySelector(sel) {
+          if (!elements.has(sel)) {
+            const classes = new Set();
+            elements.set(sel, {
+              value: "",
+              textContent: "",
+              innerHTML: "",
+              classList: {
+                add: (c) => classes.add(c),
+                remove: (c) => classes.delete(c),
+                toggle: (c, force) => (force ? classes.add(c) : classes.delete(c)),
+                has: (c) => classes.has(c),
+              },
+              addEventListener(ev, fn) {
+                listeners.set(`${sel}:${ev}`, fn);
+              },
+              focus() {},
+              getAttribute: () => null,
+            });
+          }
+          return elements.get(sel);
+        },
+        querySelectorAll() {
+          return [];
+        },
+        trigger(sel, ev, eventObj) {
+          const fn = listeners.get(`${sel}:${ev}`);
+          if (!fn) throw new Error(`未绑定事件 ${sel}:${ev}`);
+          return fn(eventObj);
+        },
+      };
+    }
+
+    setState({
+      scheduleFilter: "all",
+      scheduleSearch: "",
+      state: {
+        hub_url: rt.url,
+        hub_timezone: "America/Los_Angeles",
+        agents: [
+          { id: "worker-1", name: "Worker 1", kind: "cloud", online: true, enabled: true },
+        ],
+        devices: [],
+        tasks: [],
+        pending_actions: [],
+        schedules: [
+          {
+            id: "edge-noop",
+            agent_id: "worker-1",
+            agent_name: "Worker 1",
+            name: "空转巡检",
+            driver: "edge",
+            interval_min: 15,
+            enabled: true,
+            health: "healthy",
+            last_tick_at: now - 30_000,
+            last_run_at: null,
+            last_outcome: "noop",
+          },
+          {
+            id: "hub-running",
+            agent_id: "worker-1",
+            agent_name: "Worker 1",
+            name: "执行中任务",
+            driver: "hub",
+            cron_expr: "0 9 * * *",
+            enabled: true,
+            health: "running",
+            last_tick_at: now - 10_000,
+            last_run_at: now - 10_000,
+          },
+        ],
+      },
+    });
+
+    resetSchedulePanelState({ open: true, driver: "hub", preset: "0 9 * * *" });
+    assert.equal(isSchedulePanelOpen(), true);
+    const schContainer = makeRichMockContainer();
+    renderSchedulesView(schContainer, async () => {});
+    assert.ok(schContainer.innerHTML.includes('value="America/Los_Angeles"'), "表单默认时区应采用 hub_timezone");
+
+    schContainer.innerHTML += "<!-- draft-kept -->";
+    schContainer.trigger("#sch-search-input", "input", { target: { value: "空转" } });
+    assert.ok(schContainer.innerHTML.endsWith("<!-- draft-kept -->"), "搜索输入只应局部刷新列表，绝不能重绘破坏打开中的表单");
+    assert.ok(schContainer.querySelector("#schedules-list-region").innerHTML.includes("空转巡检"));
+    assert.equal(schContainer.querySelector("#schedules-list-region").innerHTML.includes("执行中任务"), false);
+
+    resetSchedulePanelState({ open: false });
+    assert.equal(isSchedulePanelOpen(), false);
+
+    const homeContainer = makeRichMockContainer();
+    renderHomeView(homeContainer, async () => {});
+    assert.ok(homeContainer.innerHTML.includes("2/2"), "home 定时健康数应包含 healthy 与 running（2/2）");
+    assert.equal(homeContainer.innerHTML.includes("待首报"), false, "仅 noop 打卡（有 last_tick_at）不应显示待首报");
+    assert.ok(homeContainer.innerHTML.includes("30秒前") || homeContainer.innerHTML.includes("刚刚"));
+  } finally {
+    await rt.stop();
+    fs.rmSync(hubDir, { recursive: true, force: true });
+    fs.rmSync(cliDir, { recursive: true, force: true });
   }
 });

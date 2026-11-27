@@ -4,7 +4,7 @@
 
 - `config.json`：运行身份（`mode: "hub" | "device" | "agent"`）、设备 ID、监听地址或上行 `hubUrl`、`maxConcurrent`、Hub 验签公钥 `hubPublicKey`。
 - `workers.json`：本机自动发现与自定义的可执行 CLI 列表（权限边界、工作目录 `cwd`、模型选项与 `--resume` 模板完全由本文件决定，任务参数不可覆盖）。
-- `app.env`（`0600`）：机主 Token `AH_API_TOKEN`、公网基址 `AH_PUBLIC_URL` 及外部告警推送环境变量：
+- `app.env`（`0600`）：机主 Token `AH_API_TOKEN`、公网基址 `AH_PUBLIC_URL`、默认定时时区 `AH_TIMEZONE`（默认固定为 `Asia/Shanghai`，不受宿主机或容器 `UTC` 时区影响）及外部告警推送环境变量：
   - `AH_FEISHU_WEBHOOK`
   - `AH_BARK_URL`
   - `AH_TELEGRAM_BOT_TOKEN` + `AH_TELEGRAM_CHAT_ID`
@@ -38,6 +38,7 @@ node bin/ah.mjs up --config /data --skip-skill
 - `PORT` / `AH_LISTEN=0.0.0.0:8787`
 - `AH_API_TOKEN=<强随机口令>`
 - `AH_PUBLIC_URL=https://你的公网域名`（若平台提供了 `RAILWAY_PUBLIC_DOMAIN` 等变量也会自动推断）
+- `AH_TIMEZONE=Asia/Shanghai`：中台定时任务默认时区（默认已固定 `Asia/Shanghai` 防容器 `UTC` 偏移，可按需设为任意 IANA 时区）
 - `AH_NO_DEVICE=1`：镜像默认值，只运行中台，不在容器里挂载空的本机执行池。
 
 ### Railway
