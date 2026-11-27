@@ -20,6 +20,7 @@ import {
   writeLockedAppEnvVars,
 } from "../core/config.mjs";
 import { resolveApprovalSettings } from "../core/approval-links.mjs";
+import { DEFAULT_TIMEZONE } from "../core/cron.mjs";
 import { shellQuote } from "../core/receipt.mjs";
 import {
   MCP_PROTOCOL_VERSION,
@@ -267,6 +268,7 @@ export function startHubHttpServer({
       version: DAEMON_VERSION,
       hub_url: getHubUrl(),
       hub_device_id: hubDeviceId,
+      hub_timezone: schedules ? schedules.defaultTimezone() : DEFAULT_TIMEZONE,
       public_key: approvalPublicKey,
       auth_required: Boolean(getOwnerToken()),
       notifier: notifier ? notifier.configuredChannels() : {},
@@ -566,6 +568,47 @@ export function startHubHttpServer({
     if (method === "GET" && pathname === "/api/v1/schedules") {
       if (!requireOwner()) return;
       return sendJson(res, 200, { ok: true, schedules: schedules ? schedules.listWithStatus() : [] });
+    }
+
+    // 极简短路径打卡入口：持专属 Agent Token 时自动识别身份，默认返回精简回包省 Token（传 full=1 返回完整详情）。
+    m = /^\/api\/v1\/schedules\/([A-Za-z0-9._-]+)\/runs$/.exec(pathname);
+    if (method === "POST" && m) {
+      const scheduleId = m[1];
+      const body = await readJsonBody(req);
+      let targetAgentId = "";
+      if (actor.kind === "agent") {
+        const requested = String(body.agent_id || "").trim();
+        if (requested && requested !== actor.id) {
+          return sendError(res, 403, "无权上报其他 Agent 的定时运行状态", "forbidden");
+        }
+        targetAgentId = actor.id;
+      } else if (actor.kind === "owner") {
+        targetAgentId = String(body.agent_id || url.searchParams.get("agent") || "").trim();
+        if (!targetAgentId) {
+          return sendError(res, 400, "使用机主 Token 调用短路径时请指定 agent_id", "missing_agent_id");
+        }
+      } else {
+        return sendError(res, 403, "仅独立 Agent 或机主可上报定时状态", "forbidden");
+      }
+      const idempotencyKey =
+        body.window_key ||
+        body.idempotency_key ||
+        body.client_token ||
+        req.headers["idempotency-key"] ||
+        "";
+      const runRes = schedules.recordEdgeRun(targetAgentId, scheduleId, body, {
+        actor,
+        idempotencyKey,
+      });
+      if (url.searchParams.get("full") === "1" || body.full) {
+        return sendJson(res, 200, { ok: true, ...runRes });
+      }
+      return sendJson(res, 200, {
+        ok: true,
+        outcome: runRes.outcome,
+        ...(runRes.task?.id ? { task_id: runRes.task.id } : {}),
+        ...(runRes.muted ? { muted: true } : {}),
+      });
     }
 
     if (method === "GET" && pathname === "/api/v1/admin/settings") {
@@ -1055,11 +1098,17 @@ export function startHubHttpServer({
       const wasOnline = broker.isAgentOnline(existing);
       const updated = store.updateAgent(targetId, patch);
       store.touchAgentSeen(targetId, Date.now(), 0);
+      const mutedSchedules = store.listMutedScheduleIds(targetId);
       if (!wasOnline && updated.updated_at === existing.updated_at) {
         const seq = store.nextSeq();
         store.emitChange({ type: "agent.updated", seq, agentId: targetId, deviceId: existing.device_id });
       }
-      return sendJson(res, 200, { ok: true, agent: store.getAgent(updated.id), approval_public_key: approvalPublicKey });
+      return sendJson(res, 200, {
+        ok: true,
+        agent: store.getAgent(updated.id),
+        approval_public_key: approvalPublicKey,
+        muted_schedules: mutedSchedules,
+      });
     }
 
     m = /^\/api\/v1\/agents\/([A-Za-z0-9._-]+)$/.exec(pathname);
@@ -1263,19 +1312,74 @@ export function startHubHttpServer({
       return sendJson(res, 200, { ok: true, ...resUpd });
     }
 
+    m = /^\/api\/v1\/agents\/([A-Za-z0-9._-]+)\/schedules$/.exec(pathname);
+    if (method === "GET" && m) {
+      const agentId = m[1];
+      if (actor.kind !== "owner" && (actor.kind !== "agent" || actor.id !== agentId)) {
+        return sendError(res, 403, "无权查看其他 Agent 的定时条目", "forbidden");
+      }
+      const list = schedules ? schedules.listWithStatus(agentId) : [];
+      const mutedSchedules = list.filter((s) => !s.enabled).map((s) => s.id);
+      return sendJson(res, 200, { ok: true, schedules: list, muted_schedules: mutedSchedules });
+    }
+
+    m = /^\/api\/v1\/agents\/([A-Za-z0-9._-]+)\/schedules\/([A-Za-z0-9._-]+)\/runs$/.exec(pathname);
+    if (method === "POST" && m) {
+      const [, agentId, scheduleId] = m;
+      if (actor.kind !== "owner" && (actor.kind !== "agent" || actor.id !== agentId)) {
+        return sendError(res, 403, "无权上报其他 Agent 的定时运行回执", "forbidden");
+      }
+      const body = await readJsonBody(req);
+      const idempotencyKey =
+        body.window_key ||
+        body.idempotency_key ||
+        body.client_token ||
+        req.headers["idempotency-key"] ||
+        "";
+      const runRes = schedules.recordEdgeRun(agentId, scheduleId, body, {
+        actor,
+        idempotencyKey,
+      });
+      if (url.searchParams.get("full") === "1" || body.full) {
+        return sendJson(res, 200, { ok: true, ...runRes });
+      }
+      return sendJson(res, 200, {
+        ok: true,
+        outcome: runRes.outcome,
+        ...(runRes.task?.id ? { task_id: runRes.task.id } : {}),
+        ...(runRes.muted ? { muted: true } : {}),
+      });
+    }
+
+    m = /^\/api\/v1\/agents\/([A-Za-z0-9._-]+)\/schedules\/([A-Za-z0-9._-]+)\/trigger$/.exec(pathname);
+    if (method === "POST" && m) {
+      if (!requireOwner()) return;
+      const [, agentId, scheduleId] = m;
+      const body = await readJsonBody(req);
+      const trigRes = schedules.triggerNow(agentId, scheduleId, {
+        fromNode: "owner",
+        source: "manual",
+        title: body.title || "",
+        inputText: body.input_text || "",
+        contextId: body.context_id || "",
+        actor,
+      });
+      return sendJson(res, 200, { ok: true, ...trigRes });
+    }
+
     m = /^\/api\/v1\/agents\/([A-Za-z0-9._-]+)\/schedules\/([A-Za-z0-9._-]+)$/.exec(pathname);
     if (m) {
       const [, agentId, scheduleId] = m;
       if (actor.kind !== "owner" && (actor.kind !== "agent" || actor.id !== agentId)) {
-        return sendError(res, 403, "无权修改其他 Agent 的定时自报", "forbidden");
+        return sendError(res, 403, "无权修改其他 Agent 的定时条目", "forbidden");
       }
       if (method === "PUT") {
         const body = await readJsonBody(req);
-        const resSch = schedules.upsertForAgent(agentId, scheduleId, body);
+        const resSch = schedules.upsertForAgent(agentId, scheduleId, body, { actor });
         return sendJson(res, 200, { ok: true, ...resSch });
       }
       if (method === "DELETE") {
-        const ok = schedules.deleteForAgent(agentId, scheduleId);
+        const ok = schedules.deleteForAgent(agentId, scheduleId, { actor });
         if (!ok) return sendError(res, 404, "定时条目不存在", "not_found");
         return sendJson(res, 200, { ok: true });
       }

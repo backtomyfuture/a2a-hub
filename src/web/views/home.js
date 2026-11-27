@@ -338,7 +338,7 @@ function renderScheduleSummaryPanel(schedules, agentMap) {
     .sort((a, b) => {
       const pDiff = priority(a) - priority(b);
       if (pDiff !== 0) return pDiff;
-      return Number(b.last_run_at || 0) - Number(a.last_run_at || 0);
+      return Number(b.last_tick_at || b.last_run_at || 0) - Number(a.last_tick_at || a.last_run_at || 0);
     })
     .slice(0, 4);
 
@@ -354,9 +354,12 @@ function renderScheduleSummaryPanel(schedules, agentMap) {
               ${topSchedules
                 .map((sch) => {
                   const ag = agentMap.get(sch.agent_id);
-                  const targetAttr = sch.last_context_id
-                    ? `data-view-thread="${escapeHtml(sch.last_context_id)}"`
+                  const jumpCtx = sch.driver === "hub" ? sch.last_context_id : sch.last_run?.context_id;
+                  const targetAttr = jumpCtx
+                    ? `data-view-thread="${escapeHtml(jumpCtx)}"`
                     : `data-goto-schedules="1"`;
+                  const lastAt = sch.last_tick_at || sch.last_run_at;
+                  const timeText = lastAt ? formatRelativeTime(lastAt) : (sch.driver === "hub" ? "待触发" : "待首报");
                   return `
                     <div class="schedule-mini-row" ${targetAttr}>
                       ${agentAvatar(ag || { id: sch.agent_id }, { size: "lg" })}
@@ -366,7 +369,7 @@ function renderScheduleSummaryPanel(schedules, agentMap) {
                       </div>
                       <div class="host-load">
                         <span class="status-dot ${scheduleStatusDotClass(sch)}"></span>
-                        <span class="muted" style="font-size:11px">${sch.last_run_at ? formatRelativeTime(sch.last_run_at) : "待首报"}</span>
+                        <span class="muted" style="font-size:11px">${escapeHtml(timeText)}</span>
                       </div>
                     </div>
                   `;
@@ -405,7 +408,7 @@ export function renderHomeView(container, refreshFn) {
   const totalSlots = devices.filter((d) => d.enabled !== false).reduce((sum, d) => sum + Number(d.max_concurrent || 0), 0);
 
   const abnormalCount = schedules.filter(isAbnormalSchedule).length;
-  const healthyCount = schedules.filter((sch) => sch.health === "healthy").length;
+  const healthyCount = schedules.filter((sch) => sch.health === "healthy" || sch.health === "running").length;
   const runningSchCount = schedules.filter((sch) => sch.health === "running").length;
 
   // 首页只回答「此刻要关注什么」；按线程翻历史交给「对话线程」页。待我处理的任务已在上方卡片展示，看板不再重复

@@ -50,7 +50,16 @@ ah present deny <task_id> [--note "危险操作拒绝"]
 ah present reply <task_id> "确认使用方案 A"
 ```
 
-### 5. 运维与公网暴露
+### 5. 定时任务（`ah schedule`）
+```sh
+ah schedule list [--agent <agent_id>] [--json]
+ah schedule run <schedule_id> [--every 6d] [--name "名称"] -- <原命令与参数...>
+ah schedule ok <schedule_id> [简短说明] [--every 1d]
+ah schedule fail <schedule_id> [失败原因]
+ah schedule noop <schedule_id> [说明]
+```
+
+### 6. 运维与公网暴露
 ```sh
 ah up [--listen 0.0.0.0:8787] [--service]
 ah join http://<device_token>@<hub_host>:8787 --service

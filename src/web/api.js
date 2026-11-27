@@ -104,6 +104,11 @@ export const api = {
       method: "PUT",
       body: payload,
     }),
+  triggerSchedule: (agentId, scheduleId, payload = {}) =>
+    apiFetch(`/api/v1/agents/${encodeURIComponent(agentId)}/schedules/${encodeURIComponent(scheduleId)}/trigger`, {
+      method: "POST",
+      body: payload,
+    }),
   deleteSchedule: (agentId, scheduleId) =>
     apiFetch(`/api/v1/agents/${encodeURIComponent(agentId)}/schedules/${encodeURIComponent(scheduleId)}`, {
       method: "DELETE",

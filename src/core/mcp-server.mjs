@@ -469,6 +469,7 @@ async function executeMcpTool(toolName, rawArgs, ctx) {
       summary: updated.summary,
       skills: updated.skills,
       online: true,
+      muted_schedules: store.listMutedScheduleIds(targetId),
     };
   }
 

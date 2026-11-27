@@ -1,10 +1,13 @@
-// 本地 Agent 收件箱与人类接入辅助（`ah inbox` 与 `ah present`）。
+// 本地 Agent 收件箱、人类审批与定时打卡 CLI（`ah inbox`、`ah present` 与 `ah schedule`）。
 // 仅走 Hub REST API，不直接碰 SQLite。
 
+import { spawn } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { GatewayClient } from "./gateway-client.mjs";
 import { loadConfigJson, loadOwnerToken, readLiveHubUrl } from "../core/config.mjs";
+import { DEFAULT_TIMEZONE } from "../core/cron.mjs";
 import { guessMimeByFilename } from "../store/files.mjs";
 
 export async function uploadLocalAttachments(client, rawAttach, { taskId = null } = {}) {
@@ -206,6 +209,154 @@ export async function runPresentCommand(args, { configDir, io = console } = {}) 
   }
 
   throw new Error(`未知 present 子命令: ${sub}`);
+}
+
+export async function runScheduleCommand(args, { configDir, io = console, spawnFn = spawn } = {}) {
+  // 切分 `--` 之后的被包裹命令（供 `ah schedule run <id> --every 6d -- ./my-job.sh` 零侵入包裹执行）
+  const dashIdx = args.indexOf("--");
+  const headArgs = dashIdx >= 0 ? args.slice(0, dashIdx) : args;
+  const wrappedCmd = dashIdx >= 0 ? args.slice(dashIdx + 1) : [];
+
+  const flags = parseSimpleFlags(headArgs);
+  const sub = flags._[0] || "list";
+  const pos = flags._.slice(1);
+  const { client, agentId } = makeClientForConfig(configDir, { hubUrl: flags.hub, token: flags.token });
+  const targetAgent = (typeof flags.agent === "string" ? flags.agent : "") || agentId;
+
+  const postRun = (scheduleId, payload) => {
+    if (targetAgent) {
+      return client.reportScheduleRun(targetAgent, scheduleId, payload);
+    }
+    return client.post(`/api/v1/schedules/${encodeURIComponent(scheduleId)}/runs`, payload);
+  };
+
+  if (sub === "list") {
+    const pathUrl = targetAgent
+      ? `/api/v1/agents/${encodeURIComponent(targetAgent)}/schedules`
+      : "/api/v1/schedules";
+    const r = await client.get(pathUrl);
+    if (flags.json) {
+      io.log(JSON.stringify(r.schedules || [], null, 2));
+      return 0;
+    }
+    for (const s of r.schedules || []) {
+      const expr = s.cron_expr ? `${s.cron_expr} (${s.timezone || DEFAULT_TIMEZONE})` : `every ${s.interval_min}m`;
+      io.log(
+        `${s.agent_id}/${s.id}  [${(s.driver || "edge").padEnd(4)} | ${(s.health || "idle").padEnd(8)}]  ${expr}  | ${s.name}`
+      );
+    }
+    return 0;
+  }
+
+  // 零 Token 包裹执行任意本地命令：直接传参数数组不经 shell（防引号丢失与注入），收到信号终止一律判失败。
+  if (sub === "run") {
+    const scheduleId = pos[0];
+    const cmdParts = wrappedCmd.length ? wrappedCmd : pos.slice(1);
+    if (!scheduleId || !cmdParts.length) {
+      throw new Error("用法: ah schedule run <schedule_id> [--every 6d] [--name 名称] -- <原命令与参数...>");
+    }
+    const outStream = io === console ? process.stdout : io?.stdout;
+    const errStream = io === console ? process.stderr : io?.stderr;
+    const startedAt = Date.now();
+    const execRes = await new Promise((resolve) => {
+      let outTail = "";
+      let errTail = "";
+      let settled = false;
+      const finish = (val) => {
+        if (settled) return;
+        settled = true;
+        resolve(val);
+      };
+      const child = spawnFn(cmdParts[0], cmdParts.slice(1), {
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+      });
+      child.stdout?.on("data", (chunk) => {
+        outStream?.write?.(chunk);
+        outTail = (outTail + chunk.toString("utf8")).slice(-1200);
+      });
+      child.stderr?.on("data", (chunk) => {
+        errStream?.write?.(chunk);
+        errTail = (errTail + chunk.toString("utf8")).slice(-1200);
+      });
+      child.on("error", (err) => finish({ code: 1, signal: null, outTail, errTail: err.message }));
+      child.on("close", (code, signal) => {
+        if (signal) {
+          const sigNum = os.constants?.signals?.[signal] || 0;
+          finish({ code: sigNum ? 128 + sigNum : 1, signal, outTail, errTail });
+          return;
+        }
+        finish({ code: typeof code === "number" ? code : 1, signal: null, outTail, errTail });
+      });
+    });
+
+    const durationMs = Math.max(0, Date.now() - startedAt);
+    const lastLine = (txt) =>
+      String(txt || "")
+        .trim()
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .pop() || "";
+
+    const ok = execRes.code === 0 && !execRes.signal;
+    try {
+      await postRun(scheduleId, {
+        outcome: ok ? "completed" : "failed",
+        ...(flags.name ? { name: String(flags.name) } : {}),
+        ...(flags.every ? { every: String(flags.every) } : {}),
+        ...(flags.cron ? { cron_expr: String(flags.cron) } : {}),
+        ...(flags.timezone ? { timezone: String(flags.timezone) } : {}),
+        ...(flags.window ? { window_key: String(flags.window) } : {}),
+        duration_ms: durationMs,
+        ...(ok
+          ? { summary: flags.summary || lastLine(execRes.outTail) || "执行成功" }
+          : {
+              error:
+                flags.error ||
+                lastLine(execRes.errTail) ||
+                (execRes.signal ? `进程被信号终止 (${execRes.signal})` : lastLine(execRes.outTail) || `命令退出码 ${execRes.code}`),
+            }),
+      });
+    } catch (err) {
+      io.error?.(`[ah schedule] 上报状态失败: ${err?.message || err}`);
+    }
+    return execRes.code;
+  }
+
+  if (sub === "ok" || sub === "fail" || sub === "noop") {
+    const scheduleId = pos[0];
+    const positionalMsg = pos.slice(1).join(" ").trim();
+    if (!scheduleId) {
+      throw new Error(`用法: ah schedule ${sub} <schedule_id> [简短说明] [--every 6d] [--name 名称]`);
+    }
+    const outcome = sub === "fail" ? "failed" : sub === "noop" ? "noop" : "completed";
+    const attachments = outcome === "completed" ? await uploadLocalAttachments(client, flags.attach) : [];
+    const msg = flags.summary || flags.text || positionalMsg;
+    const payload = {
+      outcome,
+      ...(flags.name ? { name: String(flags.name) } : {}),
+      ...(flags.every ? { every: String(flags.every) } : {}),
+      ...(flags.cron ? { cron_expr: String(flags.cron) } : {}),
+      ...(flags.timezone ? { timezone: String(flags.timezone) } : {}),
+      ...(flags.window ? { window_key: String(flags.window) } : {}),
+      ...(flags.title ? { title: String(flags.title) } : {}),
+      ...(outcome === "completed"
+        ? {
+            summary: msg || "完成",
+            ...(flags.text ? { text: String(flags.text) } : {}),
+          }
+        : {}),
+      ...(outcome === "failed" ? { error: String(flags.error || msg || "执行失败") } : {}),
+      ...(outcome === "noop" && msg ? { summary: msg } : {}),
+      ...(attachments.length ? { attachments } : {}),
+    };
+    const r = await postRun(scheduleId, payload);
+    io.log(JSON.stringify(r, null, 2));
+    return 0;
+  }
+
+  throw new Error(`未知 schedule 子命令: ${sub}（支持 list | run | ok | fail | noop）`);
 }
 
 const BOOLEAN_FLAGS = new Set([

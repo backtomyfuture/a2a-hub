@@ -5,7 +5,7 @@ a2a-hub：自托管个人版多 Agent 编排中台（基于 A2A 八态数据模�
 
 ## 目录与职责
 
-- `bin/ah.mjs`：CLI 分发 `up | join | setup | daemon | expose | service | doctor | update | agents | task | present | inbox`（自动检测代理并重拉起 `NODE_USE_ENV_PROXY=1`，维护 `daemon.lock`）。
+- `bin/ah.mjs`：CLI 分发 `up | join | setup | daemon | expose | service | doctor | update | agents | workers | task | schedule | file | present | inbox | mcp`（自动检测代理并重拉起 `NODE_USE_ENV_PROXY=1`，维护 `daemon.lock`）。
 - `src/store/db.mjs`：`HubStore`（基于内置 `node:sqlite` `DatabaseSync` + WAL + `BEGIN IMMEDIATE` 单事务提交 + 后置变更钩子），统一持久化 `meta`、`devices`、`agents`、`tasks`、`messages`、`schedules`、`idempotency`、`watermarks`、`files`。
 - `src/store/files.mjs`：`FileStore` 与 `FileRetentionService`，共享 `hub.db` `files` 表并在 `<configDir>/files/blobs` 落地中转文件。
 - `src/core/config.mjs`：加载 `config.json`、`workers.json`、`app.env`；自动发现本机 `claude` / `codex` / `opencode` / `gemini` / `aider` / `goose` CLI 与默认模型；强制校验 `EXEC_CONTROL_KEYS`。
@@ -15,11 +15,11 @@ a2a-hub：自托管个人版多 Agent 编排中台（基于 A2A 八态数据模�
 - `src/core/approval-links.mjs` / `src/server/approval-page.mjs`：一次性审批链接（HMAC 令牌、限时、单次使用）与 `/approve/<令牌>` 确认页；审批超时等设置解析。
 - `src/core/feishu-ws.mjs` / `src/core/feishu-approval.mjs`：零依赖飞书长连接（pbbp2 帧协议）与飞书应用审批卡片渠道（审批人白名单）。
 - `src/core/templates.mjs`：11 套内置平台模板（`DEFAULT_AGENT_TEMPLATES`，写入配置目录 `agent_templates.json` 并增量合并）及一键接入提示词/设备挂载命令生成器。
-- `src/core/webhooks.mjs` / `src/core/notifier.mjs` / `src/core/schedules.mjs`：HMAC-SHA256 签名 Webhook 门铃（`redirect: "manual"` 防 SSRF 重定向）、飞书/Bark/Telegram/通用 Webhook 机主实时推送、定时任务自报观测。
+- `src/core/webhooks.mjs` / `src/core/notifier.mjs` / `src/core/cron.mjs` / `src/core/schedules.mjs`：HMAC-SHA256 签名 Webhook 门铃（`redirect: "manual"` 防 SSRF 重定向）、飞书/Bark/Telegram/通用 Webhook 机主实时推送（含敏感凭据脱敏截断）、零依赖 5 段 IANA 时区 Cron 引擎与双模式定时调度（`hub` 中台触发 + `edge` 外部自管跑完打卡与异常/超时未报告警）。
 - `src/core/receipt.mjs` / `src/core/session-store.mjs` / `src/core/proc.mjs`：CLI 命令安全渲染、`stdout` JSON/JSONL 解析与 `(context_id, worker_key)` 会话续接。
 - `src/core/hub-runtime.mjs`：单进程拉起 Hub（SQLite + HTTP 网关 + 本机 `DeviceDaemon`）。
 - `src/server/auth.mjs` / `src/server/http-server.mjs`：机主口令 / `HttpOnly` Cookie 会话 / 设备 Token / Agent Token 分级鉴权与防冒充路由守卫，暴露全套 `/api/v1/*` 接口与托管 `src/web/` 控制台。
-- `src/client/`：`GatewayClient`、`DeviceDaemon`（支持 `maxConcurrent` 真并发池 + 同 `(context_id, worker_key)` 串行锁）、`AgentDaemon` 与 `inbox`/`present` CLI 实现。
+- `src/client/`：`GatewayClient`、`DeviceDaemon`（支持 `maxConcurrent` 真并发池 + 同 `(context_id, worker_key)` 串行锁）、`AgentDaemon` 与 `inbox`/`present`/`schedule` CLI 实现。
 - `src/cli/`：`setup.mjs`、`doctor.mjs`、`expose.mjs`（Tailscale Funnel 与 Cloudflare WAF Bot 探针）、`service.mjs`（macOS LaunchAgent / Linux systemd + `--ensure` / Windows schtasks）、`update.mjs`。
 - `src/web/`：零构建原生 HTML + CSS + Browser ESM Web 控制台（`待办概览`、`Agent 与设备` 3 秒可读卡片与详情抽屉、2 入口新增向导、多 Agent 扇出派单、`对话线程`、`设置与定时`）。
 - `skills/`：2×2 四类 Skill（`ah`、`ah-inbox`、`a2a-leader`、`a2a-worker`）与轻量检查脚本 `skills/a2a-check/*`。

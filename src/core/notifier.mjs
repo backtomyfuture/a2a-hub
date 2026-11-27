@@ -4,6 +4,19 @@
 import { validateWebhookUrl } from "./webhooks.mjs";
 import { BROWSER_USER_AGENT } from "./config.mjs";
 
+// 推送外部通知前对摘要/报错文本做单行压平、凭据脱敏与长度截断，防止 stderr 中的 Token 或密钥直接外发到飞书/Telegram。
+export function sanitizeAlertDetail(raw, maxLen = 160) {
+  const flat = String(raw || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]")
+    .replace(/\bah_[A-Za-z0-9_]+\b/g, "ah_[REDACTED]")
+    .replace(/([?&](?:token|access_token|api_key|key|secret|password)=)[^&\s]+/gi, "$1[REDACTED]")
+    .replace(/((?:token|api_key|secret|password)\s*[:=]\s*)[^\s,;]+/gi, "$1[REDACTED]");
+  if (flat.length <= maxLen) return flat;
+  return `${flat.slice(0, maxLen)}…`;
+}
+
 export class ExternalNotifier {
   constructor(env = {}, { fetchFn = globalThis.fetch, hubUrlResolver = null, approvalLinkResolver = null } = {}) {
     this.env = env;
@@ -135,7 +148,28 @@ export class ExternalNotifier {
   }
 
   handleEvent(event) {
-    if (!event || !event.taskId) return;
+    if (!event) return;
+    if (event.type === "schedule.missed") {
+      const dedupeKey = `schedule.missed:${event.agentId || ""}:${event.scheduleId || ""}:${event.seq || 0}`;
+      if (!this._remember(dedupeKey)) return;
+      const base = typeof this.hubUrlResolver === "function" ? String(this.hubUrlResolver() || "").replace(/\/+$/, "") : "";
+      const title = "a2a-hub · 定时任务超时未报";
+      const detail = sanitizeAlertDetail(event.reason || "超过预期调度窗口仍未打卡或执行", 160);
+      const body = `Agent: ${event.agentName || event.agentId || "-"}\n定时: ${event.scheduleName || event.scheduleId || "-"}\n详情: ${detail}`;
+      void this.sendAlert({ title, body, link: base ? `${base}/` : "", event }).catch(() => {});
+      return;
+    }
+    if (event.type === "schedule.failed") {
+      const dedupeKey = `schedule.failed:${event.agentId || ""}:${event.scheduleId || ""}:${event.seq || 0}`;
+      if (!this._remember(dedupeKey)) return;
+      const base = typeof this.hubUrlResolver === "function" ? String(this.hubUrlResolver() || "").replace(/\/+$/, "") : "";
+      const title = "a2a-hub · 定时任务派发失败";
+      const detail = sanitizeAlertDetail(event.reason || event.error || "定时派发异常", 160);
+      const body = `Agent: ${event.agentName || event.agentId || "-"}\n定时: ${event.scheduleName || event.scheduleId || "-"}\n详情: ${detail}`;
+      void this.sendAlert({ title, body, link: base ? `${base}/` : "", event }).catch(() => {});
+      return;
+    }
+    if (!event.taskId) return;
     const mode = String(this.env.AH_NOTIFY_ON || "action").toLowerCase();
     const actionable = ["task.auth_required", "task.input_required", "task.failed"].includes(event.type);
     const completed = event.type === "task.completed";
@@ -151,7 +185,8 @@ export class ExternalNotifier {
       "task.completed": "任务已完成",
     };
     const title = `a2a-hub · ${labelMap[event.type] || event.type}`;
-    const detail = event.prompt || event.reason || event.error || event.summary || event.title || event.taskId;
+    const rawDetail = event.prompt || event.reason || event.error || event.summary || event.title || event.taskId;
+    const detail = sanitizeAlertDetail(rawDetail, 160);
     const body = `Agent: ${event.agentId || "-"}\n任务: ${event.title || event.taskId}\n详情: ${detail}`;
     const link = this._deepLink(event);
     let approvalUrl = "";
