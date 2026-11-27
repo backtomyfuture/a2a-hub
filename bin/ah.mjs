@@ -25,7 +25,7 @@ import { startHubRuntime } from "../src/core/hub-runtime.mjs";
 import { DeviceDaemon } from "../src/client/device-daemon.mjs";
 import { AgentDaemon } from "../src/client/agent-daemon.mjs";
 import { GatewayClient } from "../src/client/gateway-client.mjs";
-import { parseSimpleFlags, runInboxCommand, runPresentCommand, uploadLocalAttachments } from "../src/client/inbox.mjs";
+import { parseSimpleFlags, runInboxCommand, runPresentCommand, runScheduleCommand, uploadLocalAttachments } from "../src/client/inbox.mjs";
 import { FILE_ID_RE, extractHubFileId, guessMimeByFilename } from "../src/store/files.mjs";
 import { runMcpStdioCommand } from "../src/core/mcp-server.mjs";
 import { runAgentSetup, runDeviceJoin, runHubSetup, runInteractiveSetup } from "../src/cli/setup.mjs";
@@ -154,6 +154,7 @@ function helpText() {
   ah workers <list | scan | add | remove> [...]
       管理本机 workers.json 可执行 Worker 列表（查看、增量扫描新 CLI、新增、移除）
   ah task <create | list | show | reply | cancel> [...]
+  ah schedule <run <id> [--every 6d] -- <cmd...> | ok <id> [摘要] | fail <id> [原因] | noop <id> | list>
   ah file <upload <filepath> | download <file_id|uri> [--out <filepath>]>
   ah present [list | approve <id> | deny <id> | reply <id> <text>]
   ah inbox <check | list | pop | show | claim | complete | done | fail | ask | auth | updates> [...]
@@ -377,6 +378,10 @@ async function main() {
 
   if (cmd === "inbox") {
     return await runInboxCommand(restArgs, { configDir });
+  }
+
+  if (cmd === "schedule") {
+    return await runScheduleCommand(restArgs, { configDir });
   }
 
   if (cmd === "mcp") {

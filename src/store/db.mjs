@@ -6,6 +6,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { DEFAULT_TIMEZONE } from "../core/cron.mjs";
 import { FILE_ID_RE, extractHubFileId } from "./files.mjs";
 
 export function hashToken(raw) {
@@ -179,15 +180,32 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 CREATE TABLE IF NOT EXISTS schedules (
-  id                TEXT NOT NULL,
-  agent_id          TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
-  name              TEXT NOT NULL,
-  cron_expr         TEXT NOT NULL DEFAULT '',
-  interval_min      INTEGER NOT NULL DEFAULT 60,
-  summary           TEXT NOT NULL DEFAULT '',
-  last_run_at       INTEGER,
-  last_task_id      TEXT,
-  enabled           INTEGER NOT NULL DEFAULT 1,
+  id                  TEXT NOT NULL,
+  agent_id            TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  name                TEXT NOT NULL,
+  driver              TEXT NOT NULL DEFAULT 'edge',
+  cron_expr           TEXT NOT NULL DEFAULT '',
+  interval_min        INTEGER NOT NULL DEFAULT 60,
+  timezone            TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+  grace_sec           INTEGER,
+  summary             TEXT NOT NULL DEFAULT '',
+  task_template_json  TEXT NOT NULL DEFAULT '{}',
+  context_mode        TEXT NOT NULL DEFAULT 'per_run',
+  pinned_context_id   TEXT,
+  overlap_policy      TEXT NOT NULL DEFAULT 'skip',
+  misfire_policy      TEXT NOT NULL DEFAULT 'fire_once',
+  triggerable         INTEGER NOT NULL DEFAULT 1,
+  next_run_at         INTEGER,
+  last_tick_at        INTEGER,
+  last_run_at         INTEGER,
+  last_duration_ms    INTEGER,
+  last_outcome        TEXT,
+  last_task_id        TEXT,
+  alerted_missed_at   INTEGER,
+  recent_ticks_json   TEXT NOT NULL DEFAULT '[]',
+  enabled             INTEGER NOT NULL DEFAULT 1,
+  created_at          INTEGER,
+  updated_at          INTEGER,
   PRIMARY KEY (agent_id, id)
 );
 
@@ -240,6 +258,7 @@ CREATE INDEX IF NOT EXISTS idx_files_task ON files(task_id);
 CREATE INDEX IF NOT EXISTS idx_file_links_file ON file_links(file_id);
 CREATE INDEX IF NOT EXISTS idx_file_links_task ON file_links(task_id);
 CREATE INDEX IF NOT EXISTS idx_file_links_context ON file_links(context_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_schedule ON tasks(to_agent_id, schedule_id, created_at DESC);
 `;
 
 export function serializeDevice(row, extra = {}) {
@@ -407,14 +426,51 @@ export function serializeSchedule(row) {
     id: row.id,
     agent_id: row.agent_id,
     name: row.name,
+    driver: row.driver === "hub" ? "hub" : "edge",
     cron_expr: row.cron_expr || "",
     interval_min: Number(row.interval_min ?? 60),
+    timezone: row.timezone || DEFAULT_TIMEZONE,
+    grace_sec: row.grace_sec !== null && row.grace_sec !== undefined ? Number(row.grace_sec) : null,
     summary: row.summary || "",
+    task_template: parseJson(row.task_template_json, {}),
+    context_mode: row.context_mode === "rolling" ? "rolling" : "per_run",
+    pinned_context_id: row.pinned_context_id || null,
+    overlap_policy: row.overlap_policy === "allow" ? "allow" : "skip",
+    misfire_policy: row.misfire_policy === "skip" ? "skip" : "fire_once",
+    triggerable: row.triggerable === undefined || row.triggerable === null ? true : Boolean(row.triggerable),
+    next_run_at: row.next_run_at ?? null,
+    last_tick_at: row.last_tick_at ?? null,
     last_run_at: row.last_run_at ?? null,
+    last_duration_ms: row.last_duration_ms !== null && row.last_duration_ms !== undefined ? Number(row.last_duration_ms) : null,
+    last_outcome: row.last_outcome || null,
     last_task_id: row.last_task_id ?? null,
+    alerted_missed_at: row.alerted_missed_at ?? null,
+    recent_ticks: parseJson(row.recent_ticks_json, []),
     enabled: Boolean(row.enabled),
+    created_at: row.created_at ?? null,
+    updated_at: row.updated_at ?? null,
   };
 }
+
+const SCHEDULE_MIGRATION_COLUMNS = [
+  ["driver", "TEXT NOT NULL DEFAULT 'edge'"],
+  ["timezone", "TEXT NOT NULL DEFAULT 'Asia/Shanghai'"],
+  ["grace_sec", "INTEGER"],
+  ["task_template_json", "TEXT NOT NULL DEFAULT '{}'"],
+  ["context_mode", "TEXT NOT NULL DEFAULT 'per_run'"],
+  ["pinned_context_id", "TEXT"],
+  ["overlap_policy", "TEXT NOT NULL DEFAULT 'skip'"],
+  ["misfire_policy", "TEXT NOT NULL DEFAULT 'fire_once'"],
+  ["triggerable", "INTEGER NOT NULL DEFAULT 1"],
+  ["next_run_at", "INTEGER"],
+  ["last_tick_at", "INTEGER"],
+  ["last_duration_ms", "INTEGER"],
+  ["last_outcome", "TEXT"],
+  ["alerted_missed_at", "INTEGER"],
+  ["recent_ticks_json", "TEXT NOT NULL DEFAULT '[]'"],
+  ["created_at", "INTEGER"],
+  ["updated_at", "INTEGER"],
+];
 
 export class HubStore {
   constructor(dbPath, { changeHook = null } = {}) {
@@ -432,12 +488,27 @@ export class HubStore {
     this.db.exec("PRAGMA busy_timeout = 5000;");
     this.db.exec("PRAGMA journal_size_limit = 16777216;");
     this.db.exec(SCHEMA_SQL);
+    this.migrateSchedulesSchema();
     this.backfillFileLinks();
     if (dbPath !== ":memory:") {
       try {
         fs.chmodSync(dbPath, 0o600);
       } catch {}
     }
+  }
+
+  migrateSchedulesSchema() {
+    const cols = new Set(
+      this.db.prepare("PRAGMA table_info(schedules)").all().map((c) => String(c.name))
+    );
+    for (const [colName, colDef] of SCHEDULE_MIGRATION_COLUMNS) {
+      if (!cols.has(colName)) {
+        this.db.exec(`ALTER TABLE schedules ADD COLUMN ${colName} ${colDef}`);
+      }
+    }
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_schedules_driver_next ON schedules(driver, enabled, next_run_at)"
+    );
   }
 
   checkpointWal(mode = "PASSIVE") {
@@ -1287,34 +1358,149 @@ export class HubStore {
 
   // ---- Schedules ----
 
-  upsertSchedule({ id, agent_id, name, cron_expr = "", interval_min = 60, summary = "", enabled = true, last_run_at = null, last_task_id = null }) {
+  upsertSchedule(input, { eventType = "schedule.updated", includeActorScope = true, silentIfUnchanged = false, eventExtra = {} } = {}) {
     return this.transaction(() => {
-      const existing = this.db.prepare("SELECT * FROM schedules WHERE agent_id = ? AND id = ?").get(String(agent_id), String(id));
+      const id = String(input.id).trim();
+      const agentId = String(input.agent_id).trim();
+      const now = sqlInt(input.now, Date.now());
+      const existing = this.db.prepare("SELECT * FROM schedules WHERE agent_id = ? AND id = ?").get(agentId, id);
+
+      const pickNullableInt = (val, prev) =>
+        val === undefined ? (prev ?? null) : val === null ? null : sqlInt(val, null);
+      const pickNullableStr = (val, prev) =>
+        val === undefined ? (prev ?? null) : val === null || val === "" ? null : String(val);
+
+      const nextName = sqlStr(input.name !== undefined ? input.name : (existing?.name || id)) || id;
+      const rawDriver = input.driver !== undefined ? input.driver : (existing?.driver || "edge");
+      const nextDriver = rawDriver === "hub" ? "hub" : "edge";
+      const nextCronExpr = sqlStr(input.cron_expr !== undefined ? input.cron_expr : (existing?.cron_expr || "")) || "";
+      const nextIntervalMin = Math.max(1, sqlInt(input.interval_min !== undefined ? input.interval_min : (existing?.interval_min ?? 60), 60));
+      const nextTimezone = sqlStr(input.timezone !== undefined ? input.timezone : (existing?.timezone || DEFAULT_TIMEZONE)) || DEFAULT_TIMEZONE;
+      const nextGraceSec = pickNullableInt(input.grace_sec, existing?.grace_sec);
+      const nextSummary = sqlStr(input.summary !== undefined ? input.summary : (existing?.summary || "")) || "";
+      const nextTemplateVal = input.task_template !== undefined
+        ? (input.task_template && typeof input.task_template === "object" ? input.task_template : {})
+        : parseJson(existing?.task_template_json, {});
+      const rawCtxMode = input.context_mode !== undefined ? input.context_mode : (existing?.context_mode || "per_run");
+      const nextContextMode = rawCtxMode === "rolling" ? "rolling" : "per_run";
+      const nextPinnedCtx = pickNullableStr(input.pinned_context_id, existing?.pinned_context_id);
+      const rawOverlap = input.overlap_policy !== undefined ? input.overlap_policy : (existing?.overlap_policy || "skip");
+      const nextOverlap = rawOverlap === "allow" ? "allow" : "skip";
+      const rawMisfire = input.misfire_policy !== undefined ? input.misfire_policy : (existing?.misfire_policy || "fire_once");
+      const nextMisfire = rawMisfire === "skip" ? "skip" : "fire_once";
+      const nextTriggerable = sqlBool(
+        input.triggerable !== undefined
+          ? input.triggerable
+          : existing?.triggerable !== undefined && existing?.triggerable !== null
+            ? existing.triggerable
+            : true
+      );
+      const nextRunAt = pickNullableInt(input.next_run_at, existing?.next_run_at);
+      const nextLastTickAt = pickNullableInt(input.last_tick_at, existing?.last_tick_at);
+      const nextLastRunAt = pickNullableInt(input.last_run_at, existing?.last_run_at);
+      const nextLastDurationMs = pickNullableInt(input.last_duration_ms, existing?.last_duration_ms);
+      const nextLastOutcome = pickNullableStr(input.last_outcome, existing?.last_outcome);
+      const nextLastTaskId = pickNullableStr(input.last_task_id, existing?.last_task_id);
+      const nextAlertedMissedAt = pickNullableInt(input.alerted_missed_at, existing?.alerted_missed_at);
+      const nextRecentTicksVal = input.recent_ticks !== undefined
+        ? (Array.isArray(input.recent_ticks) ? input.recent_ticks : [])
+        : parseJson(existing?.recent_ticks_json, []);
+      const nextEnabled = sqlBool(input.enabled !== undefined ? input.enabled : (existing ? existing.enabled : true));
+
+      if (existing && silentIfUnchanged) {
+        const unchanged =
+          nextName === existing.name &&
+          nextDriver === (existing.driver || "edge") &&
+          nextCronExpr === (existing.cron_expr || "") &&
+          nextIntervalMin === Number(existing.interval_min ?? 60) &&
+          nextTimezone === (existing.timezone || DEFAULT_TIMEZONE) &&
+          nextGraceSec === (existing.grace_sec ?? null) &&
+          nextSummary === (existing.summary || "") &&
+          deepValuesEqual(nextTemplateVal, parseJson(existing.task_template_json, {})) &&
+          nextContextMode === (existing.context_mode || "per_run") &&
+          nextPinnedCtx === (existing.pinned_context_id ?? null) &&
+          nextOverlap === (existing.overlap_policy || "skip") &&
+          nextMisfire === (existing.misfire_policy || "fire_once") &&
+          nextTriggerable === Number(existing.triggerable ?? 1) &&
+          nextEnabled === Number(existing.enabled);
+        if (unchanged) {
+          return serializeSchedule(existing);
+        }
+      }
+
+      const createdAt = existing?.created_at ?? now;
       this.db.prepare(`
-        INSERT INTO schedules (id, agent_id, name, cron_expr, interval_min, summary, last_run_at, last_task_id, enabled)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO schedules (
+          id, agent_id, name, driver, cron_expr, interval_min, timezone, grace_sec,
+          summary, task_template_json, context_mode, pinned_context_id,
+          overlap_policy, misfire_policy, triggerable,
+          next_run_at, last_tick_at, last_run_at, last_duration_ms, last_outcome, last_task_id,
+          alerted_missed_at, recent_ticks_json, enabled, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(agent_id, id) DO UPDATE SET
           name = excluded.name,
+          driver = excluded.driver,
           cron_expr = excluded.cron_expr,
           interval_min = excluded.interval_min,
+          timezone = excluded.timezone,
+          grace_sec = excluded.grace_sec,
           summary = excluded.summary,
-          last_run_at = COALESCE(excluded.last_run_at, schedules.last_run_at),
-          last_task_id = COALESCE(excluded.last_task_id, schedules.last_task_id),
-          enabled = excluded.enabled
+          task_template_json = excluded.task_template_json,
+          context_mode = excluded.context_mode,
+          pinned_context_id = excluded.pinned_context_id,
+          overlap_policy = excluded.overlap_policy,
+          misfire_policy = excluded.misfire_policy,
+          triggerable = excluded.triggerable,
+          next_run_at = excluded.next_run_at,
+          last_tick_at = excluded.last_tick_at,
+          last_run_at = excluded.last_run_at,
+          last_duration_ms = excluded.last_duration_ms,
+          last_outcome = excluded.last_outcome,
+          last_task_id = excluded.last_task_id,
+          alerted_missed_at = excluded.alerted_missed_at,
+          recent_ticks_json = excluded.recent_ticks_json,
+          enabled = excluded.enabled,
+          updated_at = excluded.updated_at
       `).run(
-        String(id),
-        String(agent_id),
-        sqlStr(name || id),
-        sqlStr(cron_expr || ""),
-        sqlInt(interval_min, 60),
-        sqlStr(summary || ""),
-        last_run_at !== null && last_run_at !== undefined ? sqlInt(last_run_at) : (existing?.last_run_at ?? null),
-        sqlStr(last_task_id ?? existing?.last_task_id ?? null),
-        sqlBool(enabled)
+        id,
+        agentId,
+        nextName,
+        nextDriver,
+        nextCronExpr,
+        nextIntervalMin,
+        nextTimezone,
+        nextGraceSec,
+        nextSummary,
+        JSON.stringify(nextTemplateVal),
+        nextContextMode,
+        nextPinnedCtx,
+        nextOverlap,
+        nextMisfire,
+        nextTriggerable,
+        nextRunAt,
+        nextLastTickAt,
+        nextLastRunAt,
+        nextLastDurationMs,
+        nextLastOutcome,
+        nextLastTaskId,
+        nextAlertedMissedAt,
+        JSON.stringify(nextRecentTicksVal),
+        nextEnabled,
+        createdAt,
+        now
       );
-      const seq = this.nextSeq();
-      this.emitChange({ type: "schedule.updated", seq, agentId: String(agent_id), scheduleId: String(id) });
-      return this.getSchedule(agent_id, id);
+
+      if (eventType) {
+        const seq = this.nextSeq();
+        this.emitChange({
+          type: eventType,
+          seq,
+          ...(includeActorScope ? { agentId } : {}),
+          scheduleId: id,
+          ...eventExtra,
+        });
+      }
+      return this.getSchedule(agentId, id);
     });
   }
 
@@ -1328,6 +1514,78 @@ export class HubStore {
       ? this.db.prepare("SELECT * FROM schedules WHERE agent_id = ? ORDER BY id ASC").all(String(agentId))
       : this.db.prepare("SELECT * FROM schedules ORDER BY agent_id ASC, id ASC").all();
     return rows.map((r) => serializeSchedule(r));
+  }
+
+  listMutedScheduleIds(agentId) {
+    const rows = this.db
+      .prepare("SELECT id FROM schedules WHERE agent_id = ? AND enabled = 0 ORDER BY id ASC")
+      .all(String(agentId));
+    return rows.map((r) => String(r.id));
+  }
+
+  listRecentScheduleTasks(agentId = null, limit = 500) {
+    const safeLimit = Math.min(Math.max(sqlInt(limit, 500), 1), 2000);
+    const taskCols = `id, context_id, from_node, to_agent_id, source, schedule_id, state, title,
+      CASE WHEN receipt_json IS NOT NULL AND json_valid(receipt_json) THEN json_extract(receipt_json, '$.summary') ELSE NULL END AS receipt_summary,
+      CASE WHEN receipt_json IS NOT NULL AND json_valid(receipt_json) THEN substr(json_extract(receipt_json, '$.text'), 1, 300) ELSE NULL END AS receipt_text_head,
+      error_message, created_at, completed_at`;
+    return agentId
+      ? this.db.prepare(`
+          SELECT ${taskCols} FROM tasks
+          WHERE schedule_id IS NOT NULL AND to_agent_id = ?
+          ORDER BY created_at DESC
+          LIMIT ?
+        `).all(String(agentId), safeLimit)
+      : this.db.prepare(`
+          SELECT ${taskCols} FROM tasks
+          WHERE schedule_id IS NOT NULL
+          ORDER BY created_at DESC
+          LIMIT ?
+        `).all(safeLimit);
+  }
+
+  hasActiveScheduleSiblingTask(scheduleId, contextId) {
+    const row = this.db.prepare(`
+      SELECT id, state FROM tasks
+      WHERE schedule_id = ? AND context_id = ? AND source = 'hub_cron'
+        AND state IN ('submitted', 'working', 'input-required', 'auth-required')
+      LIMIT 1
+    `).get(String(scheduleId), String(contextId));
+    return row || null;
+  }
+
+  recordScheduleTaskActivity(
+    agentId,
+    scheduleId,
+    { taskId = null, outcome = undefined, durationMs = undefined, touchRunAt = false, clearAlert = false, now = Date.now() } = {}
+  ) {
+    const sets = [];
+    const vals = [];
+    if (touchRunAt) {
+      sets.push("last_tick_at = ?", "last_run_at = ?");
+      vals.push(sqlInt(now), sqlInt(now));
+    }
+    if (taskId !== null && taskId !== undefined) {
+      sets.push("last_task_id = ?");
+      vals.push(String(taskId));
+    }
+    if (outcome !== undefined) {
+      sets.push("last_outcome = ?");
+      vals.push(outcome === null ? null : String(outcome));
+    }
+    if (durationMs !== undefined && durationMs !== null && Number.isFinite(Number(durationMs))) {
+      sets.push("last_duration_ms = ?");
+      vals.push(Math.max(0, Math.trunc(Number(durationMs))));
+    }
+    if (clearAlert) {
+      sets.push("alerted_missed_at = NULL");
+    }
+    if (!sets.length) return;
+    sets.push("updated_at = ?");
+    vals.push(sqlInt(now), String(agentId), String(scheduleId));
+    this.db
+      .prepare(`UPDATE schedules SET ${sets.join(", ")} WHERE agent_id = ? AND id = ?`)
+      .run(...vals);
   }
 
   deleteSchedule(agentId, id) {

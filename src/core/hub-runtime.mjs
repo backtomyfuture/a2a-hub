@@ -86,7 +86,7 @@ export async function startHubRuntime({
     hubUrlResolver: resolvePublicUrl,
     logger,
   });
-  const schedules = new ScheduleService(store, taskService);
+  const schedules = new ScheduleService(store, taskService, { envResolver: resolveEnv });
 
   store.setChangeHook((event) => {
     broker.publish(event);
@@ -171,6 +171,13 @@ export async function startHubRuntime({
 
   fileRetention.start();
   feishuApproval.start();
+  const scheduleTimer = setInterval(() => {
+    try {
+      schedules.tick();
+    } catch {}
+  }, 15_000);
+  if (typeof scheduleTimer.unref === "function") scheduleTimer.unref();
+
   const staleTimer = setInterval(() => {
     try {
       taskService.reclaimStale();
@@ -209,6 +216,7 @@ export async function startHubRuntime({
   }
 
   const stop = async () => {
+    clearInterval(scheduleTimer);
     clearInterval(staleTimer);
     clearInterval(maintenanceTimer);
     fileRetention.stop();

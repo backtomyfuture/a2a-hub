@@ -152,6 +152,23 @@ export class GatewayClient {
     return this.get(`/api/v1/agents/${encodeURIComponent(agentId)}/updates?${qs}`);
   }
 
+  upsertSchedule(agentId, scheduleId, payload = {}) {
+    return this.put(
+      `/api/v1/agents/${encodeURIComponent(agentId)}/schedules/${encodeURIComponent(scheduleId)}`,
+      payload
+    );
+  }
+
+  reportScheduleRun(agentId, scheduleId, payload = {}, idempotencyKey = "") {
+    return this.post(
+      `/api/v1/agents/${encodeURIComponent(agentId)}/schedules/${encodeURIComponent(scheduleId)}/runs`,
+      payload,
+      {
+        headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {},
+      }
+    );
+  }
+
   // ---- Task 接口 ----
 
   listTasks(params = {}) {

@@ -20,7 +20,8 @@ a2a-hub 会在你的机器上按任务拉起命令和 Agent，并在 Hub 节点�
 |---|---|
 | 任务正文里的提示注入改写执行方式 | 指令、参数、问答只写进本次执行的 `input.json`（600），不拼进 prompt；参数里带 `command` / `cwd` / `agent` / `worker` / `verify` 等控制键的任务直接拒收 |
 | 冒写审批决定 | hub 用本机 ed25519 私钥（`approval_key.pem`）给 `auth_decision` 签名，节点按 `node.json` 里固定的 `hubPublicKey` 验签。签名绑定任务号、审批请求与决定值，冒写的、抄自别的任务的都当作不存在 |
-| 未授权调用 Hub API / 控制台操作 | 除 `/api/v1/health`、静态首页 `/` 与 `/.well-known/agent.json` 外，所有 `/api/*` 路由均校验机主 `AH_API_TOKEN` 或分 Agent Token（常量时间比较，Agent Token 只存 sha256 哈希）并按角色限定可用路由；审批通过 `ApprovalService` 串行校验与签名 |
+| 未授权调用 Hub API / 控制台操作 | 除 `/api/v1/health`、静态首页 `/` 与 `/.well-known/agent.json` 外，所有 `/api/*` 路由均校验机主 `AH_API_TOKEN` 或分 Agent Token（常量时间比较，Agent Token 只存 sha256 哈希）并按角色限定可用路由；中台派发定时（`driver=hub`）的增改删停与手动触发仅限机主，Agent Token 只能上报或维护自身 `driver=edge` 条目；审批通过 `ApprovalService` 串行校验与签名 |
+| 告警渠道意外泄露错误详情中的凭据 | 外部推送通道（飞书 / Bark / Telegram / 通用 Webhook）发送任务失败详情前自动脱敏 Bearer / `ah_*` Token 及 URL 敏感查询参数并截断摘要 |
 | 从外部连入执行节点 | 边缘执行节点与纯 HTTP Agent 只发起出站请求，不开监听端口，不做反向隧道 |
 | 派生任务无限套娃 | 跳数超过 8（`HOP_LIMIT=8`）熔断，累加不清零 |
 | 副作用被重复执行 | 在途账本、outbox 与幂等键（含 SQLite `client_token` 去重）：回执无效或提交中断只补齐提交，不重跑命令 |

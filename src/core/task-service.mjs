@@ -281,9 +281,12 @@ export class TaskService {
         }
 
         if (scheduleId) {
-          this.store.db.prepare(
-            "UPDATE schedules SET last_run_at = ?, last_task_id = ? WHERE agent_id = ? AND id = ?"
-          ).run(now, taskId, agent.id, String(scheduleId));
+          this.store.recordScheduleTaskActivity(agent.id, scheduleId, {
+            taskId,
+            touchRunAt: true,
+            clearAlert: true,
+            now,
+          });
         }
 
         const task = this.store.getTask(taskId);
@@ -566,6 +569,18 @@ export class TaskService {
       this.store.db.prepare("UPDATE agents SET active_task_id = NULL WHERE id = ? AND active_task_id = ?")
         .run(task.to_agent_id, task.id);
 
+      if (task.schedule_id) {
+        const durationMs = task.created_at ? Math.max(0, now - Number(task.created_at)) : undefined;
+        this.store.recordScheduleTaskActivity(task.to_agent_id, task.schedule_id, {
+          taskId: task.id,
+          outcome: "completed",
+          durationMs,
+          touchRunAt: true,
+          clearAlert: true,
+          now,
+        });
+      }
+
       const ag = this.store.getAgent(task.to_agent_id);
       const msg = this.store.appendMessage({
         task_id: task.id,
@@ -601,7 +616,139 @@ export class TaskService {
         summary: receipt.summary,
         messageId: msg.id,
       });
+
       return this.getTaskDetail(task.id, { includeContextHistory: false });
+    });
+  }
+
+  // 供外部自管定时任务（driver='edge'）在失败、带附件或显式要求归档时单步写入终态记录（见 docs/standard.md §1 例外说明）。
+  ingestScheduleTask({
+    agentId,
+    scheduleId,
+    outcome = "completed",
+    title = "",
+    inputText = "",
+    summary = "",
+    text = "",
+    error = "",
+    data = {},
+    artifacts = [],
+    usage = null,
+    attachments = [],
+    contextId = "",
+    durationMs = null,
+    actor = null,
+    now = Date.now(),
+  } = {}) {
+    const forbidden = controlKeysIn(data);
+    if (forbidden.length) {
+      throw makeError(`回执数据严禁包含执行控制字段: ${forbidden.join(", ")}`, 400, "exec_control_key_forbidden");
+    }
+
+    return this.store.transaction(() => {
+      const agent = this.store.getAgent(agentId);
+      if (!agent) {
+        throw makeError(`Agent 不存在: ${agentId}`, 404, "agent_not_found");
+      }
+
+      const isFail = outcome === "failed";
+      const state = isFail ? "failed" : "completed";
+      const taskId = randomId("tsk");
+      const finalContextId = String(contextId || "").trim() || randomId("ctx");
+      const seq = this.store.nextSeq();
+      const safeDuration =
+        durationMs !== null && durationMs !== undefined && Number.isFinite(Number(durationMs)) && Number(durationMs) >= 0
+          ? Math.trunc(Number(durationMs))
+          : null;
+      const createdAt = safeDuration !== null ? Math.max(1, now - safeDuration) : now;
+      const taskTitle =
+        String(title || "").trim() ||
+        String(summary || text || error || "").trim().slice(0, 80) ||
+        `[定时自报] ${scheduleId}`;
+
+      const { attachments: normalizedAttachments, fileIds } = this._resolveAttachments(attachments, {
+        actor,
+        fromNode: agent.id,
+      });
+
+      const receipt = isFail
+        ? null
+        : {
+            summary: String(summary || text || taskTitle).slice(0, 600),
+            text: String(text || summary || taskTitle),
+            artifacts: Array.isArray(artifacts) ? artifacts : [],
+            attachments: normalizedAttachments,
+            data: data && typeof data === "object" ? data : {},
+            usage: usage || null,
+            completed_by: agent.id,
+          };
+      const errText = isFail ? String(error || summary || "schedule_execution_failed") : null;
+
+      this.store.db.prepare(`
+        INSERT INTO tasks (
+          id, context_id, parent_task_id, from_node, to_agent_id, title, input_text,
+          params_json, attachments_json, model, state, priority, source, schedule_id,
+          progress_json, receipt_json, error_message, retry_count, max_retries, timeout_sec,
+          claimed_by, claimed_at, lease_until, leader_notified,
+          created_at, updated_at, completed_at, changed_seq
+        ) VALUES (?, ?, NULL, ?, ?, ?, ?, '{}', ?, ?, ?, 5, 'edge_cron', ?, '{}', ?, ?, 0, 0, 600, ?, ?, NULL, 0, ?, ?, ?, ?)
+      `).run(
+        taskId,
+        finalContextId,
+        agent.id,
+        agent.id,
+        taskTitle,
+        String(inputText || taskTitle),
+        JSON.stringify(normalizedAttachments),
+        agent.default_model || "",
+        state,
+        String(scheduleId),
+        receipt ? JSON.stringify(receipt) : null,
+        errText,
+        agent.id,
+        createdAt,
+        createdAt,
+        now,
+        now,
+        seq
+      );
+
+      const msg = this.store.appendMessage({
+        task_id: taskId,
+        context_id: finalContextId,
+        from_node: agent.id,
+        kind: isFail ? "error" : "receipt",
+        body: isFail ? errText : (receipt.text || receipt.summary),
+        data: isFail ? (data && typeof data === "object" ? data : {}) : receipt,
+        attachments: normalizedAttachments,
+        created_at: now,
+      });
+
+      for (const fid of fileIds) {
+        this.store.linkFileToTask({
+          fileId: fid,
+          taskId,
+          contextId: finalContextId,
+          messageId: msg.id,
+          createdAt: now,
+        });
+      }
+
+      this.store.emitChange({
+        type: isFail ? "task.failed" : "task.completed",
+        seq,
+        taskId,
+        contextId: finalContextId,
+        fromNode: agent.id,
+        agentId: agent.id,
+        deviceId: agent.device_id ?? null,
+        state,
+        title: taskTitle,
+        ...(isFail ? { error: errText } : { summary: receipt.summary }),
+        messageId: msg.id,
+      });
+
+      return this.getTaskDetail(taskId, { includeContextHistory: false });
     });
   }
 
@@ -660,6 +807,14 @@ export class TaskService {
         SET state = 'failed', error_message = ?, lease_until = NULL, completed_at = ?, updated_at = ?, changed_seq = ?
         WHERE id = ?
       `).run(errText, now, now, seq, task.id);
+
+      if (task.schedule_id) {
+        this.store.recordScheduleTaskActivity(task.to_agent_id, task.schedule_id, {
+          taskId: task.id,
+          outcome: "failed",
+          now,
+        });
+      }
 
       const msg = this.store.appendMessage({
         task_id: task.id,
@@ -978,6 +1133,8 @@ export class TaskService {
     ).get(agent.id, watermark);
     const leaderUpdatesCount = Number(leaderUpdatesRow?.cnt || 0);
 
+    const mutedSchedules = this.store.listMutedScheduleIds(agent.id);
+
     return {
       ok: true,
       agent_id: agent.id,
@@ -986,6 +1143,7 @@ export class TaskService {
       pending_count: pendingTasks.length,
       leader_updates_count: leaderUpdatesCount,
       watermark,
+      muted_schedules: mutedSchedules,
       tasks: agent.enabled
         ? pendingTasks.map((t) => ({
             id: t.id,
