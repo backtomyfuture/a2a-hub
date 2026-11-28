@@ -153,7 +153,7 @@ function helpText() {
   ah agents [list | pause <id> | resume <id>]
   ah workers <list | scan | add | remove> [...]
       管理本机 workers.json 可执行 Worker 列表（查看、增量扫描新 CLI、新增、移除）
-  ah task <create | list | show | reply | cancel> [...]
+  ah task <create | list | show | reply | cancel | retry | resolve | delete> [...]
   ah schedule <run <id> [--every 6d] -- <cmd...> | ok <id> [摘要] | fail <id> [原因] | noop <id> | list>
   ah file <upload <filepath> | download <file_id|uri> [--out <filepath>]>
   ah present [list | approve <id> | deny <id> | reply <id> <text>]
@@ -550,6 +550,32 @@ async function main() {
       if (!id) throw new Error("用法: ah task cancel <task_id>");
       const r = await client.cancelTask(id, flags.reason || "cli cancel");
       console.log(`✓ 已取消任务 ${id} -> ${r.task.state}`);
+      return 0;
+    }
+    if (sub === "resolve") {
+      const id = flags._[2];
+      if (id === "--all" || flags.all) {
+        const r = await client.resolveAllFailed(flags.context || "");
+        console.log(`✓ 已将 ${r.resolved_count} 条失败任务标为已处理`);
+        return 0;
+      }
+      if (!id) throw new Error("用法: ah task resolve <task_id> 或 ah task resolve --all");
+      await client.resolveTask(id);
+      console.log(`✓ 已将任务 ${id} 标为已处理`);
+      return 0;
+    }
+    if (sub === "retry") {
+      const id = flags._[2];
+      if (!id) throw new Error("用法: ah task retry <task_id>");
+      const r = await client.retryTask(id);
+      console.log(`✓ 已重试任务 ${id} -> 新任务 ${r.task?.id || "-"}`);
+      return 0;
+    }
+    if (sub === "delete" || sub === "rm") {
+      const id = flags._[2];
+      if (!id) throw new Error("用法: ah task delete <task_id>");
+      await client.deleteTask(id);
+      console.log(`✓ 已删除任务 ${id}`);
       return 0;
     }
     throw new Error(`未知 task 子命令: ${sub}`);

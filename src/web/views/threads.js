@@ -79,12 +79,21 @@ function updateReplyPendingList(container, taskId) {
 
 const THREAD_PAGE_SIZE = 12;
 const THREAD_TASK_STEP = 5;
+const TERMINAL_STATES = new Set(["completed", "failed", "canceled", "rejected"]);
+const FAILED_STATES = new Set(["failed", "rejected"]);
+
+function threadUnresolvedFailCount(th) {
+  if (Number.isFinite(Number(th?.unresolved_failed_count))) {
+    return Number(th.unresolved_failed_count);
+  }
+  return Number(th?.states?.failed || 0) + Number(th?.states?.rejected || 0);
+}
 
 const THREAD_FILTERS = [
   { id: "all", label: "全部", match: () => true },
   { id: "pending", label: "待处理", match: (th) => th.pending_action_count > 0 },
   { id: "active", label: "进行中", match: (th) => Boolean(th.states?.working || th.states?.submitted) },
-  { id: "failed", label: "有失败", match: (th) => Boolean(th.states?.failed || th.states?.rejected) },
+  { id: "failed", label: "有失败", match: (th) => threadUnresolvedFailCount(th) > 0 },
 ];
 
 function threadMatchesSearch(th, q, agentName) {
@@ -93,11 +102,12 @@ function threadMatchesSearch(th, q, agentName) {
   return hay.includes(q);
 }
 
-function renderThreadStateSummary(states = {}) {
+function renderThreadStateSummary(th) {
+  const states = th?.states || {};
   const parts = [
     ["working", "is-run", (states.working || 0) + (states.submitted || 0), "进行中"],
     ["pending", "is-warn", (states["input-required"] || 0) + (states["auth-required"] || 0), "待处理"],
-    ["failed", "is-fail", (states.failed || 0) + (states.rejected || 0), "失败"],
+    ["failed", "is-fail", threadUnresolvedFailCount(th), "未处理失败"],
     ["completed", "is-ok", states.completed || 0, "完成"],
   ].filter(([, , n]) => n > 0);
   return parts
@@ -123,7 +133,7 @@ function renderThreadItems(pageThreads, activeContextId, agentMap, agentName) {
         <span class="muted truncate">${(th.agents || []).map((id) => escapeHtml(agentName(id))).join(" · ")}</span>
       </div>
       <div class="thread-item-foot">
-        <span class="thread-state-summary">${renderThreadStateSummary(th.states)}</span>
+        <span class="thread-state-summary">${renderThreadStateSummary(th)}</span>
         <span class="muted">${th.task_count} 个任务${th.attachment_count ? ` · 📎 ${th.attachment_count}` : ""}${
           th.pending_action_count ? ` · <span class="thread-pending">${th.pending_action_count} 待处理</span>` : ""
         }</span>
@@ -260,6 +270,7 @@ function renderThreadDetail(detail, agentMap = new Map()) {
   // 最新的任务在最下方，与对话阅读顺序一致；更早的任务按需展开，避免长线程一次铺满整屏
   const shownTasks = detail.tasks.slice(total - visible);
   const doneCount = detail.tasks.filter((t) => t.state === "completed").length;
+  const canDeleteThread = detail.tasks.every((t) => TERMINAL_STATES.has(t.state));
   return `
     <div class="thread-detail-head">
       <div style="min-width:0">
@@ -274,9 +285,16 @@ function renderThreadDetail(detail, agentMap = new Map()) {
           <span class="mono truncate" title="Context ID">${escapeHtml(detail.context_id)}</span>
         </div>
       </div>
-      <button class="btn btn-primary btn-sm" id="thread-continue-btn" data-ctx="${escapeHtml(detail.context_id)}" data-agents="${escapeHtml(detail.agents.join(","))}">
-        ${uiIcon("plus", 12)} 在此线程继续派单
-      </button>
+      <div class="thread-detail-actions">
+        <button class="btn btn-primary btn-sm" id="thread-continue-btn" data-ctx="${escapeHtml(detail.context_id)}" data-agents="${escapeHtml(detail.agents.join(","))}">
+          ${uiIcon("plus", 12)} 在此线程继续派单
+        </button>
+        ${
+          canDeleteThread
+            ? `<button type="button" class="btn btn-ghost btn-sm btn-icon btn-danger-ghost" data-delete-thread="${escapeHtml(detail.context_id)}" title="删除整个线程" aria-label="删除整个线程">${uiIcon("trash", 14)}</button>`
+            : ""
+        }
+      </div>
     </div>
 
     ${
@@ -288,24 +306,44 @@ function renderThreadDetail(detail, agentMap = new Map()) {
     }
 
     <div class="stack-md">
-      ${shownTasks        .map((t) => {
+      ${shownTasks
+        .map((t) => {
           const taskAttCount = countTaskUniqueAttachments(t);
           const orphanAtts = getOrphanTaskAttachments(t);
+          const isTerminal = TERMINAL_STATES.has(t.state);
+          const isFailed = FAILED_STATES.has(t.state);
+          const isResolvedFail = isFailed && Boolean(t.resolved_at);
+          const canRetry = isFailed || t.state === "canceled";
+          const pillHtml = isResolvedFail
+            ? `<span class="pill" title="该失败已处理，不再触发告警">${escapeHtml(stateLabel(t.state))} · 已处理</span>`
+            : `<span class="pill ${stateTone(t.state)}">${stateLabel(t.state)}</span>`;
           return `
-        <div class="card" style="background:var(--bg);padding:14px">
+        <div class="card thread-task-card${isResolvedFail ? " is-resolved-fail" : ""}" style="background:var(--bg);padding:14px">
           <div class="row-between">
             <div class="row" style="flex-wrap:wrap">
-              <span class="pill ${stateTone(t.state)}">${stateLabel(t.state)}</span>
+              ${pillHtml}
               <strong>${escapeHtml(t.title)}</strong>
               <span class="thread-task-target">${uiIcon("arrow-right", 12)}${agentAvatar(agentMap.get(t.to_agent_id) || { id: t.to_agent_id }, { size: "xs" })}<span>${escapeHtml(agentMap.get(t.to_agent_id)?.name || t.to_agent_id)}</span></span>
               ${t.model ? `<span class="chip chip-model">${escapeHtml(t.model)}</span>` : ""}
               ${taskAttCount ? `<span class="attachment-tag">📎 ${taskAttCount}</span>` : ""}
             </div>
-            <div class="row">
+            <div class="row" style="gap:6px;flex-shrink:0">
               ${
-                !["completed", "failed", "canceled", "rejected"].includes(t.state)
-                  ? `<button class="btn btn-sm btn-danger" data-cancel-task="${escapeHtml(t.id)}">取消任务</button>`
-                  : ""
+                !isTerminal
+                  ? `<button type="button" class="btn btn-sm btn-danger" data-cancel-task="${escapeHtml(t.id)}">取消任务</button>`
+                  : `
+                    ${
+                      canRetry
+                        ? `<button type="button" class="btn btn-sm ${isFailed && !isResolvedFail ? "btn-secondary" : "btn-ghost"}" data-retry-task="${escapeHtml(t.id)}">${uiIcon("retry", 12)} 重试</button>`
+                        : ""
+                    }
+                    ${
+                      isFailed && !isResolvedFail
+                        ? `<button type="button" class="btn btn-sm btn-ghost" data-resolve-task="${escapeHtml(t.id)}">${uiIcon("check", 12)} 已处理</button>`
+                        : ""
+                    }
+                    <button type="button" class="btn btn-sm btn-ghost btn-icon btn-danger-ghost" data-delete-task="${escapeHtml(t.id)}" title="删除这条任务记录" aria-label="删除任务">${uiIcon("trash", 13)}</button>
+                  `
               }
             </div>
           </div>
@@ -392,6 +430,70 @@ function bindThreadActions(container, refreshFn) {
         await api.cancelTask(btn.getAttribute("data-cancel-task"), "控制台手动取消");
         showToast("任务已取消");
         await reloadThreadAndState();
+      } catch (err) {
+        showToast(err.message, true);
+      }
+    });
+  });
+
+  container.querySelectorAll("[data-retry-task]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        const res = await api.retryTask(btn.getAttribute("data-retry-task"));
+        const dropped = Number(res?.dropped_attachments || 0);
+        showToast(
+          dropped > 0
+            ? `已重新派发任务（原任务有 ${dropped} 个临时附件已过期未携带）`
+            : "已重新派发任务，旧失败已自动消红"
+        );
+        await reloadThreadAndState();
+      } catch (err) {
+        showToast(err.message, true);
+      }
+    });
+  });
+
+  container.querySelectorAll("[data-resolve-task]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        await api.resolveTask(btn.getAttribute("data-resolve-task"));
+        showToast("已标为已处理");
+        await reloadThreadAndState();
+      } catch (err) {
+        showToast(err.message, true);
+      }
+    });
+  });
+
+  container.querySelectorAll("[data-delete-task]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      if (!confirm("确认删除这条任务记录吗？将一并删除该任务下的全部历史消息与附件关联，删除后不可恢复。")) return;
+      const id = btn.getAttribute("data-delete-task");
+      const wasOnlyTask = (store.selectedThreadDetail?.tasks?.length || 0) <= 1;
+      try {
+        await api.deleteTask(id);
+        showToast("任务记录已删除");
+        if (wasOnlyTask) {
+          setState({ selectedThreadId: null, selectedThreadDetail: null });
+          await refreshFn();
+        } else {
+          await reloadThreadAndState();
+        }
+      } catch (err) {
+        showToast(err.message, true);
+      }
+    });
+  });
+
+  container.querySelectorAll("[data-delete-thread]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      if (!confirm("确认删除整个对话线程及其全部任务记录吗？将一并删除线程内的全部历史消息与附件关联，删除后不可恢复。")) return;
+      const cid = btn.getAttribute("data-delete-thread");
+      try {
+        await api.deleteThread(cid);
+        showToast("对话线程已删除");
+        setState({ selectedThreadId: null, selectedThreadDetail: null });
+        await refreshFn();
       } catch (err) {
         showToast(err.message, true);
       }

@@ -163,6 +163,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   created_at        INTEGER NOT NULL,
   updated_at        INTEGER NOT NULL,
   completed_at      INTEGER,
+  resolved_at       INTEGER,
   changed_seq       INTEGER NOT NULL DEFAULT 0
 );
 
@@ -349,6 +350,7 @@ export function serializeTask(row) {
     created_at: row.created_at,
     updated_at: row.updated_at,
     completed_at: row.completed_at ?? null,
+    resolved_at: row.resolved_at ?? null,
     changed_seq: Number(row.changed_seq ?? 0),
   };
 }
@@ -400,6 +402,7 @@ export function serializeTaskSummary(row) {
     created_at: row.created_at,
     updated_at: row.updated_at,
     completed_at: row.completed_at ?? null,
+    resolved_at: row.resolved_at ?? null,
     changed_seq: Number(row.changed_seq ?? 0),
   };
 }
@@ -489,12 +492,31 @@ export class HubStore {
     this.db.exec("PRAGMA busy_timeout = 5000;");
     this.db.exec("PRAGMA journal_size_limit = 16777216;");
     this.db.exec(SCHEMA_SQL);
+    this.migrateTasksSchema();
     this.migrateSchedulesSchema();
     this.backfillFileLinks();
     if (dbPath !== ":memory:") {
       try {
         fs.chmodSync(dbPath, 0o600);
       } catch {}
+    }
+  }
+
+  migrateTasksSchema() {
+    const cols = new Set(
+      this.db.prepare("PRAGMA table_info(tasks)").all().map((c) => String(c.name))
+    );
+    if (!cols.has("resolved_at")) {
+      const now = Date.now();
+      const cutoff24h = now - 24 * 3600 * 1000;
+      this.db.exec("ALTER TABLE tasks ADD COLUMN resolved_at INTEGER");
+      // 老库首次升级平滑回填：24 小时以前的陈年历史失败自动标为已处理，
+      // 避免升级后线程页挂满旧红标，同时保留近 24 小时内的故障以便机主处置。
+      this.db.prepare(`
+        UPDATE tasks
+        SET resolved_at = ?
+        WHERE state IN ('failed', 'rejected') AND resolved_at IS NULL AND updated_at < ?
+      `).run(now, cutoff24h);
     }
   }
 
@@ -1184,7 +1206,7 @@ export class HubStore {
          (receipt_json IS NOT NULL) AS has_receipt,
          CASE WHEN receipt_json IS NOT NULL AND json_valid(receipt_json) THEN json_extract(receipt_json, '$.summary') ELSE NULL END AS receipt_summary,
          error_message, retry_count, max_retries, timeout_sec, claimed_by, claimed_at, lease_until, leader_notified,
-         created_at, updated_at, completed_at, changed_seq`
+         created_at, updated_at, completed_at, resolved_at, changed_seq`
       : "*";
     const rows = this.db.prepare(`SELECT ${cols} FROM tasks ${where} ${order} LIMIT ?`).all(...args, limit);
     return rows.map((r) => (filter.summaryOnly ? serializeTaskSummary(r) : serializeTask(r)));
@@ -1529,13 +1551,13 @@ export class HubStore {
     const taskCols = `id, context_id, from_node, to_agent_id, source, schedule_id, state, title,
       CASE WHEN receipt_json IS NOT NULL AND json_valid(receipt_json) THEN json_extract(receipt_json, '$.summary') ELSE NULL END AS receipt_summary,
       CASE WHEN receipt_json IS NOT NULL AND json_valid(receipt_json) THEN substr(json_extract(receipt_json, '$.text'), 1, 300) ELSE NULL END AS receipt_text_head,
-      error_message, created_at, completed_at`;
+      error_message, created_at, completed_at, resolved_at`;
     const where = agentId
       ? "WHERE schedule_id IS NOT NULL AND to_agent_id = ?"
       : "WHERE schedule_id IS NOT NULL";
     const sql = `
       SELECT id, context_id, from_node, to_agent_id, source, schedule_id, state, title,
-             receipt_summary, receipt_text_head, error_message, created_at, completed_at
+             receipt_summary, receipt_text_head, error_message, created_at, completed_at, resolved_at
       FROM (
         SELECT ${taskCols},
                ROW_NUMBER() OVER (PARTITION BY to_agent_id, schedule_id ORDER BY created_at DESC) AS rn
@@ -1565,6 +1587,7 @@ export class HubStore {
       SELECT id, state FROM tasks
       WHERE schedule_id = ? AND context_id = ?
         AND state IN ('failed', 'rejected', 'canceled')
+        AND resolved_at IS NULL
       LIMIT 1
     `).get(String(scheduleId), String(contextId));
     return row || null;

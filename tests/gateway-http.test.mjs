@@ -328,3 +328,147 @@ test("HTTP Optimization: /api/v1/state 裁剪大字段、gzip 压缩、AH_NO_DEV
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("Task Exit & Schedule Ack HTTP: 仅机主可消红/重试/删除/定时忽略异常，权限隔离且联动生效", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ah-test-exit-"));
+  const rt = await startHubRuntime({
+    configDir: dir,
+    listen: "127.0.0.1:0",
+    env: { AH_API_TOKEN: "exit_owner_tok" },
+    withDeviceDaemon: false,
+  });
+
+  try {
+    const owner = new GatewayClient(rt.url, { token: "exit_owner_tok" });
+    const ag = await owner.post("/api/v1/agents", { id: "bot-a", name: "Bot A", role: "worker", summary: "执行" });
+    const botClient = new GatewayClient(rt.url, { token: ag.token });
+
+    // 1) 创建并失败两条任务
+    const d1 = await owner.dispatchTask({ to: "bot-a", title: "测试失败 1", input_text: "run 1", max_retries: 0 });
+    const t1 = d1.tasks[0].id;
+    await botClient.claimTask(t1);
+    await botClient.fail(t1, { error: "bad_key", retryable: false });
+
+    const d2 = await owner.dispatchTask({ to: "bot-a", title: "测试失败 2", input_text: "run 2", max_retries: 0 });
+    const t2 = d2.tasks[0].id;
+    await botClient.claimTask(t2);
+    await botClient.fail(t2, { error: "bad_net", retryable: false });
+
+    // 权限隔离：普通 Agent 不可调用 resolve / resolve-all / retry / delete / schedule ack
+    await assert.rejects(() => botClient.resolveTask(t1), /仅机主/);
+    await assert.rejects(() => botClient.resolveAllFailed(), /仅机主/);
+    await assert.rejects(() => botClient.retryTask(t1), /仅机主/);
+    await assert.rejects(() => botClient.deleteTask(t1), /仅机主/);
+    await assert.rejects(() => botClient.deleteThread(d1.context_id), /仅机主/);
+
+    // 2) 机主重试 t1：同线程生成新任务且旧 t1 自动消红
+    const retried = await owner.retryTask(t1);
+    assert.equal(retried.ok, true);
+    assert.equal(retried.context_id, d1.context_id);
+    assert.equal(retried.task.state, "submitted");
+    const t1After = await owner.get(`/api/v1/tasks/${t1}`);
+    assert.ok(t1After.task.resolved_at);
+
+    // 含活跃任务的线程不可删除，取消后即可删除整条线程
+    await assert.rejects(() => owner.deleteThread(d1.context_id), /未结束/);
+    await owner.cancelTask(retried.task.id, "取消");
+    const delThreadRes = await owner.deleteThread(d1.context_id);
+    assert.equal(delThreadRes.deleted, true);
+    assert.equal(delThreadRes.deleted_tasks, 2);
+
+    // 3) 一键清空剩余未处理失败 t2
+    const resolveAllRes = await owner.resolveAllFailed();
+    assert.equal(resolveAllRes.resolved_count, 1);
+    const st = await owner.get("/api/v1/state");
+    const t2InState = st.tasks.find((x) => x.id === t2);
+    assert.ok(t2InState.resolved_at);
+
+    // 删除单条终态任务
+    const delOne = await owner.deleteTask(t2);
+    assert.equal(delOne.deleted, true);
+
+    // 4) 定时任务 failing 与 missed 均可通过 /ack 消红
+    await botClient.post("/api/v1/schedules/daily-job/runs", {
+      name: "每日汇总",
+      every: "1d",
+      error: "api_500",
+    });
+    let schList = (await owner.get("/api/v1/schedules")).schedules;
+    assert.equal(schList.find((x) => x.id === "daily-job").health, "failing");
+    await assert.rejects(() => botClient.ackSchedule("bot-a", "daily-job"), /仅机主/);
+    await owner.ackSchedule("bot-a", "daily-job");
+    schList = (await owner.get("/api/v1/schedules")).schedules;
+    assert.equal(schList.find((x) => x.id === "daily-job").health, "healthy");
+
+    // 超时未报 (missed) 也可通过 /ack 顺延到下一个周期并消红
+    await botClient.put("/api/v1/agents/bot-a/schedules/missed-job", {
+      name: "超时巡检",
+      interval_min: 1,
+      last_run_at: Date.now() - 180_000,
+    });
+    schList = (await owner.get("/api/v1/schedules")).schedules;
+    assert.equal(schList.find((x) => x.id === "missed-job").health, "missed");
+    await owner.ackSchedule("bot-a", "missed-job");
+    schList = (await owner.get("/api/v1/schedules")).schedules;
+    const ackedMissed = schList.find((x) => x.id === "missed-job");
+    assert.equal(ackedMissed.missed, false);
+    assert.equal(ackedMissed.health, "healthy");
+
+    // 5) 中台定时任务处于 failing 且已到期（next_run_at <= now）时，ack 只消红、绝不跳过本轮排期；
+    //    且重试该定时任务不篡改 last_run_at / last_tick_at 跑批时钟。
+    await owner.put("/api/v1/agents/bot-a/schedules/hub-due", {
+      name: "中台到期待跑",
+      driver: "hub",
+      cron_expr: "0 * * * *",
+      summary: "每小时检查",
+      task_template: { to: ["bot-a"], title: "每小时检查", input_text: "check" },
+    });
+    const trigHub = await owner.post("/api/v1/agents/bot-a/schedules/hub-due/trigger", {});
+    const hubTaskId = trigHub.task.id;
+    await botClient.claimTask(hubTaskId);
+    await botClient.fail(hubTaskId, { error: "temp_err", retryable: false });
+
+    const dueAt = Date.now() - 5_000;
+    const oldRunAt = Date.now() - 3600_000;
+    rt.store.db.prepare(
+      "UPDATE schedules SET next_run_at = ?, last_run_at = ?, last_tick_at = ? WHERE agent_id = ? AND id = ?"
+    ).run(dueAt, oldRunAt, oldRunAt, "bot-a", "hub-due");
+
+    const ackHubRes = await owner.ackSchedule("bot-a", "hub-due");
+    assert.equal(ackHubRes.skipped_window, false, "failing 但未超宽限期的中台定时 ack 不得跳过本轮");
+    assert.equal(ackHubRes.schedule.next_run_at, dueAt, "failing 消红不得推进已到期的 next_run_at");
+
+    // 再造一次失败并用 retryTask 重试：不篡改定时跑批时钟 last_run_at / last_tick_at
+    const trigHub2 = await owner.post("/api/v1/agents/bot-a/schedules/hub-due/trigger", {});
+    await botClient.claimTask(trigHub2.task.id);
+    await botClient.fail(trigHub2.task.id, { error: "temp_err_2", retryable: false });
+    const runAtBeforeRetry = rt.store.getSchedule("bot-a", "hub-due").last_run_at;
+    const tickAtBeforeRetry = rt.store.getSchedule("bot-a", "hub-due").last_tick_at;
+    await new Promise((r) => setTimeout(r, 15));
+    await owner.retryTask(trigHub2.task.id);
+    const schAfterRetry = rt.store.getSchedule("bot-a", "hub-due");
+    assert.equal(schAfterRetry.last_run_at, runAtBeforeRetry, "人工重试定时任务不得修改 last_run_at 跑批时钟");
+    assert.equal(schAfterRetry.last_tick_at, tickAtBeforeRetry, "人工重试定时任务不得修改 last_tick_at 跑批时钟");
+
+    // 6) 中台派发失败（仅写 recent_ticks 无 task 行）也能通过 /ack 完整消红
+    rt.store.upsertSchedule({
+      id: "hub-tick-fail",
+      agent_id: "bot-a",
+      name: "派发失败测试",
+      driver: "hub",
+      cron_expr: "0 * * * *",
+      last_tick_at: Date.now() - 1000,
+      last_outcome: "failed",
+      next_run_at: Date.now() + 3600_000,
+      recent_ticks: [{ at: Date.now() - 1000, outcome: "failed", summary: "dispatch_boom" }],
+    });
+    schList = (await owner.get("/api/v1/schedules")).schedules;
+    assert.equal(schList.find((x) => x.id === "hub-tick-fail").health, "failing");
+    await owner.ackSchedule("bot-a", "hub-tick-fail");
+    schList = (await owner.get("/api/v1/schedules")).schedules;
+    assert.equal(schList.find((x) => x.id === "hub-tick-fail").health, "healthy");
+  } finally {
+    await rt.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

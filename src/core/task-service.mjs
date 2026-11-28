@@ -20,6 +20,8 @@ export const A2A_STATES = new Set([
 ]);
 
 export const TERMINAL_STATES = new Set(["completed", "failed", "canceled", "rejected"]);
+export const FAILED_STATES = new Set(["failed", "rejected"]);
+export const RETRYABLE_TERMINAL_STATES = new Set(["failed", "rejected", "canceled"]);
 
 const ALLOWED_TRANSITIONS = {
   submitted: new Set(["working", "auth-required", "canceled", "rejected"]),
@@ -112,6 +114,8 @@ export class TaskService {
     for (const t of tasks) {
       if (excludeTaskId && t.id === excludeTaskId) continue;
       if (!["completed", "failed", "input-required", "auth-required", "working"].includes(t.state)) continue;
+      // 已标为「已处理 / 消红」的旧失败不再喂给后续 Agent，避免过期报错污染上下文
+      if (FAILED_STATES.has(t.state) && t.resolved_at) continue;
       const summary = t.receipt?.summary || t.receipt?.text || t.error_message || "";
       // 同轮并发扇出下仍在执行且尚无产出的兄弟任务，不注入其他节点的上下文前情，避免浪费 Token 与身份串联
       if (t.state === "working" && !String(summary).trim()) continue;
@@ -153,6 +157,7 @@ export class TaskService {
     parentTaskId = null,
     source = "direct",
     scheduleId = null,
+    touchScheduleRunAt = true,
     idempotencyKey = "",
     timeoutSec,
     maxRetries = MAX_RETRIES,
@@ -283,7 +288,7 @@ export class TaskService {
         if (scheduleId) {
           this.store.recordScheduleTaskActivity(agent.id, scheduleId, {
             taskId,
-            touchRunAt: true,
+            touchRunAt: Boolean(touchScheduleRunAt),
             clearAlert: true,
             contextId: finalContextId,
             now,
@@ -569,6 +574,15 @@ export class TaskService {
 
       this.store.db.prepare("UPDATE agents SET active_task_id = NULL WHERE id = ? AND active_task_id = ?")
         .run(task.to_agent_id, task.id);
+
+      // 仅自动消红同线程「更早轮次」（created_at 严格小于当前任务）的未处理失败，
+      // 同轮并发扇出（created_at 相同）的兄弟失败绝不误消。
+      this.store.db.prepare(`
+        UPDATE tasks
+        SET resolved_at = ?
+        WHERE context_id = ? AND id != ? AND created_at < ?
+          AND state IN ('failed', 'rejected') AND resolved_at IS NULL
+      `).run(now, task.context_id, task.id, Number(task.created_at || 0));
 
       if (task.schedule_id) {
         const durationMs = task.created_at ? Math.max(0, now - Number(task.created_at)) : undefined;
@@ -1046,6 +1060,216 @@ export class TaskService {
     });
   }
 
+  // ---- 机主处置闭环：消红（已处理）、一键重试与终态清理（不破坏 A2A 八态协议） ----
+
+  resolveTask(taskId, { now = Date.now() } = {}) {
+    return this.store.transaction(() => {
+      const task = this.store.getTask(taskId);
+      if (!task) throw makeError("任务不存在", 404, "task_not_found");
+      if (!FAILED_STATES.has(task.state)) {
+        throw makeError(`当前状态 ${task.state} 无需消红（仅失败或已拒绝任务可标为已处理）`, 409, "invalid_state");
+      }
+      if (task.resolved_at) {
+        return { task, already_resolved: true };
+      }
+      this.store.db.prepare("UPDATE tasks SET resolved_at = ? WHERE id = ? AND resolved_at IS NULL")
+        .run(now, task.id);
+      if (task.schedule_id) {
+        this.store.db.prepare(`
+          UPDATE schedules
+          SET last_outcome = NULL, updated_at = ?
+          WHERE id = ? AND last_task_id = ? AND last_outcome = 'failed'
+        `).run(now, task.schedule_id, task.id);
+      }
+      // 仅通知 Web 控制台刷新，不改任务 changed_seq，不惊动 Agent / Webhook / Leader 水位
+      const seq = this.store.nextSeq();
+      this.store.emitChange({
+        type: "task.resolved",
+        seq,
+        taskId: task.id,
+        contextId: task.context_id,
+      });
+      return { task: this.store.getTask(task.id), already_resolved: false };
+    });
+  }
+
+  resolveAllFailed({ contextId = null, sinceMs = null, now = Date.now() } = {}) {
+    return this.store.transaction(() => {
+      const cid = String(contextId || "").trim();
+      const clauses = ["state IN ('failed', 'rejected')", "resolved_at IS NULL"];
+      const args = [];
+      if (cid) {
+        clauses.push("context_id = ?");
+        args.push(cid);
+      }
+      const safeSince =
+        sinceMs !== null && sinceMs !== undefined && sinceMs !== "" && Number.isFinite(Number(sinceMs)) && Number(sinceMs) > 0
+          ? Math.trunc(Number(sinceMs))
+          : null;
+      if (safeSince !== null) {
+        clauses.push("updated_at >= ?");
+        args.push(safeSince);
+      }
+      const where = clauses.join(" AND ");
+      const matchedRows = this.store.db.prepare(`SELECT id FROM tasks WHERE ${where}`).all(...args);
+      const matchedIds = matchedRows.map((r) => String(r.id));
+      if (!matchedIds.length) {
+        return { resolved_count: 0 };
+      }
+
+      const placeholders = matchedIds.map(() => "?").join(",");
+      const res = this.store.db.prepare(`UPDATE tasks SET resolved_at = ? WHERE id IN (${placeholders})`)
+        .run(now, ...matchedIds);
+      const resolvedCount = Number(res.changes || 0);
+      if (resolvedCount > 0) {
+        // 仅清理 last_task_id 落入本次消红集合的定时条目，避免跨线程/跨时间窗误清无关定时状态
+        this.store.db.prepare(`
+          UPDATE schedules
+          SET last_outcome = NULL, updated_at = ?
+          WHERE last_outcome = 'failed' AND last_task_id IN (${placeholders})
+        `).run(now, ...matchedIds);
+        const seq = this.store.nextSeq();
+        this.store.emitChange({
+          type: "task.resolved",
+          seq,
+          ...(cid ? { contextId: cid } : {}),
+        });
+      }
+      return { resolved_count: resolvedCount };
+    });
+  }
+
+  retryTask(taskId, { fromNode = "owner", actor = null, inputText = undefined, to = undefined, model = undefined, now = Date.now() } = {}) {
+    return this.store.transaction(() => {
+      const task = this.store.getTask(taskId);
+      if (!task) throw makeError("任务不存在", 404, "task_not_found");
+      if (!RETRYABLE_TERMINAL_STATES.has(task.state)) {
+        throw makeError(`当前状态 ${task.state} 不可重试（仅失败、已拒绝或已取消任务可重试）`, 409, "invalid_state");
+      }
+      // 原任务附带的临时中转文件若已过期则剔除并记录，调用方据此向机主明确提示，不静默丢失
+      const validAttachments = [];
+      const droppedAttachmentNames = [];
+      for (const att of Array.isArray(task.attachments) ? task.attachments : []) {
+        const fid = extractHubFileId(att);
+        if (!fid) {
+          validAttachments.push(att);
+          continue;
+        }
+        if (this.store.getFileMeta(fid, now)) {
+          validAttachments.push(att);
+        } else {
+          const name = typeof att === "object" && att?.name ? String(att.name) : fid;
+          droppedAttachmentNames.push(name);
+        }
+      }
+
+      // 机主手动重试视为机主接管重派（fromNode 默认 owner，不冒充原 Leader 发起）；
+      // 若原任务归属定时条目，保留 schedule_id 关联但不修改跑批时钟（touchScheduleRunAt=false）。
+      const dispatched = this.dispatchTasks({
+        fromNode,
+        to: to || task.to_agent_id,
+        title: task.title,
+        inputText: inputText !== undefined ? String(inputText) : task.input_text,
+        params: task.params && typeof task.params === "object" ? task.params : {},
+        attachments: validAttachments,
+        actor,
+        model: model !== undefined ? String(model) : task.model,
+        priority: task.priority,
+        contextId: task.context_id,
+        parentTaskId: task.id,
+        source: task.source || "direct",
+        scheduleId: task.schedule_id || null,
+        touchScheduleRunAt: false,
+        timeoutSec: task.timeout_sec,
+        maxRetries: task.max_retries,
+      });
+
+      if (FAILED_STATES.has(task.state) && !task.resolved_at) {
+        this.store.db.prepare("UPDATE tasks SET resolved_at = ? WHERE id = ? AND resolved_at IS NULL")
+          .run(now, task.id);
+        if (task.schedule_id) {
+          this.store.db.prepare(`
+            UPDATE schedules
+            SET last_outcome = NULL, updated_at = ?
+            WHERE id = ? AND last_outcome = 'failed' AND (agent_id = ? OR last_task_id = ?)
+          `).run(now, task.schedule_id, task.to_agent_id, task.id);
+        }
+      }
+
+      return {
+        task: dispatched.tasks[0] || null,
+        tasks: dispatched.tasks,
+        context_id: dispatched.context_id,
+        retried_from: task.id,
+        dropped_attachments: droppedAttachmentNames.length,
+        dropped_attachment_names: droppedAttachmentNames,
+      };
+    });
+  }
+
+  deleteTask(taskId) {
+    return this.store.transaction(() => {
+      const task = this.store.getTask(taskId);
+      if (!task) throw makeError("任务不存在", 404, "task_not_found");
+      if (!TERMINAL_STATES.has(task.state)) {
+        throw makeError(`进行中或待处理的任务 (${task.state}) 不可删除，请先取消`, 409, "active_task_forbidden");
+      }
+      const now = Date.now();
+      this.store.db.prepare("UPDATE files SET task_id = NULL WHERE task_id = ?").run(task.id);
+      this.store.db.prepare(`
+        UPDATE schedules
+        SET last_task_id = NULL,
+            last_outcome = CASE WHEN last_outcome = 'failed' THEN NULL ELSE last_outcome END,
+            updated_at = ?
+        WHERE last_task_id = ?
+      `).run(now, task.id);
+      this.store.db.prepare("UPDATE agents SET active_task_id = NULL WHERE active_task_id = ?").run(task.id);
+      this.store.db.prepare("DELETE FROM tasks WHERE id = ?").run(task.id);
+
+      const seq = this.store.nextSeq();
+      this.store.emitChange({
+        type: "task.deleted",
+        seq,
+        taskId: task.id,
+        contextId: task.context_id,
+      });
+      return { deleted: true, task_id: task.id, context_id: task.context_id };
+    });
+  }
+
+  deleteThread(contextId) {
+    const cid = String(contextId || "").trim();
+    if (!cid) throw makeError("缺少 context_id", 400, "missing_context_id");
+    return this.store.transaction(() => {
+      const rows = this.store.db.prepare("SELECT id, state FROM tasks WHERE context_id = ?").all(cid);
+      if (!rows.length) throw makeError("Thread 不存在", 404, "thread_not_found");
+      const active = rows.find((r) => !TERMINAL_STATES.has(r.state));
+      if (active) {
+        throw makeError(`该线程仍有未结束的任务 (${active.state})，请先取消后再删除`, 409, "active_thread_forbidden");
+      }
+      const now = Date.now();
+      this.store.db.prepare("UPDATE files SET task_id = NULL WHERE task_id IN (SELECT id FROM tasks WHERE context_id = ?)").run(cid);
+      this.store.db.prepare(`
+        UPDATE schedules
+        SET last_task_id = NULL,
+            last_outcome = CASE WHEN last_outcome = 'failed' THEN NULL ELSE last_outcome END,
+            updated_at = ?
+        WHERE last_task_id IN (SELECT id FROM tasks WHERE context_id = ?)
+      `).run(now, cid);
+      this.store.db.prepare("UPDATE schedules SET pinned_context_id = NULL, updated_at = ? WHERE pinned_context_id = ?").run(now, cid);
+      this.store.db.prepare("UPDATE agents SET active_task_id = NULL WHERE active_task_id IN (SELECT id FROM tasks WHERE context_id = ?)").run(cid);
+      this.store.db.prepare("DELETE FROM tasks WHERE context_id = ?").run(cid);
+
+      const seq = this.store.nextSeq();
+      this.store.emitChange({
+        type: "thread.deleted",
+        seq,
+        contextId: cid,
+      });
+      return { deleted: true, context_id: cid, deleted_tasks: rows.length };
+    });
+  }
+
   // 有明确租约的任务只看租约：慢速 Agent（如邮件驱动）无法频繁心跳，不能被 updated_at 兜底误回收后重复派发；
   // 仅无租约的 working 任务才用 STALE_MIN 兜底。
   reclaimStale(now = Date.now()) {
@@ -1201,6 +1425,8 @@ export class TaskService {
           states: {},
           task_count: 0,
           pending_action_count: 0,
+          unresolved_failed_count: 0,
+          resolved_failed_count: 0,
           attachment_count: 0,
           _attKeys: new Set(),
           _fallbackAttCount: 0,
@@ -1221,6 +1447,10 @@ export class TaskService {
       }
       if (!g.agents.includes(t.to_agent_id)) g.agents.push(t.to_agent_id);
       g.states[t.state] = (g.states[t.state] || 0) + 1;
+      if (FAILED_STATES.has(t.state)) {
+        if (t.resolved_at) g.resolved_failed_count += 1;
+        else g.unresolved_failed_count += 1;
+      }
       if (t.state === "input-required" || t.state === "auth-required") {
         g.pending_action_count += 1;
       }

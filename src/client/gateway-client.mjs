@@ -251,6 +251,36 @@ export class GatewayClient {
     return this.post(`/api/v1/tasks/${encodeURIComponent(taskId)}/cancel`, { reason });
   }
 
+  resolveTask(taskId) {
+    return this.post(`/api/v1/tasks/${encodeURIComponent(taskId)}/resolve`, {});
+  }
+
+  resolveAllFailed(opts = "") {
+    if (opts && typeof opts === "object") {
+      const body = {};
+      if (opts.contextId || opts.context_id) body.context_id = opts.contextId || opts.context_id;
+      if (opts.sinceMs || opts.since_ms) body.since_ms = opts.sinceMs || opts.since_ms;
+      return this.post("/api/v1/tasks/resolve-all", body);
+    }
+    return this.post("/api/v1/tasks/resolve-all", opts ? { context_id: opts } : {});
+  }
+
+  retryTask(taskId, payload = {}) {
+    return this.post(`/api/v1/tasks/${encodeURIComponent(taskId)}/retry`, payload);
+  }
+
+  deleteTask(taskId) {
+    return this.del(`/api/v1/tasks/${encodeURIComponent(taskId)}`);
+  }
+
+  deleteThread(contextId) {
+    return this.del(`/api/v1/threads/${encodeURIComponent(contextId)}`);
+  }
+
+  ackSchedule(agentId, scheduleId) {
+    return this.post(`/api/v1/agents/${encodeURIComponent(agentId)}/schedules/${encodeURIComponent(scheduleId)}/ack`, {});
+  }
+
   decideApproval(taskId, { decision, note = "", requestId = "", channel = "" } = {}) {
     return this.post(`/api/v1/approvals/${encodeURIComponent(taskId)}/decide`, {
       decision,

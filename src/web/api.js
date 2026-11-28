@@ -55,6 +55,19 @@ export const api = {
       },
     }),
   cancelTask: (id, reason = "") => apiFetch(`/api/v1/tasks/${encodeURIComponent(id)}/cancel`, { method: "POST", body: { reason } }),
+  resolveTask: (id) => apiFetch(`/api/v1/tasks/${encodeURIComponent(id)}/resolve`, { method: "POST", body: {} }),
+  resolveAllFailed: (opts = {}) => {
+    const body = {};
+    if (typeof opts === "string") {
+      if (opts) body.context_id = opts;
+    } else if (opts && typeof opts === "object") {
+      if (opts.contextId || opts.context_id) body.context_id = opts.contextId || opts.context_id;
+      if (opts.sinceMs || opts.since_ms) body.since_ms = opts.sinceMs || opts.since_ms;
+    }
+    return apiFetch("/api/v1/tasks/resolve-all", { method: "POST", body });
+  },
+  retryTask: (id, payload = {}) => apiFetch(`/api/v1/tasks/${encodeURIComponent(id)}/retry`, { method: "POST", body: payload }),
+  deleteTask: (id) => apiFetch(`/api/v1/tasks/${encodeURIComponent(id)}`, { method: "DELETE" }),
   decideApproval: (id, decision, note = "") =>
     apiFetch(`/api/v1/approvals/${encodeURIComponent(id)}/decide`, { method: "POST", body: { decision, note } }),
 
@@ -98,6 +111,7 @@ export const api = {
   },
 
   getThread: (contextId) => apiFetch(`/api/v1/threads/${encodeURIComponent(contextId)}`),
+  deleteThread: (contextId) => apiFetch(`/api/v1/threads/${encodeURIComponent(contextId)}`, { method: "DELETE" }),
 
   upsertSchedule: (agentId, scheduleId, payload) =>
     apiFetch(`/api/v1/agents/${encodeURIComponent(agentId)}/schedules/${encodeURIComponent(scheduleId)}`, {
@@ -108,6 +122,11 @@ export const api = {
     apiFetch(`/api/v1/agents/${encodeURIComponent(agentId)}/schedules/${encodeURIComponent(scheduleId)}/trigger`, {
       method: "POST",
       body: payload,
+    }),
+  ackSchedule: (agentId, scheduleId) =>
+    apiFetch(`/api/v1/agents/${encodeURIComponent(agentId)}/schedules/${encodeURIComponent(scheduleId)}/ack`, {
+      method: "POST",
+      body: {},
     }),
   deleteSchedule: (agentId, scheduleId) =>
     apiFetch(`/api/v1/agents/${encodeURIComponent(agentId)}/schedules/${encodeURIComponent(scheduleId)}`, {

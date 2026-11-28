@@ -125,6 +125,7 @@ export class ScheduleService {
         error_message: t.error_message || "",
         created_at: Number(t.created_at),
         completed_at: t.completed_at ?? null,
+        resolved_at: t.resolved_at ?? null,
         duration_ms: durationMs,
       };
       taskById.set(t.id, item);
@@ -164,6 +165,7 @@ export class ScheduleService {
               error_message: explicitTask.error_message || "",
               created_at: Number(explicitTask.created_at),
               completed_at: explicitTask.completed_at,
+              resolved_at: explicitTask.resolved_at ?? null,
               duration_ms: endAt ? Math.max(0, Number(endAt) - Number(explicitTask.created_at)) : null,
             });
           }
@@ -193,6 +195,7 @@ export class ScheduleService {
           error_message: isFailTick ? noteText : "",
           created_at: Number(tk.at || 0),
           completed_at: Number(tk.at || 0),
+          resolved_at: tk.resolved_at ?? null,
           duration_ms: tk.duration_ms ?? null,
         };
       });
@@ -238,12 +241,21 @@ export class ScheduleService {
       const successRate = terminalRuns.length > 0 ? Math.round((okRuns.length / terminalRuns.length) * 100) : null;
 
       const lastState = activeTaskState || lastRun?.state || sch.last_outcome || null;
+      const lastFailResolved = Boolean(
+        lastRun &&
+        TERMINAL_FAIL_STATES.has(lastRun.state) &&
+        lastRun.resolved_at &&
+        (!sch.last_task_id || sch.last_task_id === lastRun.id)
+      );
       let health = "idle";
       if (!sch.enabled) health = "paused";
       else if (activeTaskState === "working" || activeTaskState === "submitted") health = "running";
       else if (activeTaskState === "input-required" || activeTaskState === "auth-required") health = "attention";
       else if (missed) health = "missed";
-      else if (sch.last_outcome === "failed" || (!sch.last_outcome && lastRun && TERMINAL_FAIL_STATES.has(lastRun.state))) {
+      else if (
+        (sch.last_outcome === "failed" && !lastFailResolved) ||
+        (!sch.last_outcome && lastRun && TERMINAL_FAIL_STATES.has(lastRun.state) && !lastRun.resolved_at)
+      ) {
         health = "failing";
       } else if (lastTickAt || lastRunAt) {
         health = "healthy";
@@ -1032,6 +1044,90 @@ export class ScheduleService {
     }
 
     return { dispatched, skipped, failed, missed_alerts: missedAlerts };
+  }
+
+  // 机主确认并消除定时任务的「上次失败 / 超时未报」告警：
+  // - failing：只消红旧失败（任务与派发失败 tick），不修改 next_run_at，绝不跳过即将到期的本轮；
+  // - missed（超时未报）：清除超时告警并顺延 next_run_at 至下一个周期窗口。
+  acknowledge(agentId, scheduleId, { now = Date.now() } = {}) {
+    return this.store.transaction(() => {
+      const sch = this.store.getSchedule(agentId, scheduleId);
+      if (!sch) throw makeScheduleError(`定时条目不存在: ${scheduleId}`, 404, "not_found");
+
+      const lastTask = sch.last_task_id ? this.store.getTask(sch.last_task_id) : null;
+      const isCurrentlyActive = Boolean(
+        (lastTask && ACTIVE_STATES.has(lastTask.state)) ||
+        (lastTask && this.store.hasActiveScheduleSiblingTask(sch.id, lastTask.context_id))
+      );
+
+      if (lastTask?.context_id) {
+        this.store.db.prepare(`
+          UPDATE tasks
+          SET resolved_at = ?
+          WHERE schedule_id = ? AND state IN ('failed', 'rejected') AND resolved_at IS NULL
+            AND (to_agent_id = ? OR context_id = ?)
+        `).run(now, String(scheduleId), String(agentId), String(lastTask.context_id));
+      } else {
+        this.store.db.prepare(`
+          UPDATE tasks
+          SET resolved_at = ?
+          WHERE to_agent_id = ? AND schedule_id = ? AND state IN ('failed', 'rejected') AND resolved_at IS NULL
+        `).run(now, String(agentId), String(scheduleId));
+      }
+
+      // 兼容中台派发异常（仅记录在 recent_ticks、未落地 tasks 表的 failed tick）
+      const rawTicks = Array.isArray(sch.recent_ticks) ? sch.recent_ticks : [];
+      let ticksChanged = false;
+      const nextTicks = rawTicks.map((tk) => {
+        if (tk && tk.outcome === "failed" && !tk.resolved_at) {
+          ticksChanged = true;
+          return { ...tk, resolved_at: now };
+        }
+        return tk;
+      });
+
+      const parsedCron = sch.cron_expr ? parseCronExpr(sch.cron_expr) : null;
+      const expectedAt = this._resolveExpectedNextAt(sch);
+      const graceMs = this._effectiveGraceSec(sch) * 1000;
+      const hubFailedCurrentTick = Boolean(
+        sch.driver === "hub" &&
+        sch.last_outcome === "failed" &&
+        sch.next_run_at &&
+        Number(sch.last_tick_at || 0) >= Number(sch.next_run_at)
+      );
+      const canCheckMissed = Boolean(
+        sch.enabled &&
+        expectedAt &&
+        !isCurrentlyActive &&
+        !hubFailedCurrentTick &&
+        (sch.last_tick_at || sch.last_run_at || sch.driver === "hub" || now > Number(expectedAt) + graceMs)
+      );
+      const isMissed = Boolean(canCheckMissed && now > Number(expectedAt) + graceMs);
+
+      let nextRunAt = sch.next_run_at;
+      if (isMissed) {
+        nextRunAt = computeNextRunTimestamp({
+          cronExpr: parsedCron,
+          intervalMin: sch.interval_min,
+          timezone: sch.timezone || this._defaultTimezone(),
+          afterMs: now,
+        });
+      }
+
+      const updated = this.store.upsertSchedule(
+        {
+          id: sch.id,
+          agent_id: sch.agent_id,
+          last_outcome: sch.last_outcome === "failed" ? null : sch.last_outcome,
+          next_run_at: nextRunAt,
+          alerted_missed_at: null,
+          ...(ticksChanged ? { recent_ticks: nextTicks } : {}),
+          now,
+        },
+        { eventType: "schedule.acknowledged", includeActorScope: false }
+      );
+      return { schedule: updated, skipped_window: isMissed };
+    });
   }
 
   deleteForAgent(agentId, scheduleId, { actor = null } = {}) {
