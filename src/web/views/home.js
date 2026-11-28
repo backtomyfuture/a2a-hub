@@ -21,6 +21,10 @@ function isFailedTaskState(state) {
   return state === "failed" || state === "rejected";
 }
 
+function isUnresolvedFailedTask(t) {
+  return Boolean(t && isFailedTaskState(t.state) && !t.resolved_at);
+}
+
 function isAbnormalSchedule(sch) {
   return sch.health === "missed" || sch.health === "failing" || sch.health === "attention";
 }
@@ -85,6 +89,7 @@ function renderActionCard(task, agentMap) {
             </div>`
           : `<form class="action-reply-row" data-reply-form="${escapeHtml(task.id)}">
               <input type="text" name="reply" placeholder="输入补充说明并恢复执行..." required />
+              <button type="button" class="btn btn-sm btn-danger" data-cancel-task="${escapeHtml(task.id)}">${uiIcon("x", 12)} 取消</button>
               <button type="submit" class="btn btn-sm btn-primary">${uiIcon("send", 12)} 发送回复</button>
             </form>`
       }
@@ -132,13 +137,14 @@ function renderTaskFeed(tasks, agentMap, emptyText) {
           const isErr = Boolean(t.error_message) || isFailedTaskState(t.state);
           const excerpt = cleanExcerpt(t.error_message || t.receipt?.summary || "");
           const canCancel = t.state === "working" || t.state === "submitted";
+          const canHandleFail = isUnresolvedFailedTask(t);
           const fromSuffix = t.from_node && t.from_node !== "owner" ? ` ← ${t.from_node}` : "";
           const attCount = Number.isFinite(Number(t.attachment_count))
             ? Number(t.attachment_count)
             : (t.attachments?.length || 0) + (t.receipt?.attachments?.length || 0);
           const time = taskTimeCell(t, now);
 
-          // 固定列网格：状态 / 时间 / 操作三列定宽，避免有无「取消」按钮时时间列左右跳动
+          // 固定列网格：状态 / 时间 / 操作三列定宽，避免有无按钮时时间列左右跳动
           return `
             <div class="task-feed-row ${isFailedTaskState(t.state) ? "is-err" : ""}" data-view-thread="${escapeHtml(t.context_id)}">
               ${agentAvatar(ag || { id: t.to_agent_id }, { size: "md" })}
@@ -157,7 +163,9 @@ function renderTaskFeed(tasks, agentMap, emptyText) {
               <span class="task-action">${
                 canCancel
                   ? `<button type="button" class="btn btn-ghost btn-sm btn-icon" data-cancel-task="${escapeHtml(t.id)}" title="取消任务" aria-label="取消任务">${uiIcon("x", 13)}</button>`
-                  : ""
+                  : canHandleFail
+                    ? `<button type="button" class="btn btn-ghost btn-sm btn-icon" data-retry-task="${escapeHtml(t.id)}" title="重试任务" aria-label="重试任务">${uiIcon("retry", 13)}</button><button type="button" class="btn btn-ghost btn-sm btn-icon" data-resolve-task="${escapeHtml(t.id)}" title="标为已处理（消红）" aria-label="标为已处理">${uiIcon("check", 13)}</button>`
+                    : ""
               }</span>
             </div>
           `;
@@ -180,7 +188,7 @@ function renderThroughputPanel(tasks, agentMap) {
 
   for (const t of tasks) {
     const isOk = t.state === "completed";
-    const isFail = isFailedTaskState(t.state);
+    const isFail = isUnresolvedFailedTask(t);
     if (!isOk && !isFail) continue;
     const at = Number(t.completed_at || t.updated_at || 0);
     if (at < startMs) continue;
@@ -212,7 +220,7 @@ function renderThroughputPanel(tasks, agentMap) {
         <h3 class="panel-title">${uiIcon("activity", 14)} 近 24 小时</h3>
         <div class="tp-metrics">
           <span><strong>${ok}</strong> 完成</span>
-          <span class="${fail ? "is-fail" : ""}"><strong>${fail}</strong> 失败</span>
+          <span class="${fail ? "is-fail" : ""}" title="仅统计尚未标为已处理的失败"><strong>${fail}</strong> 未处理失败</span>
           <span><strong>${total ? Math.round((ok / total) * 100) : "-"}${total ? "%" : ""}</strong> 成功率</span>
           <span><strong>${median === null ? "-" : shortDuration(median)}</strong> 中位耗时</span>
         </div>
@@ -397,10 +405,10 @@ export function renderHomeView(container, refreshFn) {
   const authCount = actions.filter((t) => t.state === "auth-required").length;
   const inputCount = actions.length - authCount;
   const activeTasks = tasks.filter((t) => isActiveTaskState(t.state));
-  const failedTasks = tasks.filter((t) => isFailedTaskState(t.state));
+  const failedTasks = tasks.filter(isUnresolvedFailedTask);
 
   const done24h = tasks.filter((t) => t.state === "completed" && Number(t.updated_at || t.created_at || 0) >= cutoff24h).length;
-  const fail24h = tasks.filter((t) => isFailedTaskState(t.state) && Number(t.updated_at || t.created_at || 0) >= cutoff24h).length;
+  const fail24h = failedTasks.filter((t) => Number(t.updated_at || t.created_at || 0) >= cutoff24h).length;
 
   const onlineDevices = devices.filter((d) => d.online).length;
   const onlineAgents = agents.filter((a) => a.online && a.enabled).length;
@@ -442,7 +450,7 @@ export function renderHomeView(container, refreshFn) {
           <span class="status-dot ${activeTasks.length ? "is-run" : "is-idle"}"></span>
         </div>
         <div class="kpi-num">${activeTasks.length} <span class="kpi-num-unit">执行中</span></div>
-        <div class="kpi-meta">24h 完成 ${done24h}${fail24h ? ` · 失败 ${fail24h}` : ""}</div>
+        <div class="kpi-meta">24h 完成 ${done24h}${fail24h ? ` · 未处理失败 ${fail24h}` : ""}</div>
       </div>
 
       <div class="kpi-cell" id="kpi-nodes">
@@ -504,7 +512,14 @@ export function renderHomeView(container, refreshFn) {
                 ).join("")}
               </div>
             </div>
-            <button type="button" class="btn btn-ghost btn-sm" id="home-goto-threads">历史线程 →</button>
+            <div class="row" style="gap:6px;flex-shrink:0">
+              ${
+                boardFilter.id === "failed" && recentFailed.length > 0
+                  ? `<button type="button" class="btn btn-ghost btn-sm" id="home-resolve-all-failed" data-resolve-since="${cutoff24h}" data-resolve-count="${recentFailed.length}" title="将近 24 小时内的未处理失败标为已处理">${uiIcon("check", 12)} 全部已处理</button>`
+                  : ""
+              }
+              <button type="button" class="btn btn-ghost btn-sm" id="home-goto-threads">历史线程 →</button>
+            </div>
           </div>
           ${renderTaskFeed(boardFilter.items.slice(0, BOARD_LIMIT), agentMap, boardFilter.empty)}
           ${
@@ -573,7 +588,14 @@ export function renderHomeView(container, refreshFn) {
 function bindHomeEvents(container, refreshFn) {
   container.querySelectorAll("[data-view-thread]").forEach((el) => {
     el.addEventListener("click", (e) => {
-      if (e.target.closest("[data-cancel-task]") || e.target.closest(".attachment-bar")) return;
+      if (
+        e.target.closest("[data-cancel-task]") ||
+        e.target.closest("[data-retry-task]") ||
+        e.target.closest("[data-resolve-task]") ||
+        e.target.closest(".attachment-bar")
+      ) {
+        return;
+      }
       setState({ activeTab: "threads", selectedThreadId: el.getAttribute("data-view-thread"), selectedThreadDetail: null });
     });
   });
@@ -582,6 +604,7 @@ function bindHomeEvents(container, refreshFn) {
     btn.addEventListener("click", async (e) => {
       e.stopPropagation();
       const id = btn.getAttribute("data-cancel-task");
+      if (btn.closest(".action-card") && !confirm("确认取消这个等待回复的任务吗？")) return;
       try {
         await api.cancelTask(id, "机主在概览取消任务");
         showToast("任务已取消");
@@ -590,6 +613,53 @@ function bindHomeEvents(container, refreshFn) {
         showToast(err.message, true);
       }
     });
+  });
+
+  container.querySelectorAll("[data-retry-task]").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const id = btn.getAttribute("data-retry-task");
+      try {
+        const res = await api.retryTask(id);
+        const dropped = Number(res?.dropped_attachments || 0);
+        showToast(
+          dropped > 0
+            ? `已重新派发任务（原任务有 ${dropped} 个临时附件已过期未携带）`
+            : "已重新派发任务，旧失败已自动消红"
+        );
+        await refreshFn();
+      } catch (err) {
+        showToast(err.message, true);
+      }
+    });
+  });
+
+  container.querySelectorAll("[data-resolve-task]").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const id = btn.getAttribute("data-resolve-task");
+      try {
+        await api.resolveTask(id);
+        showToast("已标为已处理");
+        await refreshFn();
+      } catch (err) {
+        showToast(err.message, true);
+      }
+    });
+  });
+
+  container.querySelector("#home-resolve-all-failed")?.addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    const sinceMs = Number(btn?.getAttribute?.("data-resolve-since") || 0) || undefined;
+    const cnt = Number(btn?.getAttribute?.("data-resolve-count") || 0);
+    if (!confirm(`确认将近 24 小时内的 ${cnt || "全部"} 条未处理失败标为已处理吗？`)) return;
+    try {
+      const res = await api.resolveAllFailed(sinceMs ? { sinceMs } : {});
+      showToast(res.resolved_count ? `已将 ${res.resolved_count} 条失败标为已处理` : "当前没有未处理的失败任务");
+      await refreshFn();
+    } catch (err) {
+      showToast(err.message, true);
+    }
   });
 
   container.querySelectorAll("[data-decide-approve]").forEach((btn) => {

@@ -1367,6 +1367,14 @@ export function startHubHttpServer({
       return sendJson(res, 200, { ok: true, ...trigRes });
     }
 
+    m = /^\/api\/v1\/agents\/([A-Za-z0-9._-]+)\/schedules\/([A-Za-z0-9._-]+)\/ack$/.exec(pathname);
+    if (method === "POST" && m) {
+      if (!requireOwner()) return;
+      const [, agentId, scheduleId] = m;
+      const ackRes = schedules.acknowledge(agentId, scheduleId);
+      return sendJson(res, 200, { ok: true, ...ackRes });
+    }
+
     m = /^\/api\/v1\/agents\/([A-Za-z0-9._-]+)\/schedules\/([A-Za-z0-9._-]+)$/.exec(pathname);
     if (m) {
       const [, agentId, scheduleId] = m;
@@ -1462,14 +1470,50 @@ export function startHubHttpServer({
       return sendJson(res, 200, { ok: true, task });
     }
 
+    if (method === "POST" && pathname === "/api/v1/tasks/resolve-all") {
+      if (!requireOwner()) return;
+      const body = await readJsonBody(req);
+      const result = taskService.resolveAllFailed({
+        contextId: body.context_id || null,
+        sinceMs: body.since_ms ?? null,
+      });
+      return sendJson(res, 200, { ok: true, ...result });
+    }
+
     m = /^\/api\/v1\/tasks\/([A-Za-z0-9._-]+)$/.exec(pathname);
-    if (method === "GET" && m) {
-      const detail = taskService.getTaskDetail(m[1], { includeContextHistory: true });
-      if (!detail) return sendError(res, 404, "任务不存在", "not_found");
-      if (!actorCanSeeTask(actor, detail, store)) {
-        return sendError(res, 403, "无权查看该任务", "forbidden");
+    if (m) {
+      if (method === "GET") {
+        const detail = taskService.getTaskDetail(m[1], { includeContextHistory: true });
+        if (!detail) return sendError(res, 404, "任务不存在", "not_found");
+        if (!actorCanSeeTask(actor, detail, store)) {
+          return sendError(res, 403, "无权查看该任务", "forbidden");
+        }
+        return sendJson(res, 200, { ok: true, task: detail });
       }
-      return sendJson(res, 200, { ok: true, task: detail });
+      if (method === "DELETE") {
+        if (!requireOwner()) return;
+        const result = taskService.deleteTask(m[1]);
+        return sendJson(res, 200, { ok: true, ...result });
+      }
+    }
+
+    m = /^\/api\/v1\/tasks\/([A-Za-z0-9._-]+)\/(resolve|retry)$/.exec(pathname);
+    if (method === "POST" && m) {
+      if (!requireOwner()) return;
+      const [, taskId, action] = m;
+      if (action === "resolve") {
+        const result = taskService.resolveTask(taskId);
+        return sendJson(res, 200, { ok: true, ...result });
+      }
+      const body = await readJsonBody(req);
+      const result = taskService.retryTask(taskId, {
+        fromNode: "owner",
+        actor,
+        inputText: body.input_text !== undefined ? body.input_text : undefined,
+        to: body.to !== undefined ? body.to : undefined,
+        model: body.model !== undefined ? body.model : undefined,
+      });
+      return sendJson(res, 201, { ok: true, ...result });
     }
 
     m = /^\/api\/v1\/tasks\/([A-Za-z0-9._-]+)\/(claim|heartbeat|complete|fail|ask|auth|reply|cancel)$/.exec(pathname);
@@ -1584,14 +1628,21 @@ export function startHubHttpServer({
     }
 
     m = /^\/api\/v1\/threads\/([A-Za-z0-9._-]+)$/.exec(pathname);
-    if (method === "GET" && m) {
-      const thread = taskService.getThread(m[1]);
-      if (!thread) return sendError(res, 404, "Thread 不存在", "not_found");
-      if (actor.kind === "agent") {
-        const visible = thread.tasks.some((t) => actorCanSeeTask(actor, t, store));
-        if (!visible) return sendError(res, 403, "无权查看该 Thread", "forbidden");
+    if (m) {
+      if (method === "GET") {
+        const thread = taskService.getThread(m[1]);
+        if (!thread) return sendError(res, 404, "Thread 不存在", "not_found");
+        if (actor.kind === "agent") {
+          const visible = thread.tasks.some((t) => actorCanSeeTask(actor, t, store));
+          if (!visible) return sendError(res, 403, "无权查看该 Thread", "forbidden");
+        }
+        return sendJson(res, 200, { ok: true, thread });
       }
-      return sendJson(res, 200, { ok: true, thread });
+      if (method === "DELETE") {
+        if (!requireOwner()) return;
+        const result = taskService.deleteThread(m[1]);
+        return sendJson(res, 200, { ok: true, ...result });
+      }
     }
 
     // ---- 9. 文件中转存储 ----

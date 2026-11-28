@@ -216,6 +216,11 @@ function renderScheduleRow(sch) {
                 : ""
           }
           ${
+            sch.health === "failing" || sch.health === "missed"
+              ? `<button type="button" class="btn btn-secondary btn-sm" data-sch-ack="${escapeHtml(sch.agent_id)}:::${escapeHtml(sch.id)}" data-sch-health="${escapeHtml(sch.health)}">${sch.health === "missed" ? "忽略并等到下次" : "忽略异常"}</button>`
+              : ""
+          }
+          ${
             canTrigger
               ? `<button type="button" class="btn btn-secondary btn-sm" data-sch-run="${escapeHtml(sch.agent_id)}:::${escapeHtml(sch.id)}">立即运行</button>`
               : ""
@@ -585,6 +590,31 @@ function bindScheduleListEvents(listRoot, schedules, container, refreshFn, syncL
   listRoot.querySelectorAll("[data-jump-thread]").forEach((btn) => {
     btn.addEventListener("click", () => {
       setState({ activeTab: "threads", selectedThreadId: btn.getAttribute("data-jump-thread"), selectedThreadDetail: null });
+    });
+  });
+
+  listRoot.querySelectorAll("[data-sch-ack]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const [agentId, schId] = btn.getAttribute("data-sch-ack").split(":::");
+      const health = btn.getAttribute("data-sch-health") || "";
+      const curSchedules = store.state?.schedules || schedules;
+      const target = curSchedules.find((x) => x.agent_id === agentId && x.id === schId);
+      if (!target) return;
+      if (health === "missed" && !confirm(`确认忽略「${target.name}」本次超时告警，并顺延等待下一个周期吗？`)) {
+        return;
+      }
+      try {
+        const res = await api.ackSchedule(agentId, schId);
+        showToast(
+          res?.skipped_window
+            ? `已忽略「${target.name}」本次超时，已顺延至下个周期`
+            : `已消除「${target.name}」的异常提示`
+        );
+        await refreshFn();
+        if (isSchedulePanelOpen()) syncListRegion?.();
+      } catch (err) {
+        showToast(err.message, true);
+      }
     });
   });
 

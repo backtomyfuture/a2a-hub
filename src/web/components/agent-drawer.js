@@ -180,15 +180,18 @@ export function renderAgentDrawer(root, refreshFn) {
           tasks.length
             ? `<div class="stack-sm">${tasks
                 .map(
-                  (t) => `
+                  (t) => {
+                    const isResolvedFail = (t.state === "failed" || t.state === "rejected") && Boolean(t.resolved_at);
+                    return `
               <div class="card" style="padding:10px 12px;cursor:pointer" data-jump-thread="${escapeHtml(t.context_id)}">
                 <div class="row-between">
                   <span class="truncate" style="font-weight:550">${escapeHtml(t.title)}</span>
-                  <span class="pill ${stateTone(t.state)}">${stateLabel(t.state)}</span>
+                  <span class="pill ${isResolvedFail ? "" : stateTone(t.state)}">${stateLabel(t.state)}${isResolvedFail ? " · 已处理" : ""}</span>
                 </div>
                 <div class="muted" style="font-size:11px;margin-top:3px">${formatRelativeTime(t.updated_at)} · <span class="mono">${escapeHtml(t.id)}</span></div>
               </div>
-            `
+            `;
+                  }
                 )
                 .join("")}</div>`
             : `<div class="empty-box" style="padding:16px">暂无分配给该 Agent 的任务</div>`

@@ -19,7 +19,9 @@
 
 ## 2. 只追加消息日志（`messages`）
 
-每条状态跃迁都会在 `messages` 表追加一条不可篡改的记录（`dispatch`、`status`、`question`、`answer`、`auth_request`、`auth_decision`、`receipt`、`error`、`retry`、`cancel`），任何接口均不得修改或删除历史消息。
+每条状态跃迁都会在 `messages` 表追加一条不可篡改的记录（`dispatch`、`status`、`question`、`answer`、`auth_request`、`auth_decision`、`receipt`、`error`、`retry`、`cancel`），任何正常流转接口均不得修改或删除历史消息。
+
+> 例外说明（机主清理终态废单 / 废线程）：仅当机主（`owner`）主动调用 `DELETE /api/v1/tasks/:id`（仅限终态任务）或 `DELETE /api/v1/threads/:contextId`（仅限不含活跃任务的线程）清理废单时，允许级联物理删除该任务 / 线程下的历史消息（`messages`）与附件关联（`file_links`）。
 
 ## 3. 核心 REST 接口总览
 
@@ -45,12 +47,15 @@
   - `POST /api/v1/agents/:id/schedules/:sid/runs`（`agent` 仅限自身或 `owner`；默认返回精简 JSON，传 `full=1` 返回完整详情）
   - `PUT|DELETE /api/v1/agents/:id/schedules/:sid`（`driver='hub'` 严格限 `owner`；`driver='edge'` 限 `owner` 或该 `agent` 本身）
   - `POST /api/v1/agents/:id/schedules/:sid/trigger`（严格限 `owner`，且仅对 `driver='hub'` 或 `triggerable=true` 的条目开放）
+  - `POST /api/v1/agents/:id/schedules/:sid/ack`（严格限 `owner`；`failing` 仅消红旧失败不动排期，`missed` 清除超时告警并顺延至下个周期窗口）
 - **任务、线程、审批与文件**：
   - `POST /api/v1/tasks`（支持单目标或 `to: [...]` 数组并发扇出，`owner` 或 `leader`）
   - `POST /api/v1/tasks/claim`（Device 跨启用 Worker 批量认领下一条）
+  - `POST /api/v1/tasks/resolve-all`（严格限 `owner`，支持可选 `context_id` / `since_ms` 精确范围，批量将未处理的失败/已拒绝任务标为已处理以消红）
   - `POST /api/v1/tasks/:id/{claim,heartbeat,complete,fail,ask,auth,reply,cancel}`
+  - `POST /api/v1/tasks/:id/{resolve,retry}`、`DELETE /api/v1/tasks/:id`（严格限 `owner`；`resolve` 标为已处理、`retry` 由机主接管同线程重派并自动消红旧失败且报告过期剔除附件、`DELETE` 仅允许删除已结束的终态任务并级联清理其历史消息）
   - `POST /api/v1/approvals/:taskId/decide`（**严格限 `owner`**，使用 Ed25519 私钥签名）
-  - `GET /api/v1/threads`, `GET /api/v1/threads/:contextId`
+  - `GET /api/v1/threads`, `GET|DELETE /api/v1/threads/:contextId`（`DELETE` 严格限 `owner`，且仅允许删除不含活跃任务的线程）
   - `POST /api/v1/files`, `GET /api/v1/files/:id`, `GET /api/v1/files/:id/meta`
 
 ## 4. 定时任务双模式规范（`hub` / `edge`）

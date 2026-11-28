@@ -640,3 +640,185 @@ test("Web Console 排序: Leader 置顶，其余在线 → 连不上 → 已暂�
   ];
   assert.deepEqual(sortDevicesForDisplay(devices).map((d) => d.id), ["local", "remote", "offline", "paused"]);
 });
+
+test("Web Console 失败闭环 UI: 已消红失败退出红标，未处理失败显示重试/已处理，待回复显示取消，定时异常显示忽略", async () => {
+  const { setState } = await import("../src/web/state.js");
+  const { renderHomeView } = await import("../src/web/views/home.js");
+  const { renderThreadsView } = await import("../src/web/views/threads.js");
+  const { renderSchedulesView } = await import("../src/web/views/schedules.js");
+
+  const makeMockContainer = () => ({
+    innerHTML: "",
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  });
+
+  const now = Date.now();
+  const baseState = {
+    hub_url: "http://127.0.0.1:8787",
+    agents: [{ id: "a1", name: "Bot A", enabled: true, online: true, role: "worker" }],
+    devices: [],
+    pending_actions: [
+      {
+        id: "tsk_ask",
+        context_id: "ctx_ask",
+        to_agent_id: "a1",
+        title: "需要确认参数",
+        state: "input-required",
+        updated_at: now,
+        attachments: [],
+        messages: [{ kind: "question", body: "用哪个目录？" }],
+      },
+    ],
+    tasks: [
+      {
+        id: "tsk_fail_open",
+        context_id: "ctx_open",
+        to_agent_id: "a1",
+        from_node: "owner",
+        title: "未处理失败",
+        state: "failed",
+        error_message: "boom",
+        resolved_at: null,
+        created_at: now - 5000,
+        updated_at: now - 1000,
+      },
+      {
+        id: "tsk_fail_done",
+        context_id: "ctx_done",
+        to_agent_id: "a1",
+        from_node: "owner",
+        title: "已消红失败",
+        state: "failed",
+        error_message: "old_err",
+        resolved_at: now - 500,
+        created_at: now - 10000,
+        updated_at: now - 2000,
+      },
+    ],
+    threads: [
+      {
+        context_id: "ctx_open",
+        title: "未处理线程",
+        from_node: "owner",
+        agents: ["a1"],
+        states: { failed: 1 },
+        unresolved_failed_count: 1,
+        resolved_failed_count: 0,
+        task_count: 1,
+        pending_action_count: 0,
+        updated_at: now - 1000,
+      },
+      {
+        context_id: "ctx_done",
+        title: "已消红线程",
+        from_node: "owner",
+        agents: ["a1"],
+        states: { failed: 1 },
+        unresolved_failed_count: 0,
+        resolved_failed_count: 1,
+        task_count: 1,
+        pending_action_count: 0,
+        updated_at: now - 2000,
+      },
+    ],
+    schedules: [
+      {
+        id: "sch_fail",
+        agent_id: "a1",
+        agent_name: "Bot A",
+        name: "失败定时",
+        driver: "edge",
+        interval_min: 60,
+        enabled: true,
+        health: "failing",
+        recent_runs: [],
+      },
+      {
+        id: "sch_missed",
+        agent_id: "a1",
+        agent_name: "Bot A",
+        name: "超时定时",
+        driver: "edge",
+        interval_min: 60,
+        enabled: true,
+        health: "missed",
+        missed: true,
+        recent_runs: [],
+      },
+      {
+        id: "sch_ok",
+        agent_id: "a1",
+        agent_name: "Bot A",
+        name: "正常定时",
+        driver: "edge",
+        interval_min: 60,
+        enabled: true,
+        health: "healthy",
+        recent_runs: [],
+      },
+    ],
+  };
+
+  setState({
+    state: baseState,
+    homeTaskFilter: "failed",
+    threadFilter: "failed",
+    selectedThreadId: "ctx_done",
+    selectedThreadDetail: {
+      context_id: "ctx_done",
+      title: "已消红线程",
+      from_node: "owner",
+      agents: ["a1"],
+      updated_at: now - 2000,
+      tasks: [
+        {
+          id: "tsk_fail_done",
+          context_id: "ctx_done",
+          to_agent_id: "a1",
+          title: "已消红失败",
+          state: "failed",
+          resolved_at: now - 500,
+          messages: [],
+        },
+      ],
+    },
+  });
+
+  // 1) 首页：只展示未处理失败，带重试/已处理/全部已处理按钮；待回复卡片带取消按钮
+  const homeEl = makeMockContainer();
+  renderHomeView(homeEl, async () => {});
+  assert.ok(homeEl.innerHTML.includes("tsk_fail_open"));
+  assert.ok(!homeEl.innerHTML.includes("tsk_fail_done"), "已消红的失败不得留在首页失败看板");
+  assert.ok(homeEl.innerHTML.includes('data-retry-task="tsk_fail_open"'));
+  assert.ok(homeEl.innerHTML.includes('data-resolve-task="tsk_fail_open"'));
+  assert.ok(homeEl.innerHTML.includes('id="home-resolve-all-failed"'));
+  assert.ok(homeEl.innerHTML.includes('data-cancel-task="tsk_ask"'), "首页待回复卡片应支持取消");
+
+  // 2) 线程页：已消红线程不再计入「有失败」红标，且详情里展示「失败 · 已处理」与删除线程按钮
+  const threadListEl = { innerHTML: "", querySelectorAll: () => [], scrollIntoView: () => {} };
+  const threadPagerEl = { innerHTML: "", querySelectorAll: () => [] };
+  const threadsEl = {
+    innerHTML: "",
+    querySelector(sel) {
+      if (sel === "#thread-list") return threadListEl;
+      if (sel === "#thread-pager") return threadPagerEl;
+      return null;
+    },
+    querySelectorAll: () => [],
+  };
+  renderThreadsView(threadsEl, async () => {});
+  assert.ok(threadListEl.innerHTML.includes("ctx_open"));
+  assert.ok(!threadListEl.innerHTML.includes("ctx_done"), "已消红线程不得出现在「有失败」筛选下");
+  assert.ok(threadsEl.innerHTML.includes("失败 · 已处理"));
+  assert.ok(threadsEl.innerHTML.includes('data-delete-thread="ctx_done"'));
+  assert.ok(threadsEl.innerHTML.includes('data-delete-task="tsk_fail_done"'));
+
+  // 3) 定时页：failing 显示「忽略异常」、missed 显示「忽略并等到下次」、正常条目不显示
+  const schEl = makeMockContainer();
+  renderSchedulesView(schEl, async () => {});
+  assert.ok(schEl.innerHTML.includes('data-sch-ack="a1:::sch_fail"') && schEl.innerHTML.includes("忽略异常"));
+  assert.ok(schEl.innerHTML.includes('data-sch-ack="a1:::sch_missed"') && schEl.innerHTML.includes("忽略并等到下次"));
+  assert.ok(!schEl.innerHTML.includes('data-sch-ack="a1:::sch_ok"'));
+  assert.ok(homeEl.innerHTML.includes("未处理失败"), "首页 24h 指标文案应明确标示为未处理失败");
+});
