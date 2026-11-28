@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 import zlib from "node:zlib";
+
+const execFileAsync = promisify(execFile);
 import { GatewayClient } from "../src/client/gateway-client.mjs";
 import { startHubRuntime } from "../src/core/hub-runtime.mjs";
 
@@ -438,19 +442,78 @@ test("Task Exit & Schedule Ack HTTP: 仅机主可消红/重试/删除/定时忽�
     assert.equal(ackHubRes.skipped_window, false, "failing 但未超宽限期的中台定时 ack 不得跳过本轮");
     assert.equal(ackHubRes.schedule.next_run_at, dueAt, "failing 消红不得推进已到期的 next_run_at");
 
-    // 再造一次失败并用 retryTask 重试：不篡改定时跑批时钟 last_run_at / last_tick_at
-    const trigHub2 = await owner.post("/api/v1/agents/bot-a/schedules/hub-due/trigger", {});
-    await botClient.claimTask(trigHub2.task.id);
-    await botClient.fail(trigHub2.task.id, { error: "temp_err_2", retryable: false });
-    const runAtBeforeRetry = rt.store.getSchedule("bot-a", "hub-due").last_run_at;
-    const tickAtBeforeRetry = rt.store.getSchedule("bot-a", "hub-due").last_tick_at;
-    await new Promise((r) => setTimeout(r, 15));
-    await owner.retryTask(trigHub2.task.id);
-    const schAfterRetry = rt.store.getSchedule("bot-a", "hub-due");
-    assert.equal(schAfterRetry.last_run_at, runAtBeforeRetry, "人工重试定时任务不得修改 last_run_at 跑批时钟");
-    assert.equal(schAfterRetry.last_tick_at, tickAtBeforeRetry, "人工重试定时任务不得修改 last_tick_at 跑批时钟");
+    // 两次 per_run 失败（T1 较旧、T2 较新）：
+    // 重试较旧的 T1 并完成它，不得涂绿较新的 T2，也不得改动 last_run_at / last_tick_at / next_run_at；
+    // 重试最新的 T2 并完成它，健康状态恢复 completed 但跑批时钟仍保持原排期不变。
+    const trigT1 = await owner.post("/api/v1/agents/bot-a/schedules/hub-due/trigger", {});
+    const t1Id = trigT1.task.id;
+    await botClient.claimTask(t1Id);
+    await botClient.fail(t1Id, { error: "t1_err", retryable: false });
 
-    // 6) 中台派发失败（仅写 recent_ticks 无 task 行）也能通过 /ack 完整消红
+    const trigT2 = await owner.post("/api/v1/agents/bot-a/schedules/hub-due/trigger", {});
+    const t2Id = trigT2.task.id;
+    await botClient.claimTask(t2Id);
+    await botClient.fail(t2Id, { error: "t2_err", retryable: false });
+
+    const beforeRetrySch = rt.store.getSchedule("bot-a", "hub-due");
+    assert.equal(beforeRetrySch.last_task_id, t2Id);
+    assert.equal(beforeRetrySch.last_outcome, "failed");
+
+    await new Promise((r) => setTimeout(r, 15));
+    const retryT1 = await owner.retryTask(t1Id);
+    await botClient.claimTask(retryT1.task.id);
+    await botClient.complete(retryT1.task.id, { summary: "t1 ok", text: "t1 ok" });
+
+    assert.equal(rt.store.getTask(t2Id).resolved_at, null, "重试较旧 T1 并完成后，较新失败 T2 仍须未处理");
+    const afterT1RetrySch = rt.store.getSchedule("bot-a", "hub-due");
+    assert.equal(afterT1RetrySch.last_task_id, t2Id, "重试较旧 T1 不得覆盖 last_task_id");
+    assert.equal(afterT1RetrySch.last_outcome, "failed", "重试较旧 T1 完成不得涂绿更新的失败");
+    assert.equal(afterT1RetrySch.last_run_at, beforeRetrySch.last_run_at, "重试较旧 T1 完成不得改动 last_run_at");
+    assert.equal(afterT1RetrySch.last_tick_at, beforeRetrySch.last_tick_at, "重试较旧 T1 完成不得改动 last_tick_at");
+    assert.equal(afterT1RetrySch.next_run_at, beforeRetrySch.next_run_at, "重试较旧 T1 完成不得改动 next_run_at");
+    const schViewAfterT1 = (await owner.get("/api/v1/schedules")).schedules.find((x) => x.id === "hub-due");
+    assert.equal(schViewAfterT1.health, "failing");
+
+    // 重试当前头部 T2 并完成：状态恢复健康，但跑批时钟仍保持不变
+    await new Promise((r) => setTimeout(r, 15));
+    const retryT2 = await owner.retryTask(t2Id);
+    await botClient.claimTask(retryT2.task.id);
+    await botClient.complete(retryT2.task.id, { summary: "t2 ok", text: "t2 ok" });
+
+    const afterT2RetrySch = rt.store.getSchedule("bot-a", "hub-due");
+    assert.equal(afterT2RetrySch.last_task_id, retryT2.task.id);
+    assert.equal(afterT2RetrySch.last_outcome, "completed");
+    assert.equal(afterT2RetrySch.last_run_at, beforeRetrySch.last_run_at, "重试当前头部 T2 完成也不得改动 last_run_at");
+    assert.equal(afterT2RetrySch.last_tick_at, beforeRetrySch.last_tick_at, "重试当前头部 T2 完成也不得改动 last_tick_at");
+    assert.equal(afterT2RetrySch.next_run_at, beforeRetrySch.next_run_at, "重试当前头部 T2 完成也不得改动 next_run_at");
+
+    // 6) CLI `ah task retry` 对携带过期附件的失败任务必须显式输出过期附件名称
+    const expUp = await owner.uploadFile({
+      buffer: Buffer.from("stale data", "utf8"),
+      name: "stale-report.txt",
+      mime: "text/plain",
+    });
+    const dCli = await owner.dispatchTask({
+      to: "bot-a",
+      title: "CLI 重试过期附件提示",
+      input_text: "check",
+      attachments: [expUp.file.uri],
+      max_retries: 0,
+    });
+    const cliTaskId = dCli.tasks[0].id;
+    await botClient.claimTask(cliTaskId);
+    await botClient.fail(cliTaskId, { error: "cli_fail", retryable: false });
+    rt.store.db.prepare("UPDATE files SET expires_at = ? WHERE id = ?").run(Date.now() - 1000, expUp.file.id);
+
+    const { stdout: cliOut } = await execFileAsync(
+      process.execPath,
+      [path.resolve("bin", "ah.mjs"), "task", "retry", cliTaskId, "--hub", rt.url, "--token", "exit_owner_tok"],
+      { encoding: "utf8" }
+    );
+    assert.ok(cliOut.includes("已重试任务"), `CLI 应输出重试成功提示: ${cliOut}`);
+    assert.ok(cliOut.includes("stale-report.txt") && cliOut.includes("已过期"), `CLI 应明确提示被剔除的过期附件: ${cliOut}`);
+
+    // 7) 中台派发失败（仅写 recent_ticks 无 task 行）也能通过 /ack 完整消红
     rt.store.upsertSchedule({
       id: "hub-tick-fail",
       agent_id: "bot-a",

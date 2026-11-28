@@ -285,10 +285,10 @@ export class TaskService {
           });
         }
 
-        if (scheduleId) {
+        if (scheduleId && touchScheduleRunAt) {
           this.store.recordScheduleTaskActivity(agent.id, scheduleId, {
             taskId,
-            touchRunAt: Boolean(touchScheduleRunAt),
+            touchRunAt: true,
             clearAlert: true,
             contextId: finalContextId,
             now,
@@ -542,6 +542,17 @@ export class TaskService {
     });
   }
 
+  // 判断定时任务的手动重试是否仍对应当前定时账本头部（last_task_id），避免重试历史旧单覆写更新的失败状态
+  _scheduleMatchesRetryHead(scheduleId, task) {
+    const ids = [task.id, task.parent_task_id].filter(Boolean).map(String);
+    if (!ids.length) return false;
+    const placeholders = ids.map(() => "?").join(",");
+    const row = this.store.db.prepare(
+      `SELECT 1 FROM schedules WHERE id = ? AND last_task_id IN (${placeholders}) LIMIT 1`
+    ).get(String(scheduleId), ...ids);
+    return Boolean(row);
+  }
+
   complete(taskId, { actorId, summary = "", text = "", artifacts = [], data = {}, usage = null, attachments = [], actor = null } = {}) {
     return this.store.transaction(() => {
       const task = this.store.getTask(taskId);
@@ -585,23 +596,26 @@ export class TaskService {
       `).run(now, task.context_id, task.id, Number(task.created_at || 0));
 
       if (task.schedule_id) {
-        const durationMs = task.created_at ? Math.max(0, now - Number(task.created_at)) : undefined;
-        const failedSibling = this.store.hasFailedScheduleSiblingTask(task.schedule_id, task.context_id);
-        this.store.recordScheduleTaskActivity(
-          task.to_agent_id,
-          task.schedule_id,
-          failedSibling
-            ? { touchRunAt: true, clearAlert: true, contextId: task.context_id, now }
-            : {
-                taskId: task.id,
-                outcome: "completed",
-                durationMs,
-                touchRunAt: true,
-                clearAlert: true,
-                contextId: task.context_id,
-                now,
-              }
-        );
+        const isRetry = Boolean(task.parent_task_id);
+        if (!isRetry || this._scheduleMatchesRetryHead(task.schedule_id, task)) {
+          const durationMs = task.created_at ? Math.max(0, now - Number(task.created_at)) : undefined;
+          const failedSibling = this.store.hasFailedScheduleSiblingTask(task.schedule_id, task.context_id);
+          this.store.recordScheduleTaskActivity(
+            task.to_agent_id,
+            task.schedule_id,
+            failedSibling
+              ? { touchRunAt: !isRetry, clearAlert: !isRetry, contextId: task.context_id, now }
+              : {
+                  taskId: task.id,
+                  outcome: "completed",
+                  durationMs,
+                  touchRunAt: !isRetry,
+                  clearAlert: !isRetry,
+                  contextId: task.context_id,
+                  now,
+                }
+          );
+        }
       }
 
       const ag = this.store.getAgent(task.to_agent_id);
@@ -832,12 +846,15 @@ export class TaskService {
       `).run(errText, now, now, seq, task.id);
 
       if (task.schedule_id) {
-        this.store.recordScheduleTaskActivity(task.to_agent_id, task.schedule_id, {
-          taskId: task.id,
-          outcome: "failed",
-          contextId: task.context_id,
-          now,
-        });
+        const isRetry = Boolean(task.parent_task_id);
+        if (!isRetry || this._scheduleMatchesRetryHead(task.schedule_id, task)) {
+          this.store.recordScheduleTaskActivity(task.to_agent_id, task.schedule_id, {
+            taskId: task.id,
+            outcome: "failed",
+            contextId: task.context_id,
+            now,
+          });
+        }
       }
 
       const msg = this.store.appendMessage({
@@ -1191,8 +1208,8 @@ export class TaskService {
           this.store.db.prepare(`
             UPDATE schedules
             SET last_outcome = NULL, updated_at = ?
-            WHERE id = ? AND last_outcome = 'failed' AND (agent_id = ? OR last_task_id = ?)
-          `).run(now, task.schedule_id, task.to_agent_id, task.id);
+            WHERE id = ? AND last_task_id = ? AND last_outcome = 'failed'
+          `).run(now, task.schedule_id, task.id);
         }
       }
 

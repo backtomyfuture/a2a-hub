@@ -569,6 +569,12 @@ async function main() {
       if (!id) throw new Error("用法: ah task retry <task_id>");
       const r = await client.retryTask(id);
       console.log(`✓ 已重试任务 ${id} -> 新任务 ${r.task?.id || "-"}`);
+      if (Number(r.dropped_attachments || 0) > 0) {
+        const names = Array.isArray(r.dropped_attachment_names) && r.dropped_attachment_names.length
+          ? ` (${r.dropped_attachment_names.join(", ")})`
+          : "";
+        console.log(`! 注意：原任务中有 ${r.dropped_attachments} 个临时附件已过期，本次重试未携带${names}`);
+      }
       return 0;
     }
     if (sub === "delete" || sub === "rm") {
